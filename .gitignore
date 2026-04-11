@@ -1,1 +1,4 @@
 .worktrees/
+.tmp-pytest/
+__pycache__/
+*.pyc
