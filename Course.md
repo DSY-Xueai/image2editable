@@ -1,76 +1,63 @@
 # Course
 
 ## 当前项目状态
-- 当前目录已初始化为 Git 仓库。
-- 项目当前已进入“创建 PDF/图片转可编辑 PPT skill”的升级设计阶段。
-- 已完成第一版骨架实现与阶段一 runtime pipeline 提交。
-- 已新增第二阶段设计文档，准备进入“文字严格拟合 + 常见视觉效果映射”的设计落地阶段。
-- 已新增 2B 设计文档，准备进入“分层拆解 + 复杂矢量 + 有限混合效果重建”的高难扩展阶段。
+- `skills/pdf-image-to-editable-ppt` 当前在 `feature/pdf-image-runtime-upgrade` worktree 中持续开发。
+- 阶段一 runtime pipeline 已完成并单独提交。
+- 阶段二已补到两层：
+  - `2A`：文字严格拟合校验、常见效果映射、stage2 保守增强入口。
+  - `2B`：页面分层、矢量候选映射、blend 分组回退基础设施。
 
 ## 本轮新增或变更
-- 新增 `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-design.md`。
-- 新增 `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt.md`。
-- 新增 `skills/pdf-image-to-editable-ppt/` skill 包目录。
-- 新增 `tests/`，包含 skill 文档、数据模型、过滤逻辑、PPT 构建与脚本接口测试。
-- 新增 `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-runtime-upgrade-design.md`。
-- 新增 `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-stage2-design.md`。
-- 新增 `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-2b-design.md`。
-- 新增 `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-2b.md`。
-- 新增 `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-stage2.md`。
-- 新增 `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-runtime-upgrade.md`。
-- 设计已明确采用“双层方案”：
-  - 底图层保证视觉 100% 保真、原底原色。
-  - 编辑层仅在高置信情况下提取文字和图片。
-- 明确支持多页 PDF，默认“每页一张幻灯片”，可按用户要求切分长页/长图。
-- 明确失败回退策略：宁可少提取，也绝不破坏视觉完整性。
-- 已落地第一版实现骨架：
-  - `SKILL.md` 写入核心保证、回退规则和脚本入口。
-  - `models.py`/`filtering.py` 定义页面计划与保守筛选逻辑。
-  - `build_ppt.py` 可生成最小可保存的 `.pptx`。
-  - 渲染、文字提取、图片提取脚本先提供适配器接口。
-- 已完成升级设计收敛：
-  - 阶段一接入真实 PDF 渲染、原生文本提取、OCR、图片提取、PPT 坐标映射。
-  - 阶段二再补复杂矢量、透明效果、字体拟合等高难能力。
-- 已完成升级实现计划拆解，下一步可进入真实管线开发。
-- 已完成第二阶段设计收敛：
-  - 2A 做文字严格拟合与常见效果映射。
-  - 2B 做复杂矢量、多层透明和更高难分层重建。
-- 已完成第二阶段实现计划拆解，下一步可进入 2A 开发。
-- 已完成 2B 设计收敛：
-  - 2B-1 先做页面分层与版面拆解。
-  - 2B-2 再做复杂矢量路径转 PPT 形状。
-  - 2B-3 最后做多层透明/混合效果的有限重建。
-- 已完成 2B 实现计划拆解，下一步可进入 2B-1 / 2B-2 开发。
+- 新增 `EffectBlock`、`LayeredObject`、`VectorInstruction` 等数据结构。
+- `PagePlan` 新增：
+  - `effect_blocks`
+  - `layered_objects`
+  - `vector_instructions`
+- 新增脚本：
+  - `text_fitting.py`
+  - `effect_mapping.py`
+  - `stage2_enhance.py`
+  - `layout_layers.py`
+  - `vector_mapping.py`
+  - `blend_mapping.py`
+- `convert_to_ppt.py` 新增 `enable_stage2=True` 的阶段二增强入口。
+- `build_ppt.py` 已支持更严格的字体名写入，并对暂不支持的效果层安全忽略。
+- 新增 stage2 / 2B 测试：
+  - `tests/test_models_stage2.py`
+  - `tests/test_text_fitting.py`
+  - `tests/test_effect_mapping.py`
+  - `tests/test_stage2_enhance.py`
+  - `tests/test_build_ppt_stage2.py`
+  - `tests/test_convert_to_ppt_stage2.py`
+  - `tests/test_models_2b.py`
+  - `tests/test_layout_layers.py`
+  - `tests/test_vector_mapping.py`
+  - `tests/test_blend_mapping.py`
+  - `tests/test_page_planner_2b.py`
 
 ## 关键修改文件
 - `Course.md`
-- `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-design.md`
-- `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-runtime-upgrade-design.md`
-- `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-stage2-design.md`
-- `docs/superpowers/specs/2026-04-11-pdf-image-to-editable-ppt-2b-design.md`
-- `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-2b.md`
-- `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-stage2.md`
-- `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt-runtime-upgrade.md`
-- `docs/superpowers/plans/2026-04-11-pdf-image-to-editable-ppt.md`
+- `.gitignore`
 - `skills/pdf-image-to-editable-ppt/SKILL.md`
-- `skills/pdf-image-to-editable-ppt/scripts/*.py`
 - `skills/pdf-image-to-editable-ppt/references/README.md`
+- `skills/pdf-image-to-editable-ppt/scripts/models.py`
+- `skills/pdf-image-to-editable-ppt/scripts/build_ppt.py`
+- `skills/pdf-image-to-editable-ppt/scripts/convert_to_ppt.py`
+- `skills/pdf-image-to-editable-ppt/scripts/page_planner.py`
+- `skills/pdf-image-to-editable-ppt/scripts/text_fitting.py`
+- `skills/pdf-image-to-editable-ppt/scripts/effect_mapping.py`
+- `skills/pdf-image-to-editable-ppt/scripts/stage2_enhance.py`
+- `skills/pdf-image-to-editable-ppt/scripts/layout_layers.py`
+- `skills/pdf-image-to-editable-ppt/scripts/vector_mapping.py`
+- `skills/pdf-image-to-editable-ppt/scripts/blend_mapping.py`
 - `tests/*.py`
 
 ## 运行入口
-- 当前可用入口：
-  - `skills/pdf-image-to-editable-ppt/SKILL.md`
-  - `skills/pdf-image-to-editable-ppt/scripts/build_ppt.py`
-  - `skills/pdf-image-to-editable-ppt/scripts/render_pdf_pages.py`
-  - `skills/pdf-image-to-editable-ppt/scripts/extract_text_layout.py`
-  - `skills/pdf-image-to-editable-ppt/scripts/extract_images.py`
+- `skills/pdf-image-to-editable-ppt/scripts/convert_to_ppt.py`
+- `skills/pdf-image-to-editable-ppt/scripts/build_ppt.py`
 
 ## 当前注意事项
-- 设计已冻结，`spec` 与实现计划都已写入文档。
-- 该 skill 的承诺是“视觉保真优先 + 尽量提取可编辑元素”，不是保证任意输入都能完整转换为全部可编辑对象。
-- 当前主分支仍是第一版骨架实现；真实 PDF/OCR/PPT 元素映射尚未接入。
-- 阶段一 runtime pipeline 已在 feature worktree 中提交，尚未合并回主分支。
-- 第二阶段 2A 计划已写好，下一步可选择子代理执行或当前会话内联执行。
-- 2B 仍未开始实现，下一步应先写 2B 的实现计划。
-- 2B 计划已写好，下一步可选择子代理执行或当前会话内联执行。
-- 当前工作树尚未提交；是否提交需等用户明确确认。
+- OCR 仍然是可选依赖；缺失时必须回退到背景优先输出。
+- 2A 已经可运行，但仍遵守“文字不能完全一致就不提升”的规则。
+- 2B 目前只完成分层、矢量候选和 blend 分组回退的基础设施；复杂矢量真重建、多层透明/混合效果真重建还没落地。
+- `.tmp-pytest/` 已清理；`stage2tmp/` 因本机权限异常暂未删掉，已加入 `.gitignore`，不会进入提交。

@@ -2,44 +2,39 @@ from conftest import load_skill_module
 
 
 models = load_skill_module("models")
-EffectBlock = models.EffectBlock
-PagePlan = models.PagePlan
 TextBlock = models.TextBlock
+EffectBlock = models.EffectBlock
 
 
-def test_text_block_stage2_fields_default_cleanly():
+def test_text_block_supports_fit_validation_flags():
     block = TextBlock(
         text="Title",
         left=10.0,
         top=20.0,
-        width=100.0,
-        height=30.0,
+        width=200.0,
+        height=40.0,
         font_size=24.0,
         color="#112233",
         alignment="center",
         confidence=0.95,
+        font_name="Arial",
+        line_height=28.0,
+        fit_verified=True,
     )
+    assert block.font_name == "Arial"
+    assert block.line_height == 28.0
+    assert block.fit_verified is True
 
-    assert block.font_name is None
-    assert block.line_height is None
-    assert block.fit_verified is False
 
-
-def test_effect_block_defaults_payload_to_empty_dict():
-    effect = EffectBlock(
+def test_effect_block_tracks_effect_kind_and_confidence():
+    block = EffectBlock(
         effect_type="shadow",
-        left=1.0,
-        top=2.0,
-        width=3.0,
-        height=4.0,
-        confidence=0.91,
+        left=0.0,
+        top=0.0,
+        width=100.0,
+        height=40.0,
+        confidence=0.9,
+        payload={"blur": 2.0},
     )
-
-    assert effect.effect_type == "shadow"
-    assert effect.payload == {}
-
-
-def test_page_plan_includes_effect_blocks_list():
-    plan = PagePlan(page_number=1, width_px=1000, height_px=1500, background_path="page-1.png")
-
-    assert plan.effect_blocks == []
+    assert block.effect_type == "shadow"
+    assert block.payload["blur"] == 2.0

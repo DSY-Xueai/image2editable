@@ -1,4 +1,7 @@
 .worktrees/
 .tmp-pytest/
+stage2tmp/
+.pytest_cache/
+pytest-cache-files-*/
 __pycache__/
 *.pyc

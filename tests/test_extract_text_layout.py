@@ -73,9 +73,7 @@ def test_extract_text_layout_prefers_native_pdf_text(tmp_path, monkeypatch):
 
 def test_extract_text_layout_falls_back_to_ocr_for_images(tmp_path, monkeypatch):
     input_path = tmp_path / "sample.png"
-    Path(input_path).write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-    )
+    input_path.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     class FakeImage:
         size = (200, 100)

@@ -110,4 +110,79 @@ def _build_minimal_pptx(output_path: Path, slide_count: int) -> None:
 def build_presentation(page_plans, output_path: Path) -> None:
     slide_count = max(len(page_plans), 1)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _build_minimal_pptx(output_path, slide_count)
+    for page in page_plans:
+        if not Path(page.background_path).exists():
+            raise FileNotFoundError(page.background_path)
+
+    try:
+        from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN
+        from pptx.util import Emu, Pt
+    except ImportError:
+        _build_minimal_pptx(output_path, slide_count)
+        return
+
+    presentation = Presentation()
+    while presentation.slides:
+        slide_id = presentation.slides._sldIdLst[0]
+        presentation.slides._sldIdLst.remove(slide_id)
+
+    base_page = page_plans[0]
+    slide_width = 9144000
+    slide_height = int(slide_width * (base_page.height_px / max(base_page.width_px, 1)))
+    presentation.slide_width = slide_width
+    presentation.slide_height = slide_height
+
+    alignment_map = {
+        "left": PP_ALIGN.LEFT,
+        "center": PP_ALIGN.CENTER,
+        "right": PP_ALIGN.RIGHT,
+        "justify": PP_ALIGN.JUSTIFY,
+    }
+
+    for page in page_plans:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        slide.shapes.add_picture(
+            str(page.background_path),
+            0,
+            0,
+            width=presentation.slide_width,
+            height=presentation.slide_height,
+        )
+
+        scale_x = presentation.slide_width / max(page.width_px, 1)
+        scale_y = presentation.slide_height / max(page.height_px, 1)
+
+        for block in page.text_blocks:
+            textbox = slide.shapes.add_textbox(
+                Emu(int(block.left * scale_x)),
+                Emu(int(block.top * scale_y)),
+                Emu(int(block.width * scale_x)),
+                Emu(int(block.height * scale_y)),
+            )
+            paragraph = textbox.text_frame.paragraphs[0]
+            paragraph.text = block.text
+            paragraph.alignment = alignment_map.get(block.alignment, PP_ALIGN.LEFT)
+            run = paragraph.runs[0]
+            run.font.size = Pt(block.font_size)
+            run.font.color.rgb = RGBColor.from_string(block.color.lstrip("#"))
+            if getattr(block, "font_name", None):
+                run.font.name = block.font_name
+
+        for block in page.image_blocks:
+            if not Path(block.path).exists():
+                continue
+            slide.shapes.add_picture(
+                block.path,
+                Emu(int(block.left * scale_x)),
+                Emu(int(block.top * scale_y)),
+                width=Emu(int(block.width * scale_x)),
+                height=Emu(int(block.height * scale_y)),
+            )
+
+        for _effect in getattr(page, "effect_blocks", []):
+            # Stage 2 uses fail-closed effect handling. Unsupported effects stay in the background.
+            continue
+
+    presentation.save(output_path)

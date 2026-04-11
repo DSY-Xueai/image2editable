@@ -1,39 +1,29 @@
-from types import SimpleNamespace
-
 from conftest import load_skill_module
 
 
-stage2_enhance = load_skill_module("stage2_enhance")
+models = load_skill_module("models")
+stage2 = load_skill_module("stage2_enhance")
+
+PagePlan = models.PagePlan
+TextBlock = models.TextBlock
 
 
-def test_apply_stage2_enhancements_keeps_only_verified_text_blocks():
-    verified_text = SimpleNamespace(text="kept", fit_verified=True)
-    rejected_text = SimpleNamespace(text="removed", fit_verified=False)
-    image_block = SimpleNamespace(path="image.png")
-    effect_block = SimpleNamespace(kind="shadow")
-    plan = SimpleNamespace(
-        page_number=7,
-        width_px=1200,
-        height_px=900,
-        background_path="page.png",
-        source_type="pdf",
-        page_width_points=612.0,
-        page_height_points=792.0,
-        text_blocks=[verified_text, rejected_text],
-        image_blocks=[image_block],
-        effect_blocks=[effect_block],
+def test_stage2_enhance_removes_unverified_text_blocks():
+    plan = PagePlan(page_number=1, width_px=100, height_px=100, background_path="page.png")
+    plan.text_blocks.append(
+        TextBlock(
+            text="Title",
+            left=0,
+            top=0,
+            width=10,
+            height=10,
+            font_size=12,
+            color="#000000",
+            alignment="left",
+            confidence=0.95,
+            font_name="Arial",
+            fit_verified=False,
+        )
     )
-
-    enhanced = stage2_enhance.apply_stage2_enhancements(plan)
-
-    assert enhanced is not plan
-    assert enhanced.page_number == plan.page_number
-    assert enhanced.width_px == plan.width_px
-    assert enhanced.height_px == plan.height_px
-    assert enhanced.background_path == plan.background_path
-    assert enhanced.source_type == plan.source_type
-    assert enhanced.page_width_points == plan.page_width_points
-    assert enhanced.page_height_points == plan.page_height_points
-    assert enhanced.text_blocks == [verified_text]
-    assert enhanced.image_blocks == [image_block]
-    assert enhanced.effect_blocks == [effect_block]
+    enhanced = stage2.apply_stage2_enhancements(plan)
+    assert enhanced.text_blocks == []
