@@ -416,33 +416,46 @@ def _estimate_style(img_rgb: np.ndarray, box: tuple) -> dict:
 def _sample_text_color(region: np.ndarray) -> str:
     """Sample the dominant text (foreground) color in a text region.
 
-    Strategy: the text pixels are typically darker or more saturated than
-    the background. We find the background color (most common bright pixel),
-    then take the median of non-background pixels.
+    Uses Otsu thresholding to separate text from background, then uses
+    border pixels to determine which class is background. This handles
+    both dark-on-light and light-on-dark text correctly.
     """
-    if region.size == 0:
+    if region.size == 0 or region.shape[0] < 3 or region.shape[1] < 3:
         return "#000000"
 
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
+
+    # Otsu threshold to separate two classes (text vs background)
+    thresh_val, _ = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    # Use border pixels to determine which class is background
+    # Border pixels are more likely to be background than text
+    border_vals = np.concatenate([
+        gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]
+    ]).astype(np.float32)
+    border_mean = float(np.mean(border_vals))
+
     flat = region.reshape(-1, 3).astype(np.float32)
-    gray = np.mean(flat, axis=1)
+    gray_flat = gray.reshape(-1).astype(np.float32)
 
-    # Background = brightest cluster (top 30% by brightness)
-    bright_threshold = np.percentile(gray, 70)
-    bg_pixels = flat[gray >= bright_threshold]
-    if len(bg_pixels) == 0:
-        bg_color = np.median(flat, axis=0)
+    if border_mean > thresh_val:
+        # Border is bright → background is bright → text is dark class
+        text_pixels = flat[gray_flat <= thresh_val]
     else:
-        bg_color = np.median(bg_pixels, axis=0)
-
-    # Text pixels = those far from background color
-    dists = np.linalg.norm(flat - bg_color, axis=1)
-    dist_threshold = max(30.0, np.percentile(dists, 50))
-    text_pixels = flat[dists > dist_threshold]
+        # Border is dark → background is dark → text is bright class
+        text_pixels = flat[gray_flat > thresh_val]
 
     if len(text_pixels) < 3:
-        # Fallback: darkest pixels
-        dark_threshold = np.percentile(gray, 30)
-        text_pixels = flat[gray <= dark_threshold]
+        # Fallback: use pixels most different from border
+        bg_color = np.median(
+            flat[np.argsort(np.abs(gray_flat - border_mean))[:max(1, len(flat)//3)]],
+            axis=0,
+        )
+        dists = np.linalg.norm(flat - bg_color, axis=1)
+        text_pixels = flat[dists > np.percentile(dists, 60)]
 
     if len(text_pixels) == 0:
         return "#000000"
@@ -484,27 +497,33 @@ def _estimate_bold(region: np.ndarray) -> bool:
 def _refine_alignment(text_items: list[dict], img_width: int) -> list[dict]:
     """Refine text alignment by analyzing horizontal positions.
 
-    - If a text box is roughly centered in the image → align=1 (center)
-    - If left edge is near left margin → align=0 (left)
-    - If right edge is near right margin → align=2 (right)
+    Wide text (>= 50% of image width) near the image center → center aligned
+    with full-width text box for proper PowerPoint centering.
+
+    Narrow text (< 50% of image width) → placed at detected position using
+    left/right alignment based on which side of the image it's on.
+    This handles column layouts where text is left-aligned within a column.
     """
     for item in text_items:
         x, y, w, h = item["box"]
         center_x = x + w / 2
         img_center = img_width / 2
 
-        left_margin = x
-        right_margin = img_width - (x + w)
+        is_wide = w >= img_width * 0.5
+        # Tight center check: any text very close to image center
+        is_near_center = abs(center_x - img_center) < img_width * 0.05
 
-        # Center: text center is within 15% of image center
-        if abs(center_x - img_center) < img_width * 0.15:
-            item["align"] = 1  # center
-        elif left_margin < right_margin * 0.5:
-            item["align"] = 0  # left
-        elif right_margin < left_margin * 0.5:
-            item["align"] = 2  # right
+        if is_near_center:
+            # Any text (narrow or wide) very close to center → center
+            item["align"] = 1
+        elif is_wide and abs(center_x - img_center) < img_width * 0.15:
+            # Wide text near center → full-width centered box
+            item["align"] = 1
         else:
-            item["align"] = 1  # default center
+            # Non-centered text: position at detected location, left-aligned
+            # The text box is placed at the OCR-detected coordinates,
+            # so left alignment within the box matches the original layout.
+            item["align"] = 0
 
     return text_items
 
