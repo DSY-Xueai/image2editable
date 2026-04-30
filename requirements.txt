@@ -8,6 +8,28 @@
 #   pip install -r requirements.txt
 
 # ─────────────────────────────────────────────────────────────
+# Image-to-PPT converter / 图片转可编辑PPT (image_to_ppt.py)
+# ─────────────────────────────────────────────────────────────
+# Core pipeline: background modeling, foreground extraction, PPTX assembly
+# 核心管线：背景建模、前景提取、PPTX 组装
+python-pptx>=0.6.21
+opencv-python>=4.5.0
+Pillow>=9.0.0
+numpy>=1.20.0
+
+# OCR engines (at least one required for text detection)
+# OCR 引擎（文本检测至少需要一个）
+#
+# Option A: PaddleOCR (recommended for Chinese, better accuracy)
+#   pip install paddleocr paddlepaddle
+#
+# Option B: Tesseract (lighter, requires system install)
+#   pip install pytesseract
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki
+#   macOS: brew install tesseract
+#   Ubuntu: sudo apt install tesseract-ocr tesseract-ocr-chi-sim
+
+# ─────────────────────────────────────────────────────────────
 # SVG to PPTX tool / SVG 转 PPTX 工具 (skills/ppt-master/scripts/svg_to_pptx.py)
 # ─────────────────────────────────────────────────────────────
 # Batch-convert SVG files to PowerPoint presentations.

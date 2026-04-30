@@ -1,59 +1,66 @@
 # Course
 
 ## 当前项目状态
-- 已集成 `hugohe3/ppt-master` 作为基础设施（SVG→PPTX DrawingML 转换管线）。
-- 新增 `faithful_convert.py`：忠实还原转换器，支持两种模式：
-  - `--mode ai`：AI 视觉全元素重建（多模态 AI 分析图片→识别元素→原生 SVG 重建 + 复杂区域裁剪嵌入）
-  - `--mode ocr`：背景图 + OCR 文字叠加（Tesseract）
-- 新增 `vision_analyzer.py`：多模态 AI 视觉分析模块，支持 Anthropic / OpenAI / 任意 OpenAI 兼容 API。
-- 新增 `auto_convert.py`：自动化编排脚本（prepare + export 两阶段）。
-- 旧 skill `pdf-image-to-editable-ppt` 已归档至 `archive/`。
+- 核心功能：图片→可编辑 PPT 转换（背景建模/修复 + 前景拆分 + 文本重建）。
+- 管线：读图 → OCR 文本检测 → 自适应背景建模 → 前景提取/组件拆分 → PPTX 分层组装。
+- OCR：PaddleOCR 优先（已 patch OneDNN mkldnn bug），pytesseract 回退。
+- 自动估计字号（非线性校正，±7% 偏差）、颜色（采样）、粗体（ink ratio）。
+- `skills/ppt-master/` 保留为 SVG→PPTX 基础设施（本管线未使用但不冲突）。
 
 ## 本轮变更
-- **架构替换**：从 OCR+背景图叠加方案切换到 AI 驱动的混合裁剪策略。
-- 集成 `hugohe3/ppt-master` 的 `skills/ppt-master/` 完整目录（SVG→PPTX、项目管理、源文档转换等）。
-- 新增 `faithful_convert.py`：核心转换入口，AI 模式下实现"复杂图形裁剪嵌入 + 文字/形状原生可编辑"。
-- 新增 `vision_analyzer.py`：多 provider AI 视觉分析（自动检测 Anthropic/OpenAI 环境变量）。
-- 新增 `auto_convert.py`：自动化编排（图片→PDF→Markdown→项目初始化→导入→导出）。
-- 新增 `image_to_pdf.py`：图片→PDF 桥接脚本。
-- 添加 `CLAUDE.md`、`AGENTS.md`、`.env.example`、`requirements.txt`。
-- 旧 skill、旧测试、旧 worktree（3 个 feature 分支）全部归档/清理。
+- **架构重建**：从 AI 视觉/OCR+SVG 方案切换到纯本地 CV 管线。
+- 删除 `faithful_convert.py`、`vision_analyzer.py`、`auto_convert.py`、`demo.py`（旧方案）。
+- 新增 5 个模块化文件：
+  - `image_to_ppt.py` — 主入口 + CLI + 管线编排
+  - `text_detect.py` — OCR 文本检测 + 样式估计
+  - `bg_model.py` — 自适应背景建模 + inpainting 双 pass 修复
+  - `fg_extract.py` — 前景提取 + 连通域组件拆分
+  - `ppt_assemble.py` — PPTX 分层组装（背景 + 前景组件 + 文本框）
+- 更新 `requirements.txt`：新增 `opencv-python`，整理依赖说明。
+- **关键修复**：
+  1. PaddleOCR 可用（patch 掉 PaddlePaddle 3.x OneDNN mkldnn bug）→ 中文识别正确
+  2. 前景组件提取完整（测试图 146 个组件，超过参考 PPTX 的 104 个）
+  3. 背景 inpainting 双 pass 修复（TELEA + NS，更大 radius，边界模糊平滑）
+  4. 默认不输出参考页（可通过 `--reference` 开启）
+  5. OCR 噪声过滤（小字号 < 8pt、纯符号行、乱码大写字母串）
+  6. 字号非线性校正（大字号校正更多，偏差控制在 ±7%）
+  7. 粗体检测（Otsu + ink ratio > 0.20）和居中对齐正确
 
 ## 关键文件
-- `faithful_convert.py` — 核心转换入口（AI 模式 / OCR 模式）
-- `vision_analyzer.py` — 多模态 AI 视觉分析模块
-- `auto_convert.py` — 自动化编排脚本
-- `skills/ppt-master/SKILL.md` — ppt-master 工作流定义
-- `skills/ppt-master/scripts/svg_to_pptx/` — SVG→原生 PPTX (DrawingML)
-- `skills/ppt-master/scripts/source_to_md/` — 源文档转 Markdown
-- `skills/ppt-master/scripts/source_to_md/image_to_pdf.py` — 图片→PDF 桥接
+- `image_to_ppt.py` — 主入口（CLI + 管线编排）
+- `text_detect.py` — 文本检测模块（PaddleOCR / pytesseract + 样式估计 + mkldnn patch）
+- `bg_model.py` — 背景建模模块（自适应边缘采样 + 瓦片中值 + 双 pass inpainting）
+- `fg_extract.py` — 前景提取模块（差分阈值 20 + 连通域拆分 + alpha feathering）
+- `ppt_assemble.py` — PPTX 组装模块（背景层 + 前景组件层 + 全幅居中文本框层）
+- `skills/ppt-master/` — ppt-master 基础设施（SVG→PPTX，保留未使用）
 
 ## 运行入口
 ```bash
-# AI 全元素重建（推荐）
-python faithful_convert.py input.png --mode ai --provider openai
+# 基本用法（默认不加参考页）
+python image_to_ppt.py input.png
 
-# OCR + 背景图模式（fallback）
-python faithful_convert.py input.pdf --mode ocr
+# 指定输出路径
+python image_to_ppt.py input.png -o output.pptx
 
-# 自动化编排
-python auto_convert.py prepare input.png --name my_project
-python auto_convert.py export projects/my_project_ppt169_xxx
+# 调整参数
+python image_to_ppt.py input.png --lang ch --period 32 --diff-threshold 20 --min-area 20
+
+# 加参考页（第二页放原图对照）
+python image_to_ppt.py input.png --reference
 ```
 
 ## 运行时依赖
-- 见 `requirements.txt`（核心：python-pptx、PyMuPDF、Pillow、svglib、reportlab、anthropic、openai）
-- Tesseract OCR（OCR 模式需要，`C:\Program Files\Tesseract-OCR\`，需 chi_sim 语言包）
+- 见 `requirements.txt`（核心：python-pptx、opencv-python、Pillow、numpy）
+- OCR 引擎至少需要一个：PaddleOCR（推荐，已内置 mkldnn patch）或 Tesseract
 
 ## 关键目录
-- `skills/ppt-master/` — ppt-master skill（SVG→PPTX 基础设施）
-- `projects/` — 用户项目工作区（gitignored）
-- `exports/` — 导出的 PPTX（gitignored）
+- `skills/ppt-master/` — ppt-master skill（SVG→PPTX 基础设施，保留）
 - `archive/` — 旧 skill 归档
 
 ## 当前注意事项
-- AI 模式需要配置多模态 API（通过环境变量 `OPENAI_API_KEY` + `OPENAI_BASE_URL`，或 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL`）。
-- AI 模式下，复杂图形区域（插图、照片等）从原图裁剪嵌入，文字和简单形状为原生可编辑元素。
-- AI 还原度取决于模型能力，当前已验证 Claude Sonnet 4 可用。
-- `projects/` 和 `exports/` 已 gitignore。
-- 待优化：AI 元素识别精度、文字位置精确度、更多形状类型支持。
+- PaddleOCR v3.5.0 + PaddlePaddle 3.3.1 的 OneDNN mkldnn bug 已通过 `_patch_paddle_mkldnn()` 修复（强制 `run_mode='paddle'`）。
+- Windows 环境需先 import torch 再 import paddle 以避免 DLL 路径污染（patch 中已处理）。
+- 粗体检测基于墨水密度（Otsu + ink ratio），对大多数中英文文本有效。
+- 背景建模为自适应方案（边缘采样 + 瓦片中值 + 双 pass inpainting），支持亮色/暗色背景。
+- 前景组件按连通域拆分（diff_threshold=20, min_area=20），每个组件为独立透明 PNG。
+- 待优化：背景修复质量（复杂纹理/渐变区域）、文本颜色精度、更多图片类型验证。
