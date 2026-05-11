@@ -32,6 +32,7 @@
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
 
+
 > 输出的 PPTX 中，每个前景元素都是独立图层，可自由拖动、缩放、删除；文本框可直接编辑文字内容。
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
 
