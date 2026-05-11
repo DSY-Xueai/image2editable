@@ -47,7 +47,6 @@
 | **OCR 文本重建** | PaddleOCR / Tesseract 双引擎，自动估计字号、颜色、粗体、对齐方式 |
 | **分层 PPTX 组装** | 背景层 + 前景组件层 + 文本框层，完全可编辑 |
 | **批量处理** | 多张图片或整个目录一次性转换为多页 PPTX |
-| **Skill 包** | 可作为独立 skill 分发，别人拿到即可直接使用 |
 
 ---
 
@@ -68,7 +67,7 @@ pip install -r requirements.txt
 
 ### OCR 引擎
 
-**方式 A：PaddleOCR（推荐，中文识别精度更高）**
+**方式 A：PaddleOCR（中文识别精度更高）**
 
 ```bash
 pip install paddleocr paddlepaddle
