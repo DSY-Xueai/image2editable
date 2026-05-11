@@ -28,13 +28,12 @@
 
 ### 输入 vs 输出
 
-| 输入图片 | 输出 PPT（分层可编辑） |
-|:---:|:---:|
-| ![input](test-image/1-1-1-1png.png) | 背景 + 19 个独立组件 + 5 个文本框 |
-| ![input](test-image/2-2.png) | 背景 + 32 个独立组件 + 7 个文本框 |
-| ![input](test-image/3-3.png) | 背景 + 17 个独立组件 + 10 个文本框 |
+>输入图片 | 也可输入多张
+<img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
+
 
 > 输出的 PPTX 中，每个前景元素都是独立图层，可自由拖动、缩放、删除；文本框可直接编辑文字内容。
+<img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
 
 ---
 
@@ -194,16 +193,6 @@ any2ppt/
 
 项目已封装为独立可分发的 Skill，位于 `skills/image-to-ppt/`。
 
-将该文件夹发送给他人，对方只需：
-
-```bash
-cd skills/image-to-ppt
-pip install -r references/requirements.txt
-python scripts/image_to_ppt.py input.png
-```
-
-即可直接使用全部功能，无需克隆整个仓库。
-
 ---
 
 ## 技术栈
@@ -230,18 +219,6 @@ python scripts/image_to_ppt.py input.png
 ## 支持的图片格式
 
 PNG · JPG / JPEG · BMP · TIFF / TIF · WebP
-
----
-
-## 更新日志
-
-| 日期 | 说明 |
-|------|------|
-| 2025/05 | 支持多图批量处理，多张图片合并为一个多页 PPTX |
-| 2025/05 | 封装为可分发 Skill 包 |
-| 2025/05 | 前景拆分修复：Canny 边缘辅助 + 边缘伪影过滤 |
-| 2025/05 | 背景建模重写：两轮迭代，非前景区域像素级保留原图 |
-| 2025/05 | 首次发布：单图转可编辑 PPT |
 
 ---
 
