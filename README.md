@@ -185,9 +185,7 @@ any2ppt/
 │       ├── SKILL.md
 │       ├── scripts/       # 完整源码副本
 │       └── references/    # 依赖说明
-├── test-image/            # 测试图片
-├── requirements.txt       # 依赖清单
-└── .env.example           # 环境变量示例
+└── requirements.txt       # 依赖清单
 ```
 
 ---
