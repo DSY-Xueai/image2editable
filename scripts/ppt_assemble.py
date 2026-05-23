@@ -18,6 +18,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.oxml.xmlchemy import OxmlElement
 from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
@@ -242,7 +243,7 @@ def _add_textbox(
 
     box = slide.shapes.add_textbox(left, top, width, height)
     tf = box.text_frame
-    tf.word_wrap = False
+    tf.word_wrap = _should_wrap_text(item)
     tf.clear()
 
     p = tf.paragraphs[0]
@@ -267,5 +268,22 @@ def _set_run_font(run, font_name: str) -> None:
     """Set both Latin and East Asian font names for PowerPoint."""
     run.font.name = font_name
     rpr = run._r.get_or_add_rPr()
-    rpr.set(qn("a:latin"), font_name)
-    rpr.set(qn("a:ea"), font_name)
+    for tag in ("a:latin", "a:ea"):
+        node = rpr.find(qn(tag))
+        if node is None:
+            node = OxmlElement(tag)
+            rpr.append(node)
+        node.set("typeface", font_name)
+
+
+def _should_wrap_text(item: dict) -> bool:
+    """Disable wrapping only for large title-like text boxes."""
+    text = item.get("text", "")
+    font_size = float(item.get("font_size", 12))
+    if not _has_cjk(text):
+        return True
+    return not ((font_size >= 36.0 and len(text) <= 24) or len(text) <= 6)
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= c <= "\u9fff" for c in text)

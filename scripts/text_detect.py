@@ -347,6 +347,9 @@ def _filter_noise(boxes: list[dict]) -> list[dict]:
         if _NOISE_PATTERN.match(text):
             continue
 
+        if _is_likely_vertical_decorative_fragment(b):
+            continue
+
         # Count meaningful characters (letters, digits, CJK)
         meaningful = sum(
             1 for c in text
@@ -376,6 +379,23 @@ def _filter_noise(boxes: list[dict]) -> list[dict]:
         filtered.append(b)
 
     return filtered
+
+
+def _is_likely_vertical_decorative_fragment(box: dict) -> bool:
+    """Identify OCR fragments from large vertical/decorative background text."""
+    text = box["text"].strip()
+    x, y, w, h = box.get("box", (0, 0, 0, 0))
+    if w <= 0 or h <= 0:
+        return False
+
+    has_cjk = any('\u4e00' <= c <= '\u9fff' for c in text)
+    has_latin_or_digit = any(c.isascii() and c.isalnum() for c in text)
+
+    if h / w >= 1.8 and w <= 36 and (has_cjk or has_latin_or_digit):
+        return True
+    if has_cjk and len(text) == 1 and h >= 120 and w >= 80:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------

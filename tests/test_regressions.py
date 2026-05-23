@@ -9,6 +9,9 @@ from PIL import Image
 from image_to_ppt import _parse_reference_option
 from scripts.bg_model import _should_use_fg_hint
 from scripts.fg_extract import _keep_detector_mask
+from scripts.fg_extract import _limit_combined_mask
+from scripts.ppt_assemble import _set_run_font
+from scripts.ppt_assemble import _should_wrap_text
 from scripts.text_detect import (
     _adjust_font_size,
     _filter_noise,
@@ -16,6 +19,7 @@ from scripts.text_detect import (
     _should_force_regular_weight,
     _try_tesseract,
 )
+from pptx import Presentation
 
 
 def test_filter_noise_keeps_meaningful_all_caps_text() -> None:
@@ -27,6 +31,22 @@ def test_filter_noise_keeps_meaningful_all_caps_text() -> None:
     filtered = _filter_noise(boxes)
 
     assert [item["text"] for item in filtered] == ["PROJECT ROADMAP"]
+
+
+def test_filter_noise_removes_vertical_decorative_ocr_fragments() -> None:
+    boxes = [
+        {"text": "目录", "box": (65, 49, 245, 134), "confidence": 0.95},
+        {"text": "01", "box": (353, 254, 59, 45), "confidence": 0.95},
+        {"text": "革", "box": (1236, 402, 167, 178), "confidence": 0.95},
+        {"text": "命", "box": (1239, 547, 226, 180), "confidence": 0.95},
+        {"text": "19111", "box": (1219, 445, 23, 115), "confidence": 0.95},
+        {"text": "WUCCHANG", "box": (1202, 522, 14, 99), "confidence": 0.95},
+        {"text": "武昌", "box": (1208, 640, 27, 52), "confidence": 0.95},
+    ]
+
+    filtered = _filter_noise(boxes)
+
+    assert [item["text"] for item in filtered] == ["目录", "01"]
 
 
 def test_tesseract_fallback_uses_requested_language(
@@ -80,6 +100,49 @@ def test_huge_foreground_hint_is_rejected_for_background_refinement() -> None:
 def test_huge_detector_mask_is_rejected() -> None:
     assert not _keep_detector_mask(nonzero_pixels=600, total_pixels=1000)
     assert _keep_detector_mask(nonzero_pixels=200, total_pixels=1000)
+
+
+def test_combined_foreground_mask_is_rejected_after_union() -> None:
+    import numpy as np
+
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[:, :6] = True
+    fallback = np.zeros((10, 10), dtype=bool)
+    fallback[0, 0] = True
+
+    limited = _limit_combined_mask(mask, fallback)
+
+    assert int(np.count_nonzero(limited)) == 1
+
+
+def test_oversized_edge_fallback_is_rejected() -> None:
+    import numpy as np
+
+    mask = np.ones((10, 10), dtype=bool)
+    fallback = np.zeros((10, 10), dtype=bool)
+
+    limited = _limit_combined_mask(mask, fallback)
+
+    assert int(np.count_nonzero(limited)) == 0
+
+
+def test_text_wrap_only_disabled_for_large_titles() -> None:
+    assert not _should_wrap_text({"text": "辛亥革命的烽火岁月", "font_size": 88.0})
+    assert not _should_wrap_text({"text": "核心方略", "font_size": 24.0})
+    assert _should_wrap_text({"text": "不与清军在正面战场硬碰硬，而是潜入敌人内部。", "font_size": 18.0})
+
+
+def test_east_asian_font_is_written_as_typeface_child() -> None:
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    box = slide.shapes.add_textbox(0, 0, 1000000, 1000000)
+    run = box.text_frame.paragraphs[0].add_run()
+
+    _set_run_font(run, "Microsoft YaHei")
+
+    xml = run._r.xml
+    assert '<a:ea typeface="Microsoft YaHei"/>' in xml
+    assert '<a:latin typeface="Microsoft YaHei"/>' in xml
 
 
 def test_large_chinese_title_uses_calligraphy_font_without_bold() -> None:

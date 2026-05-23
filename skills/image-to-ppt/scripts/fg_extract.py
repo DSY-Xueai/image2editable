@@ -105,7 +105,8 @@ def extract_foreground_mask(
     if detector_masks:
         mask = np.logical_or.reduce(detector_masks)
     else:
-        mask = edge_fg
+        mask = np.zeros((h, w), dtype=bool)
+    mask = _limit_combined_mask(mask, edge_fg)
 
     # Exclude text regions — text will be rebuilt as editable text boxes
     if text_mask is not None:
@@ -141,6 +142,22 @@ def _keep_detector_mask(
     if total_pixels <= 0:
         return False
     return nonzero_pixels / total_pixels <= max_mask_ratio
+
+
+def _limit_combined_mask(
+    mask: np.ndarray,
+    fallback_mask: np.ndarray,
+    max_mask_ratio: float = 0.45,
+) -> np.ndarray:
+    """Reject combined masks that still cover too much of the slide."""
+    total_pixels = int(mask.size)
+    if _keep_detector_mask(int(np.count_nonzero(mask)), total_pixels, max_mask_ratio):
+        return mask
+    if _keep_detector_mask(
+        int(np.count_nonzero(fallback_mask)), total_pixels, max_mask_ratio
+    ):
+        return fallback_mask
+    return np.zeros(mask.shape, dtype=bool)
 
 
 def split_components(

@@ -8,9 +8,12 @@
 
 ## 本轮变更
 - 修复前景大面积误检：`fg_extract.py` 对单个 detector mask 增加覆盖率保护，避免颜色/亮度差异把整页红色背景识别成一个巨大前景组件。
+- 修复合并后 mask 仍可能过大的问题：`fg_extract.py` 对多个 detector 合并后的最终 mask 再做一次覆盖率保护，且 oversized edge fallback 不再无条件回流。
 - 修复背景 refinement 污染：`bg_model.py` 对过大的 `fg_hint_mask` 增加保护，第一轮 mask 失控时不再污染第二轮背景修复。
 - 恢复前景组件提取能力：撤回“清空前景组件”的错误 fallback，`test-image/` 转换结果重新输出多组件图层。
 - 保留文字提取的阶段性修复：Tesseract 语言映射、全大写英文过滤、中文字体写入 PPT 的兼容性处理。
+- 修复 PPT 组装细节：正文文本恢复自动换行，大标题和短中文标题关闭换行；东亚字体改为 PowerPoint DrawingML 的 `typeface` 子节点写法。
+- 修复 OCR 竖排装饰文本误重建：`text_detect.py` 过滤明显竖排/装饰性 OCR 碎片，使其继续作为前景组件保留，避免右侧装饰字被错误重建成重叠文本框。
 - 补充回归测试：新增 `tests/test_regressions.py` 覆盖 reference 参数、过大 mask 拒绝、OCR 过滤、Tesseract 语言映射和中文标题字体策略。
 
 ## 关键修改文件
@@ -36,6 +39,8 @@ python image_to_ppt.py img1.png img2.png --reference
 - 使用根目录 `test-image/` 生成 `test_output_files/foreground_components_checked.pptx`，共 5 页，不含原图参考页。
 - 组件数量检查：第 1 页 64 个前景组件，第 5 页 117 个前景组件；未再出现整页红色遮挡。
 - 已导出并人工查看第 1 页、第 5 页 PNG，确认前景组件恢复、页面可读性明显优于失败版本。
+- 审查修复后回归测试增至 10 个，覆盖最终 mask 合并保护、edge fallback 超限拒绝、正文换行策略和字体 XML 写入。
+- OCR 竖排装饰文本修复后回归测试增至 11 个；`test-image/2.png` OCR 输出从 17 个文本框降为 12 个，右侧装饰碎片不再进入可编辑文本层。
 
 ## 当前注意事项
 - 文字提取与字体风格仍是近似重建，不应宣称与原图完全一致。
