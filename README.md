@@ -99,11 +99,14 @@ python image_to_ppt.py input.png -o output.pptx
 # 多张图片 → 一个多页 PPTX
 python image_to_ppt.py img1.png img2.png img3.png -o slides.pptx
 
-# 传入目录（自动扫描所有图片）
+# 传入目录（自动扫描该目录第一层的所有图片文件）
 python image_to_ppt.py ./my_slides/ -o presentation.pptx
 
 # 调整参数
 python image_to_ppt.py input.png --lang en --diff-threshold 15 --min-area 30
+
+# 每页后附加原图参考页
+python image_to_ppt.py img1.png img2.png --reference
 ```
 
 ### Python API
@@ -125,13 +128,14 @@ result = convert_batch(
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `images` | （必填） | 图片文件、多个文件、或目录路径 |
-| `-o, --output` | 首张图片同名.pptx | 输出路径 |
-| `--lang` | `ch` | OCR 语言（ch / en） |
+| `images` | （必填） | 图片文件、多个图片文件、或目录路径；目录只扫描第一层图片 |
+| `-o, --output` | 首张图片同名 `.pptx` | 输出路径 |
+| `--lang` | `ch` | OCR 语言，常用 `ch` / `en` |
 | `--period` | `32` | 背景建模周期 |
-| `--diff-threshold` | `20.0` | 前景检测灵敏度（越小越敏感） |
-| `--min-area` | `20` | 最小组件面积（像素） |
-| `--reference` | 不启用 | 每页后附加原图参考 slide |
+| `--diff-threshold` | `20.0` | 前景检测灵敏度，越小越敏感 |
+| `--min-area` | `20` | 最小组件面积（像素），用于过滤噪点 |
+| `--reference` | 不启用 | 每页内容后附加原图参考页 |
+| `--no-reference` | 默认行为 | 显式关闭原图参考页 |
 
 ---
 
