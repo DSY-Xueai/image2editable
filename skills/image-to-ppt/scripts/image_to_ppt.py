@@ -26,10 +26,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from bg_model import build_background
-from fg_extract import extract_foreground_mask, split_components
-from ppt_assemble import assemble_pptx, assemble_pptx_multi
-from text_detect import detect_text
+from scripts.bg_model import build_background
+from scripts.fg_extract import extract_foreground_mask, split_components
+from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
+from scripts.text_detect import detect_text
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,7 @@ def convert(
 
     comp_dir = Path(work_dir) / "components"
     components = split_components(
-        img, fg_mask, comp_dir, min_area=min_component_area
+        img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
     )
     print(f"      {len(components)} components extracted")
 
@@ -223,7 +223,7 @@ def convert_batch(
 
         comp_dir = Path(work_dir) / "components"
         components = split_components(
-            img, fg_mask, comp_dir, min_area=min_component_area
+            img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
         )
         print(f"         {len(components)} components extracted\n")
 

@@ -70,7 +70,13 @@ def build_background(
 
     if has_fg_hint:
         # Refinement pass: use original image + inpainting for pixel-accurate bg
-        bg = _original_based_background(img, exclude, bg_color)
+        bg = _original_based_background(
+            img,
+            exclude,
+            bg_color,
+            text_mask=text_mask,
+            fg_mask=fg_hint_mask,
+        )
     else:
         # Initial pass: smooth background for foreground detection
         bg = _smooth_background(img, bg_color, candidate_mask, text_mask)
@@ -200,6 +206,8 @@ def _original_based_background(
     img: np.ndarray,
     exclude_mask: np.ndarray,
     bg_color: np.ndarray,
+    text_mask: np.ndarray | None = None,
+    fg_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Build background by starting from original image and inpainting excluded regions.
 
@@ -221,12 +229,19 @@ def _original_based_background(
     if not np.any(exclude_mask > 0):
         return bg
 
-    # Pre-fill excluded regions with bg_color for better inpainting seed
-    fill_color = np.clip(bg_color, 0, 255).astype(np.uint8)
-    bg[exclude_mask > 0] = fill_color
+    if text_mask is not None:
+        bg = _fill_text_regions(bg, text_mask)
 
-    # Build inpaint mask: excluded regions dilated slightly to cover edges
-    inpaint_mask = _build_inpaint_mask(exclude_mask)
+    repair_mask = fg_mask if fg_mask is not None else exclude_mask
+    if not np.any(repair_mask > 0):
+        return bg
+
+    # Pre-fill foreground regions with bg_color for better inpainting seed
+    fill_color = np.clip(bg_color, 0, 255).astype(np.uint8)
+    bg[repair_mask > 0] = fill_color
+
+    # Build inpaint mask from the exact excluded regions.
+    inpaint_mask = _build_inpaint_mask(repair_mask)
 
     # Inpaint to blend filled regions with surrounding real background
     bg = _inpaint(bg, inpaint_mask)
@@ -235,11 +250,77 @@ def _original_based_background(
 
 
 def _build_inpaint_mask(exclude_mask: np.ndarray) -> np.ndarray:
-    """Build inpaint mask from exclusion mask with slight dilation for edge coverage."""
-    # Dilate to cover boundary artifacts
-    kernel = np.ones((5, 5), np.uint8)
-    inpaint_mask = cv2.dilate(exclude_mask, kernel, iterations=1)
-    return inpaint_mask
+    """Build inpaint mask from the exact exclusion mask."""
+    return exclude_mask.copy()
+
+
+def _fill_text_regions(img: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+    """Clean OCR text boxes with nearby non-text background color."""
+    output = img.copy()
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (text_mask > 0).astype(np.uint8), connectivity=8
+    )
+    h, w = text_mask.shape
+
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(w, x + bw)
+        y2 = min(h, y + bh)
+
+        pad = max(4, min(16, max(bw, bh) // 6))
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(w, x2 + pad)
+        sy2 = min(h, y2 + pad)
+
+        box = output[y1:y2, x1:x2]
+        ink = _estimate_text_ink(box)
+        if not np.any(ink):
+            continue
+
+        local_mask = text_mask[sy1:sy2, sx1:sx2] == 0
+        local_pixels = output[sy1:sy2, sx1:sx2][local_mask]
+        if len(local_pixels) == 0:
+            fill = np.median(output.reshape(-1, 3), axis=0)
+        else:
+            fill = np.median(local_pixels.reshape(-1, 3), axis=0)
+        output[y1:y2, x1:x2][ink] = np.clip(fill, 0, 255).astype(np.uint8)
+
+    return output
+
+
+def _estimate_text_ink(region: np.ndarray) -> np.ndarray:
+    """Estimate glyph pixels in an OCR text box."""
+    if region.size == 0 or region.shape[0] < 3 or region.shape[1] < 3:
+        return np.zeros(region.shape[:2], dtype=bool)
+
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+    if float(np.std(gray)) < 8.0:
+        return np.zeros(gray.shape, dtype=bool)
+
+    thresh, _ = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    border = np.concatenate([
+        gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]
+    ]).astype(np.float32)
+    border_mean = float(np.mean(border))
+
+    if border_mean > float(thresh):
+        cutoff = max(float(thresh), border_mean - 25.0)
+        ink = gray <= cutoff
+    else:
+        cutoff = min(float(thresh), border_mean + 25.0)
+        ink = gray >= cutoff
+
+    ink_uint8 = ink.astype(np.uint8) * 255
+    ink_uint8 = cv2.dilate(ink_uint8, np.ones((3, 3), np.uint8), iterations=1)
+    return ink_uint8 > 0
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +330,7 @@ def _build_inpaint_mask(exclude_mask: np.ndarray) -> np.ndarray:
 
 def _inpaint(bg: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Inpaint masked regions using dual-pass approach."""
+    original = bg.copy()
     bgr = cv2.cvtColor(bg, cv2.COLOR_RGB2BGR)
 
     # First pass: Telea algorithm with larger radius for structural fill
@@ -259,12 +341,7 @@ def _inpaint(bg: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
     result = cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB)
 
-    # Gaussian blur at inpainting boundaries to smooth seams
-    blurred = cv2.GaussianBlur(result, (5, 5), 0)
-    boundary = cv2.dilate(mask, np.ones((5, 5), np.uint8)) - cv2.erode(mask, np.ones((3, 3), np.uint8))
-    boundary_mask = (boundary > 0)
-
     output = result.copy()
-    output[boundary_mask] = blurred[boundary_mask]
+    output[mask == 0] = original[mask == 0]
 
     return output

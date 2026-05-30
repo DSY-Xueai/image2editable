@@ -40,7 +40,7 @@ def assemble_pptx(
     img_width: int,
     img_height: int,
     output_path: str | Path,
-    add_reference_slide: bool = True,
+    add_reference_slide: bool = False,
     original_image_path: str | Path | None = None,
 ) -> str:
     """Assemble a PPTX from background, foreground components, and text.

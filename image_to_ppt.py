@@ -114,7 +114,7 @@ def convert(
 
     comp_dir = Path(work_dir) / "components"
     components = split_components(
-        img, fg_mask, comp_dir, min_area=min_component_area
+        img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
     )
     print(f"      {len(components)} components extracted")
 
@@ -223,7 +223,7 @@ def convert_batch(
 
         comp_dir = Path(work_dir) / "components"
         components = split_components(
-            img, fg_mask, comp_dir, min_area=min_component_area
+            img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
         )
         print(f"         {len(components)} components extracted\n")
 

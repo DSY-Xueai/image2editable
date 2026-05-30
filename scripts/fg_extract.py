@@ -108,9 +108,9 @@ def extract_foreground_mask(
         mask = np.zeros((h, w), dtype=bool)
     mask = _limit_combined_mask(mask, edge_fg)
 
-    # Exclude text regions — text will be rebuilt as editable text boxes
+    text_ink_mask = None
     if text_mask is not None:
-        mask[text_mask > 0] = False
+        text_ink_mask = _build_text_ink_mask(img, text_mask)
 
     mask = mask.astype(np.uint8) * 255
 
@@ -118,12 +118,14 @@ def extract_foreground_mask(
     # CLOSE: fill small holes inside foreground regions (beneficial)
     kernel_close = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
-    # OPEN: remove isolated noise pixels, but use 2x2 kernel to preserve thin lines
-    kernel_open = np.ones((2, 2), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
 
     # Remove small noise blobs and edge artifacts
     mask = _remove_noise(mask, img_shape=(h, w))
+
+    # Exclude only likely text ink, not the whole OCR bbox. Whole-box removal
+    # cuts holes into graphics that sit behind editable text.
+    if text_ink_mask is not None:
+        mask[text_ink_mask > 0] = 0
 
     logger.info(
         "Foreground mask: %d non-zero pixels (%.1f%%)",
@@ -166,12 +168,11 @@ def split_components(
     output_dir: str | Path,
     min_area: int = 20,
     padding: int = 3,
+    text_mask: np.ndarray | None = None,
 ) -> list[dict]:
     """Split foreground mask into independent transparent PNG components.
 
-    Uses distance-transform-based splitting to separate elements connected
-    by thin bridges (e.g., connecting lines between icons). This produces
-    finer-grained components than simple connected-component analysis.
+    Uses connected-component analysis so a connected shape stays intact.
 
     Args:
         img: Original image (H, W, 3) RGB uint8.
@@ -179,6 +180,7 @@ def split_components(
         output_dir: Directory to save component PNGs.
         min_area: Minimum component area in pixels.
         padding: Pixels to pad around each component bounding box.
+        text_mask: Optional OCR text mask used to repair text over components.
 
     Returns:
         List of component dicts with keys: path, x, y, w, h, area.
@@ -189,15 +191,30 @@ def split_components(
 
     img_h, img_w = img.shape[:2]
 
-    # Split connected foreground into individual elements
-    label_map = _split_by_distance_transform(fg_mask, min_area)
+    text_ink_mask = (
+        _build_text_ink_mask(img, text_mask)
+        if text_mask is not None
+        else np.zeros_like(fg_mask)
+    )
+    component_text_ink_mask = _filter_text_ink_over_components(
+        fg_mask, text_ink_mask, text_mask
+    )
+
+    # Label on a grouping mask that closes narrow text gaps.
+    grouping_mask = _build_component_grouping_mask(fg_mask)
+    label_map = _label_connected_components(grouping_mask, min_area)
 
     # Extract each labeled component
     components: list[dict] = []
     num_labels = label_map.max()
 
     for i in range(1, num_labels + 1):
-        comp_mask_full = (label_map == i).astype(np.uint8) * 255
+        label_bool = label_map == i
+        original_bool = label_bool & (fg_mask > 0)
+        repair_bool = _find_component_text_repairs(
+            original_bool, component_text_ink_mask
+        )
+        comp_mask_full = (original_bool | repair_bool).astype(np.uint8) * 255
         area = int(np.count_nonzero(comp_mask_full))
 
         if area < min_area:
@@ -216,12 +233,14 @@ def split_components(
         x2 = min(img_w, x_max + 1 + padding)
         y2 = min(img_h, y_max + 1 + padding)
 
-        # Extract component mask and apply alpha feathering
+        # Use hard alpha and repair text pixels over components, so
+        # editable text does not sit on top of original raster text.
         comp_mask = comp_mask_full[y1:y2, x1:x2]
-        comp_alpha = cv2.GaussianBlur(comp_mask, (3, 3), 0)
+        repair_mask = repair_bool[y1:y2, x1:x2].astype(np.uint8) * 255
+        comp_alpha = comp_mask
 
         # Crop RGB and combine with alpha
-        crop_rgb = img[y1:y2, x1:x2]
+        crop_rgb = _repair_component_rgb(img[y1:y2, x1:x2], repair_mask)
         rgba = np.dstack([crop_rgb, comp_alpha])
 
         # Save as transparent PNG
@@ -244,18 +263,10 @@ def split_components(
     return components
 
 
-def _split_by_distance_transform(
+def _label_connected_components(
     fg_mask: np.ndarray, min_area: int = 20
 ) -> np.ndarray:
-    """Split connected foreground regions into individual elements.
-
-    Uses a per-component adaptive strategy:
-    - Small components (< 0.1% of image area): kept intact, no splitting
-    - Large components: split using adaptive threshold based on their
-      internal distance distribution (30% of 75th percentile distance)
-
-    This avoids over-splitting small elements while aggressively splitting
-    large connected groups where distinct elements are joined by thin bridges.
+    """Label connected foreground regions without splitting connected shapes.
 
     Args:
         fg_mask: Binary foreground mask (H, W) uint8.
@@ -264,109 +275,129 @@ def _split_by_distance_transform(
     Returns:
         Label map (H, W) int32 where each pixel is assigned a component ID.
     """
-    h, w = fg_mask.shape
-
-    # Distance transform for the entire mask
-    dist = cv2.distanceTransform(fg_mask, cv2.DIST_L2, 5)
-
-    # Find connected components in original mask
     num_orig, orig_labels, orig_stats, _ = cv2.connectedComponentsWithStats(
         fg_mask, connectivity=8
     )
 
-    # Adaptive size threshold: only split components larger than this
-    # Scale with image resolution (~0.1% of image area, min 500px)
-    img_area = h * w
-    split_size_threshold = max(500, int(img_area * 0.001))
-
-    # Phase 1: Assign seeds per component
-    all_seeds = np.zeros((h, w), dtype=np.int32)
+    label_map = np.zeros_like(orig_labels, dtype=np.int32)
     next_label = 1
 
     for i in range(1, num_orig):
         area = orig_stats[i, cv2.CC_STAT_AREA]
         if area < min_area:
             continue
+        label_map[orig_labels == i] = next_label
+        next_label += 1
 
-        comp_mask = (orig_labels == i)
+    return label_map
 
-        if area < split_size_threshold:
-            # Small component: keep as single element
-            all_seeds[comp_mask] = next_label
-            next_label += 1
-        else:
-            # Large component: split using per-component adaptive threshold
-            comp_dists = dist[comp_mask]
-            comp_dists = comp_dists[comp_dists > 0]
 
-            if len(comp_dists) == 0:
-                all_seeds[comp_mask] = next_label
-                next_label += 1
-                continue
+def _build_component_grouping_mask(fg_mask: np.ndarray) -> np.ndarray:
+    """Close narrow text-shaped gaps only for component grouping."""
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    return cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
-            # Threshold = 30% of 75th percentile distance
-            # This breaks bridges much thinner than the main element bodies
-            p75 = float(np.percentile(comp_dists, 75))
-            comp_threshold = max(1.5, p75 * 0.3)
 
-            # Find cores within this component
-            comp_cores = (dist > comp_threshold) & comp_mask
-            cores_uint8 = comp_cores.astype(np.uint8) * 255
-            num_seeds, seed_labels = cv2.connectedComponents(
-                cores_uint8, connectivity=8
-            )
+def _find_component_text_repairs(
+    component_mask: np.ndarray, text_ink_mask: np.ndarray
+) -> np.ndarray:
+    """Find raster text pixels that sit on top of an existing component."""
+    if not np.any(component_mask) or not np.any(text_ink_mask > 0):
+        return np.zeros(component_mask.shape, dtype=bool)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 17))
+    nearby_component = cv2.dilate(
+        component_mask.astype(np.uint8) * 255, kernel, iterations=1
+    ) > 0
+    return nearby_component & (text_ink_mask > 0)
 
-            if num_seeds <= 2:
-                # Single core or no split — keep as one element
-                all_seeds[comp_mask] = next_label
-                next_label += 1
-            else:
-                # Multiple cores — each becomes a seed
-                for s in range(1, num_seeds):
-                    seed_pixels = (seed_labels == s)
-                    seed_area = np.count_nonzero(seed_pixels)
-                    if seed_area >= min_area:
-                        all_seeds[seed_pixels] = next_label
-                        next_label += 1
-                    # Tiny seed fragments are left unassigned (will be claimed in expansion)
 
-    # Phase 2: Expand seeds to claim remaining foreground pixels
-    assigned = all_seeds.astype(np.float32)
-    fg_bool = fg_mask > 0
-    remaining = fg_bool & (assigned == 0)
+def _filter_text_ink_over_components(
+    fg_mask: np.ndarray,
+    text_ink_mask: np.ndarray,
+    text_mask: np.ndarray | None,
+    min_component_ratio: float = 0.25,
+) -> np.ndarray:
+    """Keep text ink only where the OCR box sits on a foreground component."""
+    if text_mask is None or not np.any(text_ink_mask > 0):
+        return np.zeros_like(text_ink_mask)
 
-    kernel = np.ones((3, 3), np.uint8)
+    keep = np.zeros_like(text_ink_mask)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (text_mask > 0).astype(np.uint8), connectivity=8
+    )
 
-    for _ in range(300):
-        if not np.any(remaining):
-            break
-        dilated = cv2.dilate(assigned, kernel, iterations=1)
-        new_pixels = remaining & (dilated > 0)
-        if not np.any(new_pixels):
-            break
-        assigned[new_pixels] = dilated[new_pixels]
-        remaining = fg_bool & (assigned == 0)
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        if w <= 0 or h <= 0:
+            continue
 
-    assigned = assigned.astype(np.int32)
+        box_area = max(w * h, 1)
+        fg_pixels = int(np.count_nonzero(fg_mask[y:y + h, x:x + w]))
+        if fg_pixels / box_area >= min_component_ratio:
+            keep[y:y + h, x:x + w] = text_ink_mask[y:y + h, x:x + w]
 
-    # Phase 3: Remaining unassigned pixels become their own components
-    if np.any(remaining):
-        remaining_mask = remaining.astype(np.uint8) * 255
-        num_rem, rem_labels = cv2.connectedComponents(
-            remaining_mask, connectivity=8
-        )
-        for i in range(1, num_rem):
-            rem_area = np.count_nonzero(rem_labels == i)
-            if rem_area >= min_area:
-                assigned[rem_labels == i] = next_label
-                next_label += 1
+    return keep
 
-    return assigned
+
+def _repair_component_rgb(crop_rgb: np.ndarray, repair_mask: np.ndarray) -> np.ndarray:
+    """Remove raster text pixels from a component while keeping its base shape."""
+    if not np.any(repair_mask > 0):
+        return crop_rgb
+    bgr = cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR)
+    repaired = cv2.inpaint(bgr, repair_mask, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
+    return cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB)
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _build_text_ink_mask(img: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+    """Estimate actual glyph pixels inside OCR boxes."""
+    ink_mask = np.zeros(text_mask.shape, dtype=np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (text_mask > 0).astype(np.uint8), connectivity=8
+    )
+
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        if w < 3 or h < 3:
+            continue
+
+        region = gray[y:y + h, x:x + w]
+        if float(np.std(region)) < 8.0:
+            continue
+
+        thresh, _ = cv2.threshold(
+            region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        border = np.concatenate([
+            region[0, :], region[-1, :], region[:, 0], region[:, -1]
+        ]).astype(np.float32)
+
+        border_mean = float(np.mean(border))
+        if border_mean > float(thresh):
+            cutoff = max(float(thresh), border_mean - 25.0)
+            ink = region <= cutoff
+        else:
+            cutoff = min(float(thresh), border_mean + 25.0)
+            ink = region >= cutoff
+
+        ink_uint8 = ink.astype(np.uint8) * 255
+        ink_uint8 = cv2.dilate(ink_uint8, np.ones((3, 3), np.uint8), iterations=1)
+        box_mask = text_mask[y:y + h, x:x + w] > 0
+        ink_mask[y:y + h, x:x + w][(ink_uint8 > 0) & box_mask] = 255
+
+    return ink_mask
 
 
 def _estimate_bg_color(bg: np.ndarray) -> np.ndarray:
