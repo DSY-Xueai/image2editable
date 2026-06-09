@@ -87,6 +87,41 @@ pip install pytesseract
 
 ## 使用方法
 
+### Skill 安装
+
+项目已封装为独立可分发的 Skill，位于 `skills/image-to-ppt/`。
+
+**方式一：使用 skills CLI**
+
+```bash
+npx skills add DSY-Xueai/any2ppt --skill image-to-ppt
+```
+
+**方式二：让 Agent 自动安装**
+
+把下面这段话发给支持安装 Skills 的 Agent：
+
+```text
+请从 https://github.com/DSY-Xueai/any2ppt 安装 image-to-ppt skill。
+```
+
+**方式三：Claude Code plugin**
+
+```bash
+claude plugin marketplace add https://github.com/DSY-Xueai/any2ppt
+claude plugin install any2ppt@any2ppt --scope user
+```
+
+**方式四：手动安装**
+
+```bash
+git clone https://github.com/DSY-Xueai/any2ppt.git
+mkdir -p ~/.claude/skills
+cp -R any2ppt/skills/image-to-ppt ~/.claude/skills/image-to-ppt
+```
+
+手动安装到其他 Agent 时，把 `skills/image-to-ppt/` 复制到对应的本地 skills 目录即可。
+
 ### 命令行
 
 ```bash
@@ -124,14 +159,6 @@ result = convert_batch(
 )
 ```
 
-### 手动视觉 QA
-
-生成 PPT 后如果需要人工对比源图与渲染预览，可单独运行 QA 脚本。它不会随主转换命令自动执行。
-
-```bash
-python scripts/visual_compare_qa.py source.png rendered.png --out-dir qa_dir
-```
-
 ### 参数说明
 
 | 参数 | 默认值 | 说明 |
@@ -139,11 +166,13 @@ python scripts/visual_compare_qa.py source.png rendered.png --out-dir qa_dir
 | `images` | （必填） | 图片文件、多个图片文件、或目录路径；目录只扫描第一层图片 |
 | `-o, --output` | 首张图片同名 `.pptx` | 输出路径 |
 | `--lang` | `ch` | OCR 语言，常用 `ch` / `en` |
-| `--period` | `32` | 背景建模周期 |
+| `--period` | `32` | 背景建模参数，通常无需调整 |
 | `--diff-threshold` | `20.0` | 前景检测灵敏度，越小越敏感 |
 | `--min-area` | `20` | 最小组件面积（像素），用于过滤噪点 |
 | `--reference` | 不启用 | 每页内容后附加原图参考页 |
 | `--no-reference` | 默认行为 | 显式关闭原图参考页 |
+
+可把原图和输出结果交给支持本地文件操作的 Agent 辅助尝试参数。
 
 ---
 
@@ -202,43 +231,6 @@ any2ppt/
 │       └── references/    # 依赖说明
 └── requirements.txt       # 依赖清单
 ```
-
----
-
-## skills 安装
-
-项目已封装为独立可分发的 Skill，位于 `skills/image-to-ppt/`。
-
-### 方式一：使用 skills CLI
-
-```bash
-npx skills add DSY-Xueai/any2ppt --skill image-to-ppt
-```
-
-### 方式二：让 Agent 自动安装
-
-把下面这段话发给支持安装 Skills 的 Agent：
-
-```text
-请从 https://github.com/DSY-Xueai/any2ppt 安装 image-to-ppt skill。
-```
-
-### 方式三：Claude Code plugin
-
-```bash
-claude plugin marketplace add https://github.com/DSY-Xueai/any2ppt
-claude plugin install any2ppt@any2ppt --scope user
-```
-
-### 方式四：手动安装
-
-```bash
-git clone https://github.com/DSY-Xueai/any2ppt.git
-mkdir -p ~/.claude/skills
-cp -R any2ppt/skills/image-to-ppt ~/.claude/skills/image-to-ppt
-```
-
-手动安装到其他 Agent 时，把 `skills/image-to-ppt/` 复制到对应的本地 skills 目录即可。
 
 ---
 
