@@ -28,6 +28,10 @@ env/
 
 # --- Generated / test outputs ---
 *.pptx
+*.psd
+
+# --- Commercial licenses ---
+*.lic
 
 # --- Large binary files ---
 *.pdf

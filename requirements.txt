@@ -1,11 +1,11 @@
-# Image-to-PPT Converter Dependencies / 图片转可编辑PPT 依赖
+# image2editable Dependencies / 图片转可编辑 PPTX/PSD 依赖
 # ==============================================================
 #
 # Install / 安装方式：
 #   pip install -r requirements.txt
 
 # ─────────────────────────────────────────────────────────────
-# Core pipeline / 核心管线 (image_to_ppt.py)
+# Core pipeline / 核心管线
 # ─────────────────────────────────────────────────────────────
 # Background modeling, foreground extraction, PPTX assembly
 # 背景建模、前景提取、PPTX 组装
@@ -13,6 +13,10 @@ python-pptx>=0.6.21
 opencv-python>=4.5.0
 Pillow>=9.0.0
 numpy>=1.20.0
+
+# PSD assembly with real Photoshop text layers.
+# Requires a valid Aspose.PSD license configured via ASPOSE_PSD_LICENSE.
+aspose-psd>=26.5.0
 
 # ─────────────────────────────────────────────────────────────
 # OCR engines (at least one required for text detection)

@@ -1,0 +1,11 @@
+opencv-python>=4.5.0
+Pillow>=9.0.0
+numpy>=1.20.0
+aspose-psd>=26.5.0
+
+# OCR engines: install at least one.
+# PaddleOCR gives better Chinese recognition:
+#   pip install paddleocr paddlepaddle
+#
+# Tesseract is lighter but requires the system engine:
+#   pip install pytesseract

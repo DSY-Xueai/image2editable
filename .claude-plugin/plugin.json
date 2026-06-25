@@ -1,13 +1,13 @@
 {
-  "name": "any2ppt",
-  "description": "Convert images, screenshots, and design drafts into editable layered PowerPoint presentations.",
+  "name": "image2editable",
+  "description": "Convert images, screenshots, and design drafts into editable PPTX presentations or layered PSD files.",
   "version": "1.0.0",
   "author": {
     "name": "DSY-Xueai"
   },
-  "homepage": "https://github.com/DSY-Xueai/any2ppt",
-  "repository": "https://github.com/DSY-Xueai/any2ppt",
+  "homepage": "https://github.com/DSY-Xueai/image2editable",
+  "repository": "https://github.com/DSY-Xueai/image2editable",
   "license": "MIT",
-  "keywords": ["ppt", "powerpoint", "ocr", "image-to-ppt", "presentation"],
-  "skills": ["./skills/image-to-ppt"]
+  "keywords": ["ppt", "powerpoint", "psd", "photoshop", "ocr", "image-to-ppt", "image-to-psd"],
+  "skills": ["./skills/image-to-ppt", "./skills/image-to-psd"]
 }
