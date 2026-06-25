@@ -1,4 +1,4 @@
-<div align="center">
+<div align="image2editable">
 
 # image2editable
 
