@@ -192,45 +192,25 @@ convert_batch_to_psd(["img1.png", "img2.png"], output_path="psd_output_dir")
 
 ---
 
-## 工作原理
-
-```
-输入图片
-  │
-  ▼
-OCR 文本检测
-  │
-  ▼
-背景建模与修复
-  │
-  ▼
-前景提取与组件拆分
-  │
-  ├── PPTX 组装
-  └── PSD 组装
-```
-
----
-
 ## 项目结构
 
 ```
 image2editable/
 ├── .claude-plugin/
-│   └── plugin.json
-├── image_to_ppt.py
-├── image_to_psd.py
-├── scripts/
-│   ├── text_detect.py
-│   ├── bg_model.py
-│   ├── fg_extract.py
-│   ├── ppt_assemble.py
-│   ├── psd_assemble.py
-│   └── visual_compare_qa.py
-├── skills/
-│   ├── image-to-ppt/
-│   └── image-to-psd/
-└── requirements.txt
+│   └── plugin.json        # Claude Code plugin 配置，暴露两个独立 skill
+├── image_to_ppt.py        # 图片转 PPTX 入口（CLI + Python API）
+├── image_to_psd.py        # 图片转 PSD 入口（CLI + Python API）
+├── scripts/               # 核心处理与导出模块
+│   ├── text_detect.py     # OCR 文本识别与样式估计
+│   ├── bg_model.py        # 背景建模与修复
+│   ├── fg_extract.py      # 前景组件提取与拆分
+│   ├── ppt_assemble.py    # PPTX 分层组装
+│   ├── psd_assemble.py    # PSD 分层组装（Aspose.PSD）
+│   └── visual_compare_qa.py # 手动视觉对比 QA 工具
+├── skills/                # 可分发 Agent skill
+│   ├── image-to-ppt/      # 图片转 PPTX skill
+│   └── image-to-psd/      # 图片转 PSD skill
+└── requirements.txt       # Python 依赖
 ```
 
 ---
