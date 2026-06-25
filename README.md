@@ -11,6 +11,7 @@
 </div>
 
 输入 PPT 截图、页面截图或设计稿图片，自动拆成背景、前景组件和文本层，并导出为可编辑 PPTX 或分层 PSD。
+
 ---
 
 ## 效果演示
@@ -99,6 +100,7 @@ export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 npx skills add DSY-Xueai/image2editable --skill <skill_name>
 ```
 把 <skill_name> 换成要安装的 skill 目录名，例如 image-to-ppt。
+
 **方式二：让 Agent 自动安装**
 
 ```text
@@ -120,7 +122,7 @@ mkdir -p ~/.claude/skills
 cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 ```
 
-### 命令行
+### 命令行运行
 
 ```bash
 # 单张图片 → PPTX
@@ -146,17 +148,9 @@ python image_to_psd.py ./my_slides/ -o psd_output_dir
 
 # 调整参数
 python image_to_ppt.py input.png --lang en --diff-threshold 15 --min-area 30
+python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
 ```
 
-### Python API
-
-```python
-from image_to_ppt import convert as convert_to_ppt
-from image_to_ppt import convert_batch as convert_batch_to_ppt
-
-convert_to_ppt("input.png", output_path="output.pptx") #或者output_path="output.psd"
-convert_batch_to_ppt(["img1.png", "img2.png"], output_path="slides.pptx") #或者output_path="psd_output_di"
-```
 
 ### 参数说明
 
