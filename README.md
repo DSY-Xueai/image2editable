@@ -1,4 +1,4 @@
-<div align="image2editable">
+<div align="center">
 
 # image2editable
 
@@ -11,7 +11,6 @@
 </div>
 
 输入 PPT 截图、页面截图或设计稿图片，自动拆成背景、前景组件和文本层，并导出为可编辑 PPTX 或分层 PSD。
-
 ---
 
 ## 效果演示
