@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from pptx import Presentation
@@ -25,12 +26,41 @@ from pptx.util import Inches, Pt
 logger = logging.getLogger(__name__)
 
 # Slide width in inches (standard widescreen reference)
-SLIDE_WIDTH_INCHES = 13.333
+SLIDE_WIDTH_INCHES = 40 / 3
+SLIDE_HEIGHT_INCHES = 7.5
+
+
+@dataclass(frozen=True)
+class ContainTransform:
+    slide_width: float
+    slide_height: float
+    content_width: float
+    content_height: float
+    offset_x: float
+    offset_y: float
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def compute_contain_transform(img_width: int, img_height: int) -> ContainTransform:
+    """Map an image into the center of a fixed widescreen slide."""
+    scale = min(
+        SLIDE_WIDTH_INCHES / img_width,
+        SLIDE_HEIGHT_INCHES / img_height,
+    )
+    content_width = img_width * scale
+    content_height = img_height * scale
+    return ContainTransform(
+        slide_width=SLIDE_WIDTH_INCHES,
+        slide_height=SLIDE_HEIGHT_INCHES,
+        content_width=content_width,
+        content_height=content_height,
+        offset_x=(SLIDE_WIDTH_INCHES - content_width) / 2,
+        offset_y=(SLIDE_HEIGHT_INCHES - content_height) / 2,
+    )
 
 
 def assemble_pptx(
@@ -63,12 +93,11 @@ def assemble_pptx(
 
     prs = Presentation()
 
-    # Set slide dimensions to match image aspect ratio
-    slide_w = SLIDE_WIDTH_INCHES
-    slide_h = slide_w * img_height / img_width
+    transform = compute_contain_transform(img_width, img_height)
 
-    prs.slide_width = Inches(slide_w)
-    prs.slide_height = Inches(slide_h)
+    prs.slide_width = Inches(transform.slide_width)
+    prs.slide_height = Inches(transform.slide_height)
+    prs._element.sldSz.set("type", "screen16x9")
 
     # Use blank layout
     blank_layout = prs.slide_layouts[6]
@@ -78,23 +107,24 @@ def assemble_pptx(
 
     # Layer 1 (bottom): Background image
     slide.shapes.add_picture(
-        str(background_path), 0, 0, Inches(slide_w), Inches(slide_h)
+        str(background_path), 0, 0,
+        Inches(transform.slide_width), Inches(transform.slide_height)
     )
     logger.info("Added background layer.")
 
     # Layer 2 (middle): Foreground components
     for comp in components:
-        left = Inches(comp["x"] / img_width * slide_w)
-        top = Inches(comp["y"] / img_height * slide_h)
-        width = Inches(comp["w"] / img_width * slide_w)
-        height = Inches(comp["h"] / img_height * slide_h)
+        left = Inches(transform.offset_x + comp["x"] / img_width * transform.content_width)
+        top = Inches(transform.offset_y + comp["y"] / img_height * transform.content_height)
+        width = Inches(comp["w"] / img_width * transform.content_width)
+        height = Inches(comp["h"] / img_height * transform.content_height)
         slide.shapes.add_picture(comp["path"], left, top, width, height)
 
     logger.info("Added %d foreground components.", len(components))
 
     # Layer 3 (top): Editable text boxes
     for item in text_items:
-        _add_textbox(slide, item, img_width, img_height, slide_w, slide_h)
+        _add_textbox(slide, item, img_width, img_height, transform)
 
     logger.info("Added %d text boxes.", len(text_items))
 
@@ -104,7 +134,13 @@ def assemble_pptx(
         if original_image_path.exists():
             ref_slide = prs.slides.add_slide(blank_layout)
             ref_slide.shapes.add_picture(
-                str(original_image_path), 0, 0, Inches(slide_w), Inches(slide_h)
+                str(background_path), 0, 0,
+                Inches(transform.slide_width), Inches(transform.slide_height)
+            )
+            ref_slide.shapes.add_picture(
+                str(original_image_path),
+                Inches(transform.offset_x), Inches(transform.offset_y),
+                Inches(transform.content_width), Inches(transform.content_height)
             )
             logger.info("Added reference slide with original image.")
 
@@ -141,41 +177,37 @@ def assemble_pptx_multi(
 
     prs = Presentation()
 
-    # Use first image to set slide dimensions
-    first = slides_data[0]
-    slide_w = SLIDE_WIDTH_INCHES
-    slide_h = slide_w * first["img_height"] / first["img_width"]
-
-    prs.slide_width = Inches(slide_w)
-    prs.slide_height = Inches(slide_h)
+    prs.slide_width = Inches(SLIDE_WIDTH_INCHES)
+    prs.slide_height = Inches(SLIDE_HEIGHT_INCHES)
+    prs._element.sldSz.set("type", "screen16x9")
 
     blank_layout = prs.slide_layouts[6]
 
     for idx, data in enumerate(slides_data):
         img_w = data["img_width"]
         img_h = data["img_height"]
-        # Per-slide aspect ratio (height may differ from first slide)
-        s_h = slide_w * img_h / img_w
+        transform = compute_contain_transform(img_w, img_h)
 
         # --- Content slide ---
         slide = prs.slides.add_slide(blank_layout)
 
         # Layer 1: Background
         slide.shapes.add_picture(
-            str(data["background_path"]), 0, 0, Inches(slide_w), Inches(s_h)
+            str(data["background_path"]), 0, 0,
+            Inches(transform.slide_width), Inches(transform.slide_height)
         )
 
         # Layer 2: Foreground components
         for comp in data["components"]:
-            left = Inches(comp["x"] / img_w * slide_w)
-            top = Inches(comp["y"] / img_h * s_h)
-            width = Inches(comp["w"] / img_w * slide_w)
-            height = Inches(comp["h"] / img_h * s_h)
+            left = Inches(transform.offset_x + comp["x"] / img_w * transform.content_width)
+            top = Inches(transform.offset_y + comp["y"] / img_h * transform.content_height)
+            width = Inches(comp["w"] / img_w * transform.content_width)
+            height = Inches(comp["h"] / img_h * transform.content_height)
             slide.shapes.add_picture(comp["path"], left, top, width, height)
 
         # Layer 3: Text boxes
         for item in data["text_items"]:
-            _add_textbox(slide, item, img_w, img_h, slide_w, s_h)
+            _add_textbox(slide, item, img_w, img_h, transform)
 
         logger.info("Slide %d: bg + %d components + %d text boxes.",
                     idx + 1, len(data["components"]), len(data["text_items"]))
@@ -186,7 +218,13 @@ def assemble_pptx_multi(
             if orig.exists():
                 ref_slide = prs.slides.add_slide(blank_layout)
                 ref_slide.shapes.add_picture(
-                    str(orig), 0, 0, Inches(slide_w), Inches(s_h)
+                    str(data["background_path"]), 0, 0,
+                    Inches(transform.slide_width), Inches(transform.slide_height)
+                )
+                ref_slide.shapes.add_picture(
+                    str(orig),
+                    Inches(transform.offset_x), Inches(transform.offset_y),
+                    Inches(transform.content_width), Inches(transform.content_height)
                 )
 
     prs.save(str(output_path))
@@ -217,8 +255,7 @@ def _add_textbox(
     item: dict,
     img_w: int,
     img_h: int,
-    slide_w: float,
-    slide_h: float,
+    transform: ContainTransform,
 ) -> None:
     """Add an editable text box to the slide.
 
@@ -228,11 +265,11 @@ def _add_textbox(
     x, y, w, h = item["box"]
 
     # Map vertical position and height from image to slide
-    top = Inches(y / img_h * slide_h)
-    height = Inches(h / img_h * slide_h)
+    top = Inches(transform.offset_y + y / img_h * transform.content_height)
+    height = Inches(h / img_h * transform.content_height)
 
-    left = Inches(x / img_w * slide_w)
-    width = Inches(w / img_w * slide_w)
+    left = Inches(transform.offset_x + x / img_w * transform.content_width)
+    width = Inches(w / img_w * transform.content_width)
 
     box = slide.shapes.add_textbox(left, top, width, height)
     tf = box.text_frame

@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: If you use image2editable, please cite this software and SAM 2.
+title: image2editable
+type: software
+authors:
+  - name: DengShouYang
+repository-code: https://github.com/DSY-Xueai/image2editable
+license: MIT

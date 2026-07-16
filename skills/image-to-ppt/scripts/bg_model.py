@@ -25,6 +25,43 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def extend_background_to_widescreen(
+    background: np.ndarray,
+    canvas_width: int = 1920,
+    canvas_height: int = 1080,
+) -> np.ndarray:
+    """Extend a background to widescreen while preserving its centered content."""
+    height, width = background.shape[:2]
+
+    cover_scale = max(canvas_width / width, canvas_height / height)
+    cover_width = max(canvas_width, int(round(width * cover_scale)))
+    cover_height = max(canvas_height, int(round(height * cover_scale)))
+    cover = cv2.resize(
+        background, (cover_width, cover_height), interpolation=cv2.INTER_LINEAR
+    )
+    crop_x = (cover_width - canvas_width) // 2
+    crop_y = (cover_height - canvas_height) // 2
+    canvas = cover[
+        crop_y:crop_y + canvas_height,
+        crop_x:crop_x + canvas_width,
+    ]
+    canvas = cv2.GaussianBlur(canvas, (0, 0), sigmaX=24, sigmaY=24)
+
+    contain_scale = min(canvas_width / width, canvas_height / height)
+    contain_width = min(canvas_width, int(round(width * contain_scale)))
+    contain_height = min(canvas_height, int(round(height * contain_scale)))
+    contained = cv2.resize(
+        background, (contain_width, contain_height), interpolation=cv2.INTER_AREA
+    )
+    offset_x = (canvas_width - contain_width) // 2
+    offset_y = (canvas_height - contain_height) // 2
+    canvas[
+        offset_y:offset_y + contain_height,
+        offset_x:offset_x + contain_width,
+    ] = contained
+    return canvas
+
+
 def build_background(
     img: np.ndarray,
     text_mask: np.ndarray | None = None,
@@ -82,6 +119,23 @@ def build_background(
         bg = _smooth_background(img, bg_color, candidate_mask, text_mask)
 
     return bg
+
+
+def build_clean_background(
+    img: np.ndarray,
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Remove visual elements and text from an image."""
+    removal = (text_mask > 0).astype(np.uint8) * 255
+    for mask in element_masks:
+        removal[np.asarray(mask, dtype=bool)] = 255
+    removal = cv2.dilate(
+        removal,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    )
+    return _inpaint(img, removal)
 
 
 def build_text_only_background(

@@ -40,6 +40,7 @@ from scripts.visual_segment import (
     resolve_visual_elements,
     validate_visual_masks,
     visual_difference,
+    write_segmentation_diagnostics,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,13 @@ def _process_image(
     visual_only_path = work_dir / "visual-only.png"
     _save_rgb(str(visual_only_path), visual_only)
     quality = visual_difference(img, visual_only, text_mask)
+    write_segmentation_diagnostics(
+        work_dir / "diagnostics",
+        source=img,
+        masks=element_masks,
+        reconstructed=visual_only,
+        metrics=quality,
+    )
     require_visual_quality(quality)
 
     raster_text_items, _ = detect_text(visual_only_path, lang=lang)

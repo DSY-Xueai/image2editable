@@ -1,12 +1,13 @@
 ---
 name: image-to-ppt
 description: 将一张或多张图片转换为可编辑的分层 PowerPoint 演示文稿。自动完成 OCR 文本识别、背景建模修复、前景组件拆分和 PPTX 分层组装。当用户需要把截图、设计稿、幻灯片图片还原为可编辑 PPT 时使用此 skill。适用场景包括：图片转 PPT、截图还原为可编辑演示文稿、从图片中提取文字和元素重建 PowerPoint、批量图片生成多页 PPT。
-version: 1.0.0
 ---
 
 # Image to PPT
 
 将图片转换为分层可编辑的 PowerPoint 文件。每张图片生成一页 slide，包含三层：背景图层、前景组件图层（独立可移动）、可编辑文本框图层。
+
+使用 SAM 2.1 分割视觉元素。首次运行时将 large checkpoint 下载到用户本地缓存；自动使用可用的 CUDA，CPU 推理较慢。严格视觉质量校验失败时停止并保留 diagnostics，不要将页面 flatten 为单张图片。
 
 ## 工作原理
 

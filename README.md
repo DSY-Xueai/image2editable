@@ -62,6 +62,22 @@ cd image2editable
 pip install -r requirements.txt
 ```
 
+### SAM 2.1 视觉分割
+
+PPTX 前景视觉元素通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将 checkpoint 下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。SAM 2 代码与 checkpoint 采用 [Apache License 2.0](third_party/licenses/SAM2-APACHE-2.0.txt)。
+
+引用 SAM 2：
+
+```bibtex
+@article{ravi2024sam2,
+  title={SAM 2: Segment Anything in Images and Videos},
+  author={Ravi, Nikhila and Gabeur, Valentin and Hu, Yuan-Ting and Hu, Ronghang and Ryali, Chaitanya and Ma, Tengyu and Khedr, Haitham and R{\"a}dle, Roman and Rolland, Chloe and Gustafson, Laura and Mintun, Eric and Pan, Junting and Alwala, Kalyan Vasudev and Carion, Nicolas and Wu, Chao-Yuan and Girshick, Ross and Doll{\'a}r, Piotr and Feichtenhofer, Christoph},
+  journal={arXiv preprint arXiv:2408.00714},
+  url={https://arxiv.org/abs/2408.00714},
+  year={2024}
+}
+```
+
 ### OCR 引擎
 
 **方式 A：PaddleOCR（中文识别精度更高）**
