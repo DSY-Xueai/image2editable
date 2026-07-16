@@ -77,12 +77,9 @@ def resolve_visual_elements(
         candidate, candidate_area, candidate_bbox = candidate_stats
         duplicate = False
         for retained, retained_area, retained_bbox in unique:
-            if (
-                min(candidate_area, retained_area)
-                / max(candidate_area, retained_area)
-                < duplicate_iou
-            ):
-                continue
+            smaller_area = min(candidate_area, retained_area)
+            larger_area = max(candidate_area, retained_area)
+            smaller = candidate if candidate_area <= retained_area else retained
 
             y1 = max(candidate_bbox[0], retained_bbox[0])
             y2 = min(candidate_bbox[1], retained_bbox[1])
@@ -91,23 +88,33 @@ def resolve_visual_elements(
             if y1 >= y2 or x1 >= x2:
                 continue
 
+            area_ratio = smaller_area / larger_area
+            if area_ratio < duplicate_iou and not smaller.touches_crop_edge:
+                continue
+
             intersection = int(
                 np.count_nonzero(
                     candidate.mask[y1:y2, x1:x2]
                     & retained.mask[y1:y2, x1:x2]
                 )
             )
+            if (
+                smaller.touches_crop_edge
+                and smaller_area - intersection < min_area
+            ):
+                duplicate = True
+                break
+            if area_ratio < duplicate_iou:
+                continue
+
             union = candidate_area + retained_area - intersection
             if intersection / max(union, 1) < duplicate_iou:
                 continue
 
-            smaller_area = min(candidate_area, retained_area)
-            larger_area = max(candidate_area, retained_area)
             parent_child = (
                 smaller_area - intersection < min_area
                 and larger_area - intersection >= min_area
             )
-            smaller = candidate if candidate_area <= retained_area else retained
             if not parent_child or smaller.touches_crop_edge:
                 duplicate = True
                 break
