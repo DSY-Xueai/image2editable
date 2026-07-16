@@ -36,6 +36,56 @@ class VisualElement:
     source: str
 
 
+def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    intersection = int(np.count_nonzero(left & right))
+    union = int(np.count_nonzero(left | right))
+    return intersection / max(union, 1)
+
+
+def resolve_visual_elements(
+    candidates: list[MaskCandidate],
+    min_area: int = 20,
+    duplicate_iou: float = 0.92,
+) -> list[VisualElement]:
+    valid = [
+        candidate
+        for candidate in candidates
+        if candidate.mask.dtype == bool
+        and np.count_nonzero(candidate.mask) >= min_area
+        and np.count_nonzero(candidate.mask) / candidate.mask.size < 0.95
+    ]
+
+    unique = []
+    for candidate in sorted(valid, key=lambda item: item.score, reverse=True):
+        if any(
+            _mask_iou(candidate.mask, retained.mask) >= duplicate_iou
+            for retained in unique
+        ):
+            continue
+        unique.append(candidate)
+
+    front_to_back = sorted(
+        unique,
+        key=lambda item: (np.count_nonzero(item.mask), -item.score),
+    )
+    if not front_to_back:
+        return []
+
+    claimed = np.zeros(front_to_back[0].mask.shape, dtype=bool)
+    elements = []
+    for candidate in front_to_back:
+        visible = candidate.mask & ~claimed
+        if np.count_nonzero(visible) < min_area:
+            continue
+        elements.append(VisualElement(visible, 0, candidate.score, candidate.source))
+        claimed |= visible
+
+    elements.reverse()
+    for z_index, element in enumerate(elements):
+        element.z_index = z_index
+    return elements
+
+
 def _crop_origins(length: int, crop_size: int, overlap: int) -> list[int]:
     if length <= crop_size:
         return [0]
