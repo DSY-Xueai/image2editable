@@ -175,21 +175,38 @@ def export_visual_components(
 
     img_h, img_w = img.shape[:2]
     text_ink = _build_text_ink_mask(img, text_mask)
+    ownership_masks = [np.asarray(mask, dtype=bool) for mask in element_masks]
+    owned_union = np.zeros((img_h, img_w), dtype=bool)
+    for ownership_mask in ownership_masks:
+        owned_union |= ownership_mask
+
+    assigned_hole_repairs = [
+        np.zeros((img_h, img_w), dtype=bool) for _ in ownership_masks
+    ]
+    claimed_holes = np.zeros((img_h, img_w), dtype=bool)
+    unowned_text_ink = (text_ink > 0) & ~owned_union
+    for position in reversed(range(len(ownership_masks))):
+        enclosed_holes = _remove_border_connected(~ownership_masks[position])
+        hole_repair = unowned_text_ink & enclosed_holes & ~claimed_holes
+        assigned_hole_repairs[position] = hole_repair
+        claimed_holes |= hole_repair
+
     components: list[dict] = []
 
-    for index, element_mask in enumerate(element_masks, start=1):
-        refined = _refine_visual_mask(img, element_mask)
+    for index, ownership_mask in enumerate(ownership_masks, start=1):
+        refined = _refine_visual_mask(img, ownership_mask)
         area = int(np.count_nonzero(refined))
         if area == 0:
             continue
 
-        ys, xs = np.where(refined)
+        alpha_mask = refined | assigned_hole_repairs[index - 1]
+        ys, xs = np.where(alpha_mask)
         x1 = max(0, int(xs.min()) - padding)
         y1 = max(0, int(ys.min()) - padding)
         x2 = min(img_w, int(xs.max()) + 1 + padding)
         y2 = min(img_h, int(ys.max()) + 1 + padding)
 
-        local_mask = refined[y1:y2, x1:x2]
+        local_mask = alpha_mask[y1:y2, x1:x2]
         local_text = text_ink[y1:y2, x1:x2].copy()
         local_text[~local_mask] = 0
         crop = img[y1:y2, x1:x2]
@@ -215,8 +232,10 @@ def export_visual_components(
 def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Refine one visual-element mask without merging it with other elements."""
     binary = np.asarray(mask, dtype=np.uint8)
-    if np.count_nonzero(binary) < 20:
-        return binary > 0
+    original = binary > 0
+    original_area = int(np.count_nonzero(original))
+    if original_area < 20:
+        return original
 
     dilated = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=1)
     eroded = cv2.erode(binary, np.ones((3, 3), np.uint8), iterations=1)
@@ -238,8 +257,13 @@ def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
             cv2.GC_INIT_WITH_MASK,
         )
     except cv2.error:
-        return binary > 0
-    return (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
+        return original
+    refined = (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
+    refined &= original
+    refined_area = int(np.count_nonzero(refined))
+    if refined_area == 0 or refined_area < original_area * 0.5:
+        return original
+    return refined
 
 
 def _soft_alpha(mask: np.ndarray) -> np.ndarray:
