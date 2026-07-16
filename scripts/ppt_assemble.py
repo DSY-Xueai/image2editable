@@ -26,7 +26,7 @@ from pptx.util import Inches, Pt
 logger = logging.getLogger(__name__)
 
 # Slide width in inches (standard widescreen reference)
-SLIDE_WIDTH_INCHES = 13.333
+SLIDE_WIDTH_INCHES = 40 / 3
 SLIDE_HEIGHT_INCHES = 7.5
 
 
@@ -97,6 +97,7 @@ def assemble_pptx(
 
     prs.slide_width = Inches(transform.slide_width)
     prs.slide_height = Inches(transform.slide_height)
+    prs._element.sldSz.set("type", "screen16x9")
 
     # Use blank layout
     blank_layout = prs.slide_layouts[6]
@@ -178,6 +179,7 @@ def assemble_pptx_multi(
 
     prs.slide_width = Inches(SLIDE_WIDTH_INCHES)
     prs.slide_height = Inches(SLIDE_HEIGHT_INCHES)
+    prs._element.sldSz.set("type", "screen16x9")
 
     blank_layout = prs.slide_layouts[6]
 
