@@ -84,6 +84,23 @@ def build_background(
     return bg
 
 
+def build_clean_background(
+    img: np.ndarray,
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Remove visual elements and text from an image."""
+    removal = (text_mask > 0).astype(np.uint8) * 255
+    for mask in element_masks:
+        removal[np.asarray(mask, dtype=bool)] = 255
+    removal = cv2.dilate(
+        removal,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    )
+    return _inpaint(img, removal)
+
+
 def build_text_only_background(
     img: np.ndarray,
     text_items: list[dict],

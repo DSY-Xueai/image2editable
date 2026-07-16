@@ -21,6 +21,42 @@ class VisualSegmentationError(RuntimeError):
     pass
 
 
+def validate_visual_masks(element_masks: list[np.ndarray]) -> None:
+    if not element_masks:
+        return
+    ownership = np.sum(
+        [np.asarray(mask, dtype=np.uint8) for mask in element_masks],
+        axis=0,
+    )
+    if np.max(ownership) > 1:
+        raise VisualSegmentationError("overlapping visual ownership detected")
+
+
+def visual_difference(
+    source: np.ndarray,
+    reconstructed: np.ndarray,
+    text_mask: np.ndarray,
+) -> dict:
+    valid = text_mask == 0
+    if not np.any(valid):
+        return {"mae": 0.0, "p95": 0.0}
+    pixel_difference = np.mean(
+        np.abs(source.astype(np.float32) - reconstructed.astype(np.float32)),
+        axis=2,
+    )[valid]
+    return {
+        "mae": float(np.mean(pixel_difference)),
+        "p95": float(np.percentile(pixel_difference, 95)),
+    }
+
+
+def require_visual_quality(metrics: dict) -> None:
+    if metrics["mae"] > 12.0 or metrics["p95"] > 48.0:
+        raise VisualSegmentationError(
+            "visual reconstruction did not meet the quality threshold"
+        )
+
+
 @dataclass
 class MaskCandidate:
     mask: np.ndarray
