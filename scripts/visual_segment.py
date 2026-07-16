@@ -38,12 +38,6 @@ class VisualElement:
     source: str
 
 
-def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
-    intersection = int(np.count_nonzero(left & right))
-    union = int(np.count_nonzero(left | right))
-    return intersection / max(union, 1)
-
-
 def resolve_visual_elements(
     candidates: list[MaskCandidate],
     min_area: int = 20,
