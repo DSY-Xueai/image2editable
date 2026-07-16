@@ -33,7 +33,6 @@ from scripts.text_detect import detect_text
 from scripts.visual_segment import (
     MaskCandidate,
     VisualSegmentationError,
-    compose_visual_result,
     create_sam_generator,
     generate_mask_candidates,
     require_visual_quality,
@@ -51,6 +50,23 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 # ---------------------------------------------------------------------------
 # Core pipeline
 # ---------------------------------------------------------------------------
+
+
+def _compose_exported_components(
+    clean_background: np.ndarray,
+    components: list[dict],
+) -> np.ndarray:
+    from PIL import Image
+
+    canvas = Image.fromarray(clean_background).convert("RGBA")
+    for component in components:
+        with Image.open(component["path"]) as component_image:
+            layer = component_image.convert("RGBA")
+        canvas.alpha_composite(
+            layer,
+            dest=(int(component["x"]), int(component["y"])),
+        )
+    return np.asarray(canvas.convert("RGB"))
 
 
 def _process_image(
@@ -73,7 +89,7 @@ def _process_image(
         residual = [
             candidate
             for candidate in generate_mask_candidates(clean_background, mask_generator)
-            if candidate.score >= 0.90
+            if candidate.score >= 0.86
         ]
         if not residual:
             break
@@ -82,7 +98,13 @@ def _process_image(
                 "clean background still contains independent visual elements"
             )
         candidates.extend(
-            MaskCandidate(candidate.mask, candidate.score, "residual")
+            MaskCandidate(
+                candidate.mask,
+                candidate.score,
+                "residual",
+                crop_box=candidate.crop_box,
+                touches_crop_edge=candidate.touches_crop_edge,
+            )
             for candidate in residual
         )
 
@@ -98,17 +120,12 @@ def _process_image(
         extend_background_to_widescreen(clean_background, 1920, 1080),
     )
 
-    visual_only = compose_visual_result(
-        clean_background,
-        img,
-        element_masks,
-        text_mask,
-    )
+    visual_only = _compose_exported_components(clean_background, components)
+    visual_only_path = work_dir / "visual-only.png"
+    _save_rgb(str(visual_only_path), visual_only)
     quality = visual_difference(img, visual_only, text_mask)
     require_visual_quality(quality)
 
-    visual_only_path = work_dir / "visual-only.png"
-    _save_rgb(str(visual_only_path), visual_only)
     raster_text_items, _ = detect_text(visual_only_path, lang=lang)
     if raster_text_items:
         raise VisualSegmentationError(

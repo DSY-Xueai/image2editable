@@ -21,19 +21,6 @@ class VisualSegmentationError(RuntimeError):
     pass
 
 
-def compose_visual_result(
-    clean_background: np.ndarray,
-    source: np.ndarray,
-    element_masks: list[np.ndarray],
-    text_mask: np.ndarray,
-) -> np.ndarray:
-    composed = clean_background.copy()
-    for mask in element_masks:
-        visible = np.asarray(mask, dtype=bool) & (text_mask == 0)
-        composed[visible] = source[visible]
-    return composed
-
-
 def validate_visual_masks(element_masks: list[np.ndarray]) -> None:
     if not element_masks:
         return
