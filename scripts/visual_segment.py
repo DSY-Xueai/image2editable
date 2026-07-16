@@ -47,33 +47,79 @@ def resolve_visual_elements(
     min_area: int = 20,
     duplicate_iou: float = 0.92,
 ) -> list[VisualElement]:
-    valid = [
-        candidate
-        for candidate in candidates
-        if candidate.mask.dtype == bool
-        and np.count_nonzero(candidate.mask) >= min_area
-        and np.count_nonzero(candidate.mask) / candidate.mask.size < 0.95
-    ]
+    valid = []
+    for candidate in candidates:
+        if candidate.mask.dtype != bool:
+            continue
+        area = int(np.count_nonzero(candidate.mask))
+        if area < min_area or area / candidate.mask.size >= 0.95:
+            continue
+        ys, xs = np.nonzero(candidate.mask)
+        bbox = (
+            int(ys.min()),
+            int(ys.max()) + 1,
+            int(xs.min()),
+            int(xs.max()) + 1,
+        )
+        valid.append((candidate, area, bbox))
 
     unique = []
-    for candidate in sorted(valid, key=lambda item: item.score, reverse=True):
-        if any(
-            _mask_iou(candidate.mask, retained.mask) >= duplicate_iou
-            for retained in unique
-        ):
+    for candidate_stats in sorted(
+        valid,
+        key=lambda item: item[0].score,
+        reverse=True,
+    ):
+        candidate, candidate_area, candidate_bbox = candidate_stats
+        duplicate = False
+        for retained, retained_area, retained_bbox in unique:
+            if (
+                min(candidate_area, retained_area)
+                / max(candidate_area, retained_area)
+                < duplicate_iou
+            ):
+                continue
+
+            y1 = max(candidate_bbox[0], retained_bbox[0])
+            y2 = min(candidate_bbox[1], retained_bbox[1])
+            x1 = max(candidate_bbox[2], retained_bbox[2])
+            x2 = min(candidate_bbox[3], retained_bbox[3])
+            if y1 >= y2 or x1 >= x2:
+                continue
+
+            intersection = int(
+                np.count_nonzero(
+                    candidate.mask[y1:y2, x1:x2]
+                    & retained.mask[y1:y2, x1:x2]
+                )
+            )
+            union = candidate_area + retained_area - intersection
+            if intersection / max(union, 1) < duplicate_iou:
+                continue
+
+            smaller_area = min(candidate_area, retained_area)
+            larger_area = max(candidate_area, retained_area)
+            parent_child = (
+                smaller_area - intersection < min_area
+                and larger_area - intersection >= min_area
+            )
+            if not parent_child:
+                duplicate = True
+                break
+
+        if duplicate:
             continue
-        unique.append(candidate)
+        unique.append(candidate_stats)
 
     front_to_back = sorted(
         unique,
-        key=lambda item: (np.count_nonzero(item.mask), -item.score),
+        key=lambda item: (item[1], -item[0].score),
     )
     if not front_to_back:
         return []
 
-    claimed = np.zeros(front_to_back[0].mask.shape, dtype=bool)
+    claimed = np.zeros(front_to_back[0][0].mask.shape, dtype=bool)
     elements = []
-    for candidate in front_to_back:
+    for candidate, _, _ in front_to_back:
         visible = candidate.mask & ~claimed
         if np.count_nonzero(visible) < min_area:
             continue
