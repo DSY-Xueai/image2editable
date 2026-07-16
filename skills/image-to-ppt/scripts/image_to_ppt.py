@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from scripts.bg_model import build_background
+from scripts.bg_model import build_background, build_text_only_background
 from scripts.fg_extract import extract_foreground_mask, split_components
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import detect_text
@@ -108,15 +108,23 @@ def convert(
     )
     fg_mask = _merge_foreground_masks(fg_mask, refined_fg_mask)
 
+    use_text_only_fallback = _should_use_text_only_fallback(fg_mask)
+    if use_text_only_fallback:
+        bg = build_text_only_background(img, text_items)
+
     # Split into components
     work_dir = tempfile.mkdtemp(prefix="img2ppt_")
     bg_path = Path(work_dir) / "background.png"
     _save_rgb(str(bg_path), bg)
 
-    comp_dir = Path(work_dir) / "components"
-    components = split_components(
-        img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
-    )
+    if use_text_only_fallback:
+        components = []
+        print("      Dense layout detected; using text-editable flattened background")
+    else:
+        comp_dir = Path(work_dir) / "components"
+        components = split_components(
+            img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
+        )
     print(f"      {len(components)} components extracted")
 
     # Step 4: Assemble PPTX
@@ -218,15 +226,23 @@ def convert_batch(
         )
         fg_mask = _merge_foreground_masks(fg_mask, refined_fg_mask)
 
+        use_text_only_fallback = _should_use_text_only_fallback(fg_mask)
+        if use_text_only_fallback:
+            bg = build_text_only_background(img, text_items)
+
         # Split components
         work_dir = tempfile.mkdtemp(prefix=f"img2ppt_{i}_")
         bg_path = Path(work_dir) / "background.png"
         _save_rgb(str(bg_path), bg)
 
-        comp_dir = Path(work_dir) / "components"
-        components = split_components(
-            img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
-        )
+        if use_text_only_fallback:
+            components = []
+            print("         Dense layout detected; using text-editable flattened background")
+        else:
+            comp_dir = Path(work_dir) / "components"
+            components = split_components(
+                img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
+            )
         print(f"         {len(components)} components extracted\n")
 
         slides_data.append({
@@ -389,6 +405,33 @@ def _merge_foreground_masks(
             merged[component] = 255
 
     return merged
+
+
+def _should_use_text_only_fallback(
+    fg_mask: np.ndarray,
+    min_bbox_ratio: float = 0.60,
+    min_fill_ratio: float = 0.20,
+) -> bool:
+    """Use a flattened background when one connected component spans the slide."""
+    grouping_mask = cv2.morphologyEx(
+        fg_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+        iterations=1,
+    )
+    total_area = max(int(fg_mask.shape[0] * fg_mask.shape[1]), 1)
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+        (grouping_mask > 0).astype(np.uint8), connectivity=8
+    )
+
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        width = int(stats[i, cv2.CC_STAT_WIDTH])
+        height = int(stats[i, cv2.CC_STAT_HEIGHT])
+        bbox_area = max(width * height, 1)
+        if bbox_area / total_area >= min_bbox_ratio and area / bbox_area >= min_fill_ratio:
+            return True
+    return False
 
 
 def _resolve_inputs(inputs: list[str]) -> list[Path]:

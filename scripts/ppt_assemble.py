@@ -222,28 +222,27 @@ def _add_textbox(
 ) -> None:
     """Add an editable text box to the slide.
 
-    For centered text, the text box spans the full slide width so that
-    PowerPoint's native center alignment works correctly.
+    Alignment is applied inside the OCR-detected bounds so nearby text keeps
+    its original horizontal position.
     """
     x, y, w, h = item["box"]
-    align_val = item.get("align", 1)
 
     # Map vertical position and height from image to slide
     top = Inches(y / img_h * slide_h)
     height = Inches(h / img_h * slide_h)
 
-    # For centered text: full-width box for proper centering
-    # For left/right aligned: use original bbox position
-    if align_val == 1:  # center
-        left = Inches(0)
-        width = Inches(slide_w)
-    else:
-        left = Inches(x / img_w * slide_w)
-        width = Inches(w / img_w * slide_w)
+    left = Inches(x / img_w * slide_w)
+    width = Inches(w / img_w * slide_w)
 
     box = slide.shapes.add_textbox(left, top, width, height)
     tf = box.text_frame
-    tf.word_wrap = _should_wrap_text(item)
+    tf.word_wrap = False
+    tf.margin_left = 0
+    tf.margin_right = 0
+    tf.margin_top = 0
+    tf.margin_bottom = 0
+    from pptx.enum.text import MSO_VERTICAL_ANCHOR
+    tf.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
     tf.clear()
 
     p = tf.paragraphs[0]
@@ -274,16 +273,3 @@ def _set_run_font(run, font_name: str) -> None:
             node = OxmlElement(tag)
             rpr.append(node)
         node.set("typeface", font_name)
-
-
-def _should_wrap_text(item: dict) -> bool:
-    """Disable wrapping only for large title-like text boxes."""
-    text = item.get("text", "")
-    font_size = float(item.get("font_size", 12))
-    if not _has_cjk(text):
-        return True
-    return not ((font_size >= 36.0 and len(text) <= 24) or len(text) <= 6)
-
-
-def _has_cjk(text: str) -> bool:
-    return any("\u4e00" <= c <= "\u9fff" for c in text)

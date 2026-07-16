@@ -84,6 +84,28 @@ def build_background(
     return bg
 
 
+def build_text_only_background(
+    img: np.ndarray,
+    text_items: list[dict],
+    padding: int = 2,
+) -> np.ndarray:
+    """Remove detected text while preserving all non-text slide content."""
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    for item in text_items:
+        x, y, bw, bh = item["box"]
+        x1 = max(0, int(x - padding))
+        y1 = max(0, int(y - padding))
+        x2 = min(w, int(x + bw + padding))
+        y2 = min(h, int(y + bh + padding))
+        mask[y1:y2, x1:x2] = 255
+
+    if not np.any(mask):
+        return img.copy()
+    return _inpaint(img, mask)
+
+
 def _should_use_fg_hint(
     nonzero_pixels: int,
     total_pixels: int,

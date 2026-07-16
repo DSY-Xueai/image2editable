@@ -96,6 +96,8 @@ def detect_text(
             "confidence": rb["confidence"],
         })
 
+    text_items = _merge_adjacent_text_items(text_items)
+
     # Refine alignment by grouping nearby lines
     text_items = _refine_alignment(text_items, w)
 
@@ -448,9 +450,7 @@ def _estimate_style(img_rgb: np.ndarray, box: tuple) -> dict:
 
 def _select_font(text: str, font_size: float) -> str:
     """Choose an editable font that better matches common Chinese slide styles."""
-    if _has_cjk(text) and font_size >= 36.0:
-        return "华文行楷"
-    return "Microsoft YaHei"
+    return "Microsoft YaHei" if _has_cjk(text) else "Arial"
 
 
 def _adjust_font_size(text: str, font_size: float) -> float:
@@ -463,8 +463,8 @@ def _adjust_font_size(text: str, font_size: float) -> float:
 
 
 def _should_force_regular_weight(text: str, font_size: float) -> bool:
-    """Avoid synthetic bold on calligraphy fonts."""
-    return _has_cjk(text) and font_size >= 36.0
+    """Keep the detected weight for the sans-serif fallback fonts."""
+    return False
 
 
 def _has_cjk(text: str) -> bool:
@@ -550,6 +550,96 @@ def _estimate_bold(region: np.ndarray) -> bool:
 # ---------------------------------------------------------------------------
 # Alignment refinement
 # ---------------------------------------------------------------------------
+
+
+def _merge_adjacent_text_items(text_items: list[dict]) -> list[dict]:
+    """Merge same-style OCR fragments that belong to one visual line."""
+    merged = [dict(item) for item in text_items]
+
+    while True:
+        best_pair = None
+        best_score = None
+        for i in range(len(merged)):
+            for j in range(i + 1, len(merged)):
+                left, right = sorted((merged[i], merged[j]), key=lambda item: item["box"][0])
+                if not _can_merge_text_items(left, right):
+                    continue
+                gap = right["box"][0] - (left["box"][0] + left["box"][2])
+                center_gap = abs(
+                    (left["box"][1] + left["box"][3] / 2)
+                    - (right["box"][1] + right["box"][3] / 2)
+                )
+                score = (max(gap, 0), center_gap)
+                if best_score is None or score < best_score:
+                    best_pair = (i, j, left, right)
+                    best_score = score
+
+        if best_pair is None:
+            break
+        i, j, left, right = best_pair
+        for index in sorted((i, j), reverse=True):
+            merged.pop(index)
+        merged.append(_merge_text_pair(left, right))
+
+    return sorted(merged, key=lambda item: (item["box"][1], item["box"][0]))
+
+
+def _can_merge_text_items(left: dict, right: dict) -> bool:
+    lx, ly, lw, lh = left["box"]
+    rx, ry, rw, rh = right["box"]
+    if rx < lx:
+        return False
+
+    overlap = max(0, min(ly + lh, ry + rh) - max(ly, ry))
+    if overlap / max(1, min(lh, rh)) < 0.60:
+        return False
+
+    gap = rx - (lx + lw)
+    max_height = max(lh, rh)
+    if gap < -0.35 * max_height or gap > max(6, 0.45 * max_height):
+        return False
+
+    left_size = float(left.get("font_size", 12))
+    right_size = float(right.get("font_size", 12))
+    if abs(left_size - right_size) / max(left_size, right_size, 1) > 0.25:
+        return False
+    if left.get("bold", False) != right.get("bold", False):
+        return False
+    return _colors_are_close(left.get("color", "#000000"), right.get("color", "#000000"))
+
+
+def _colors_are_close(left: str, right: str, max_distance: float = 48.0) -> bool:
+    try:
+        lrgb = np.array([int(left[i:i + 2], 16) for i in (1, 3, 5)])
+        rrgb = np.array([int(right[i:i + 2], 16) for i in (1, 3, 5)])
+    except (TypeError, ValueError):
+        return left == right
+    return float(np.linalg.norm(lrgb - rrgb)) <= max_distance
+
+
+def _merge_text_pair(left: dict, right: dict) -> dict:
+    lx, ly, lw, lh = left["box"]
+    rx, ry, rw, rh = right["box"]
+    left_char = left["text"][-1:]
+    right_char = right["text"][:1]
+    separator = ""
+    if not (
+        (_has_cjk(left_char) and _has_cjk(right_char))
+        or (left_char.isdigit() and _has_cjk(right_char))
+    ):
+        separator = " "
+    merged = dict(left)
+    merged["box"] = [
+        min(lx, rx),
+        min(ly, ry),
+        max(lx + lw, rx + rw) - min(lx, rx),
+        max(ly + lh, ry + rh) - min(ly, ry),
+    ]
+    merged["text"] = left["text"] + separator + right["text"]
+    merged["font_size"] = max(float(left.get("font_size", 12)), float(right.get("font_size", 12)))
+    merged["font"] = _select_font(merged["text"], merged["font_size"])
+    merged["confidence"] = min(float(left.get("confidence", 1)), float(right.get("confidence", 1)))
+    return merged
 
 
 def _refine_alignment(text_items: list[dict], img_width: int) -> list[dict]:
