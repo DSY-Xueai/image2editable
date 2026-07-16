@@ -12,7 +12,7 @@ Usage:
     python image_to_ppt.py img1.png img2.png img3.png
     python image_to_ppt.py ./slides_folder/
     python image_to_ppt.py input.png -o output.pptx
-    python image_to_ppt.py input.png --lang ch --period 32
+    python image_to_ppt.py input.png --lang ch
 """
 
 from __future__ import annotations
@@ -125,14 +125,21 @@ def _process_image(
     visual_only_path = work_dir / "visual-only.png"
     _save_rgb(str(visual_only_path), visual_only)
     quality = visual_difference(img, visual_only, text_mask)
+    diagnostics_dir = (work_dir / "diagnostics").resolve()
     write_segmentation_diagnostics(
-        work_dir / "diagnostics",
+        diagnostics_dir,
         source=img,
         masks=element_masks,
         reconstructed=visual_only,
         metrics=quality,
     )
-    require_visual_quality(quality)
+    try:
+        require_visual_quality(quality)
+    except VisualSegmentationError as exc:
+        raise VisualSegmentationError(
+            f"{exc}; mae={quality['mae']:.3f}, p95={quality['p95']:.3f}, "
+            f"diagnostics={diagnostics_dir}"
+        ) from exc
 
     raster_text_items, _ = detect_text(visual_only_path, lang=lang)
     if raster_text_items:
@@ -166,9 +173,9 @@ def convert(
         image_path: Path to input image.
         output_path: Where to save the PPTX. Auto-generated if None.
         lang: OCR language code.
-        bg_period: Tile period for background modeling.
-        diff_threshold: Foreground detection sensitivity.
-        min_component_area: Minimum component area in pixels.
+        bg_period: Deprecated compatibility option; ignored by strict SAM pipeline.
+        diff_threshold: Deprecated compatibility option; ignored by strict SAM pipeline.
+        min_component_area: Deprecated compatibility option; ignored by strict SAM pipeline.
         add_reference: Add a reference slide with the original image.
 
     Returns:
@@ -188,8 +195,9 @@ def convert(
 
     print("[1/3] Loading segmentation model...")
     mask_generator = create_sam_generator(resolve_sam_checkpoint())
-    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_"))
+    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_")).resolve()
     print(f"[2/3] Decomposing image: {image_path.name}")
+    print(f"  Assets/diagnostics: {work_dir}")
     slide_data = _process_image(image_path, work_dir, mask_generator, lang)
     print("[3/3] Assembling PPTX...")
     result = assemble_pptx(
@@ -227,9 +235,9 @@ def convert_batch(
         image_paths: List of paths to input images.
         output_path: Where to save the PPTX. Auto-generated if None.
         lang: OCR language code.
-        bg_period: Tile period for background modeling.
-        diff_threshold: Foreground detection sensitivity.
-        min_component_area: Minimum component area in pixels.
+        bg_period: Deprecated compatibility option; ignored by strict SAM pipeline.
+        diff_threshold: Deprecated compatibility option; ignored by strict SAM pipeline.
+        min_component_area: Deprecated compatibility option; ignored by strict SAM pipeline.
         add_reference: Add reference slides with original images.
 
     Returns:
@@ -259,7 +267,8 @@ def convert_batch(
     slides_data = []
     for i, img_path in enumerate(resolved_paths):
         print(f"=== Image {i + 1}/{total}: {img_path.name} ===")
-        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{i}_"))
+        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{i}_")).resolve()
+        print(f"  Assets/diagnostics: {work_dir}")
         slide_data = _process_image(img_path, work_dir, mask_generator, lang)
         slides_data.append(slide_data)
         print(f"         {len(slide_data['components'])} components extracted\n")
@@ -321,15 +330,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--period", type=int, default=32,
-        help="Background tile period (default: 32)"
+        help="Deprecated compatibility option; ignored by strict SAM pipeline"
     )
     parser.add_argument(
         "--diff-threshold", type=float, default=20.0,
-        help="Foreground detection threshold (default: 20.0)"
+        help="Deprecated compatibility option; ignored by strict SAM pipeline"
     )
     parser.add_argument(
         "--min-area", type=int, default=20,
-        help="Minimum component area in pixels (default: 20)"
+        help="Deprecated compatibility option; ignored by strict SAM pipeline"
     )
     parser.add_argument(
         "--no-reference", action="store_true", default=False,

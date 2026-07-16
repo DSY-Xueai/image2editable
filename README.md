@@ -4,7 +4,7 @@
 
 **图片 → 可编辑 PPTX / 分层 PSD**
 
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
@@ -37,8 +37,8 @@
 
 | 特性 | 说明 |
 |------|------|
-| 背景修复 | 两轮背景建模与 inpainting 修复 |
-| 前景拆分 | 基于差分、边缘和连通域提取独立透明组件 |
+| 背景修复 | 为 PPTX 生成 clean background；PSD 使用两轮背景建模与 inpainting 修复 |
+| 前景拆分 | PPTX 使用 SAM 2.1 多尺度候选与 OpenCV 几何补漏；PSD 使用差分、边缘和连通域 |
 | OCR 文本重建 | 识别文本并估计字号、颜色、粗体、对齐方式 |
 | PPTX 导出 | 生成可编辑 PowerPoint：背景层、前景组件层、文本框层 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
@@ -50,7 +50,9 @@
 
 ### 环境要求
 
-- Python 3.9+
+- Python 3.10+
+- `torch>=2.5.1`、`torchvision>=0.20.1`
+- SAM 官方推荐 Linux/WSL；Windows 建议使用 WSL
 - OCR 引擎至少安装一个
 - PSD 导出需要 Aspose.PSD 授权，并设置 `ASPOSE_PSD_LICENSE`
 
@@ -64,7 +66,16 @@ pip install -r requirements.txt
 
 ### SAM 2.1 视觉分割
 
-PPTX 前景视觉元素通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将 checkpoint 下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。SAM 2 代码与 checkpoint 采用 [Apache License 2.0](third_party/licenses/SAM2-APACHE-2.0.txt)。
+PPTX 前景视觉元素通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将 checkpoint 下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。第三方说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，SAM 2 代码与 checkpoint 采用 [Apache License 2.0](third_party/licenses/SAM2-APACHE-2.0.txt)。
+
+### PPTX 严格管线
+
+1. 使用现有 OCR 逻辑检测文字并生成文字遮罩。
+2. 使用 SAM 2.1 生成多尺度候选，并用 OpenCV 几何候选补漏。
+3. 对候选去重，解析父子关系，为每个像素建立唯一 ownership。
+4. 导出不含文字的透明视觉组件，并重建 clean background。
+5. 按实际导出的 RGBA 图层重建页面，执行严格视觉质量 QA。
+6. 以固定 16:9 画布组装背景、组件和可编辑文本框。
 
 引用 SAM 2：
 
@@ -106,7 +117,7 @@ set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
-项目代码以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。
+项目代码以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。SAM 2.1 的来源、缓存和许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [Apache License 2.0 副本](third_party/licenses/SAM2-APACHE-2.0.txt)。
 
 ---
 
@@ -173,8 +184,7 @@ python image_to_psd.py img1.png img2.png -o psd_output_dir
 # 传入目录 → 每张图片一个 PSD
 python image_to_psd.py ./my_slides/ -o psd_output_dir
 
-# 调整参数
-python image_to_ppt.py input.png --lang en --diff-threshold 15 --min-area 30
+# 调整 PSD 参数
 python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
 ```
 
@@ -200,9 +210,9 @@ convert_batch_to_psd(["img1.png", "img2.png"], output_path="psd_output_dir")
 | `images` | （必填） | 图片文件、多个图片文件、或目录路径；目录只扫描第一层图片 |
 | `-o, --output` | 输入同名输出 | PPTX 为文件路径；PSD 单图可为文件路径，多图为输出目录 |
 | `--lang` | `ch` | OCR 语言，常用 `ch` / `en` |
-| `--period` | `32` | 背景建模参数，通常无需调整 |
-| `--diff-threshold` | `20.0` | 前景检测灵敏度，越小越敏感 |
-| `--min-area` | `20` | 最小组件面积（像素），用于过滤噪点 |
+| `--period` | `32` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：背景建模瓦片周期 |
+| `--diff-threshold` | `20.0` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：前景检测阈值 |
+| `--min-area` | `20` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：最小组件面积 |
 | `--reference` | 不启用 | 仅 PPTX：每页内容后附加原图参考页 |
 | `--no-reference` | 默认行为 | 仅 PPTX：显式关闭原图参考页 |
 
@@ -240,7 +250,8 @@ image2editable/
 | PPTX 生成 | python-pptx |
 | PSD 生成 | Aspose.PSD |
 | 背景修复 | OpenCV Inpainting |
-| 前景检测 | 差分阈值 + Canny 边缘 + 形态学运算 |
+| PPTX 视觉分割 | SAM 2.1 多尺度候选 + OpenCV 几何补漏 + 唯一 ownership |
+| PSD 前景检测 | 差分阈值 + Canny 边缘 + 形态学运算 |
 
 ---
 
