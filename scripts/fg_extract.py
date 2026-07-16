@@ -162,6 +162,96 @@ def _limit_combined_mask(
     return np.zeros(mask.shape, dtype=bool)
 
 
+def export_visual_components(
+    img: np.ndarray,
+    element_masks: list[np.ndarray],
+    output_dir: str | Path,
+    text_mask: np.ndarray,
+    padding: int = 3,
+) -> list[dict]:
+    """Export each visual element as an independent transparent PNG."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    img_h, img_w = img.shape[:2]
+    text_ink = _build_text_ink_mask(img, text_mask)
+    components: list[dict] = []
+
+    for index, element_mask in enumerate(element_masks, start=1):
+        refined = _refine_visual_mask(img, element_mask)
+        area = int(np.count_nonzero(refined))
+        if area == 0:
+            continue
+
+        ys, xs = np.where(refined)
+        x1 = max(0, int(xs.min()) - padding)
+        y1 = max(0, int(ys.min()) - padding)
+        x2 = min(img_w, int(xs.max()) + 1 + padding)
+        y2 = min(img_h, int(ys.max()) + 1 + padding)
+
+        local_mask = refined[y1:y2, x1:x2]
+        local_text = text_ink[y1:y2, x1:x2].copy()
+        local_text[~local_mask] = 0
+        crop = img[y1:y2, x1:x2]
+        rgb = _repair_component_rgb(crop, local_text)
+        alpha = _soft_alpha(local_mask)
+        rgba = np.dstack([rgb, alpha])
+
+        component_path = output_dir / f"component_{index:04d}.png"
+        Image.fromarray(rgba.astype(np.uint8)).save(str(component_path))
+        components.append({
+            "path": str(component_path),
+            "x": x1,
+            "y": y1,
+            "w": x2 - x1,
+            "h": y2 - y1,
+            "area": area,
+            "z_index": index - 1,
+        })
+
+    return components
+
+
+def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Refine one visual-element mask without merging it with other elements."""
+    binary = np.asarray(mask, dtype=np.uint8)
+    if np.count_nonzero(binary) < 20:
+        return binary > 0
+
+    dilated = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=1)
+    eroded = cv2.erode(binary, np.ones((3, 3), np.uint8), iterations=1)
+    trimap = np.full(binary.shape, cv2.GC_BGD, dtype=np.uint8)
+    trimap[dilated > 0] = cv2.GC_PR_BGD
+    trimap[binary > 0] = cv2.GC_PR_FGD
+    trimap[eroded > 0] = cv2.GC_FGD
+
+    bg_model = np.zeros((1, 65), dtype=np.float64)
+    fg_model = np.zeros((1, 65), dtype=np.float64)
+    try:
+        cv2.grabCut(
+            img,
+            trimap,
+            None,
+            bg_model,
+            fg_model,
+            2,
+            cv2.GC_INIT_WITH_MASK,
+        )
+    except cv2.error:
+        return binary > 0
+    return (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
+
+
+def _soft_alpha(mask: np.ndarray) -> np.ndarray:
+    """Feather a hard mask while preserving its eroded interior."""
+    hard = mask.astype(np.uint8) * 255
+    eroded = cv2.erode(hard, np.ones((3, 3), np.uint8), iterations=1)
+    alpha = cv2.GaussianBlur(hard, (3, 3), 0)
+    alpha[eroded > 0] = 255
+    alpha[hard == 0] = 0
+    return alpha.astype(np.uint8)
+
+
 def split_components(
     img: np.ndarray,
     fg_mask: np.ndarray,
