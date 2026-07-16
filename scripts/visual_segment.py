@@ -26,6 +26,8 @@ class MaskCandidate:
     mask: np.ndarray
     score: float
     source: str
+    crop_box: tuple[int, int, int, int] | None = None
+    touches_crop_edge: bool = False
 
 
 @dataclass
@@ -66,8 +68,7 @@ def resolve_visual_elements(
     unique = []
     for candidate_stats in sorted(
         valid,
-        key=lambda item: item[0].score,
-        reverse=True,
+        key=lambda item: (item[0].touches_crop_edge, -item[0].score),
     ):
         candidate, candidate_area, candidate_bbox = candidate_stats
         duplicate = False
@@ -102,7 +103,8 @@ def resolve_visual_elements(
                 smaller_area - intersection < min_area
                 and larger_area - intersection >= min_area
             )
-            if not parent_child:
+            smaller = candidate if candidate_area <= retained_area else retained
+            if not parent_child or smaller.touches_crop_edge:
                 duplicate = True
                 break
 
@@ -182,7 +184,15 @@ def generate_mask_candidates(
                 float(record.get("predicted_iou", 0.0)),
                 float(record.get("stability_score", 0.0)),
             )
-            candidates.append(MaskCandidate(full_mask, score, "sam"))
+            touches_crop_edge = bool(
+                (x1 > 0 and np.any(mask[:, 0]))
+                or (x2 < width and np.any(mask[:, -1]))
+                or (y1 > 0 and np.any(mask[0, :]))
+                or (y2 < height and np.any(mask[-1, :]))
+            )
+            candidates.append(
+                MaskCandidate(full_mask, score, "sam", box, touches_crop_edge)
+            )
 
     if include_geometry:
         candidates.extend(generate_geometry_candidates(image))
