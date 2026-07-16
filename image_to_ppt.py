@@ -26,10 +26,22 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from scripts.bg_model import build_background, build_text_only_background
-from scripts.fg_extract import extract_foreground_mask, split_components
+from scripts.bg_model import build_clean_background, extend_background_to_widescreen
+from scripts.fg_extract import export_visual_components
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import detect_text
+from scripts.visual_segment import (
+    MaskCandidate,
+    VisualSegmentationError,
+    compose_visual_result,
+    create_sam_generator,
+    generate_mask_candidates,
+    require_visual_quality,
+    resolve_sam_checkpoint,
+    resolve_visual_elements,
+    validate_visual_masks,
+    visual_difference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +51,79 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 # ---------------------------------------------------------------------------
 # Core pipeline
 # ---------------------------------------------------------------------------
+
+
+def _process_image(
+    image_path: Path,
+    work_dir: Path,
+    mask_generator,
+    lang: str,
+) -> dict:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    img = _load_rgb(str(image_path))
+    img_h, img_w = img.shape[:2]
+    text_items, text_mask = detect_text(image_path, lang=lang)
+
+    candidates = generate_mask_candidates(img, mask_generator)
+    for round_index in range(2):
+        elements = resolve_visual_elements(candidates)
+        element_masks = [element.mask for element in elements]
+        validate_visual_masks(element_masks)
+        clean_background = build_clean_background(img, element_masks, text_mask)
+        residual = [
+            candidate
+            for candidate in generate_mask_candidates(clean_background, mask_generator)
+            if candidate.score >= 0.90
+        ]
+        if not residual:
+            break
+        if round_index == 1:
+            raise VisualSegmentationError(
+                "clean background still contains independent visual elements"
+            )
+        candidates.extend(
+            MaskCandidate(candidate.mask, candidate.score, "residual")
+            for candidate in residual
+        )
+
+    components = export_visual_components(
+        img,
+        element_masks,
+        work_dir / "components",
+        text_mask,
+    )
+    background_path = work_dir / "background.png"
+    _save_rgb(
+        str(background_path),
+        extend_background_to_widescreen(clean_background, 1920, 1080),
+    )
+
+    visual_only = compose_visual_result(
+        clean_background,
+        img,
+        element_masks,
+        text_mask,
+    )
+    quality = visual_difference(img, visual_only, text_mask)
+    require_visual_quality(quality)
+
+    visual_only_path = work_dir / "visual-only.png"
+    _save_rgb(str(visual_only_path), visual_only)
+    raster_text_items, _ = detect_text(visual_only_path, lang=lang)
+    if raster_text_items:
+        raise VisualSegmentationError(
+            "visual components still contain raster text after cleanup"
+        )
+
+    return {
+        "background_path": str(background_path),
+        "components": components,
+        "text_items": text_items,
+        "img_width": img_w,
+        "img_height": img_h,
+        "original_image_path": str(image_path),
+        "quality": quality,
+    }
 
 
 def convert(
@@ -76,74 +161,27 @@ def convert(
         output_path = image_path.with_suffix(".pptx")
     output_path = Path(output_path).resolve()
 
-    # Load image
-    print(f"[1/5] Loading image: {image_path.name}")
-    img = _load_rgb(str(image_path))
-    img_h, img_w = img.shape[:2]
-    print(f"      Image size: {img_w} x {img_h}")
-
-    # Step 1: Text detection
-    print(f"[2/5] Detecting text (OCR)...")
-    text_items, text_mask = detect_text(image_path, lang=lang)
-    print(f"      Found {len(text_items)} text regions")
-
-    # Step 2: Background modeling (first pass)
-    print(f"[3/5] Building background model...")
-    bg = build_background(img, text_mask=text_mask, period=bg_period)
-
-    # Step 3: Foreground extraction
-    print(f"[4/5] Extracting foreground components...")
-    fg_mask = extract_foreground_mask(
-        img, bg, text_mask, diff_threshold=diff_threshold
-    )
-
-    # Iterative refinement: use foreground mask to improve background
-    bg = build_background(
-        img, text_mask=text_mask, fg_hint_mask=fg_mask, period=bg_period
-    )
-
-    # Re-extract foreground with improved background
-    refined_fg_mask = extract_foreground_mask(
-        img, bg, text_mask, diff_threshold=diff_threshold
-    )
-    fg_mask = _merge_foreground_masks(fg_mask, refined_fg_mask)
-
-    use_text_only_fallback = _should_use_text_only_fallback(fg_mask)
-    if use_text_only_fallback:
-        bg = build_text_only_background(img, text_items)
-
-    # Split into components
-    work_dir = tempfile.mkdtemp(prefix="img2ppt_")
-    bg_path = Path(work_dir) / "background.png"
-    _save_rgb(str(bg_path), bg)
-
-    if use_text_only_fallback:
-        components = []
-        print("      Dense layout detected; using text-editable flattened background")
-    else:
-        comp_dir = Path(work_dir) / "components"
-        components = split_components(
-            img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
-        )
-    print(f"      {len(components)} components extracted")
-
-    # Step 4: Assemble PPTX
-    print(f"[5/5] Assembling PPTX...")
+    print("[1/3] Loading segmentation model...")
+    mask_generator = create_sam_generator(resolve_sam_checkpoint())
+    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_"))
+    print(f"[2/3] Decomposing image: {image_path.name}")
+    slide_data = _process_image(image_path, work_dir, mask_generator, lang)
+    print("[3/3] Assembling PPTX...")
     result = assemble_pptx(
-        background_path=str(bg_path),
-        components=components,
-        text_items=text_items,
-        img_width=img_w,
-        img_height=img_h,
+        background_path=slide_data["background_path"],
+        components=slide_data["components"],
+        text_items=slide_data["text_items"],
+        img_width=slide_data["img_width"],
+        img_height=slide_data["img_height"],
         output_path=str(output_path),
         add_reference_slide=add_reference,
-        original_image_path=str(image_path),
+        original_image_path=slide_data["original_image_path"],
     )
 
     print(f"\nDone!")
     print(f"  Output: {result}")
-    print(f"  Components: {len(components)}")
-    print(f"  Text boxes: {len(text_items)}")
+    print(f"  Components: {len(slide_data['components'])}")
+    print(f"  Text boxes: {len(slide_data['text_items'])}")
     print(f"  Assets: {work_dir}")
 
     return result
@@ -192,67 +230,14 @@ def convert_batch(
     total = len(resolved_paths)
     print(f"Processing {total} image(s) into one PPTX...\n")
 
+    mask_generator = create_sam_generator(resolve_sam_checkpoint())
     slides_data = []
     for i, img_path in enumerate(resolved_paths):
         print(f"=== Image {i + 1}/{total}: {img_path.name} ===")
-
-        # Load image
-        print(f"  [1/4] Loading image...")
-        img = _load_rgb(str(img_path))
-        img_h, img_w = img.shape[:2]
-        print(f"         Size: {img_w} x {img_h}")
-
-        # Text detection
-        print(f"  [2/4] Detecting text (OCR)...")
-        text_items, text_mask = detect_text(img_path, lang=lang)
-        print(f"         Found {len(text_items)} text regions")
-
-        # Background modeling
-        print(f"  [3/4] Building background model...")
-        bg = build_background(img, text_mask=text_mask, period=bg_period)
-
-        # Foreground extraction
-        print(f"  [4/4] Extracting foreground components...")
-        fg_mask = extract_foreground_mask(
-            img, bg, text_mask, diff_threshold=diff_threshold
-        )
-
-        # Iterative refinement
-        bg = build_background(
-            img, text_mask=text_mask, fg_hint_mask=fg_mask, period=bg_period
-        )
-        refined_fg_mask = extract_foreground_mask(
-            img, bg, text_mask, diff_threshold=diff_threshold
-        )
-        fg_mask = _merge_foreground_masks(fg_mask, refined_fg_mask)
-
-        use_text_only_fallback = _should_use_text_only_fallback(fg_mask)
-        if use_text_only_fallback:
-            bg = build_text_only_background(img, text_items)
-
-        # Split components
-        work_dir = tempfile.mkdtemp(prefix=f"img2ppt_{i}_")
-        bg_path = Path(work_dir) / "background.png"
-        _save_rgb(str(bg_path), bg)
-
-        if use_text_only_fallback:
-            components = []
-            print("         Dense layout detected; using text-editable flattened background")
-        else:
-            comp_dir = Path(work_dir) / "components"
-            components = split_components(
-                img, fg_mask, comp_dir, min_area=min_component_area, text_mask=text_mask
-            )
-        print(f"         {len(components)} components extracted\n")
-
-        slides_data.append({
-            "background_path": str(bg_path),
-            "components": components,
-            "text_items": text_items,
-            "img_width": img_w,
-            "img_height": img_h,
-            "original_image_path": str(img_path),
-        })
+        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{i}_"))
+        slide_data = _process_image(img_path, work_dir, mask_generator, lang)
+        slides_data.append(slide_data)
+        print(f"         {len(slide_data['components'])} components extracted\n")
 
     # Assemble all slides into one PPTX
     print(f"Assembling {total} slide(s) into PPTX...")
@@ -405,33 +390,6 @@ def _merge_foreground_masks(
             merged[component] = 255
 
     return merged
-
-
-def _should_use_text_only_fallback(
-    fg_mask: np.ndarray,
-    min_bbox_ratio: float = 0.60,
-    min_fill_ratio: float = 0.20,
-) -> bool:
-    """Use a flattened background when one connected component spans the slide."""
-    grouping_mask = cv2.morphologyEx(
-        fg_mask,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
-        iterations=1,
-    )
-    total_area = max(int(fg_mask.shape[0] * fg_mask.shape[1]), 1)
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
-        (grouping_mask > 0).astype(np.uint8), connectivity=8
-    )
-
-    for i in range(1, num_labels):
-        area = int(stats[i, cv2.CC_STAT_AREA])
-        width = int(stats[i, cv2.CC_STAT_WIDTH])
-        height = int(stats[i, cv2.CC_STAT_HEIGHT])
-        bbox_area = max(width * height, 1)
-        if bbox_area / total_area >= min_bbox_ratio and area / bbox_area >= min_fill_ratio:
-            return True
-    return False
 
 
 def _resolve_inputs(inputs: list[str]) -> list[Path]:
