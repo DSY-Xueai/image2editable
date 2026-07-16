@@ -54,6 +54,11 @@ def generate_mask_candidates(
     overlap: int = 128,
     include_geometry: bool = True,
 ) -> list[MaskCandidate]:
+    if crop_size <= 0 or overlap < 0 or overlap >= crop_size:
+        raise ValueError(
+            "crop_size must be > 0 and overlap must satisfy 0 <= overlap < crop_size"
+        )
+
     height, width = image.shape[:2]
     crop_boxes = [(0, 0, width, height)]
     if height > crop_size or width > crop_size:
