@@ -53,3 +53,7 @@ Thumbs.db
 # --- Temp ---
 *.tmp
 *.temp
+
+# Downloaded visual-segmentation checkpoints
+*.pt
+.model-cache/

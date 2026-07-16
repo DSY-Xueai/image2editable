@@ -31,3 +31,6 @@ aspose-psd>=26.5.0
 #   Windows: https://github.com/UB-Mannheim/tesseract/wiki
 #   macOS: brew install tesseract
 #   Ubuntu: sudo apt install tesseract-ocr tesseract-ocr-chi-sim
+
+# General-purpose visual instance segmentation
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git@main
