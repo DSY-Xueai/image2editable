@@ -68,7 +68,11 @@ def resolve_visual_elements(
     unique = []
     for candidate_stats in sorted(
         valid,
-        key=lambda item: (item[0].touches_crop_edge, -item[0].score),
+        key=lambda item: (
+            item[0].touches_crop_edge,
+            -item[1] if item[0].touches_crop_edge else 0,
+            -item[0].score,
+        ),
     ):
         candidate, candidate_area, candidate_bbox = candidate_stats
         duplicate = False
