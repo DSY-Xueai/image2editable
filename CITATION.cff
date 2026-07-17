@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: If you use image2editable, please cite this software, Grounding DINO, and SAM 2.
+message: If you use image2editable, please cite this software, Grounding DINO, SAM 2, and LaMa.
 title: image2editable
 type: software
 authors:

@@ -25,33 +25,71 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _corner_colors(background: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Return median RGB colors from the four 5% corner regions."""
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise ValueError("background must be an RGB image")
+
+    height, width = source.shape[:2]
+    if height <= 0 or width <= 0:
+        raise ValueError("background must not be empty")
+    corner_height = max(1, int(round(height * 0.05)))
+    corner_width = max(1, int(round(width * 0.05)))
+    regions = (
+        source[:corner_height, :corner_width],
+        source[:corner_height, -corner_width:],
+        source[-corner_height:, :corner_width],
+        source[-corner_height:, -corner_width:],
+    )
+    return tuple(
+        np.median(region.reshape(-1, 3), axis=0).astype(np.float32)
+        for region in regions
+    )
+
+
+def _bilinear_gradient(
+    colors: tuple[np.ndarray, ...],
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Build an RGB canvas interpolated between four corner colors."""
+    if width <= 0 or height <= 0:
+        raise ValueError("canvas dimensions must be positive")
+    corner_values = np.asarray(colors, dtype=np.float32)
+    if corner_values.shape != (4, 3):
+        raise ValueError("colors must contain four RGB values")
+
+    top_left, top_right, bottom_left, bottom_right = corner_values
+    x = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :, None]
+    y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None, None]
+    top = top_left * (1.0 - x) + top_right * x
+    bottom = bottom_left * (1.0 - x) + bottom_right * x
+    gradient = top * (1.0 - y) + bottom * y
+    return np.clip(np.rint(gradient), 0, 255).astype(np.uint8)
+
+
 def extend_background_to_widescreen(
     background: np.ndarray,
     canvas_width: int = 1920,
     canvas_height: int = 1080,
 ) -> np.ndarray:
     """Extend a background to widescreen while preserving its centered content."""
-    height, width = background.shape[:2]
-
-    cover_scale = max(canvas_width / width, canvas_height / height)
-    cover_width = max(canvas_width, int(round(width * cover_scale)))
-    cover_height = max(canvas_height, int(round(height * cover_scale)))
-    cover = cv2.resize(
-        background, (cover_width, cover_height), interpolation=cv2.INTER_LINEAR
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise ValueError("background must be an RGB image")
+    height, width = source.shape[:2]
+    canvas = _bilinear_gradient(
+        _corner_colors(source),
+        canvas_width,
+        canvas_height,
     )
-    crop_x = (cover_width - canvas_width) // 2
-    crop_y = (cover_height - canvas_height) // 2
-    canvas = cover[
-        crop_y:crop_y + canvas_height,
-        crop_x:crop_x + canvas_width,
-    ]
-    canvas = cv2.GaussianBlur(canvas, (0, 0), sigmaX=24, sigmaY=24)
 
     contain_scale = min(canvas_width / width, canvas_height / height)
     contain_width = min(canvas_width, int(round(width * contain_scale)))
     contain_height = min(canvas_height, int(round(height * contain_scale)))
     contained = cv2.resize(
-        background, (contain_width, contain_height), interpolation=cv2.INTER_AREA
+        source, (contain_width, contain_height), interpolation=cv2.INTER_AREA
     )
     offset_x = (canvas_width - contain_width) // 2
     offset_y = (canvas_height - contain_height) // 2
@@ -125,17 +163,72 @@ def build_clean_background(
     img: np.ndarray,
     element_masks: list[np.ndarray],
     text_mask: np.ndarray,
+    large_inpainter=None,
 ) -> np.ndarray:
     """Remove visual elements and text from an image."""
+    removal = build_removal_mask(element_masks, text_mask)
+    return repair_masked_background(img, removal, large_inpainter)
+
+
+def build_removal_mask(
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Combine visual-element and text masks for background repair."""
     removal = (text_mask > 0).astype(np.uint8) * 255
     for mask in element_masks:
         removal[np.asarray(mask, dtype=bool)] = 255
-    removal = cv2.dilate(
+    return cv2.dilate(
         removal,
         np.ones((5, 5), dtype=np.uint8),
         iterations=1,
     )
-    return _inpaint(img, removal)
+
+
+def needs_large_mask_inpaint(mask: np.ndarray) -> bool:
+    """Return whether a mask is too large or deep for local OpenCV inpainting."""
+    binary = (np.asarray(mask) > 0).astype(np.uint8)
+    if not np.any(binary):
+        return False
+
+    h, w = binary.shape
+    mask_ratio = np.count_nonzero(binary) / binary.size
+    depth = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    max_depth_ratio = float(depth.max()) / np.hypot(h, w)
+    return mask_ratio > 0.08 or max_depth_ratio > 0.015
+
+
+def repair_masked_background(
+    image: np.ndarray,
+    mask: np.ndarray,
+    large_inpainter=None,
+) -> np.ndarray:
+    """Repair a mask with OpenCV or LaMa according to its scale."""
+    source = np.asarray(image)
+    binary = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if binary.shape != source.shape[:2]:
+        raise ValueError("mask must match the image height and width")
+    if not np.any(binary):
+        return source.copy()
+
+    if needs_large_mask_inpaint(binary):
+        if large_inpainter is None:
+            from scripts.lama_inpaint import inpaint_large_mask
+
+            large_inpainter = inpaint_large_mask
+        repaired = large_inpainter(source, binary)
+    else:
+        repaired = _inpaint(source, binary)
+
+    repaired = np.asarray(repaired)
+    if repaired.shape != source.shape:
+        raise ValueError(
+            f"inpaint output shape {repaired.shape} does not match {source.shape}"
+        )
+
+    output = repaired.astype(np.uint8, copy=True)
+    output[binary == 0] = source[binary == 0]
+    return output
 
 
 def build_text_only_background(

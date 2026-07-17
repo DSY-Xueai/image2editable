@@ -25,8 +25,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
-from scripts.bg_model import build_clean_background, extend_background_to_widescreen
+from scripts.bg_model import (
+    build_clean_background,
+    build_removal_mask,
+    extend_background_to_widescreen,
+)
 from scripts.fg_extract import (
     _build_text_ink_mask,
     export_visual_components,
@@ -47,6 +52,7 @@ from scripts.visual_segment import (
     generate_mask_candidates,
     generate_prompted_mask_candidates,
     reconcile_residual_candidates,
+    recheck_visual_element_holes,
     require_visual_quality,
     resolve_sam_checkpoint,
     resolve_visual_elements,
@@ -165,16 +171,32 @@ def _process_image(
             )
         candidates.extend(residual_candidates)
 
+    recheck_visual_element_holes(img, elements, mask_generator)
+    element_masks = [element.mask for element in elements]
+    semantic_masks = [element.semantic_mask for element in elements]
+    validate_visual_masks(element_masks)
+    clean_background = build_clean_background(img, element_masks, text_mask)
     components = export_visual_components(
         img,
         element_masks,
         work_dir / "components",
         text_mask,
+        semantic_masks=semantic_masks,
     )
-    background_path = work_dir / "background.png"
+    background_original_path = work_dir / "background-original.png"
+    background_widescreen_path = work_dir / "background-16x9.png"
+    background_removal_mask_path = work_dir / "background-removal-mask.png"
+    background_difference_path = work_dir / "background-difference.png"
+    _save_rgb(str(background_original_path), clean_background)
     _save_rgb(
-        str(background_path),
+        str(background_widescreen_path),
         extend_background_to_widescreen(clean_background, 1920, 1080),
+    )
+    removal_mask = build_removal_mask(element_masks, text_mask)
+    Image.fromarray(removal_mask, mode="L").save(background_removal_mask_path)
+    _save_rgb(
+        str(background_difference_path),
+        cv2.absdiff(img, clean_background),
     )
 
     visual_only = _compose_exported_components(clean_background, components)
@@ -210,7 +232,9 @@ def _process_image(
         ) from exc
 
     return {
-        "background_path": str(background_path),
+        "background_path": str(background_widescreen_path),
+        "background_original_path": str(background_original_path),
+        "background_widescreen_path": str(background_widescreen_path),
         "components": components,
         "text_items": text_items,
         "img_width": img_w,
@@ -218,6 +242,111 @@ def _process_image(
         "original_image_path": str(image_path),
         "quality": quality,
     }
+
+
+def _resolve_image_path(image_path: str | Path) -> Path:
+    resolved = Path(image_path).resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"Image not found: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"Image path is not a file: {resolved}")
+    if resolved.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise ValueError(f"Unsupported image format: {resolved.suffix.lower()}")
+    try:
+        with Image.open(resolved) as probe:
+            probe.load()
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot decode image: {resolved}") from exc
+    return resolved
+
+
+def _prepare_single_image(
+    image_path: str | Path,
+    lang: str,
+) -> tuple[dict, Path]:
+    resolved = _resolve_image_path(image_path)
+    print("[1/3] Loading visual models...")
+    object_detector = create_object_detector()
+    mask_generator = create_sam_generator(resolve_sam_checkpoint())
+    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_")).resolve()
+    print(f"[2/3] Decomposing image: {resolved.name}")
+    print(f"  Assets/diagnostics: {work_dir}")
+    slide_data = _process_image(
+        resolved,
+        work_dir,
+        object_detector,
+        mask_generator,
+        lang,
+    )
+    return slide_data, work_dir
+
+
+def _prepare_multiple_images(
+    image_paths: list[str | Path],
+    lang: str,
+) -> list[dict]:
+    resolved_paths = [_resolve_image_path(path) for path in image_paths]
+    if not resolved_paths:
+        raise ValueError("No valid images provided")
+
+    total = len(resolved_paths)
+    print(f"Processing {total} image(s)...\n")
+    object_detector = create_object_detector()
+    mask_generator = create_sam_generator(resolve_sam_checkpoint())
+    slides_data = []
+    for index, image_path in enumerate(resolved_paths):
+        print(f"=== Image {index + 1}/{total}: {image_path.name} ===")
+        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{index}_")).resolve()
+        print(f"  Assets/diagnostics: {work_dir}")
+        slide_data = _process_image(
+            image_path,
+            work_dir,
+            object_detector,
+            mask_generator,
+            lang,
+        )
+        slides_data.append(slide_data)
+        print(f"         {len(slide_data['components'])} components extracted\n")
+    return slides_data
+
+
+def _variant_output_paths(
+    image_path: str | Path,
+    output_path: str | Path | None,
+) -> tuple[Path, Path]:
+    base = (
+        Path(output_path).resolve()
+        if output_path is not None
+        else Path(image_path).resolve()
+    ).with_suffix("")
+    return (
+        Path(f"{base}_original.pptx"),
+        Path(f"{base}_16x9.pptx"),
+    )
+
+
+def _assemble_prepared_slide(
+    slide_data: dict,
+    output_path: str | Path,
+    add_reference: bool,
+    slide_size: str,
+) -> str:
+    background_key = (
+        "background_original_path"
+        if slide_size == "original"
+        else "background_widescreen_path"
+    )
+    return assemble_pptx(
+        background_path=slide_data[background_key],
+        components=slide_data["components"],
+        text_items=slide_data["text_items"],
+        img_width=slide_data["img_width"],
+        img_height=slide_data["img_height"],
+        output_path=str(output_path),
+        add_reference_slide=add_reference,
+        original_image_path=slide_data["original_image_path"],
+        slide_size=slide_size,
+    )
 
 
 def convert(
@@ -228,6 +357,7 @@ def convert(
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
     add_reference: bool = False,
+    slide_size: str = "16:9",
 ) -> str:
     """Full pipeline: image → PPTX.
 
@@ -239,45 +369,25 @@ def convert(
         diff_threshold: Deprecated compatibility option; ignored by strict SAM pipeline.
         min_component_area: Deprecated compatibility option; ignored by strict SAM pipeline.
         add_reference: Add a reference slide with the original image.
+        slide_size: Use the original image ratio or a 16:9 slide.
 
     Returns:
         Path to the output PPTX file.
     """
-    image_path = Path(image_path).resolve()
-    if not image_path.exists():
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    ext = image_path.suffix.lower()
-    if ext not in IMAGE_EXTENSIONS:
-        raise ValueError(f"Unsupported image format: {ext}")
+    if slide_size not in {"original", "16:9"}:
+        raise ValueError("slide_size must be 'original' or '16:9'")
 
     if output_path is None:
-        output_path = image_path.with_suffix(".pptx")
+        output_path = Path(image_path).resolve().with_suffix(".pptx")
     output_path = Path(output_path).resolve()
 
-    print("[1/3] Loading visual models...")
-    object_detector = create_object_detector()
-    mask_generator = create_sam_generator(resolve_sam_checkpoint())
-    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_")).resolve()
-    print(f"[2/3] Decomposing image: {image_path.name}")
-    print(f"  Assets/diagnostics: {work_dir}")
-    slide_data = _process_image(
-        image_path,
-        work_dir,
-        object_detector,
-        mask_generator,
-        lang,
-    )
+    slide_data, work_dir = _prepare_single_image(image_path, lang)
     print("[3/3] Assembling PPTX...")
-    result = assemble_pptx(
-        background_path=slide_data["background_path"],
-        components=slide_data["components"],
-        text_items=slide_data["text_items"],
-        img_width=slide_data["img_width"],
-        img_height=slide_data["img_height"],
-        output_path=str(output_path),
-        add_reference_slide=add_reference,
-        original_image_path=slide_data["original_image_path"],
+    result = _assemble_prepared_slide(
+        slide_data,
+        output_path,
+        add_reference,
+        slide_size,
     )
 
     print(f"\nDone!")
@@ -287,6 +397,41 @@ def convert(
     print(f"  Assets: {work_dir}")
 
     return result
+
+
+def convert_variants(
+    image_path: str | Path,
+    output_path: str | Path | None = None,
+    lang: str = "ch",
+    add_reference: bool = False,
+    bg_period: int = 32,
+    diff_threshold: float = 20.0,
+    min_component_area: int = 20,
+) -> dict[str, str]:
+    original_output, widescreen_output = _variant_output_paths(
+        image_path,
+        output_path,
+    )
+    slide_data, work_dir = _prepare_single_image(image_path, lang)
+    print("[3/3] Assembling original and 16:9 PPTX files...")
+    original_result = _assemble_prepared_slide(
+        slide_data,
+        original_output,
+        add_reference,
+        "original",
+    )
+    widescreen_result = _assemble_prepared_slide(
+        slide_data,
+        widescreen_output,
+        add_reference,
+        "16:9",
+    )
+
+    print("\nDone!")
+    print(f"  Original: {original_result}")
+    print(f"  16:9: {widescreen_result}")
+    print(f"  Assets: {work_dir}")
+    return {"original": original_result, "16:9": widescreen_result}
 
 
 def convert_batch(
@@ -312,42 +457,11 @@ def convert_batch(
     Returns:
         Path to the output PPTX file.
     """
-    resolved_paths = []
-    for p in image_paths:
-        p = Path(p).resolve()
-        if not p.exists():
-            raise FileNotFoundError(f"Image not found: {p}")
-        ext = p.suffix.lower()
-        if ext not in IMAGE_EXTENSIONS:
-            raise ValueError(f"Unsupported image format: {ext} ({p.name})")
-        resolved_paths.append(p)
-
-    if not resolved_paths:
-        raise ValueError("No valid images provided")
-
+    slides_data = _prepare_multiple_images(image_paths, lang)
     if output_path is None:
-        output_path = resolved_paths[0].with_suffix(".pptx")
+        output_path = Path(slides_data[0]["original_image_path"]).with_suffix(".pptx")
     output_path = Path(output_path).resolve()
-
-    total = len(resolved_paths)
-    print(f"Processing {total} image(s) into one PPTX...\n")
-
-    object_detector = create_object_detector()
-    mask_generator = create_sam_generator(resolve_sam_checkpoint())
-    slides_data = []
-    for i, img_path in enumerate(resolved_paths):
-        print(f"=== Image {i + 1}/{total}: {img_path.name} ===")
-        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{i}_")).resolve()
-        print(f"  Assets/diagnostics: {work_dir}")
-        slide_data = _process_image(
-            img_path,
-            work_dir,
-            object_detector,
-            mask_generator,
-            lang,
-        )
-        slides_data.append(slide_data)
-        print(f"         {len(slide_data['components'])} components extracted\n")
+    total = len(slides_data)
 
     # Assemble all slides into one PPTX
     print(f"Assembling {total} slide(s) into PPTX...")
@@ -362,6 +476,81 @@ def convert_batch(
     print(f"  Total slides: {total}")
 
     return result
+
+
+def convert_batch_variants(
+    image_paths: list[str | Path],
+    output_path: str | Path | None = None,
+    lang: str = "ch",
+    add_reference: bool = False,
+    include_widescreen: bool = True,
+    bg_period: int = 32,
+    diff_threshold: float = 20.0,
+    min_component_area: int = 20,
+) -> dict[str, str | list[str] | None]:
+    slides_data = _prepare_multiple_images(image_paths, lang)
+    source_paths = [
+        Path(slide_data["original_image_path"]).resolve()
+        for slide_data in slides_data
+    ]
+    base = (
+        Path(output_path).resolve()
+        if output_path is not None
+        else source_paths[0]
+    ).with_suffix("")
+    widescreen_output = Path(f"{base}_16x9.pptx")
+    original_dir = Path(f"{base}_original")
+
+    widescreen_result = None
+    if include_widescreen:
+        widescreen_result = assemble_pptx_multi(
+            slides_data=slides_data,
+            output_path=str(widescreen_output),
+            add_reference=add_reference,
+        )
+
+    original_results = []
+    stem_totals: dict[str, int] = {}
+    for source_path in source_paths:
+        stem_key = source_path.stem.casefold()
+        stem_totals[stem_key] = stem_totals.get(stem_key, 0) + 1
+    reserved_stems = {
+        stem_key for stem_key, count in stem_totals.items() if count == 1
+    }
+    next_suffix: dict[str, int] = {}
+    used_stems: set[str] = set()
+    for slide_data, source_path in zip(slides_data, source_paths):
+        stem_key = source_path.stem.casefold()
+        if stem_totals[stem_key] == 1:
+            output_stem = source_path.stem
+            output_key = stem_key
+        else:
+            suffix_number = next_suffix.get(stem_key, 1)
+            while True:
+                output_stem = (
+                    source_path.stem
+                    if suffix_number == 1
+                    else f"{source_path.stem}_{suffix_number}"
+                )
+                output_key = output_stem.casefold()
+                suffix_number += 1
+                if output_key not in used_stems and output_key not in reserved_stems:
+                    break
+            next_suffix[stem_key] = suffix_number
+        used_stems.add(output_key)
+        original_output = (
+            original_dir / f"{output_stem}_original.pptx"
+        ).resolve()
+        original_results.append(
+            _assemble_prepared_slide(
+                slide_data,
+                original_output,
+                add_reference,
+                "original",
+            )
+        )
+
+    return {"16:9": widescreen_result, "original": original_results}
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +577,7 @@ def _save_rgb(path: str, img: np.ndarray) -> None:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert image(s) to editable PowerPoint (background + foreground components + text)"
     )
@@ -398,7 +587,7 @@ def main() -> None:
     )
     parser.add_argument(
         "-o", "--output", default=None,
-        help="Output PPTX path (default: same name as first input with .pptx)"
+        help="Output PPTX path, or filename base when --slide-size=both"
     )
     parser.add_argument(
         "--lang", default="ch",
@@ -424,7 +613,17 @@ def main() -> None:
         "--reference", action="store_true", default=False,
         help="Add a reference slide with the original image"
     )
+    parser.add_argument(
+        "--slide-size",
+        choices=("original", "16:9", "both"),
+        default="both",
+        help="Output slide size (default: both original ratio and 16:9)",
+    )
+    return parser
 
+
+def main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
     add_reference = _parse_reference_option(args.reference, args.no_reference)
 
@@ -440,8 +639,17 @@ def main() -> None:
         print("Error: No valid image files found in the provided input(s).")
         sys.exit(1)
 
-    if len(image_files) == 1:
-        # Single image: use original convert() for full backward compatibility
+    if len(image_files) == 1 and args.slide_size == "both":
+        convert_variants(
+            image_path=image_files[0],
+            output_path=args.output,
+            lang=args.lang,
+            add_reference=add_reference,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
+        )
+    elif len(image_files) == 1:
         convert(
             image_path=image_files[0],
             output_path=args.output,
@@ -450,9 +658,30 @@ def main() -> None:
             diff_threshold=args.diff_threshold,
             min_component_area=args.min_area,
             add_reference=add_reference,
+            slide_size=args.slide_size,
+        )
+    elif args.slide_size == "both":
+        convert_batch_variants(
+            image_paths=image_files,
+            output_path=args.output,
+            lang=args.lang,
+            add_reference=add_reference,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
+        )
+    elif args.slide_size == "original":
+        convert_batch_variants(
+            image_paths=image_files,
+            output_path=args.output,
+            lang=args.lang,
+            add_reference=add_reference,
+            include_widescreen=False,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
         )
     else:
-        # Multiple images: batch into one PPTX
         convert_batch(
             image_paths=image_files,
             output_path=args.output,

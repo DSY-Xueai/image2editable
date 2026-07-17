@@ -102,6 +102,12 @@ class VisualElement:
     z_index: int
     score: float
     source: str
+    semantic_mask: np.ndarray | None = None
+    object_box: tuple[float, float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.semantic_mask is None:
+            self.semantic_mask = np.asarray(self.mask, dtype=bool).copy()
 
 
 def resolve_visual_elements(
@@ -124,7 +130,7 @@ def resolve_visual_elements(
             int(xs.min()),
             int(xs.max()) + 1,
         )
-        valid.append((candidate, area, bbox))
+        valid.append((candidate, area, bbox, candidate.mask.copy()))
 
     unique = []
     for candidate_stats in sorted(
@@ -135,9 +141,16 @@ def resolve_visual_elements(
             -item[0].score,
         ),
     ):
-        candidate, candidate_area, candidate_bbox = candidate_stats
+        candidate, candidate_area, candidate_bbox, candidate_support = (
+            candidate_stats
+        )
         duplicate = False
-        for retained, retained_area, retained_bbox in unique:
+        for index, (
+            retained,
+            retained_area,
+            retained_bbox,
+            retained_support,
+        ) in enumerate(unique):
             smaller_area = min(candidate_area, retained_area)
             larger_area = max(candidate_area, retained_area)
             smaller = candidate if candidate_area <= retained_area else retained
@@ -164,6 +177,12 @@ def resolve_visual_elements(
                 and smaller_area - intersection < min_area
             ):
                 duplicate = True
+                unique[index] = (
+                    retained,
+                    retained_area,
+                    retained_bbox,
+                    retained_support | candidate_support,
+                )
                 break
             if area_ratio < duplicate_iou:
                 continue
@@ -178,6 +197,12 @@ def resolve_visual_elements(
             )
             if not parent_child or smaller.touches_crop_edge:
                 duplicate = True
+                unique[index] = (
+                    retained,
+                    retained_area,
+                    retained_bbox,
+                    retained_support | candidate_support,
+                )
                 break
 
         if duplicate:
@@ -193,17 +218,123 @@ def resolve_visual_elements(
 
     claimed = np.zeros(front_to_back[0][0].mask.shape, dtype=bool)
     elements = []
-    for candidate, _, _ in front_to_back:
+    for candidate, _, _, semantic_support in front_to_back:
         visible = candidate.mask & ~claimed
         if np.count_nonzero(visible) < min_area:
             continue
-        elements.append(VisualElement(visible, 0, candidate.score, candidate.source))
+        elements.append(
+            VisualElement(
+                mask=visible,
+                z_index=0,
+                score=candidate.score,
+                source=candidate.source,
+                semantic_mask=semantic_support,
+                object_box=candidate.object_box,
+            )
+        )
         claimed |= visible
 
     elements.reverse()
     for z_index, element in enumerate(elements):
         element.z_index = z_index
     return elements
+
+
+def _enclosed_holes(mask: np.ndarray) -> np.ndarray:
+    background = ~np.asarray(mask, dtype=bool)
+    if not np.any(background):
+        return np.zeros(background.shape, dtype=bool)
+    count, labels = cv2.connectedComponents(background.astype(np.uint8), connectivity=8)
+    border_labels = set(labels[0, :])
+    border_labels.update(labels[-1, :])
+    border_labels.update(labels[:, 0])
+    border_labels.update(labels[:, -1])
+    keep = np.ones(count, dtype=bool)
+    keep[list(border_labels)] = False
+    keep[0] = False
+    return keep[labels]
+
+
+def recheck_visual_element_holes(
+    image: np.ndarray,
+    elements: list[VisualElement],
+    generator,
+    min_hole_area: int = 20,
+) -> None:
+    if not elements or not any(
+        element.object_box is not None for element in elements
+    ):
+        return
+
+    predictor = generator.predictor
+    predictor.set_image(image)
+    owned = np.logical_or.reduce([element.mask for element in elements])
+    height, width = image.shape[:2]
+
+    for element in reversed(elements):
+        if element.object_box is None:
+            continue
+        holes = _enclosed_holes(element.mask)
+        other_owned = owned & ~element.mask
+        holes &= ~other_owned
+        count, labels = cv2.connectedComponents(
+            holes.astype(np.uint8),
+            connectivity=8,
+        )
+        for label in range(1, count):
+            hole = labels == label
+            hole_area = int(np.count_nonzero(hole))
+
+            semantic_coverage = float(np.count_nonzero(hole & element.semantic_mask))
+            if semantic_coverage / max(hole_area, 1) >= 0.90:
+                recovered = hole & element.semantic_mask & ~owned
+                element.mask |= recovered
+                owned |= recovered
+                continue
+            if hole_area < min_hole_area:
+                continue
+
+            distance = cv2.distanceTransform(hole.astype(np.uint8), cv2.DIST_L2, 5)
+            point_y, point_x = np.unravel_index(int(np.argmax(distance)), distance.shape)
+            x1, y1, x2, y2 = element.object_box
+            point_coords = np.asarray(
+                [
+                    [point_x, point_y],
+                    [max(0.0, x1 - 2.0), max(0.0, y1 - 2.0)],
+                    [min(width - 1.0, x2 + 2.0), max(0.0, y1 - 2.0)],
+                    [max(0.0, x1 - 2.0), min(height - 1.0, y2 + 2.0)],
+                    [min(width - 1.0, x2 + 2.0), min(height - 1.0, y2 + 2.0)],
+                ],
+                dtype=np.float32,
+            )
+            masks, scores, _ = predictor.predict(
+                point_coords=point_coords,
+                point_labels=np.asarray([1, 0, 0, 0, 0], dtype=np.int32),
+                box=np.asarray(element.object_box, dtype=np.float32),
+                multimask_output=True,
+            )
+            candidate = np.asarray(masks[int(np.argmax(scores))], dtype=bool)
+            element_area = int(np.count_nonzero(element.mask))
+            if (
+                np.count_nonzero(candidate & hole) / max(hole_area, 1) < 0.90
+                or np.count_nonzero(candidate & element.mask) / max(element_area, 1)
+                < 0.85
+            ):
+                continue
+
+            box_mask = np.zeros(candidate.shape, dtype=bool)
+            box_x1 = max(0, int(np.floor(x1)))
+            box_y1 = max(0, int(np.floor(y1)))
+            box_x2 = min(width, int(np.ceil(x2)))
+            box_y2 = min(height, int(np.ceil(y2)))
+            box_mask[box_y1:box_y2, box_x1:box_x2] = True
+            if np.count_nonzero(candidate & ~box_mask) > element_area * 0.01:
+                continue
+
+            element.semantic_mask |= candidate
+            recovered = hole & candidate & ~owned
+            element.mask |= recovered
+            owned |= recovered
 
 
 def _merge_semantic_candidates(
