@@ -45,14 +45,31 @@ class ContainTransform:
 # ---------------------------------------------------------------------------
 
 
-def compute_contain_transform(img_width: int, img_height: int) -> ContainTransform:
-    """Map an image into the center of a fixed widescreen slide."""
+def compute_slide_transform(
+    img_width: int,
+    img_height: int,
+    slide_size: str,
+) -> ContainTransform:
+    """Map an image to its original aspect ratio or a fixed widescreen slide."""
+    if slide_size not in {"original", "16:9"}:
+        raise ValueError("slide_size must be 'original' or '16:9'")
+
     scale = min(
         SLIDE_WIDTH_INCHES / img_width,
         SLIDE_HEIGHT_INCHES / img_height,
     )
     content_width = img_width * scale
     content_height = img_height * scale
+    if slide_size == "original":
+        return ContainTransform(
+            slide_width=content_width,
+            slide_height=content_height,
+            content_width=content_width,
+            content_height=content_height,
+            offset_x=0,
+            offset_y=0,
+        )
+
     return ContainTransform(
         slide_width=SLIDE_WIDTH_INCHES,
         slide_height=SLIDE_HEIGHT_INCHES,
@@ -61,6 +78,11 @@ def compute_contain_transform(img_width: int, img_height: int) -> ContainTransfo
         offset_x=(SLIDE_WIDTH_INCHES - content_width) / 2,
         offset_y=(SLIDE_HEIGHT_INCHES - content_height) / 2,
     )
+
+
+def compute_contain_transform(img_width: int, img_height: int) -> ContainTransform:
+    """Map an image into the center of a fixed widescreen slide."""
+    return compute_slide_transform(img_width, img_height, "16:9")
 
 
 def assemble_pptx(
@@ -72,6 +94,7 @@ def assemble_pptx(
     output_path: str | Path,
     add_reference_slide: bool = False,
     original_image_path: str | Path | None = None,
+    slide_size: str = "16:9",
 ) -> str:
     """Assemble a PPTX from background, foreground components, and text.
 
@@ -93,11 +116,14 @@ def assemble_pptx(
 
     prs = Presentation()
 
-    transform = compute_contain_transform(img_width, img_height)
+    transform = compute_slide_transform(img_width, img_height, slide_size)
 
     prs.slide_width = Inches(transform.slide_width)
     prs.slide_height = Inches(transform.slide_height)
-    prs._element.sldSz.set("type", "screen16x9")
+    prs._element.sldSz.set(
+        "type",
+        "screen16x9" if slide_size == "16:9" else "custom",
+    )
 
     # Use blank layout
     blank_layout = prs.slide_layouts[6]
@@ -291,7 +317,7 @@ def _add_textbox(
     font_size = (
         item.get("font_size", 12)
         * transform.content_width
-        / transform.slide_width
+        / SLIDE_WIDTH_INCHES
     )
     font.size = Pt(font_size)
     font.bold = item.get("bold", False)

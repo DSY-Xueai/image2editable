@@ -25,8 +25,13 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
-from scripts.bg_model import build_clean_background, extend_background_to_widescreen
+from scripts.bg_model import (
+    build_clean_background,
+    build_removal_mask,
+    extend_background_to_widescreen,
+)
 from scripts.fg_extract import (
     _build_text_ink_mask,
     export_visual_components,
@@ -178,10 +183,20 @@ def _process_image(
         text_mask,
         semantic_masks=semantic_masks,
     )
-    background_path = work_dir / "background.png"
+    background_original_path = work_dir / "background-original.png"
+    background_widescreen_path = work_dir / "background-16x9.png"
+    background_removal_mask_path = work_dir / "background-removal-mask.png"
+    background_difference_path = work_dir / "background-difference.png"
+    _save_rgb(str(background_original_path), clean_background)
     _save_rgb(
-        str(background_path),
+        str(background_widescreen_path),
         extend_background_to_widescreen(clean_background, 1920, 1080),
+    )
+    removal_mask = build_removal_mask(element_masks, text_mask)
+    Image.fromarray(removal_mask, mode="L").save(background_removal_mask_path)
+    _save_rgb(
+        str(background_difference_path),
+        cv2.absdiff(img, clean_background),
     )
 
     visual_only = _compose_exported_components(clean_background, components)
@@ -217,7 +232,9 @@ def _process_image(
         ) from exc
 
     return {
-        "background_path": str(background_path),
+        "background_path": str(background_widescreen_path),
+        "background_original_path": str(background_original_path),
+        "background_widescreen_path": str(background_widescreen_path),
         "components": components,
         "text_items": text_items,
         "img_width": img_w,
