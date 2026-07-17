@@ -91,6 +91,9 @@ class MaskCandidate:
     source: str
     crop_box: tuple[int, int, int, int] | None = None
     touches_crop_edge: bool = False
+    label: str = ""
+    role: str = ""
+    object_box: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -106,6 +109,7 @@ def resolve_visual_elements(
     min_area: int = 20,
     duplicate_iou: float = 0.92,
 ) -> list[VisualElement]:
+    candidates = _merge_semantic_candidates(candidates)
     valid = []
     for candidate in candidates:
         if candidate.mask.dtype != bool:
@@ -202,6 +206,106 @@ def resolve_visual_elements(
     return elements
 
 
+def _merge_semantic_candidates(
+    candidates: list[MaskCandidate],
+) -> list[MaskCandidate]:
+    """Merge partial duplicate detections without joining different object roles."""
+    rules = {
+        "container": (0.95, 0.50),
+        "person": (0.80, 0.0),
+    }
+    passthrough = [candidate for candidate in candidates if candidate.role not in rules]
+    for role, (min_containment, min_iou) in rules.items():
+        passthrough.extend(
+            _merge_role_candidates(
+                candidates,
+                role=role,
+                min_containment=min_containment,
+                min_iou=min_iou,
+            )
+        )
+    return passthrough
+
+
+def _merge_role_candidates(
+    candidates: list[MaskCandidate],
+    *,
+    role: str,
+    min_containment: float,
+    min_iou: float,
+) -> list[MaskCandidate]:
+    same_role = sorted(
+        (candidate for candidate in candidates if candidate.role == role),
+        key=lambda candidate: int(np.count_nonzero(candidate.mask)),
+        reverse=True,
+    )
+    merged: list[MaskCandidate] = []
+    for candidate in same_role:
+        candidate_area = int(np.count_nonzero(candidate.mask))
+        for index, retained in enumerate(merged):
+            if not _same_semantic_instance(candidate, retained, role):
+                continue
+            retained_area = int(np.count_nonzero(retained.mask))
+            intersection = int(np.count_nonzero(candidate.mask & retained.mask))
+            union = candidate_area + retained_area - intersection
+            if (
+                intersection / max(min(candidate_area, retained_area), 1)
+                < min_containment
+                or intersection / max(union, 1) < min_iou
+            ):
+                continue
+            base = retained if retained_area >= candidate_area else candidate
+            merged[index] = MaskCandidate(
+                mask=retained.mask | candidate.mask,
+                score=max(retained.score, candidate.score),
+                source=base.source,
+                crop_box=base.crop_box,
+                touches_crop_edge=(
+                    retained.touches_crop_edge and candidate.touches_crop_edge
+                ),
+                label=base.label,
+                role=role,
+                object_box=base.object_box,
+            )
+            break
+        else:
+            merged.append(candidate)
+    return merged
+
+
+def _same_semantic_instance(
+    first: MaskCandidate,
+    second: MaskCandidate,
+    role: str,
+) -> bool:
+    if first.object_box is None or second.object_box is None:
+        return False
+    first_box = first.object_box
+    second_box = second.object_box
+    x1 = max(first_box[0], second_box[0])
+    y1 = max(first_box[1], second_box[1])
+    x2 = min(first_box[2], second_box[2])
+    y2 = min(first_box[3], second_box[3])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    first_area = max(0.0, first_box[2] - first_box[0]) * max(
+        0.0, first_box[3] - first_box[1]
+    )
+    second_area = max(0.0, second_box[2] - second_box[0]) * max(
+        0.0, second_box[3] - second_box[1]
+    )
+    box_iou = intersection / max(first_area + second_area - intersection, 1.0)
+    if box_iou >= (0.55 if role == "person" else 0.70):
+        return True
+    first_tokens = {token.strip(".,").lower() for token in first.label.split()}
+    second_tokens = {token.strip(".,").lower() for token in second.label.split()}
+    return (
+        role == "container"
+        and first.source != second.source
+        and bool(first_tokens & second_tokens)
+        and box_iou >= 0.30
+    )
+
+
 def _crop_origins(length: int, crop_size: int, overlap: int) -> list[int]:
     if length <= crop_size:
         return [0]
@@ -265,6 +369,298 @@ def generate_mask_candidates(
     if include_geometry:
         candidates.extend(generate_geometry_candidates(image))
     return candidates
+
+
+def _mask_box_fill(mask: np.ndarray, box: tuple[float, float, float, float]) -> float:
+    height, width = mask.shape
+    x1 = max(0, int(np.floor(box[0])))
+    y1 = max(0, int(np.floor(box[1])))
+    x2 = min(width, int(np.ceil(box[2])))
+    y2 = min(height, int(np.ceil(box[3])))
+    return float(np.count_nonzero(mask[y1:y2, x1:x2])) / max(
+        (x2 - x1) * (y2 - y1),
+        1,
+    )
+
+
+def _positive_hits(mask: np.ndarray, points: np.ndarray) -> int:
+    height, width = mask.shape
+    return sum(
+        bool(
+            mask[
+                min(height - 1, max(0, int(round(y)))),
+                min(width - 1, max(0, int(round(x)))),
+            ]
+        )
+        for x, y in points
+    )
+
+
+def _drop_small_mask_islands(
+    mask: np.ndarray,
+    min_relative_area: float = 0.10,
+) -> np.ndarray:
+    binary = np.asarray(mask, dtype=np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if count <= 2:
+        return np.asarray(mask, dtype=bool)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    min_area = max(20, int(np.max(areas) * min_relative_area))
+    keep_labels = np.flatnonzero(areas >= min_area) + 1
+    return np.isin(labels, keep_labels)
+
+
+def _select_person_mask(
+    predictor,
+    box: np.ndarray,
+    a_mask: np.ndarray,
+    a_score: float,
+) -> tuple[np.ndarray, float]:
+    if _mask_box_fill(a_mask, tuple(box.tolist())) < 0.70:
+        return a_mask, a_score
+
+    x_mid = (box[0] + box[2]) / 2
+    positive = np.asarray(
+        [
+            [x_mid, box[1] + (box[3] - box[1]) * fraction]
+            for fraction in (0.25, 0.50, 0.65)
+        ],
+        dtype=np.float32,
+    )
+    inset_x = (box[2] - box[0]) * 0.10
+    inset_y = (box[3] - box[1]) * 0.10
+    negative = np.asarray(
+        [
+            [box[0] + inset_x, box[1] + inset_y],
+            [box[2] - inset_x, box[1] + inset_y],
+            [box[0] + inset_x, box[3] - inset_y],
+            [box[2] - inset_x, box[3] - inset_y],
+        ],
+        dtype=np.float32,
+    )
+    masks, scores, _ = predictor.predict(
+        point_coords=np.vstack((positive, negative)),
+        point_labels=np.asarray([1, 1, 1, 0, 0, 0, 0], dtype=np.int32),
+        box=box,
+        multimask_output=True,
+    )
+    eligible = [
+        (np.asarray(mask, dtype=bool), float(score))
+        for mask, score in zip(masks, scores, strict=True)
+        if float(score) >= a_score - 0.10
+        and _positive_hits(np.asarray(mask, dtype=bool), positive) >= 2
+    ]
+    if not eligible:
+        return a_mask, a_score
+    return min(
+        eligible,
+        key=lambda item: (
+            _mask_box_fill(item[0], tuple(box.tolist())),
+            -item[1],
+        ),
+    )
+
+
+def generate_prompted_mask_candidates(
+    image: np.ndarray,
+    proposals,
+    generator,
+    text_mask: np.ndarray,
+    *,
+    set_image: bool = True,
+) -> list[MaskCandidate]:
+    predictor = generator.predictor
+    if set_image:
+        predictor.set_image(image)
+
+    candidates = []
+    for proposal in proposals:
+        box = np.asarray(proposal.box_xyxy, dtype=np.float32)
+        masks, scores, _ = predictor.predict(box=box, multimask_output=True)
+        best_index = int(np.argmax(scores))
+        a_mask = _drop_small_mask_islands(masks[best_index])
+        a_score = float(scores[best_index])
+        requested_roles = (
+            ("container", "person")
+            if proposal.role == "mixed"
+            else (proposal.role,)
+        )
+        for role in requested_roles:
+            mask, sam_score = (
+                _select_person_mask(predictor, box, a_mask, a_score)
+                if role == "person"
+                else (a_mask, a_score)
+            )
+            mask = _drop_small_mask_islands(mask)
+            visible = np.asarray(mask, dtype=bool) & (text_mask == 0)
+            if np.count_nonzero(visible) < 20:
+                continue
+            candidates.append(
+                MaskCandidate(
+                    mask=visible,
+                    score=min(float(proposal.score), sam_score),
+                    source=f"grounded:{proposal.source}:{role}",
+                    crop_box=proposal.crop_box,
+                    touches_crop_edge=proposal.touches_crop_edge,
+                    label=proposal.label,
+                    role=role,
+                    object_box=tuple(float(value) for value in proposal.box_xyxy),
+                )
+            )
+    return candidates
+
+
+def filter_prompt_free_candidates(
+    candidates: list[MaskCandidate],
+    grounded_candidates: list[MaskCandidate],
+    text_mask: np.ndarray,
+    duplicate_containment: float = 0.60,
+    duplicate_iou: float = 0.50,
+    nested_containment: float = 0.80,
+    min_area_fraction: float = 0.0005,
+    min_score: float = 0.90,
+) -> list[MaskCandidate]:
+    """Keep prompt-free masks that add visual ownership beyond grounded objects."""
+    min_area = max(20, int(text_mask.size * min_area_fraction))
+    retained = []
+    for candidate in candidates:
+        visible = _drop_small_mask_islands(candidate.mask) & (text_mask == 0)
+        area = int(np.count_nonzero(visible))
+        if area < min_area or candidate.score < min_score:
+            continue
+        duplicate = None
+        max_containment = 0.0
+        for grounded in grounded_candidates:
+            grounded_mask = np.asarray(grounded.mask, dtype=bool)
+            grounded_area = int(np.count_nonzero(grounded_mask))
+            intersection = int(np.count_nonzero(visible & grounded_mask))
+            union = area + grounded_area - intersection
+            containment = intersection / area
+            max_containment = max(max_containment, containment)
+            if (
+                containment >= duplicate_containment
+                and intersection / max(union, 1) >= duplicate_iou
+            ):
+                duplicate = grounded
+                break
+        if duplicate is not None:
+            duplicate.mask = np.asarray(duplicate.mask, dtype=bool) | visible
+            continue
+        if max_containment >= nested_containment:
+            continue
+        retained.append(
+            MaskCandidate(
+                mask=visible,
+                score=candidate.score,
+                source=candidate.source,
+                crop_box=candidate.crop_box,
+                touches_crop_edge=candidate.touches_crop_edge,
+                label=candidate.label,
+                role=candidate.role,
+                object_box=candidate.object_box,
+            )
+        )
+    return retained
+
+
+def filter_unchanged_residual_candidates(
+    source: np.ndarray,
+    clean_background: np.ndarray,
+    candidates: list[MaskCandidate],
+    text_mask: np.ndarray,
+    unchanged_threshold: int = 8,
+    unchanged_fraction: float = 0.75,
+):
+    difference = np.max(
+        np.abs(source.astype(np.int16) - clean_background.astype(np.int16)),
+        axis=2,
+    )
+    retained = []
+    for candidate in candidates:
+        valid = np.asarray(candidate.mask, dtype=bool) & (text_mask == 0)
+        if not np.any(valid):
+            continue
+        unchanged = difference[valid] < unchanged_threshold
+        if float(np.mean(unchanged)) >= unchanged_fraction:
+            retained.append(candidate)
+    return retained
+
+
+def reconcile_residual_candidates(
+    residual_candidates: list[MaskCandidate],
+    existing_candidates: list[MaskCandidate],
+    image_shape: tuple[int, int],
+) -> tuple[list[MaskCandidate], int]:
+    """Attach structural fragments and reject unassigned edge background."""
+    height, width = image_shape
+    contact_radius = max(2, int(round(min(height, width) * 0.003)))
+    kernel = np.ones((contact_radius * 2 + 1,) * 2, dtype=np.uint8)
+    completion_radius = max(
+        contact_radius + 2,
+        int(round(min(height, width) * 0.009)),
+    )
+    completion_kernel = np.ones(
+        (completion_radius * 2 + 1,) * 2, dtype=np.uint8
+    )
+    containers = [
+        candidate for candidate in existing_candidates if candidate.role == "container"
+    ]
+    structural_tokens = {"line", "border", "frame", "decoration"}
+    retained = []
+    attached = 0
+
+    for residual in residual_candidates:
+        mask = np.asarray(residual.mask, dtype=bool)
+        tokens = {token.strip(".,").lower() for token in residual.label.split()}
+        target = None
+        best_contact = 0.0
+        if tokens & structural_tokens:
+            area = max(int(np.count_nonzero(mask)), 1)
+            for container in containers:
+                expanded = cv2.dilate(
+                    np.asarray(container.mask, dtype=np.uint8), kernel, iterations=1
+                ).astype(bool)
+                contact = float(np.count_nonzero(mask & expanded)) / area
+                if contact > best_contact:
+                    target = container
+                    best_contact = contact
+        if target is not None and best_contact >= 0.15:
+            target.mask = np.asarray(target.mask, dtype=bool) | mask
+            attached += 1
+            continue
+
+        if residual.score >= 0.24:
+            target = None
+            best_contact = 0.0
+            area = max(int(np.count_nonzero(mask)), 1)
+            for container in containers:
+                expanded = cv2.dilate(
+                    np.asarray(container.mask, dtype=np.uint8),
+                    completion_kernel,
+                    iterations=1,
+                ).astype(bool)
+                contact = float(np.count_nonzero(mask & expanded)) / area
+                if contact > best_contact:
+                    target = container
+                    best_contact = contact
+            if target is not None and best_contact >= 0.25:
+                target.mask = np.asarray(target.mask, dtype=bool) | mask
+                attached += 1
+                continue
+
+        touches_image_edge = bool(
+            np.any(mask[0, :])
+            or np.any(mask[-1, :])
+            or np.any(mask[:, 0])
+            or np.any(mask[:, -1])
+        )
+        if touches_image_edge:
+            continue
+        if residual.score < 0.24:
+            continue
+        retained.append(residual)
+
+    return retained, attached
 
 
 def generate_geometry_candidates(
@@ -346,11 +742,11 @@ def create_sam_generator(checkpoint_path, device=None):
     )
     return mask_generator.SAM2AutomaticMaskGenerator(
         model,
-        points_per_side=32,
+        points_per_side=16,
         points_per_batch=16 if str(selected_device).startswith("cuda") else 4,
         pred_iou_thresh=0.86,
         stability_score_thresh=0.92,
-        crop_n_layers=1,
+        crop_n_layers=0,
         crop_n_points_downscale_factor=2,
         min_mask_region_area=20,
     )

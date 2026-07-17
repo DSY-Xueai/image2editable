@@ -10,12 +10,12 @@ description: 将一张或多张图片转换为严格校验、分层可编辑的 
 ## 环境
 
 - 使用 Python 3.10 或更高版本。
-- 安装 `torch>=2.5.1`、`torchvision>=0.20.1` 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
+- 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
 - 安装 PaddleOCR 或 Tesseract 作为 OCR 引擎。
 - 优先使用 Linux/WSL；SAM 官方建议 Windows 用户使用 WSL。
 - 自动使用可用的 CUDA；CPU 也受支持，但推理较慢。
 
-首次运行时把 SAM 2.1 large checkpoint 下载到用户本地 cache。源码和权重不存放在此 skill 中。
+首次运行时把 Grounding DINO tiny 模型和 SAM 2.1 large checkpoint 下载到用户本地 cache。源码和权重不存放在此 skill 中。
 
 ## 命令行
 
@@ -45,7 +45,7 @@ convert_batch(["img1.png", "img2.png"], output_path="slides.pptx")
 ## 严格管线
 
 1. 使用现有 OCR 逻辑检测文字并生成文字遮罩。
-2. 使用 SAM 2.1 生成多尺度候选，并用 OpenCV 几何候选补漏。
+2. 使用 Grounding DINO 生成整图与重叠分块语义候选，再用 SAM 2.1 生成对象掩膜，并以无提示 SAM 候选覆盖词表外对象。
 3. 对候选去重，解析父子关系，为每个像素建立唯一 ownership。
 4. 导出不含文字的透明组件，并重建 clean background。
 5. 按实际导出的 RGBA 图层重建页面，执行严格视觉质量 QA。

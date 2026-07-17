@@ -27,14 +27,26 @@ import cv2
 import numpy as np
 
 from scripts.bg_model import build_clean_background, extend_background_to_widescreen
-from scripts.fg_extract import export_visual_components
+from scripts.fg_extract import (
+    _build_text_ink_mask,
+    export_visual_components,
+    repair_exported_component_text,
+)
+from scripts.object_detect import (
+    create_object_detector,
+    filter_text_overlapping_proposals,
+    generate_object_proposals,
+)
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import detect_text
 from scripts.visual_segment import (
-    MaskCandidate,
     VisualSegmentationError,
     create_sam_generator,
+    filter_prompt_free_candidates,
+    filter_unchanged_residual_candidates,
     generate_mask_candidates,
+    generate_prompted_mask_candidates,
+    reconcile_residual_candidates,
     require_visual_quality,
     resolve_sam_checkpoint,
     resolve_visual_elements,
@@ -73,6 +85,7 @@ def _compose_exported_components(
 def _process_image(
     image_path: Path,
     work_dir: Path,
+    object_detector,
     mask_generator,
     lang: str,
 ) -> dict:
@@ -80,34 +93,77 @@ def _process_image(
     img = _load_rgb(str(image_path))
     img_h, img_w = img.shape[:2]
     text_items, text_mask = detect_text(image_path, lang=lang)
+    text_ink_mask = _build_text_ink_mask(img, text_mask)
 
-    candidates = generate_mask_candidates(img, mask_generator)
-    for round_index in range(2):
+    proposals = filter_text_overlapping_proposals(
+        generate_object_proposals(img, object_detector), text_mask
+    )
+    candidates = generate_prompted_mask_candidates(
+        img,
+        proposals,
+        mask_generator,
+        text_ink_mask,
+    )
+    candidates.extend(
+        filter_prompt_free_candidates(
+            generate_mask_candidates(
+                img,
+                mask_generator,
+                crop_size=max(img.shape[:2]),
+            ),
+            candidates,
+            text_ink_mask,
+        )
+    )
+    for round_index in range(3):
         elements = resolve_visual_elements(candidates)
         element_masks = [element.mask for element in elements]
         validate_visual_masks(element_masks)
         clean_background = build_clean_background(img, element_masks, text_mask)
-        residual = [
-            candidate
-            for candidate in generate_mask_candidates(clean_background, mask_generator)
-            if candidate.score >= 0.86
-        ]
-        if not residual:
-            break
-        if round_index == 1:
-            raise VisualSegmentationError(
-                "clean background still contains independent visual elements"
-            )
-        candidates.extend(
-            MaskCandidate(
-                candidate.mask,
-                candidate.score,
-                "residual",
-                crop_box=candidate.crop_box,
-                touches_crop_edge=candidate.touches_crop_edge,
-            )
-            for candidate in residual
+        residual_proposals = filter_text_overlapping_proposals(
+            generate_object_proposals(clean_background, object_detector),
+            text_mask,
         )
+        residual_candidates = generate_prompted_mask_candidates(
+            clean_background,
+            residual_proposals,
+            mask_generator,
+            text_ink_mask,
+        )
+        residual_candidates = filter_unchanged_residual_candidates(
+            img,
+            clean_background,
+            residual_candidates,
+            text_ink_mask,
+        )
+        residual_candidates, attached_count = reconcile_residual_candidates(
+            residual_candidates,
+            candidates,
+            img.shape[:2],
+        )
+        if not residual_candidates:
+            if attached_count:
+                elements = resolve_visual_elements(candidates)
+                element_masks = [element.mask for element in elements]
+                validate_visual_masks(element_masks)
+                clean_background = build_clean_background(
+                    img, element_masks, text_mask
+                )
+            break
+        residual_diagnostics = work_dir / f"residual-round-{round_index + 1}"
+        write_segmentation_diagnostics(
+            residual_diagnostics,
+            source=img,
+            masks=[candidate.mask for candidate in residual_candidates],
+            reconstructed=clean_background,
+            metrics={"residual_count": len(residual_candidates)},
+        )
+        if round_index == 2:
+            raise VisualSegmentationError(
+                "clean background still contains independent visual elements; "
+                f"diagnostics={residual_diagnostics.resolve()}"
+            )
+        candidates.extend(residual_candidates)
 
     components = export_visual_components(
         img,
@@ -124,6 +180,18 @@ def _process_image(
     visual_only = _compose_exported_components(clean_background, components)
     visual_only_path = work_dir / "visual-only.png"
     _save_rgb(str(visual_only_path), visual_only)
+
+    raster_text_items, raster_text_mask = detect_text(visual_only_path, lang=lang)
+    if raster_text_items:
+        repair_exported_component_text(components, raster_text_mask, visual_only)
+        visual_only = _compose_exported_components(clean_background, components)
+        _save_rgb(str(visual_only_path), visual_only)
+        raster_text_items, _ = detect_text(visual_only_path, lang=lang)
+    if raster_text_items:
+        raise VisualSegmentationError(
+            "visual components still contain raster text after cleanup"
+        )
+
     quality = visual_difference(img, visual_only, text_mask)
     diagnostics_dir = (work_dir / "diagnostics").resolve()
     write_segmentation_diagnostics(
@@ -140,12 +208,6 @@ def _process_image(
             f"{exc}; mae={quality['mae']:.3f}, p95={quality['p95']:.3f}, "
             f"diagnostics={diagnostics_dir}"
         ) from exc
-
-    raster_text_items, _ = detect_text(visual_only_path, lang=lang)
-    if raster_text_items:
-        raise VisualSegmentationError(
-            "visual components still contain raster text after cleanup"
-        )
 
     return {
         "background_path": str(background_path),
@@ -193,12 +255,19 @@ def convert(
         output_path = image_path.with_suffix(".pptx")
     output_path = Path(output_path).resolve()
 
-    print("[1/3] Loading segmentation model...")
+    print("[1/3] Loading visual models...")
+    object_detector = create_object_detector()
     mask_generator = create_sam_generator(resolve_sam_checkpoint())
     work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_")).resolve()
     print(f"[2/3] Decomposing image: {image_path.name}")
     print(f"  Assets/diagnostics: {work_dir}")
-    slide_data = _process_image(image_path, work_dir, mask_generator, lang)
+    slide_data = _process_image(
+        image_path,
+        work_dir,
+        object_detector,
+        mask_generator,
+        lang,
+    )
     print("[3/3] Assembling PPTX...")
     result = assemble_pptx(
         background_path=slide_data["background_path"],
@@ -263,13 +332,20 @@ def convert_batch(
     total = len(resolved_paths)
     print(f"Processing {total} image(s) into one PPTX...\n")
 
+    object_detector = create_object_detector()
     mask_generator = create_sam_generator(resolve_sam_checkpoint())
     slides_data = []
     for i, img_path in enumerate(resolved_paths):
         print(f"=== Image {i + 1}/{total}: {img_path.name} ===")
         work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{i}_")).resolve()
         print(f"  Assets/diagnostics: {work_dir}")
-        slide_data = _process_image(img_path, work_dir, mask_generator, lang)
+        slide_data = _process_image(
+            img_path,
+            work_dir,
+            object_detector,
+            mask_generator,
+            lang,
+        )
         slides_data.append(slide_data)
         print(f"         {len(slide_data['components'])} components extracted\n")
 

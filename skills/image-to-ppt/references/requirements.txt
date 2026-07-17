@@ -16,6 +16,7 @@ numpy>=1.20.0
 torch>=2.5.1
 torchvision>=0.20.1
 SAM-2 @ git+https://github.com/facebookresearch/sam2.git@main
+transformers>=4.40.0
 
 # ─────────────────────────────────────────────────────────────
 # OCR engines (at least one required for text detection)

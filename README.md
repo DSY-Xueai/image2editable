@@ -38,7 +38,7 @@
 | 特性 | 说明 |
 |------|------|
 | 背景修复 | 为 PPTX 生成 clean background；PSD 使用两轮背景建模与 inpainting 修复 |
-| 前景拆分 | PPTX 使用 SAM 2.1 多尺度候选与 OpenCV 几何补漏；PSD 使用差分、边缘和连通域 |
+| 前景拆分 | PPTX 使用 Grounding DINO 语义候选与 SAM 2.1 分割；PSD 使用差分、边缘和连通域 |
 | OCR 文本重建 | 识别文本并估计字号、颜色、粗体、对齐方式 |
 | PPTX 导出 | 生成可编辑 PowerPoint：背景层、前景组件层、文本框层 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
@@ -51,7 +51,7 @@
 ### 环境要求
 
 - Python 3.10+
-- `torch>=2.5.1`、`torchvision>=0.20.1`
+- `torch>=2.5.1`、`torchvision>=0.20.1`、`transformers>=4.40.0`
 - SAM 官方推荐 Linux/WSL；Windows 建议使用 WSL
 - OCR 引擎至少安装一个
 - PSD 导出需要 Aspose.PSD 授权，并设置 `ASPOSE_PSD_LICENSE`
@@ -64,14 +64,14 @@ cd image2editable
 pip install -r requirements.txt
 ```
 
-### SAM 2.1 视觉分割
+### Grounding DINO + SAM 2.1 视觉分割
 
-PPTX 前景视觉元素通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将 checkpoint 下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。第三方说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，SAM 2 代码与 checkpoint 采用 [Apache License 2.0](third_party/licenses/SAM2-APACHE-2.0.txt)。
+PPTX 前景视觉元素先由 Grounding DINO 生成开放词汇语义候选，再通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将模型文件下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。第三方来源、缓存与 Apache 2.0 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ### PPTX 严格管线
 
 1. 使用现有 OCR 逻辑检测文字并生成文字遮罩。
-2. 使用 SAM 2.1 生成多尺度候选，并用 OpenCV 几何候选补漏。
+2. 使用 Grounding DINO 生成整图与重叠分块语义候选，再用 SAM 2.1 生成对象掩膜，并以无提示 SAM 候选覆盖词表外对象。
 3. 对候选去重，解析父子关系，为每个像素建立唯一 ownership。
 4. 导出不含文字的透明视觉组件，并重建 clean background。
 5. 按实际导出的 RGBA 图层重建页面，执行严格视觉质量 QA。
@@ -86,6 +86,18 @@ PPTX 前景视觉元素通过 SAM 2.1 官方 Python API 和 large checkpoint 分
   journal={arXiv preprint arXiv:2408.00714},
   url={https://arxiv.org/abs/2408.00714},
   year={2024}
+}
+```
+
+引用 Grounding DINO：
+
+```bibtex
+@article{liu2023grounding,
+  title={Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection},
+  author={Liu, Shilong and Zeng, Zhaoyang and Ren, Tianhe and Li, Feng and Zhang, Hao and Yang, Jie and Jiang, Qing and Li, Chunyuan and Yang, Jianwei and Su, Hang and Zhu, Jun and Zhang, Lei},
+  journal={arXiv preprint arXiv:2303.05499},
+  url={https://arxiv.org/abs/2303.05499},
+  year={2023}
 }
 ```
 
@@ -117,7 +129,7 @@ set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
-项目代码以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。SAM 2.1 的来源、缓存和许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [Apache License 2.0 副本](third_party/licenses/SAM2-APACHE-2.0.txt)。
+项目代码以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。Grounding DINO 与 SAM 2.1 的来源、缓存和许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [Apache License 2.0 副本](third_party/licenses/SAM2-APACHE-2.0.txt)。
 
 ---
 
@@ -250,7 +262,7 @@ image2editable/
 | PPTX 生成 | python-pptx |
 | PSD 生成 | Aspose.PSD |
 | 背景修复 | OpenCV Inpainting |
-| PPTX 视觉分割 | SAM 2.1 多尺度候选 + OpenCV 几何补漏 + 唯一 ownership |
+| PPTX 视觉分割 | Grounding DINO 语义候选 + SAM 2.1 掩膜 + 唯一 ownership |
 | PSD 前景检测 | 差分阈值 + Canny 边缘 + 形态学运算 |
 
 ---

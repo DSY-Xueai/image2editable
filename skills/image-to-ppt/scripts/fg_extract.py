@@ -175,21 +175,16 @@ def export_visual_components(
 
     img_h, img_w = img.shape[:2]
     text_ink = _build_text_ink_mask(img, text_mask)
+    text_removal = cv2.dilate(
+        (text_mask > 0).astype(np.uint8) * 255,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    text_clean_img = _repair_component_rgb(img, text_removal)
     ownership_masks = [np.asarray(mask, dtype=bool) for mask in element_masks]
-    owned_union = np.zeros((img_h, img_w), dtype=bool)
-    for ownership_mask in ownership_masks:
-        owned_union |= ownership_mask
-
-    assigned_hole_repairs = [
-        np.zeros((img_h, img_w), dtype=bool) for _ in ownership_masks
-    ]
-    claimed_holes = np.zeros((img_h, img_w), dtype=bool)
-    unowned_text_ink = (text_ink > 0) & ~owned_union
-    for position in reversed(range(len(ownership_masks))):
-        enclosed_holes = _remove_border_connected(~ownership_masks[position])
-        hole_repair = unowned_text_ink & enclosed_holes & ~claimed_holes
-        assigned_hole_repairs[position] = hole_repair
-        claimed_holes |= hole_repair
+    assigned_hole_repairs = _assign_text_hole_repairs(
+        ownership_masks, text_ink, text_mask
+    )
 
     components: list[dict] = []
 
@@ -207,10 +202,7 @@ def export_visual_components(
         y2 = min(img_h, int(ys.max()) + 1 + padding)
 
         local_mask = alpha_mask[y1:y2, x1:x2]
-        local_text = text_ink[y1:y2, x1:x2].copy()
-        local_text[~local_mask] = 0
-        crop = img[y1:y2, x1:x2]
-        rgb = _repair_component_rgb(crop, local_text)
+        rgb = text_clean_img[y1:y2, x1:x2].copy()
         alpha = _soft_alpha(local_mask)
         rgba = np.dstack([rgb, alpha])
 
@@ -227,6 +219,63 @@ def export_visual_components(
         })
 
     return components
+
+
+def _assign_text_hole_repairs(
+    ownership_masks: list[np.ndarray],
+    text_ink: np.ndarray,
+    text_mask: np.ndarray,
+) -> list[np.ndarray]:
+    """Assign each removed glyph hole to the nearest underlying visual element."""
+    if not ownership_masks:
+        return []
+    owned_union = np.logical_or.reduce(ownership_masks)
+    unowned_text_ink = (text_ink > 0) & ~owned_union
+    claimed_holes = np.zeros(text_mask.shape, dtype=bool)
+    repairs = [np.zeros(text_mask.shape, dtype=bool) for _ in ownership_masks]
+    for position in reversed(range(len(ownership_masks))):
+        ownership_mask = ownership_masks[position]
+        relevant_text = _filter_text_ink_over_components(
+            ownership_mask, text_ink, text_mask
+        )
+        nearby_holes = _find_component_text_repairs(
+            ownership_mask, relevant_text
+        )
+        enclosed_holes = _remove_border_connected(~ownership_mask)
+        repair = (
+            unowned_text_ink
+            & (nearby_holes | enclosed_holes)
+            & ~claimed_holes
+        )
+        repairs[position] = repair
+        claimed_holes |= repair
+    return repairs
+
+
+def repair_exported_component_text(
+    components: list[dict],
+    text_mask: np.ndarray,
+    source_rgb: np.ndarray,
+) -> None:
+    """Inpaint OCR-detected raster text that remains in exported RGBA layers."""
+    text_ink = _build_text_ink_mask(source_rgb, text_mask)
+    image_height, image_width = text_mask.shape
+    for component in components:
+        path = Path(component["path"])
+        with Image.open(path) as image:
+            rgba = np.asarray(image.convert("RGBA")).copy()
+        x = int(component["x"])
+        y = int(component["y"])
+        height, width = rgba.shape[:2]
+        x2 = min(image_width, x + width)
+        y2 = min(image_height, y + height)
+        local = np.zeros((height, width), dtype=np.uint8)
+        local[: y2 - y, : x2 - x] = text_ink[y:y2, x:x2]
+        repair = ((local > 0) & (rgba[:, :, 3] > 0)).astype(np.uint8) * 255
+        if not np.any(repair):
+            continue
+        rgba[:, :, :3] = _repair_component_rgb(rgba[:, :, :3], repair)
+        Image.fromarray(rgba, "RGBA").save(path)
 
 
 def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:

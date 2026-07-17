@@ -288,7 +288,12 @@ def _add_textbox(
 
     font = run.font
     _set_run_font(run, item.get("font", "Microsoft YaHei"))
-    font.size = Pt(item.get("font_size", 12))
+    font_size = (
+        item.get("font_size", 12)
+        * transform.content_width
+        / transform.slide_width
+    )
+    font.size = Pt(font_size)
     font.bold = item.get("bold", False)
 
     color = _hex_to_rgb(item.get("color", "#000000"))
