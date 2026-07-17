@@ -31,7 +31,7 @@
 | 背景修复 | PPTX 对小/窄遮罩使用 OpenCV、对大/深遮罩使用 LaMa；PSD 使用两轮背景建模与 inpainting 修复 |
 | 前景拆分 | PPTX 使用 Grounding DINO 语义候选与 SAM 2.1 分割；PSD 使用差分、边缘和连通域 |
 | OCR 文本重建 | 识别文本并估计字号、颜色、粗体、对齐方式 |
-| PPTX 导出 | 生成可编辑 PowerPoint：背景层、前景组件层、文本框层 |
+| PPTX 导出 | 生成背景、独立透明组件和可编辑文本框，默认同时输出原图比例与 16:9 版本 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
 | 批量处理 | 多张图片或目录输入；PPTX 合并为多页，PSD 每图一个文件 |
 
@@ -55,57 +55,9 @@ cd image2editable
 pip install -r requirements.txt
 ```
 
-### Grounding DINO + SAM 2.1 视觉分割
+### 模型与首次运行
 
-PPTX 前景视觉元素先由 Grounding DINO 生成开放词汇语义候选，再通过 SAM 2.1 官方 Python API 和 large checkpoint 分割。首次运行会将模型文件下载到用户本地缓存；仓库不包含模型权重。程序会自动使用可用的 CUDA，CPU 也可运行但速度较慢。第三方来源、缓存与 Apache 2.0 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-### LaMa 大遮罩背景修复
-
-PPTX 背景修复按遮罩规模与深度路由：小/窄遮罩使用 OpenCV，大/深遮罩使用 LaMa。LaMa 依赖缺失或模型初始化失败时会明确报错，不会静默退回容易产生条带拖影的 OpenCV 修复。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，wrapper 首次运行可将模型下载到用户本地 cache。
-
-### PPTX 严格管线
-
-1. 使用现有 OCR 逻辑检测文字并生成文字遮罩。
-2. 使用 Grounding DINO 生成整图与重叠分块语义候选，再用 SAM 2.1 生成对象掩膜，并以无提示 SAM 候选覆盖词表外对象。
-3. 对候选去重，解析父子关系，为每个像素建立唯一 ownership；结合语义支撑与定向 SAM 复查修补组件内部破洞。
-4. 导出不含文字的独立透明视觉组件，并按遮罩规模在 OpenCV 与 LaMa 间路由，重建 clean background。
-5. 按实际导出的 RGBA 图层重建页面，执行严格视觉质量 QA。
-6. 分别组装原图比例与 16:9 画布；16:9 使用 contain 居中，留白区由四角/边缘颜色渐变填充，不使用模糊放大的原图副本。
-
-引用 SAM 2：
-
-```bibtex
-@article{ravi2024sam2,
-  title={SAM 2: Segment Anything in Images and Videos},
-  author={Ravi, Nikhila and Gabeur, Valentin and Hu, Yuan-Ting and Hu, Ronghang and Ryali, Chaitanya and Ma, Tengyu and Khedr, Haitham and R{\"a}dle, Roman and Rolland, Chloe and Gustafson, Laura and Mintun, Eric and Pan, Junting and Alwala, Kalyan Vasudev and Carion, Nicolas and Wu, Chao-Yuan and Girshick, Ross and Doll{\'a}r, Piotr and Feichtenhofer, Christoph},
-  journal={arXiv preprint arXiv:2408.00714},
-  url={https://arxiv.org/abs/2408.00714},
-  year={2024}
-}
-```
-
-引用 Grounding DINO：
-
-```bibtex
-@article{liu2023grounding,
-  title={Grounding DINO: Marrying DINO with Grounded Pre-Training for Open-Set Object Detection},
-  author={Liu, Shilong and Zeng, Zhaoyang and Ren, Tianhe and Li, Feng and Zhang, Hao and Yang, Jie and Jiang, Qing and Li, Chunyuan and Yang, Jianwei and Su, Hang and Zhu, Jun and Zhang, Lei},
-  journal={arXiv preprint arXiv:2303.05499},
-  url={https://arxiv.org/abs/2303.05499},
-  year={2023}
-}
-```
-
-引用 LaMa：
-
-```bibtex
-@article{suvorov2021resolution,
- title={Resolution-robust Large Mask Inpainting with Fourier Convolutions},
- author={Suvorov, Roman and Logacheva, Elizaveta and Mashikhin, Anton and Remizova, Anastasia and Ashukha, Arsenii and Silvestrov, Aleksei and Kong, Naejin and Goka, Harshith and Park, Kiwoong and Lempitsky, Victor},
- journal={arXiv preprint arXiv:2109.07161},
- year={2021}
-}
-```
+PPTX 转换使用 Grounding DINO、SAM 2.1 和 LaMa。模型文件在首次运行时下载到用户本地缓存，仓库不包含模型权重；程序优先使用可用的 CUDA，也支持速度较慢的 CPU 运行。`LAMA_MODEL` 可用于指定本地 LaMa TorchScript 模型。
 
 ### OCR 引擎
 
@@ -135,7 +87,7 @@ set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
-项目代码仍以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。Grounding DINO、SAM 2.1、LaMa 与 `simple-lama-inpainting` 是第三方 Apache 2.0 项目，其来源、缓存和许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目代码以 MIT License 发布。Aspose.PSD 是受其官方 EULA 和授权约束的商业依赖；其他第三方来源与许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，论文引用见 [CITATION.cff](CITATION.cff)。
 
 ---
 
@@ -216,9 +168,9 @@ python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
 | `images` | （必填） | 图片文件、多个图片文件、或目录路径；目录只扫描第一层图片 |
 | `-o, --output` | 输入同名输出 | PPTX：`original` / `16:9` 单模式为文件路径，默认 `both` 时为输出基名；PSD 单图可为文件路径，多图为输出目录 |
 | `--lang` | `ch` | OCR 语言，常用 `ch` / `en` |
-| `--period` | `32` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：背景建模瓦片周期 |
-| `--diff-threshold` | `20.0` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：前景检测阈值 |
-| `--min-area` | `20` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：最小组件面积 |
+| `--period` | `32` | PPTX：仅为兼容保留、不生效；PSD：背景建模瓦片周期 |
+| `--diff-threshold` | `20.0` | PPTX：仅为兼容保留、不生效；PSD：前景检测阈值 |
+| `--min-area` | `20` | PPTX：仅为兼容保留、不生效；PSD：最小组件面积 |
 | `--reference` | 不启用 | 仅 PPTX：每页内容后附加原图参考页 |
 | `--no-reference` | 默认行为 | 仅 PPTX：显式关闭原图参考页 |
 | `--slide-size` | `both` | 仅 PPTX：`original` 保持输入比例；`16:9` 输出宽屏；`both` 同时输出两种尺寸 |
