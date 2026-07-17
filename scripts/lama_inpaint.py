@@ -64,6 +64,17 @@ def inpaint_large_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     except Exception as exc:
         raise LargeMaskInpaintError("LaMa inference failed.") from exc
 
+    if repaired.ndim != 3 or repaired.shape[2] != source.shape[2]:
+        raise LargeMaskInpaintError(
+            f"LaMa returned shape {repaired.shape}, expected {source.shape}."
+        )
+    source_height, source_width = source.shape[:2]
+    if repaired.shape[0] < source_height or repaired.shape[1] < source_width:
+        raise LargeMaskInpaintError(
+            f"LaMa returned smaller shape {repaired.shape}, expected at least "
+            f"{source.shape}."
+        )
+    repaired = repaired[:source_height, :source_width]
     if repaired.shape != source.shape:
         raise LargeMaskInpaintError(
             f"LaMa returned shape {repaired.shape}, expected {source.shape}."
