@@ -99,11 +99,15 @@ class MaskCandidate:
 @dataclass
 class VisualElement:
     mask: np.ndarray
-    semantic_mask: np.ndarray
     z_index: int
     score: float
     source: str
+    semantic_mask: np.ndarray | None = None
     object_box: tuple[float, float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.semantic_mask is None:
+            self.semantic_mask = np.asarray(self.mask, dtype=bool).copy()
 
 
 def resolve_visual_elements(
@@ -220,12 +224,12 @@ def resolve_visual_elements(
             continue
         elements.append(
             VisualElement(
-                visible,
-                semantic_support,
-                0,
-                candidate.score,
-                candidate.source,
-                candidate.object_box,
+                mask=visible,
+                z_index=0,
+                score=candidate.score,
+                source=candidate.source,
+                semantic_mask=semantic_support,
+                object_box=candidate.object_box,
             )
         )
         claimed |= visible

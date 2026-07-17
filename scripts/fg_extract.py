@@ -213,6 +213,7 @@ def export_visual_components(
         occupied_by_other = owned_union & ~ownership_mask
         refined = _restore_supported_holes(
             refined,
+            ownership_mask,
             semantic_masks[position],
             occupied_by_other,
         )
@@ -254,14 +255,22 @@ def export_visual_components(
 
 def _restore_supported_holes(
     refined: np.ndarray,
+    ownership_mask: np.ndarray,
     semantic: np.ndarray,
     occupied_by_other: np.ndarray,
 ) -> np.ndarray:
     restored = np.asarray(refined, dtype=bool).copy()
-    holes = _remove_border_connected(~restored)
-    count, labels = cv2.connectedComponents(holes.astype(np.uint8), connectivity=8)
+    new_internal_loss = (
+        _remove_border_connected(~restored)
+        & ownership_mask
+        & ~occupied_by_other
+    )
+    count, labels = cv2.connectedComponents(
+        new_internal_loss.astype(np.uint8),
+        connectivity=8,
+    )
     for label in range(1, count):
-        recoverable = (labels == label) & ~occupied_by_other
+        recoverable = labels == label
         recoverable_area = int(np.count_nonzero(recoverable))
         if recoverable_area == 0:
             continue
