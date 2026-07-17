@@ -32,6 +32,8 @@ def _corner_colors(background: np.ndarray) -> tuple[np.ndarray, ...]:
         raise ValueError("background must be an RGB image")
 
     height, width = source.shape[:2]
+    if height <= 0 or width <= 0:
+        raise ValueError("background must not be empty")
     corner_height = max(1, int(round(height * 0.05)))
     corner_width = max(1, int(round(width * 0.05)))
     regions = (

@@ -61,6 +61,14 @@ def compute_slide_transform(
     content_width = img_width * scale
     content_height = img_height * scale
     if slide_size == "original":
+        if min(content_width, content_height) < 1.0:
+            size_scale = 1.0 / min(content_width, content_height)
+            content_width *= size_scale
+            content_height *= size_scale
+        if max(content_width, content_height) > 56.0 + 1e-9:
+            raise ValueError(
+                "original slide aspect ratio exceeds PowerPoint's 1-56 inch range"
+            )
         return ContainTransform(
             slide_width=content_width,
             slide_height=content_height,
