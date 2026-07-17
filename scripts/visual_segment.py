@@ -271,6 +271,8 @@ def recheck_visual_element_holes(
         if element.object_box is None:
             continue
         holes = _enclosed_holes(element.mask)
+        other_owned = owned & ~element.mask
+        holes &= ~other_owned
         count, labels = cv2.connectedComponents(
             holes.astype(np.uint8),
             connectivity=8,
@@ -278,8 +280,6 @@ def recheck_visual_element_holes(
         for label in range(1, count):
             hole = labels == label
             hole_area = int(np.count_nonzero(hole))
-            if np.any(hole & owned):
-                continue
 
             semantic_coverage = float(np.count_nonzero(hole & element.semantic_mask))
             if semantic_coverage / max(hole_area, 1) >= 0.90:
