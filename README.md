@@ -16,15 +16,6 @@
 
 ## 效果演示
 
-```
-输入图片
-  ├── 背景修复
-  ├── 前景组件拆分
-  └── OCR 文本重建
-        ├── 输出 .pptx：背景层 + 前景图片层 + 可编辑文本框
-        └── 输出 .psd：背景层 + 前景像素层 + Photoshop 文本图层
-```
-
 > 输入图片 | 也可输入多张
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
@@ -145,15 +136,14 @@ export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 **方式一：使用 skills CLI**
 
 ```bash
-npx skills add DSY-Xueai/image2editable --skill image-to-ppt
-npx skills add DSY-Xueai/image2editable --skill image-to-psd
+npx skills add DSY-Xueai/image2editable --skill <skill_name>
 ```
+把 <skill_name> 换成要安装的 skill 目录名，例如 image-to-ppt。
 
 **方式二：让 Agent 自动安装**
 
 ```text
-请从 https://github.com/DSY-Xueai/image2editable 安装 image-to-ppt skill。
-请从 https://github.com/DSY-Xueai/image2editable 安装 image-to-psd skill。
+请从 https://github.com/DSY-Xueai/image2editable 安装 <skill_name> skill。
 ```
 
 **方式三：Claude Code plugin**
@@ -168,11 +158,10 @@ claude plugin install image2editable@image2editable --scope user
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
 mkdir -p ~/.claude/skills
-cp -R image2editable/skills/image-to-ppt ~/.claude/skills/image-to-ppt
-cp -R image2editable/skills/image-to-psd ~/.claude/skills/image-to-psd
+cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 ```
 
-### 命令行
+### 命令行运行
 
 ```bash
 # 单张图片 → PPTX
@@ -200,20 +189,6 @@ python image_to_psd.py ./my_slides/ -o psd_output_dir
 python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
 ```
 
-### Python API
-
-```python
-from image_to_ppt import convert as convert_to_ppt
-from image_to_ppt import convert_batch as convert_batch_to_ppt
-from image_to_psd import convert as convert_to_psd
-from image_to_psd import convert_batch as convert_batch_to_psd
-
-convert_to_ppt("input.png", output_path="output.pptx")
-convert_batch_to_ppt(["img1.png", "img2.png"], output_path="slides.pptx")
-
-convert_to_psd("input.png", output_path="output.psd")
-convert_batch_to_psd(["img1.png", "img2.png"], output_path="psd_output_dir")
-```
 
 ### 参数说明
 
