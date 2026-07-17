@@ -125,17 +125,72 @@ def build_clean_background(
     img: np.ndarray,
     element_masks: list[np.ndarray],
     text_mask: np.ndarray,
+    large_inpainter=None,
 ) -> np.ndarray:
     """Remove visual elements and text from an image."""
+    removal = build_removal_mask(element_masks, text_mask)
+    return repair_masked_background(img, removal, large_inpainter)
+
+
+def build_removal_mask(
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Combine visual-element and text masks for background repair."""
     removal = (text_mask > 0).astype(np.uint8) * 255
     for mask in element_masks:
         removal[np.asarray(mask, dtype=bool)] = 255
-    removal = cv2.dilate(
+    return cv2.dilate(
         removal,
         np.ones((5, 5), dtype=np.uint8),
         iterations=1,
     )
-    return _inpaint(img, removal)
+
+
+def needs_large_mask_inpaint(mask: np.ndarray) -> bool:
+    """Return whether a mask is too large or deep for local OpenCV inpainting."""
+    binary = (np.asarray(mask) > 0).astype(np.uint8)
+    if not np.any(binary):
+        return False
+
+    h, w = binary.shape
+    mask_ratio = np.count_nonzero(binary) / binary.size
+    depth = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    max_depth_ratio = float(depth.max()) / np.hypot(h, w)
+    return mask_ratio > 0.08 or max_depth_ratio > 0.015
+
+
+def repair_masked_background(
+    image: np.ndarray,
+    mask: np.ndarray,
+    large_inpainter=None,
+) -> np.ndarray:
+    """Repair a mask with OpenCV or LaMa according to its scale."""
+    source = np.asarray(image)
+    binary = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if binary.shape != source.shape[:2]:
+        raise ValueError("mask must match the image height and width")
+    if not np.any(binary):
+        return source.copy()
+
+    if needs_large_mask_inpaint(binary):
+        if large_inpainter is None:
+            from scripts.lama_inpaint import inpaint_large_mask
+
+            large_inpainter = inpaint_large_mask
+        repaired = large_inpainter(source, binary)
+    else:
+        repaired = _inpaint(source, binary)
+
+    repaired = np.asarray(repaired)
+    if repaired.shape != source.shape:
+        raise ValueError(
+            f"inpaint output shape {repaired.shape} does not match {source.shape}"
+        )
+
+    output = repaired.astype(np.uint8, copy=True)
+    output[binary == 0] = source[binary == 0]
+    return output
 
 
 def build_text_only_background(
