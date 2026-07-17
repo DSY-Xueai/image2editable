@@ -397,6 +397,9 @@ def convert_variants(
     output_path: str | Path | None = None,
     lang: str = "ch",
     add_reference: bool = False,
+    bg_period: int = 32,
+    diff_threshold: float = 20.0,
+    min_component_area: int = 20,
 ) -> dict[str, str]:
     original_output, widescreen_output = _variant_output_paths(
         image_path,
@@ -474,6 +477,9 @@ def convert_batch_variants(
     lang: str = "ch",
     add_reference: bool = False,
     include_widescreen: bool = True,
+    bg_period: int = 32,
+    diff_threshold: float = 20.0,
+    min_component_area: int = 20,
 ) -> dict[str, str | list[str] | None]:
     slides_data = _prepare_multiple_images(image_paths, lang)
     source_paths = [
@@ -632,6 +638,9 @@ def main() -> None:
             output_path=args.output,
             lang=args.lang,
             add_reference=add_reference,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
         )
     elif len(image_files) == 1:
         convert(
@@ -650,6 +659,9 @@ def main() -> None:
             output_path=args.output,
             lang=args.lang,
             add_reference=add_reference,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
         )
     elif args.slide_size == "original":
         convert_batch_variants(
@@ -658,6 +670,9 @@ def main() -> None:
             lang=args.lang,
             add_reference=add_reference,
             include_widescreen=False,
+            bg_period=args.period,
+            diff_threshold=args.diff_threshold,
+            min_component_area=args.min_area,
         )
     else:
         convert_batch(
