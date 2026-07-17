@@ -4,7 +4,7 @@
 
 **图片 → 可编辑 PPTX / 分层 PSD**
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)]()
 
@@ -41,7 +41,7 @@
 
 ### 环境要求
 
-- Python 3.10+
+- Python 3.10–3.12（上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束）
 - `torch>=2.5.1`、`torchvision>=0.20.1`、`transformers>=4.40.0`、`simple-lama-inpainting==0.1.2`
 - SAM 官方推荐 Linux/WSL；Windows 建议使用 WSL
 - OCR 引擎至少安装一个
@@ -214,7 +214,7 @@ python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `images` | （必填） | 图片文件、多个图片文件、或目录路径；目录只扫描第一层图片 |
-| `-o, --output` | 输入同名输出 | PPTX 为文件路径；PSD 单图可为文件路径，多图为输出目录 |
+| `-o, --output` | 输入同名输出 | PPTX：`original` / `16:9` 单模式为文件路径，默认 `both` 时为输出基名；PSD 单图可为文件路径，多图为输出目录 |
 | `--lang` | `ch` | OCR 语言，常用 `ch` / `en` |
 | `--period` | `32` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：背景建模瓦片周期 |
 | `--diff-threshold` | `20.0` | PPTX：仅为兼容保留，strict SAM 管线忽略；PSD：前景检测阈值 |
