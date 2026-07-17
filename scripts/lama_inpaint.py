@@ -69,10 +69,17 @@ def inpaint_large_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
             f"LaMa returned shape {repaired.shape}, expected {source.shape}."
         )
     source_height, source_width = source.shape[:2]
-    if repaired.shape[0] < source_height or repaired.shape[1] < source_width:
+    padded_height = ((source_height + 7) // 8) * 8
+    padded_width = ((source_width + 7) // 8) * 8
+    actual_spatial = repaired.shape[:2]
+    allowed_spatial = (
+        (source_height, source_width),
+        (padded_height, padded_width),
+    )
+    if actual_spatial not in allowed_spatial:
         raise LargeMaskInpaintError(
-            f"LaMa returned smaller shape {repaired.shape}, expected at least "
-            f"{source.shape}."
+            f"LaMa returned invalid spatial shape: actual={actual_spatial}, "
+            f"allowed={allowed_spatial}."
         )
     repaired = repaired[:source_height, :source_width]
     if repaired.shape != source.shape:
