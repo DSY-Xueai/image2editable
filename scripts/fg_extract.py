@@ -23,6 +23,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+
+class ComponentExtractionError(RuntimeError):
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -168,6 +173,7 @@ def export_visual_components(
     output_dir: str | Path,
     text_mask: np.ndarray,
     padding: int = 3,
+    semantic_masks: list[np.ndarray] | None = None,
 ) -> list[dict]:
     """Export each visual element as an independent transparent PNG."""
     output_dir = Path(output_dir)
@@ -182,19 +188,44 @@ def export_visual_components(
     )
     text_clean_img = _repair_component_rgb(img, text_removal)
     ownership_masks = [np.asarray(mask, dtype=bool) for mask in element_masks]
+    if any(mask.shape != (img_h, img_w) for mask in ownership_masks):
+        raise ValueError("element mask shape must match image")
+    semantic_masks = ownership_masks if semantic_masks is None else [
+        np.asarray(mask, dtype=bool) for mask in semantic_masks
+    ]
+    if len(semantic_masks) != len(ownership_masks):
+        raise ValueError("semantic mask count must match element mask count")
+    if any(mask.shape != (img_h, img_w) for mask in semantic_masks):
+        raise ValueError("semantic mask shape must match image")
+    owned_union = (
+        np.logical_or.reduce(ownership_masks)
+        if ownership_masks
+        else np.zeros((img_h, img_w), dtype=bool)
+    )
     assigned_hole_repairs = _assign_text_hole_repairs(
         ownership_masks, text_ink, text_mask
     )
 
     components: list[dict] = []
 
-    for index, ownership_mask in enumerate(ownership_masks, start=1):
+    for position, ownership_mask in enumerate(ownership_masks):
         refined = _refine_visual_mask(img, ownership_mask)
+        occupied_by_other = owned_union & ~ownership_mask
+        refined = _restore_supported_holes(
+            refined,
+            semantic_masks[position],
+            occupied_by_other,
+        )
+        unsupported_holes = _remove_border_connected(~refined) & ownership_mask
+        if np.any(unsupported_holes):
+            raise ComponentExtractionError(
+                f"component {position + 1} still has unsupported internal holes"
+            )
         area = int(np.count_nonzero(refined))
         if area == 0:
             continue
 
-        alpha_mask = refined | assigned_hole_repairs[index - 1]
+        alpha_mask = refined | assigned_hole_repairs[position]
         ys, xs = np.where(alpha_mask)
         x1 = max(0, int(xs.min()) - padding)
         y1 = max(0, int(ys.min()) - padding)
@@ -206,7 +237,7 @@ def export_visual_components(
         alpha = _soft_alpha(local_mask)
         rgba = np.dstack([rgb, alpha])
 
-        component_path = output_dir / f"component_{index:04d}.png"
+        component_path = output_dir / f"component_{position + 1:04d}.png"
         Image.fromarray(rgba.astype(np.uint8)).save(str(component_path))
         components.append({
             "path": str(component_path),
@@ -215,10 +246,29 @@ def export_visual_components(
             "w": x2 - x1,
             "h": y2 - y1,
             "area": area,
-            "z_index": index - 1,
+            "z_index": position,
         })
 
     return components
+
+
+def _restore_supported_holes(
+    refined: np.ndarray,
+    semantic: np.ndarray,
+    occupied_by_other: np.ndarray,
+) -> np.ndarray:
+    restored = np.asarray(refined, dtype=bool).copy()
+    holes = _remove_border_connected(~restored)
+    count, labels = cv2.connectedComponents(holes.astype(np.uint8), connectivity=8)
+    for label in range(1, count):
+        recoverable = (labels == label) & ~occupied_by_other
+        recoverable_area = int(np.count_nonzero(recoverable))
+        if recoverable_area == 0:
+            continue
+        supported = recoverable & semantic
+        if np.count_nonzero(supported) / recoverable_area >= 0.90:
+            restored |= supported
+    return restored
 
 
 def _assign_text_hole_repairs(
@@ -312,6 +362,7 @@ def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     refined_area = int(np.count_nonzero(refined))
     if refined_area == 0 or refined_area < original_area * 0.5:
         return original
+    refined |= eroded > 0
     return refined
 
 

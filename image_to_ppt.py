@@ -47,6 +47,7 @@ from scripts.visual_segment import (
     generate_mask_candidates,
     generate_prompted_mask_candidates,
     reconcile_residual_candidates,
+    recheck_visual_element_holes,
     require_visual_quality,
     resolve_sam_checkpoint,
     resolve_visual_elements,
@@ -165,11 +166,17 @@ def _process_image(
             )
         candidates.extend(residual_candidates)
 
+    recheck_visual_element_holes(img, elements, mask_generator)
+    element_masks = [element.mask for element in elements]
+    semantic_masks = [element.semantic_mask for element in elements]
+    validate_visual_masks(element_masks)
+    clean_background = build_clean_background(img, element_masks, text_mask)
     components = export_visual_components(
         img,
         element_masks,
         work_dir / "components",
         text_mask,
+        semantic_masks=semantic_masks,
     )
     background_path = work_dir / "background.png"
     _save_rgb(
