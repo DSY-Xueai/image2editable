@@ -174,19 +174,37 @@ def export_visual_components(
     text_mask: np.ndarray,
     padding: int = 3,
     semantic_masks: list[np.ndarray] | None = None,
+    text_items: list[dict] | None = None,
+    text_clean_image: np.ndarray | None = None,
 ) -> list[dict]:
     """Export each visual element as an independent transparent PNG."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     img_h, img_w = img.shape[:2]
-    text_ink = _build_text_ink_mask(img, text_mask)
+    has_text_item_boxes = bool(text_items) and all(
+        "box" in item for item in text_items
+    )
+    text_ink = (
+        _build_text_ink_mask(img, text_mask)
+        if not has_text_item_boxes
+        else _build_text_ink_mask(img, text_mask, text_items=text_items)
+    )
     text_removal = cv2.dilate(
-        (text_mask > 0).astype(np.uint8) * 255,
+        (
+            text_ink
+            if has_text_item_boxes
+            else (text_mask > 0).astype(np.uint8) * 255
+        ),
         np.ones((3, 3), dtype=np.uint8),
         iterations=1,
     )
-    text_clean_img = _repair_component_rgb(img, text_removal)
+    if text_clean_image is None:
+        text_clean_img = _repair_component_rgb(img, text_removal)
+    else:
+        text_clean_img = np.asarray(text_clean_image, dtype=np.uint8)
+        if text_clean_img.shape != img.shape:
+            raise ValueError("text-clean image shape must match image")
     ownership_masks = [np.asarray(mask, dtype=bool) for mask in element_masks]
     if any(mask.shape != (img_h, img_w) for mask in ownership_masks):
         raise ValueError("element mask shape must match image")
@@ -203,7 +221,10 @@ def export_visual_components(
         else np.zeros((img_h, img_w), dtype=bool)
     )
     assigned_hole_repairs = _assign_text_hole_repairs(
-        ownership_masks, text_ink, text_mask
+        ownership_masks,
+        text_ink,
+        text_mask,
+        semantic_masks=semantic_masks,
     )
 
     components: list[dict] = []
@@ -222,11 +243,19 @@ def export_visual_components(
             raise ComponentExtractionError(
                 f"component {position + 1} still has unsupported internal holes"
             )
-        area = int(np.count_nonzero(refined))
+        semantic_underlay = (
+            _remove_border_connected(~ownership_mask)
+            & semantic_masks[position]
+        )
+        alpha_mask = (
+            refined
+            | assigned_hole_repairs[position]
+            | semantic_underlay
+        )
+        area = int(np.count_nonzero(alpha_mask))
         if area == 0:
             continue
 
-        alpha_mask = refined | assigned_hole_repairs[position]
         ys, xs = np.where(alpha_mask)
         x1 = max(0, int(xs.min()) - padding)
         y1 = max(0, int(ys.min()) - padding)
@@ -235,6 +264,13 @@ def export_visual_components(
 
         local_mask = alpha_mask[y1:y2, x1:x2]
         rgb = text_clean_img[y1:y2, x1:x2].copy()
+        local_underlay = semantic_underlay[y1:y2, x1:x2]
+        if np.any(local_underlay):
+            rgb = _fill_component_underlay(
+                rgb,
+                local_underlay,
+                refined[y1:y2, x1:x2],
+            )
         alpha = _soft_alpha(local_mask)
         rgba = np.dstack([rgb, alpha])
 
@@ -284,12 +320,15 @@ def _assign_text_hole_repairs(
     ownership_masks: list[np.ndarray],
     text_ink: np.ndarray,
     text_mask: np.ndarray,
+    semantic_masks: list[np.ndarray] | None = None,
 ) -> list[np.ndarray]:
     """Assign each removed glyph hole to the nearest underlying visual element."""
     if not ownership_masks:
         return []
+    semantic_masks = ownership_masks if semantic_masks is None else semantic_masks
     owned_union = np.logical_or.reduce(ownership_masks)
     unowned_text_ink = (text_ink > 0) & ~owned_union
+    unowned_text_region = (text_mask > 0) & ~owned_union
     claimed_holes = np.zeros(text_mask.shape, dtype=bool)
     repairs = [np.zeros(text_mask.shape, dtype=bool) for _ in ownership_masks]
     for position in reversed(range(len(ownership_masks))):
@@ -301,23 +340,163 @@ def _assign_text_hole_repairs(
             ownership_mask, relevant_text
         )
         enclosed_holes = _remove_border_connected(~ownership_mask)
-        repair = (
-            unowned_text_ink
-            & (nearby_holes | enclosed_holes)
-            & ~claimed_holes
+        relevant_region = _filter_text_ink_over_components(
+            ownership_mask,
+            text_mask,
+            text_mask,
         )
+        supported_region = (
+            (relevant_region > 0)
+            & semantic_masks[position]
+            & unowned_text_region
+        )
+        supported_region = _solidify_text_repairs(
+            supported_region,
+            semantic_masks[position],
+            relevant_region,
+        )
+        repair = (
+            (
+                unowned_text_ink
+                & (nearby_holes | enclosed_holes)
+            )
+            | supported_region
+        ) & ~claimed_holes
         repairs[position] = repair
         claimed_holes |= repair
     return repairs
+
+
+def _solidify_text_repairs(
+    repair_seed: np.ndarray,
+    semantic_mask: np.ndarray,
+    text_regions: np.ndarray,
+) -> np.ndarray:
+    """Replace glyph-shaped alpha repairs with solid semantic underlays."""
+    solid = np.zeros(repair_seed.shape, dtype=bool)
+    count, labels, _, _ = cv2.connectedComponentsWithStats(
+        (text_regions > 0).astype(np.uint8),
+        connectivity=8,
+    )
+    for label in range(1, count):
+        region_seed = repair_seed & (labels == label)
+        if not np.any(region_seed):
+            continue
+        ys, xs = np.where(region_seed)
+        x = int(xs.min())
+        y = int(ys.min())
+        width = int(xs.max()) + 1 - x
+        height = int(ys.max()) + 1 - y
+        solid[y:y + height, x:x + width] |= semantic_mask[
+            y:y + height,
+            x:x + width,
+        ]
+    return solid
+
+
+def _fill_component_underlay(
+    crop_rgb: np.ndarray,
+    repair_mask: np.ndarray,
+    donor_mask: np.ndarray,
+) -> np.ndarray:
+    """Fill hidden pixels from the nearest visible pixel of the same component."""
+    repair_mask = np.asarray(repair_mask, dtype=bool)
+    donor_mask = np.asarray(donor_mask, dtype=bool) & ~repair_mask
+    if not np.any(repair_mask) or not np.any(donor_mask):
+        return crop_rgb
+    _, labels = cv2.distanceTransformWithLabels(
+        (~donor_mask).astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    donor_colors = crop_rgb[donor_mask]
+    filled = crop_rgb.copy()
+    filled[repair_mask] = donor_colors[labels[repair_mask] - 1]
+    return filled
 
 
 def repair_exported_component_text(
     components: list[dict],
     text_mask: np.ndarray,
     source_rgb: np.ndarray,
+    text_items: list[dict] | None = None,
+    cleaned_rgb: np.ndarray | None = None,
 ) -> None:
     """Inpaint OCR-detected raster text that remains in exported RGBA layers."""
-    text_ink = _build_text_ink_mask(source_rgb, text_mask)
+    if cleaned_rgb is not None and text_items:
+        cleaned_rgb = np.asarray(cleaned_rgb, dtype=np.uint8)
+        if cleaned_rgb.shape != source_rgb.shape:
+            raise ValueError("cleaned RGB image shape must match source RGB image")
+        loaded = []
+        for position, component in enumerate(components):
+            with Image.open(component["path"]) as image:
+                rgba = np.asarray(image.convert("RGBA")).copy()
+            alpha_support = rgba[:, :, 3] > 0
+            alpha_support |= _remove_border_connected(~alpha_support)
+            loaded.append((component, rgba, alpha_support, position))
+
+        for item in text_items:
+            box_x, box_y, box_width, box_height = (
+                int(value) for value in item["box"]
+            )
+            box_x2 = box_x + box_width
+            box_y2 = box_y + box_height
+            best = None
+            for component, rgba, alpha_support, position in loaded:
+                x = int(component["x"])
+                y = int(component["y"])
+                x1 = max(x, box_x)
+                y1 = max(y, box_y)
+                x2 = min(x + rgba.shape[1], box_x2)
+                y2 = min(y + rgba.shape[0], box_y2)
+                if x1 >= x2 or y1 >= y2:
+                    continue
+                alpha = rgba[y1 - y:y2 - y, x1 - x:x2 - x, 3]
+                overlap = int(np.count_nonzero(alpha))
+                score = (overlap, int(component.get("z_index", position)))
+                if overlap and (best is None or score > best[0]):
+                    best = (
+                        score,
+                        component,
+                        rgba,
+                        alpha_support,
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                    )
+            if best is None:
+                continue
+            _, component, rgba, alpha_support, x1, y1, x2, y2 = best
+            x = int(component["x"])
+            y = int(component["y"])
+            region = rgba[y1 - y:y2 - y, x1 - x:x2 - x]
+            local_support = alpha_support[y1 - y:y2 - y, x1 - x:x2 - x]
+            region[local_support, :3] = cleaned_rgb[y1:y2, x1:x2][local_support]
+            region[local_support, 3] = 255
+
+        for component, rgba, _, _ in loaded:
+            Image.fromarray(rgba, "RGBA").save(component["path"])
+        return
+
+    has_text_item_boxes = bool(text_items) and all(
+        "box" in item for item in text_items
+    )
+    text_ink = (
+        _build_text_ink_mask(source_rgb, text_mask)
+        if not has_text_item_boxes
+        else _build_text_ink_mask(
+            source_rgb,
+            text_mask,
+            text_items=text_items,
+        )
+    )
+    text_ink = cv2.dilate(
+        text_ink,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
     image_height, image_width = text_mask.shape
     for component in components:
         path = Path(component["path"])
@@ -615,20 +794,38 @@ def _repair_component_rgb(crop_rgb: np.ndarray, repair_mask: np.ndarray) -> np.n
 # ---------------------------------------------------------------------------
 
 
-def _build_text_ink_mask(img: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+def _build_text_ink_mask(
+    img: np.ndarray,
+    text_mask: np.ndarray,
+    text_items: list[dict] | None = None,
+) -> np.ndarray:
     """Estimate actual glyph pixels inside OCR boxes."""
     ink_mask = np.zeros(text_mask.shape, dtype=np.uint8)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        (text_mask > 0).astype(np.uint8), connectivity=8
-    )
-
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    if text_items and any("box" not in item for item in text_items):
+        text_items = None
+    if text_items is None:
+        count, _, stats, _ = cv2.connectedComponentsWithStats(
+            (text_mask > 0).astype(np.uint8), connectivity=8
+        )
+        regions = [
+            (*tuple(int(value) for value in stats[i, :4]), None)
+            for i in range(1, count)
+        ]
+    else:
+        regions = [
+            (
+                *tuple(int(value) for value in item["box"]),
+                item.get("color"),
+            )
+            for item in text_items
+        ]
 
-    for i in range(1, num_labels):
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
+    for x, y, w, h, color in regions:
+        x = max(0, x)
+        y = max(0, y)
+        w = min(gray.shape[1] - x, w)
+        h = min(gray.shape[0] - y, h)
         if w < 3 or h < 3:
             continue
 
@@ -639,7 +836,19 @@ def _build_text_ink_mask(img: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
         thresh, _ = cv2.threshold(
             region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
-        ink = _select_text_ink(region, float(thresh))
+        ink = None
+        if isinstance(color, str) and len(color) == 7 and color.startswith("#"):
+            target = np.asarray(
+                [int(color[index:index + 2], 16) for index in (1, 3, 5)],
+                dtype=np.float32,
+            )
+            rgb_region = img[y:y + h, x:x + w].astype(np.float32)
+            color_match = np.linalg.norm(rgb_region - target, axis=2) <= 45.0
+            isolated_match = _remove_border_connected(color_match)
+            if np.count_nonzero(isolated_match) >= 4:
+                ink = isolated_match
+        if ink is None:
+            ink = _select_text_ink(region, float(thresh))
 
         ink_uint8 = ink.astype(np.uint8) * 255
         ink_uint8 = cv2.dilate(ink_uint8, np.ones((3, 3), np.uint8), iterations=1)

@@ -37,6 +37,7 @@ from scripts.fg_extract import (
     export_visual_components,
     repair_exported_component_text,
 )
+from scripts.lama_inpaint import inpaint_large_mask
 from scripts.object_detect import (
     create_object_detector,
     filter_text_overlapping_proposals,
@@ -71,6 +72,58 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 # ---------------------------------------------------------------------------
 
 
+def _build_text_item_removal_mask(
+    shape: tuple[int, int],
+    text_items: list[dict],
+    padding: int = 2,
+) -> np.ndarray:
+    height, width = shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for item in text_items:
+        x, y, box_width, box_height = (int(value) for value in item["box"])
+        x1 = max(0, x - padding)
+        y1 = max(0, y - padding)
+        x2 = min(width, x + box_width + padding)
+        y2 = min(height, y + box_height + padding)
+        mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def _interpolate_text_item_boxes(
+    image: np.ndarray,
+    text_items: list[dict],
+    padding: int = 4,
+) -> np.ndarray:
+    repaired = np.asarray(image, dtype=np.float32).copy()
+    height, width = repaired.shape[:2]
+    for item in text_items:
+        x, y, box_width, box_height = (int(value) for value in item["box"])
+        x1 = max(1, x - padding)
+        y1 = max(1, y - padding)
+        x2 = min(width - 1, x + box_width + padding)
+        y2 = min(height - 1, y + box_height + padding)
+        if x1 >= x2 or y1 >= y2:
+            continue
+        region_width = x2 - x1
+        region_height = y2 - y1
+        horizontal_weight = np.linspace(
+            0.0, 1.0, region_width, dtype=np.float32
+        )[None, :, None]
+        horizontal = (
+            repaired[y1:y2, x1 - 1][:, None] * (1.0 - horizontal_weight)
+            + repaired[y1:y2, x2][:, None] * horizontal_weight
+        )
+        vertical_weight = np.linspace(
+            0.0, 1.0, region_height, dtype=np.float32
+        )[:, None, None]
+        vertical = (
+            repaired[y1 - 1, x1:x2][None] * (1.0 - vertical_weight)
+            + repaired[y2, x1:x2][None] * vertical_weight
+        )
+        repaired[y1:y2, x1:x2] = (horizontal + vertical) * 0.5
+    return np.clip(repaired, 0, 255).astype(np.uint8)
+
+
 def _compose_exported_components(
     clean_background: np.ndarray,
     components: list[dict],
@@ -100,6 +153,15 @@ def _process_image(
     img_h, img_w = img.shape[:2]
     text_items, text_mask = detect_text(image_path, lang=lang)
     text_ink_mask = _build_text_ink_mask(img, text_mask)
+    valid_text_items = bool(text_items) and all(
+        "box" in item for item in text_items
+    )
+    text_clean_image = None
+    if valid_text_items:
+        text_clean_image = inpaint_large_mask(
+            img,
+            _build_text_item_removal_mask(img.shape[:2], text_items),
+        )
 
     proposals = filter_text_overlapping_proposals(
         generate_object_proposals(img, object_detector), text_mask
@@ -176,12 +238,16 @@ def _process_image(
     semantic_masks = [element.semantic_mask for element in elements]
     validate_visual_masks(element_masks)
     clean_background = build_clean_background(img, element_masks, text_mask)
+    export_kwargs = {"semantic_masks": semantic_masks}
+    if valid_text_items:
+        export_kwargs["text_items"] = text_items
+        export_kwargs["text_clean_image"] = text_clean_image
     components = export_visual_components(
         img,
         element_masks,
         work_dir / "components",
         text_mask,
-        semantic_masks=semantic_masks,
+        **export_kwargs,
     )
     background_original_path = work_dir / "background-original.png"
     background_widescreen_path = work_dir / "background-16x9.png"
@@ -205,7 +271,18 @@ def _process_image(
 
     raster_text_items, raster_text_mask = detect_text(visual_only_path, lang=lang)
     if raster_text_items:
-        repair_exported_component_text(components, raster_text_mask, visual_only)
+        repair_kwargs = {"text_items": raster_text_items}
+        if all("box" in item for item in raster_text_items):
+            repair_kwargs["cleaned_rgb"] = _interpolate_text_item_boxes(
+                visual_only,
+                raster_text_items,
+            )
+        repair_exported_component_text(
+            components,
+            raster_text_mask,
+            visual_only,
+            **repair_kwargs,
+        )
         visual_only = _compose_exported_components(clean_background, components)
         _save_rgb(str(visual_only_path), visual_only)
         raster_text_items, _ = detect_text(visual_only_path, lang=lang)
