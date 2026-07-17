@@ -248,8 +248,15 @@ def _resolve_image_path(image_path: str | Path) -> Path:
     resolved = Path(image_path).resolve()
     if not resolved.exists():
         raise FileNotFoundError(f"Image not found: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"Image path is not a file: {resolved}")
     if resolved.suffix.lower() not in IMAGE_EXTENSIONS:
         raise ValueError(f"Unsupported image format: {resolved.suffix.lower()}")
+    try:
+        with Image.open(resolved) as probe:
+            probe.load()
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot decode image: {resolved}") from exc
     return resolved
 
 
