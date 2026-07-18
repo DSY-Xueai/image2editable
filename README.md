@@ -226,3 +226,7 @@ image2editable/
 ## 支持的图片格式
 
 PNG · JPG / JPEG · BMP · TIFF / TIF · WebP
+
+## LICENES
+
+MIT
