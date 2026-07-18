@@ -57,7 +57,7 @@ pip install -r requirements.txt
 
 ### 模型与首次运行
 
-PPTX 转换使用 Grounding DINO、SAM 2.1 和 LaMa。模型文件在首次运行时下载到用户本地缓存，仓库不包含模型权重；程序优先使用可用的 CUDA，也支持速度较慢的 CPU 运行。`LAMA_MODEL` 可用于指定本地 LaMa TorchScript 模型。
+PPTX 转换依赖 Grounding DINO、SAM 2.1 和 LaMa。首次运行会自动下载所需模型到本地缓存，本仓库不包含模型权重。运行时会优先使用 CUDA，也支持 CPU；CPU 模式速度会明显慢一些。已有本地 LaMa TorchScript 模型时，可通过 `LAMA_MODEL` 指定模型路径。
 
 ### OCR 引擎
 
@@ -87,7 +87,7 @@ set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
-项目代码以 MIT License 发布。Aspose.PSD 是受其官方 EULA 和授权约束的商业依赖；其他第三方来源与许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，论文引用见 [CITATION.cff](CITATION.cff)。
+Aspose.PSD 是商业组件，使用前请确认已获得符合官方 EULA 的授权。其他第三方依赖及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，论文引用信息见 [CITATION.cff](CITATION.cff)。
 
 ---
 
