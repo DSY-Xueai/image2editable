@@ -1,7 +1,6 @@
 ---
 name: image-to-psd
 description: 将一张或多张图片转换为分层 PSD 文件。自动完成 OCR 文本识别、背景建模修复、前景组件拆分，并使用 Aspose.PSD 生成 Photoshop 文本图层。当用户需要把截图、设计稿、幻灯片图片还原为可在 Photoshop 中编辑的分层 PSD 时使用此 skill。
-version: 1.0.0
 ---
 
 # Image to PSD

@@ -14,6 +14,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+skill_root = str(Path(__file__).resolve().parents[1])
+if skill_root not in sys.path:
+    sys.path.insert(0, skill_root)
+
 from image_to_ppt import (
     IMAGE_EXTENSIONS,
     _load_rgb,
