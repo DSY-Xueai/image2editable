@@ -2,6 +2,8 @@
 
 # image2editable
 
+中文 | [English](README_EN.md)
+
 **图片 → 可编辑 PPTX / 分层 PSD**
 
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue)](https://www.python.org/)
