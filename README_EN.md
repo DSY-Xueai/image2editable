@@ -22,6 +22,8 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
 > In the PPTX output, foreground elements can be moved and text boxes can be edited.
+>
+> For the best visual results in a 16:9 PPT, using a 16:9 input image is recommended.
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
 
 ---

@@ -22,6 +22,8 @@
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
 > PPTX 输出中，前景元素可移动，文本框可编辑。
+>
+> 为获得最佳的 16:9 PPT 视觉效果，建议输入图片采用 16:9 比例。
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
 
 ---
