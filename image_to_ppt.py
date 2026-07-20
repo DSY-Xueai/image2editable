@@ -30,7 +30,7 @@ from PIL import Image
 from scripts.bg_model import (
     build_clean_background,
     build_removal_mask,
-    extend_background_to_widescreen,
+    build_widescreen_background,
 )
 from scripts.fg_extract import (
     _build_text_ink_mask,
@@ -254,10 +254,17 @@ def _process_image(
     background_removal_mask_path = work_dir / "background-removal-mask.png"
     background_difference_path = work_dir / "background-difference.png"
     _save_rgb(str(background_original_path), clean_background)
-    _save_rgb(
-        str(background_widescreen_path),
-        extend_background_to_widescreen(clean_background, 1920, 1080),
-    )
+    (
+        widescreen_background,
+        content_offset_x,
+        content_offset_y,
+        widescreen_background_method,
+    ) = build_widescreen_background(clean_background)
+    canvas_height, canvas_width = widescreen_background.shape[:2]
+    if widescreen_background_method == "identity":
+        background_widescreen_path = background_original_path
+    else:
+        _save_rgb(str(background_widescreen_path), widescreen_background)
     removal_mask = build_removal_mask(element_masks, text_mask)
     Image.fromarray(removal_mask, mode="L").save(background_removal_mask_path)
     _save_rgb(
@@ -316,6 +323,11 @@ def _process_image(
         "text_items": text_items,
         "img_width": img_w,
         "img_height": img_h,
+        "canvas_width": canvas_width,
+        "canvas_height": canvas_height,
+        "content_offset_x": content_offset_x,
+        "content_offset_y": content_offset_y,
+        "widescreen_background_method": widescreen_background_method,
         "original_image_path": str(image_path),
         "quality": quality,
     }
@@ -413,6 +425,7 @@ def _assemble_prepared_slide(
         if slide_size == "original"
         else "background_widescreen_path"
     )
+    use_canvas = slide_size == "16:9"
     return assemble_pptx(
         background_path=slide_data[background_key],
         components=slide_data["components"],
@@ -423,6 +436,10 @@ def _assemble_prepared_slide(
         add_reference_slide=add_reference,
         original_image_path=slide_data["original_image_path"],
         slide_size=slide_size,
+        canvas_width=slide_data.get("canvas_width") if use_canvas else None,
+        canvas_height=slide_data.get("canvas_height") if use_canvas else None,
+        content_offset_x=slide_data.get("content_offset_x", 0) if use_canvas else 0,
+        content_offset_y=slide_data.get("content_offset_y", 0) if use_canvas else 0,
     )
 
 

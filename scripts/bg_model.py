@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 
 import cv2
 import numpy as np
@@ -98,6 +99,332 @@ def extend_background_to_widescreen(
         offset_x:offset_x + contain_width,
     ] = contained
     return canvas
+
+
+def compute_widescreen_canvas(width: int, height: int) -> tuple[int, int, int, int]:
+    """Return the smallest centered integer 16:9 canvas containing the source."""
+    if width <= 0 or height <= 0:
+        raise ValueError("source dimensions must be positive")
+    units = max(math.ceil(width / 16), math.ceil(height / 9))
+    canvas_width = 16 * units
+    canvas_height = 9 * units
+    return (
+        canvas_width,
+        canvas_height,
+        (canvas_width - width) // 2,
+        (canvas_height - height) // 2,
+    )
+
+
+def _resize_cover(source: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Sample a centered cover with one uniform scale and no large intermediate."""
+    source_height, source_width = source.shape[:2]
+    scale = max(width / source_width, height / source_height)
+    transform = np.array(
+        (
+            (
+                scale,
+                0.0,
+                ((width - 1) - (source_width - 1) * scale) / 2.0,
+            ),
+            (
+                0.0,
+                scale,
+                ((height - 1) - (source_height - 1) * scale) / 2.0,
+            ),
+        ),
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        source,
+        transform,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def _build_ambient_backdrop(
+    source: np.ndarray,
+    canvas_width: int,
+    canvas_height: int,
+    offset_x: int,
+    offset_y: int,
+) -> np.ndarray:
+    """Build a soft decorative extension without repeating source objects."""
+    height, width = source.shape[:2]
+    canvas_ratio = canvas_width / canvas_height
+    work_short = min(256, canvas_width, canvas_height)
+    if canvas_width >= canvas_height:
+        work_height = work_short
+        work_width = max(1, int(round(work_short * canvas_ratio)))
+    else:
+        work_width = work_short
+        work_height = max(1, int(round(work_short / canvas_ratio)))
+    decorative = _resize_cover(source, work_width, work_height)
+    sigma = max(1.0, 0.025 * min(work_width, work_height))
+    decorative = cv2.GaussianBlur(decorative, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    decorative_float = decorative.astype(np.float32)
+    gray = cv2.cvtColor(decorative, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    decorative_float = decorative_float * 0.8 + gray[:, :, None] * 0.2
+    decorative = np.clip(
+        np.rint(decorative_float * 0.92), 0, 255
+    ).astype(np.uint8)
+    result = cv2.resize(
+        decorative, (canvas_width, canvas_height), interpolation=cv2.INTER_LINEAR
+    )
+
+    right_pad = canvas_width - offset_x - width
+    bottom_pad = canvas_height - offset_y - height
+    horizontal_extension = offset_x + right_pad
+    vertical_extension = offset_y + bottom_pad
+    x = np.arange(canvas_width, dtype=np.float32)[None, :]
+    dx = np.maximum(
+        np.maximum(offset_x - x, x - (offset_x + width - 1)), 0
+    )
+    for row_start in range(0, canvas_height, 64):
+        row_end = min(canvas_height, row_start + 64)
+        if horizontal_extension >= vertical_extension:
+            farthest = max(1, offset_x, right_pad)
+            ratio = np.broadcast_to(dx / farthest, (row_end - row_start, canvas_width))
+        else:
+            y = np.arange(row_start, row_end, dtype=np.float32)[:, None]
+            dy = np.maximum(
+                np.maximum(offset_y - y, y - (offset_y + height - 1)), 0
+            )
+            farthest = max(1, offset_y, bottom_pad)
+            ratio = np.broadcast_to(dy / farthest, (row_end - row_start, canvas_width))
+        values = result[row_start:row_end].astype(np.float32)
+        values *= (1.0 - 0.08 * np.clip(ratio, 0, 1))[:, :, None]
+        result[row_start:row_end] = np.clip(np.rint(values), 0, 255).astype(np.uint8)
+
+    band_limit = min(64, max(4, int(round(min(canvas_width, canvas_height) * 0.02))))
+
+    def lowpass(edge: np.ndarray) -> np.ndarray:
+        length = edge.shape[0]
+        edge_sigma = max(1.0, min(12.0, length * 0.025))
+        shaped = edge[:, None, :].astype(np.float32)
+        blurred = cv2.GaussianBlur(
+            shaped,
+            (0, 0),
+            sigmaX=1.0,
+            sigmaY=edge_sigma,
+        )[:, 0]
+        return blurred
+
+    def smooth_weights(depth: int) -> np.ndarray:
+        if depth <= 0:
+            return np.empty(0, dtype=np.float32)
+        value = 1.0 - np.arange(1, depth + 1, dtype=np.float32) / (depth + 1)
+        return value * value * (3.0 - 2.0 * value)
+
+    source_x2 = offset_x + width
+    source_y2 = offset_y + height
+
+    def blend_vertical_side(pad: int, seam_x: int, step: int, source_edge: np.ndarray) -> None:
+        depth = min(pad, band_limit) - 1
+        if depth <= 0:
+            return
+        columns = seam_x + step * np.arange(1, depth + 1)
+        ambient_edge = result[offset_y:source_y2, columns[0]]
+        delta = np.clip(
+            lowpass(source_edge) - lowpass(ambient_edge), -48, 48
+        )
+        weights = smooth_weights(depth)
+        strip = result[offset_y:source_y2, columns].astype(np.float32)
+        strip += delta[:, None, :] * weights[None, :, None]
+        result[offset_y:source_y2, columns] = np.clip(
+            np.rint(strip), 0, 255
+        ).astype(np.uint8)
+
+    def blend_horizontal_side(pad: int, seam_y: int, step: int, source_edge: np.ndarray) -> None:
+        depth = min(pad, band_limit) - 1
+        if depth <= 0:
+            return
+        rows = seam_y + step * np.arange(1, depth + 1)
+        ambient_edge = result[rows[0], offset_x:source_x2]
+        delta = np.clip(
+            lowpass(source_edge) - lowpass(ambient_edge), -48, 48
+        )
+        weights = smooth_weights(depth)
+        strip = result[rows, offset_x:source_x2].astype(np.float32)
+        strip += delta[None, :, :] * weights[:, None, None]
+        result[rows, offset_x:source_x2] = np.clip(
+            np.rint(strip), 0, 255
+        ).astype(np.uint8)
+
+    blend_vertical_side(offset_x, offset_x - 1, -1, source[:, 0])
+    blend_vertical_side(right_pad, source_x2, 1, source[:, -1])
+    blend_horizontal_side(offset_y, offset_y - 1, -1, source[0])
+    blend_horizontal_side(bottom_pad, source_y2, 1, source[-1])
+
+    if offset_x:
+        result[offset_y:source_y2, offset_x - 1] = source[:, 0]
+    if right_pad:
+        result[offset_y:source_y2, source_x2] = source[:, -1]
+    if offset_y:
+        result[offset_y - 1, offset_x:source_x2] = source[0]
+    if bottom_pad:
+        result[source_y2, offset_x:source_x2] = source[-1]
+    if offset_x and offset_y:
+        result[offset_y - 1, offset_x - 1] = source[0, 0]
+    if right_pad and offset_y:
+        result[offset_y - 1, source_x2] = source[0, -1]
+    if offset_x and bottom_pad:
+        result[source_y2, offset_x - 1] = source[-1, 0]
+    if right_pad and bottom_pad:
+        result[source_y2, source_x2] = source[-1, -1]
+    result[offset_y:offset_y + height, offset_x:offset_x + width] = source
+    return np.ascontiguousarray(result)
+
+
+def _outpaint_in_stages(
+    source: np.ndarray,
+    canvas_width: int,
+    canvas_height: int,
+    large_inpainter,
+) -> np.ndarray:
+    """Grow a centered source by at most 25% per axis in each inpaint pass."""
+    source_height, source_width = source.shape[:2]
+    current = source.copy()
+    current_width = source_width
+    current_height = source_height
+
+    while current_width < canvas_width or current_height < canvas_height:
+        if ((current_width < canvas_width and current_width < 4)
+                or (current_height < canvas_height and current_height < 4)):
+            raise ValueError("source axis is too small for a 25% outpaint stage")
+        next_width = min(canvas_width, current_width + max(1, current_width // 4))
+        next_height = min(canvas_height, current_height + max(1, current_height // 4))
+        current_source_x = (current_width - source_width) // 2
+        current_source_y = (current_height - source_height) // 2
+        next_source_x = (next_width - source_width) // 2
+        next_source_y = (next_height - source_height) // 2
+        left = next_source_x - current_source_x
+        top = next_source_y - current_source_y
+        seed = _build_ambient_backdrop(current, next_width, next_height, left, top)
+        mask = np.full((next_height, next_width), 255, dtype=np.uint8)
+        mask[top:top + current_height, left:left + current_width] = 0
+        candidate = large_inpainter(seed, mask)
+        if (not isinstance(candidate, np.ndarray)
+                or candidate.shape != seed.shape
+                or candidate.dtype != np.uint8):
+            raise ValueError("outpaint result must be a same-shape uint8 RGB array")
+        candidate = np.ascontiguousarray(candidate)
+        candidate[top:top + current_height, left:left + current_width] = current
+        if not _extension_quality_passes(candidate, current, left, top):
+            raise ValueError("outpaint stage failed extension quality checks")
+        current = candidate
+        current_width = next_width
+        current_height = next_height
+
+    return current
+
+
+def _extension_quality_passes(
+    candidate: np.ndarray,
+    source: np.ndarray,
+    offset_x: int,
+    offset_y: int,
+) -> bool:
+    """Reject extensions with broken seams, flat detail, or lost sharpness."""
+    source_height, source_width = source.shape[:2]
+    source_x2 = offset_x + source_width
+    source_y2 = offset_y + source_height
+    if not np.array_equal(candidate[offset_y:source_y2, offset_x:source_x2], source):
+        return False
+
+    def side_passes(new_region, new_seam, source_edge,
+                    new_strip, source_strip) -> bool:
+        difference = np.abs(
+            new_seam.astype(np.float32) - source_edge.astype(np.float32)
+        )
+        if difference.mean() > 18 or np.percentile(difference, 95) > 48:
+            return False
+        if np.std(source_edge.astype(np.float32)) >= 8 and np.std(new_region) < 3:
+            return False
+        source_gray = cv2.cvtColor(source_strip, cv2.COLOR_RGB2GRAY)
+        new_gray = cv2.cvtColor(new_strip, cv2.COLOR_RGB2GRAY)
+        source_detail = cv2.Laplacian(source_gray, cv2.CV_32F).var()
+        if source_detail >= 10:
+            new_detail = cv2.Laplacian(new_gray, cv2.CV_32F).var()
+            if new_detail / source_detail < 0.25:
+                return False
+        return True
+
+    checks = []
+    depth = min(32, source_height)
+    if offset_y:
+        checks.append((candidate[:offset_y, offset_x:source_x2],
+                       candidate[offset_y - 1, offset_x:source_x2], source[0],
+                       candidate[max(0, offset_y - 32):offset_y,
+                                 offset_x:source_x2],
+                       source[:depth]))
+    if source_y2 < candidate.shape[0]:
+        checks.append((candidate[source_y2:, offset_x:source_x2],
+                       candidate[source_y2, offset_x:source_x2], source[-1],
+                       candidate[source_y2:min(candidate.shape[0], source_y2 + 32),
+                                 offset_x:source_x2],
+                       source[-depth:]))
+    depth = min(32, source_width)
+    if offset_x:
+        checks.append((candidate[offset_y:source_y2, :offset_x],
+                       candidate[offset_y:source_y2, offset_x - 1], source[:, 0],
+                       candidate[offset_y:source_y2,
+                                 max(0, offset_x - 32):offset_x],
+                       source[:, :depth]))
+    if source_x2 < candidate.shape[1]:
+        checks.append((candidate[offset_y:source_y2, source_x2:],
+                       candidate[offset_y:source_y2, source_x2], source[:, -1],
+                       candidate[offset_y:source_y2,
+                                 source_x2:min(candidate.shape[1], source_x2 + 32)],
+                       source[:, -depth:]))
+    return all(side_passes(*check) for check in checks)
+
+
+def build_widescreen_background(
+    background: np.ndarray,
+    large_inpainter=None,
+) -> tuple[np.ndarray, int, int, str]:
+    """Create a lossless centered 16:9 background, preferring LaMa outpaint."""
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3 or source.dtype != np.uint8:
+        raise ValueError("background must be a uint8 RGB image")
+    height, width = source.shape[:2]
+    canvas_width, canvas_height, offset_x, offset_y = compute_widescreen_canvas(
+        width, height
+    )
+    if (canvas_width, canvas_height) == (width, height):
+        return source.copy(), 0, 0, "identity"
+
+    from scripts.lama_inpaint import LargeMaskInpaintError, inpaint_large_mask
+
+    inpainter = large_inpainter or inpaint_large_mask
+    try:
+        candidate = _outpaint_in_stages(
+            source, canvas_width, canvas_height, inpainter
+        )
+    except (LargeMaskInpaintError, ValueError):
+        return (
+            _build_ambient_backdrop(
+                source, canvas_width, canvas_height, offset_x, offset_y
+            ),
+            offset_x,
+            offset_y,
+            "ambient",
+        )
+
+    candidate[offset_y:offset_y + height, offset_x:offset_x + width] = source
+    if not _extension_quality_passes(candidate, source, offset_x, offset_y):
+        return (
+            _build_ambient_backdrop(
+                source, canvas_width, canvas_height, offset_x, offset_y
+            ),
+            offset_x,
+            offset_y,
+            "ambient",
+        )
+    return candidate, offset_x, offset_y, "outpaint"
 
 
 def build_background(
