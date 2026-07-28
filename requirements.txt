@@ -1,8 +1,10 @@
-# image2editable Dependencies / 图片转可编辑 PPTX/PSD 依赖
+# image2editable Core/PPTX Dependencies / 图片转可编辑 PPTX 核心依赖
 # ==============================================================
 #
 # Install / 安装方式：
 #   pip install -r requirements.txt
+# PSD export / PSD 导出：
+#   pip install .[psd]
 
 # ─────────────────────────────────────────────────────────────
 # Core pipeline / 核心管线

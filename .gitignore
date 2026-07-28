@@ -1,5 +1,6 @@
 # --- Project patterns ---
 .worktrees/
+/runs/
 .tmp-pytest/
 .pytest_cache/
 .ruff_cache/

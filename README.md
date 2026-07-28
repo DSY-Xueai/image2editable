@@ -48,15 +48,18 @@
 - Python 3.10–3.12（上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束）
 - `torch>=2.5.1`、`torchvision>=0.20.1`、`transformers>=4.40.0`、`simple-lama-inpainting==0.1.2`
 - SAM 官方推荐 Linux/WSL；Windows 建议使用 WSL
-- OCR 引擎至少安装一个
-- PSD 导出需要 Aspose.PSD 授权，并设置 `ASPOSE_PSD_LICENSE`
+- OCR 至少配置一条完整路径：`paddleocr` + `paddlepaddle`，或 `pytesseract` + 系统 Tesseract 可执行文件；`doctor` 以此判断环境是否 ready
+- PSD 导出额外需要 Aspose.PSD 包及授权，并设置 `ASPOSE_PSD_LICENSE`
 
 ### 安装
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
 cd image2editable
-pip install -r requirements.txt
+pip install .
+
+# 需要 PSD 导出时安装可选依赖
+pip install .[psd]
 ```
 
 ### 模型与首次运行
@@ -83,11 +86,15 @@ pip install pytesseract
 
 PSD 导出授权：
 
-```bash
-# Windows
-set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
+Windows PowerShell：
 
-# macOS/Linux
+```powershell
+$env:ASPOSE_PSD_LICENSE = "C:\path\to\Aspose.PSD.lic"
+```
+
+macOS/Linux：
+
+```bash
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
@@ -133,6 +140,25 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 ```
 
 ### 命令行运行
+
+#### 统一 Runtime（P0 仅支持图片输入）
+
+```bash
+# 直接转换，并为任务保留 Manifest 和状态
+image2editable convert input.png
+
+# 只准备任务，再单独执行和查询状态
+image2editable prepare input.png --run-dir runs/example
+image2editable run execute runs/example
+image2editable run status runs/example
+
+# 检查本地依赖
+image2editable doctor
+```
+
+统一 Runtime 当前接回现有图片转换管线，不改变 OCR、视觉拆分、背景修复和 PPTX 组装结果。原有 `python image_to_ppt.py` 和 `python image_to_psd.py` 入口继续兼容。P0 的 retry 会重置 legacy batch 中的整批失败页面，并非真正的逐页重试；PDF、图片版/混合 PPTX 与 Agent 页面调度将在后续阶段接入。
+
+#### 兼容入口
 
 ```bash
 # 单张图片 → 默认同时生成 input_original.pptx 和 input_16x9.pptx

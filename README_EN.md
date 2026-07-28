@@ -48,15 +48,18 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 - Python 3.10–3.12 (the upper limit comes from the NumPy/Pillow constraints of `simple-lama-inpainting 0.1.2`)
 - `torch>=2.5.1`, `torchvision>=0.20.1`, `transformers>=4.40.0`, and `simple-lama-inpainting==0.1.2`
 - SAM officially recommends Linux/WSL; WSL is recommended on Windows
-- At least one OCR engine must be installed
-- PSD export requires an Aspose.PSD license and the `ASPOSE_PSD_LICENSE` environment variable
+- OCR requires at least one complete route: `paddleocr` + `paddlepaddle`, or `pytesseract` + a system Tesseract executable; `doctor` uses this requirement when deciding whether the environment is ready
+- PSD export additionally requires the Aspose.PSD package and license, plus the `ASPOSE_PSD_LICENSE` environment variable
 
 ### Installation
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
 cd image2editable
-pip install -r requirements.txt
+pip install .
+
+# Install the optional dependency when PSD export is needed
+pip install .[psd]
 ```
 
 ### Models and First Run
@@ -83,11 +86,15 @@ pip install pytesseract
 
 Configure the PSD export license:
 
-```bash
-# Windows
-set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
+Windows PowerShell:
 
-# macOS/Linux
+```powershell
+$env:ASPOSE_PSD_LICENSE = "C:\path\to\Aspose.PSD.lic"
+```
+
+macOS/Linux:
+
+```bash
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
@@ -134,6 +141,25 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 ```
 
 ### Command Line
+
+#### Unified Runtime (P0 supports image inputs only)
+
+```bash
+# Convert directly while keeping the manifest and state
+image2editable convert input.png
+
+# Prepare, execute, and inspect a run separately
+image2editable prepare input.png --run-dir runs/example
+image2editable run execute runs/example
+image2editable run status runs/example
+
+# Inspect local dependencies
+image2editable doctor
+```
+
+The unified runtime currently delegates to the existing image conversion pipeline, so OCR, visual segmentation, background repair, and PPTX assembly semantics remain unchanged. The existing `python image_to_ppt.py` and `python image_to_psd.py` commands remain compatible. In P0, retry resets all failed pages in the legacy batch rather than providing true page-level retry; PDF, image-based/mixed PPTX, and Agent page orchestration will be added in later stages.
+
+#### Compatible Entry Points
 
 ```bash
 # One image → generates input_original.pptx and input_16x9.pptx by default
