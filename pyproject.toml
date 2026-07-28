@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image2editable"
+version = "0.1.0"
+description = "Local-first image to editable PPTX and layered PSD runtime"
+readme = "README_EN.md"
+requires-python = ">=3.10,<3.13"
+license = { file = "LICENSE" }
+dynamic = ["dependencies"]
+
+[project.scripts]
+image2editable = "image2editable.cli:main"
+
+[project.optional-dependencies]
+psd = ["aspose-psd>=26.5.0"]
+test = [
+    "pytest",
+    "tomli>=2; python_version < '3.11'",
+]
+
+[tool.setuptools]
+py-modules = ["image_to_ppt", "image_to_psd"]
+
+[tool.setuptools.packages.find]
+include = ["image2editable*", "scripts*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

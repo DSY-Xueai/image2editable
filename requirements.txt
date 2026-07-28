@@ -14,10 +14,6 @@ opencv-python>=4.5.0
 Pillow>=9.0.0
 numpy>=1.20.0
 
-# PSD assembly with real Photoshop text layers.
-# Requires a valid Aspose.PSD license configured via ASPOSE_PSD_LICENSE.
-aspose-psd>=26.5.0
-
 # ─────────────────────────────────────────────────────────────
 # OCR engines (at least one required for text detection)
 # OCR 引擎（文本检测至少需要一个）
