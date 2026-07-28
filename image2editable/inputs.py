@@ -5,7 +5,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
 from image2editable.store import RunStore
@@ -13,6 +13,34 @@ from image2editable.store import RunStore
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 _HASH_CHUNK_SIZE = 1024 * 1024
+InputType = Literal["images", "pdf", "pptx"]
+
+
+def classify_inputs(
+    inputs: str | Path | Iterable[str | Path],
+) -> tuple[InputType, list[Path]]:
+    values = (inputs,) if isinstance(inputs, (str, Path)) else list(inputs)
+    if not values:
+        raise ValueError("No inputs provided")
+
+    resolved_paths = [Path(value).resolve() for value in values]
+    for path in resolved_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Input path does not exist: {path}")
+
+    document_paths = [
+        path
+        for path in resolved_paths
+        if path.is_file() and path.suffix.casefold() in {".pdf", ".pptx"}
+    ]
+    if document_paths:
+        if len(resolved_paths) != 1:
+            raise ValueError("Inputs must contain one PDF or one PPTX")
+        if document_paths[0].suffix.casefold() == ".pdf":
+            return "pdf", resolved_paths
+        return "pptx", resolved_paths
+
+    return "images", resolve_image_inputs(values)
 
 
 def resolve_image_inputs(
@@ -52,7 +80,7 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _new_job_id() -> str:
+def new_job_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
@@ -69,7 +97,7 @@ def prepare_image_job(
         raise ValueError(f"Unsupported slide_size: {slide_size}")
 
     source_paths = resolve_image_inputs(inputs)
-    job_id = _new_job_id()
+    job_id = new_job_id()
     root = Path(run_dir).resolve() if run_dir is not None else Path.cwd() / "runs" / job_id
     resolved_output: Path | None = None
     if output_path is not None:
