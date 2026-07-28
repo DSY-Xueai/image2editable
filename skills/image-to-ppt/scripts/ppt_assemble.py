@@ -328,7 +328,20 @@ def assemble_pptx_multi(
             content_offset_x = 0
             content_offset_y = 0
             use_canvas = False
-            transform = original_transform
+            scale = min(
+                original_transform.slide_width / img_w,
+                original_transform.slide_height / img_h,
+            )
+            content_width = img_w * scale
+            content_height = img_h * scale
+            transform = ContainTransform(
+                slide_width=original_transform.slide_width,
+                slide_height=original_transform.slide_height,
+                content_width=content_width,
+                content_height=content_height,
+                offset_x=(original_transform.slide_width - content_width) / 2,
+                offset_y=(original_transform.slide_height - content_height) / 2,
+            )
         background_key = (
             "background_original_path" if slide_size == "original" else "background_path"
         )
@@ -337,10 +350,19 @@ def assemble_pptx_multi(
         slide = prs.slides.add_slide(blank_layout)
 
         # Layer 1: Background
-        slide.shapes.add_picture(
-            str(data[background_key]), 0, 0,
-            Inches(transform.slide_width), Inches(transform.slide_height)
-        )
+        if original_transform is None:
+            slide.shapes.add_picture(
+                str(data[background_key]), 0, 0,
+                Inches(transform.slide_width), Inches(transform.slide_height)
+            )
+        else:
+            slide.shapes.add_picture(
+                str(data[background_key]),
+                Inches(transform.offset_x),
+                Inches(transform.offset_y),
+                Inches(transform.content_width),
+                Inches(transform.content_height),
+            )
 
         # Layer 2: Foreground components
         for comp in data["components"]:
@@ -378,10 +400,19 @@ def assemble_pptx_multi(
             orig = Path(data["original_image_path"])
             if orig.exists():
                 ref_slide = prs.slides.add_slide(blank_layout)
-                ref_slide.shapes.add_picture(
-                    str(data[background_key]), 0, 0,
-                    Inches(transform.slide_width), Inches(transform.slide_height)
-                )
+                if original_transform is None:
+                    ref_slide.shapes.add_picture(
+                        str(data[background_key]), 0, 0,
+                        Inches(transform.slide_width), Inches(transform.slide_height)
+                    )
+                else:
+                    ref_slide.shapes.add_picture(
+                        str(data[background_key]),
+                        Inches(transform.offset_x),
+                        Inches(transform.offset_y),
+                        Inches(transform.content_width),
+                        Inches(transform.content_height),
+                    )
                 left, top, width, height = _map_bbox(
                     0,
                     0,

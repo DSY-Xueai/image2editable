@@ -578,10 +578,10 @@ def convert_batch_variants(
     lang: str = "ch",
     add_reference: bool = False,
     include_widescreen: bool = True,
-    combine_original: bool = False,
     bg_period: int = 32,
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
+    combine_original: bool = False,
 ) -> dict[str, str | list[str] | None]:
     slides_data = _prepare_multiple_images(image_paths, lang)
     source_paths = [
