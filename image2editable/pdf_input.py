@@ -32,16 +32,16 @@ RenderProfile = Literal["standard", "detail"]
 def pdf_page_count(path: str | Path) -> int:
     try:
         document = pdfium.PdfDocument(str(Path(path).resolve()))
+        try:
+            count = len(document)
+        finally:
+            document.close()
     except pdfium.PdfiumError as error:
         if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
             raise ValueError(f"Cannot open encrypted PDF: {path}") from error
         raise ValueError(f"Cannot open PDF: {path}") from error
     except Exception as error:
         raise ValueError(f"Cannot open PDF: {path}") from error
-    try:
-        count = len(document)
-    finally:
-        document.close()
     if count == 0:
         raise ValueError(f"Cannot open PDF: {path} has no pages")
     return count
@@ -129,10 +129,31 @@ def prepare_pdf_job(
         store.initialize(manifest, page_ids)
         store.transition_run(RunStatus.PREPARED)
         return store.root
-    except Exception:
-        shutil.rmtree(store.root)
-        store.root.mkdir(parents=True)
+    except Exception as error:
+        cleanup_error: Exception | None = None
+        try:
+            shutil.rmtree(store.root)
+        except Exception as caught:
+            cleanup_error = caught
+        try:
+            store.root.mkdir(parents=True, exist_ok=True)
+        except Exception as caught:
+            if cleanup_error is None:
+                cleanup_error = caught
+        if cleanup_error is not None:
+            raise error from cleanup_error
         raise
+
+
+def _remove_files(paths: Sequence[Path]) -> Exception | None:
+    first_error: Exception | None = None
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+    return first_error
 
 
 def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
@@ -155,33 +176,69 @@ def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
     if history["detail_used"]:
         raise RuntimeError(f"Detail rendering already used for page: {page_id}")
 
+    standard = history["renders"][0]
+    standard_request = dict(request)
+    standard_request.update(
+        {
+            "source": (Path("pages") / page_id / "source.png").as_posix(),
+            "sha256": standard["sha256"],
+            "render": standard,
+        }
+    )
     detail_relative = (Path("pages") / page_id / "source_detail.png").as_posix()
     detail_path = store.root / detail_relative
-    detail = render_pdf_page(
-        store.root / manifest["input"]["source"],
-        request["render"]["page_index"],
-        detail_path,
-        profile="detail",
-    )
-    standard = history["renders"][0]
-    activated = (
-        detail["pixel_width"] > standard["pixel_width"]
-        and detail["pixel_height"] > standard["pixel_height"]
-    )
-    if activated:
-        detail["result"] = "detail_activated"
-        detail["source"] = detail_relative
-        request["source"] = detail_relative
-        request["sha256"] = detail["sha256"]
-        request["render"] = detail
-        store.write_json(request_path, request)
-    else:
-        detail_path.unlink(missing_ok=True)
-        detail["result"] = "detail_not_higher"
-        detail["source"] = None
-    history["renders"].append(detail)
-    history["detail_used"] = True
-    store.write_json(history_path, history)
+    detail_temp_path = detail_path.with_name(f"{detail_path.name}.tmp")
+    recovery_error: Exception | None = None
+    try:
+        store.write_json(request_path, standard_request)
+    except Exception as error:
+        recovery_error = error
+    cleanup_error = _remove_files((detail_temp_path, detail_path))
+    if recovery_error is not None:
+        if cleanup_error is not None:
+            raise recovery_error from cleanup_error
+        raise recovery_error
+    if cleanup_error is not None:
+        raise cleanup_error
+
+    try:
+        detail = render_pdf_page(
+            store.root / manifest["input"]["source"],
+            standard["page_index"],
+            detail_temp_path,
+            profile="detail",
+        )
+        activated = (
+            detail["pixel_width"] > standard["pixel_width"]
+            and detail["pixel_height"] > standard["pixel_height"]
+        )
+        if activated:
+            detail["result"] = "detail_activated"
+            detail["source"] = detail_relative
+            request["source"] = detail_relative
+            request["sha256"] = detail["sha256"]
+            request["render"] = detail
+            os.replace(detail_temp_path, detail_path)
+            store.write_json(request_path, request)
+        else:
+            detail_temp_path.unlink(missing_ok=True)
+            detail["result"] = "detail_not_higher"
+            detail["source"] = None
+        history["renders"].append(detail)
+        history["detail_used"] = True
+        store.write_json(history_path, history)
+    except Exception as error:
+        cleanup_error: Exception | None = None
+        try:
+            store.write_json(request_path, standard_request)
+        except Exception as caught:
+            cleanup_error = caught
+        file_cleanup_error = _remove_files((detail_temp_path, detail_path))
+        if cleanup_error is None:
+            cleanup_error = file_cleanup_error
+        if cleanup_error is not None:
+            raise error from cleanup_error
+        raise
     return {"detail_used": True, "activated": activated}
 
 
