@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from numbers import Integral
 from pathlib import Path
@@ -238,6 +239,7 @@ def assemble_pptx_multi(
     slides_data: list[dict],
     output_path: str | Path,
     add_reference: bool = False,
+    slide_size: str = "16:9",
 ) -> str:
     """Assemble a multi-slide PPTX from multiple images' data.
 
@@ -254,46 +256,89 @@ def assemble_pptx_multi(
     Returns:
         The output path as string.
     """
+    if slide_size not in {"original", "16:9"}:
+        raise ValueError("slide_size must be 'original' or '16:9'")
     if not slides_data:
         raise ValueError("slides_data must not be empty")
+
+    original_transform = None
+    if slide_size == "original":
+        first_width = slides_data[0]["img_width"]
+        first_height = slides_data[0]["img_height"]
+        if first_width <= 0 or first_height <= 0:
+            raise ValueError("original slides require positive image dimensions")
+        first_ratio = first_width / first_height
+        for data in slides_data[1:]:
+            img_w = data["img_width"]
+            img_h = data["img_height"]
+            if img_w <= 0 or img_h <= 0:
+                raise ValueError("original slides require positive image dimensions")
+            if not math.isclose(
+                img_w / img_h,
+                first_ratio,
+                rel_tol=1e-4,
+                abs_tol=1e-6,
+            ):
+                raise ValueError("original slides must have the same aspect ratio")
+        original_transform = compute_slide_transform(
+            first_width,
+            first_height,
+            "original",
+        )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     prs = Presentation()
 
-    prs.slide_width = Inches(SLIDE_WIDTH_INCHES)
-    prs.slide_height = Inches(SLIDE_HEIGHT_INCHES)
-    prs._element.sldSz.set("type", "screen16x9")
+    if original_transform is None:
+        prs.slide_width = Inches(SLIDE_WIDTH_INCHES)
+        prs.slide_height = Inches(SLIDE_HEIGHT_INCHES)
+        prs._element.sldSz.set("type", "screen16x9")
+    else:
+        prs.slide_width = Inches(original_transform.slide_width)
+        prs.slide_height = Inches(original_transform.slide_height)
+        prs._element.sldSz.set("type", "custom")
 
     blank_layout = prs.slide_layouts[6]
 
     for idx, data in enumerate(slides_data):
         img_w = data["img_width"]
         img_h = data["img_height"]
-        canvas_width = data.get("canvas_width")
-        canvas_height = data.get("canvas_height")
-        content_offset_x = data.get("content_offset_x", 0)
-        content_offset_y = data.get("content_offset_y", 0)
-        use_canvas = _validate_canvas(
-            img_w,
-            img_h,
-            canvas_width,
-            canvas_height,
-            content_offset_x,
-            content_offset_y,
-        )
-        if use_canvas:
-            transform = compute_contain_transform(canvas_width, canvas_height)
+        if original_transform is None:
+            canvas_width = data.get("canvas_width")
+            canvas_height = data.get("canvas_height")
+            content_offset_x = data.get("content_offset_x", 0)
+            content_offset_y = data.get("content_offset_y", 0)
+            use_canvas = _validate_canvas(
+                img_w,
+                img_h,
+                canvas_width,
+                canvas_height,
+                content_offset_x,
+                content_offset_y,
+            )
+            if use_canvas:
+                transform = compute_contain_transform(canvas_width, canvas_height)
+            else:
+                transform = compute_contain_transform(img_w, img_h)
         else:
-            transform = compute_contain_transform(img_w, img_h)
+            canvas_width = None
+            canvas_height = None
+            content_offset_x = 0
+            content_offset_y = 0
+            use_canvas = False
+            transform = original_transform
+        background_key = (
+            "background_original_path" if slide_size == "original" else "background_path"
+        )
 
         # --- Content slide ---
         slide = prs.slides.add_slide(blank_layout)
 
         # Layer 1: Background
         slide.shapes.add_picture(
-            str(data["background_path"]), 0, 0,
+            str(data[background_key]), 0, 0,
             Inches(transform.slide_width), Inches(transform.slide_height)
         )
 
@@ -334,7 +379,7 @@ def assemble_pptx_multi(
             if orig.exists():
                 ref_slide = prs.slides.add_slide(blank_layout)
                 ref_slide.shapes.add_picture(
-                    str(data["background_path"]), 0, 0,
+                    str(data[background_key]), 0, 0,
                     Inches(transform.slide_width), Inches(transform.slide_height)
                 )
                 left, top, width, height = _map_bbox(

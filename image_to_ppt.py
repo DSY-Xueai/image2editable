@@ -578,6 +578,7 @@ def convert_batch_variants(
     lang: str = "ch",
     add_reference: bool = False,
     include_widescreen: bool = True,
+    combine_original: bool = False,
     bg_period: int = 32,
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
@@ -602,6 +603,15 @@ def convert_batch_variants(
             output_path=str(widescreen_output),
             add_reference=add_reference,
         )
+
+    if combine_original:
+        original_result = assemble_pptx_multi(
+            slides_data=slides_data,
+            output_path=str(Path(f"{base}_original.pptx")),
+            add_reference=add_reference,
+            slide_size="original",
+        )
+        return {"16:9": widescreen_result, "original": original_result}
 
     original_results = []
     stem_totals: dict[str, int] = {}

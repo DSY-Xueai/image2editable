@@ -42,6 +42,10 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
     sources = [_source_path(store, page_id) for page_id in manifest["pages"]]
     options = manifest["options"]
     slide_size = options["slide_size"]
+    combine_original = (
+        manifest["input"].get("type") == "pdf"
+        and manifest["input"].get("page_ratios_equal") is True
+    )
     output_path = options["output_path"]
     if output_path is None:
         output_path = str(store.root / "final" / "output.pptx")
@@ -64,17 +68,27 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                 )
             }
         elif slide_size == "both":
+            kwargs = {
+                "output_path": output_path,
+                "lang": options["lang"],
+            }
+            if combine_original:
+                kwargs["combine_original"] = True
             result = module.convert_batch_variants(
                 sources,
-                output_path=output_path,
-                lang=options["lang"],
+                **kwargs,
             )
         elif slide_size == "original":
+            kwargs = {
+                "output_path": output_path,
+                "lang": options["lang"],
+                "include_widescreen": False,
+            }
+            if combine_original:
+                kwargs["combine_original"] = True
             result = module.convert_batch_variants(
                 sources,
-                output_path=output_path,
-                lang=options["lang"],
-                include_widescreen=False,
+                **kwargs,
             )
         else:
             result = {
