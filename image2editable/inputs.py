@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Sequence
 
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
 from image2editable.store import RunStore
@@ -85,6 +86,39 @@ def new_job_id() -> str:
     return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
+def validate_pptx_output_path(
+    output_path: str | Path | None,
+    *,
+    source_paths: Sequence[Path],
+    run_root: Path,
+) -> Path | None:
+    if output_path is None:
+        return None
+    resolved_output = Path(output_path).resolve()
+    if resolved_output.suffix.casefold() != ".pptx":
+        raise ValueError(f"Invalid output path; expected .pptx: {resolved_output}")
+    if resolved_output.is_dir():
+        raise ValueError(f"Invalid output path; path is a directory: {resolved_output}")
+    if any(
+        resolved_output == source.resolve()
+        or (
+            resolved_output.exists()
+            and source.exists()
+            and os.path.samefile(resolved_output, source)
+        )
+        for source in source_paths
+    ):
+        raise ValueError(f"Invalid output path; overwrites source: {resolved_output}")
+    root = run_root.resolve()
+    if resolved_output.is_relative_to(root) and not resolved_output.is_relative_to(
+        root / "final"
+    ):
+        raise ValueError(
+            f"Invalid output path; run outputs must be under final: {resolved_output}"
+        )
+    return resolved_output
+
+
 def prepare_image_job(
     inputs: str | Path | Iterable[str | Path],
     *,
@@ -99,21 +133,9 @@ def prepare_image_job(
     source_paths = resolve_image_inputs(inputs)
     job_id = new_job_id()
     root = Path(run_dir).resolve() if run_dir is not None else Path.cwd() / "runs" / job_id
-    resolved_output: Path | None = None
-    if output_path is not None:
-        resolved_output = Path(output_path).resolve()
-        if resolved_output.suffix.casefold() != ".pptx":
-            raise ValueError(f"Invalid output path; expected .pptx: {resolved_output}")
-        if resolved_output.is_dir():
-            raise ValueError(f"Invalid output path; path is a directory: {resolved_output}")
-        if resolved_output in source_paths:
-            raise ValueError(f"Invalid output path; overwrites source: {resolved_output}")
-        if resolved_output.is_relative_to(root) and not resolved_output.is_relative_to(
-            root / "final"
-        ):
-            raise ValueError(
-                f"Invalid output path; run outputs must be under final: {resolved_output}"
-            )
+    resolved_output = validate_pptx_output_path(
+        output_path, source_paths=source_paths, run_root=root
+    )
     store = RunStore.create(root)
     try:
         items = []

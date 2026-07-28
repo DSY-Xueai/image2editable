@@ -3,12 +3,21 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
 
 from PIL import Image
 import pypdfium2 as pdfium
+
+from image2editable.contracts import SCHEMA_VERSION, RunStatus
+from image2editable.inputs import (
+    new_job_id,
+    sha256_file,
+    validate_pptx_output_path,
+)
+from image2editable.store import RunStore
 
 
 STANDARD_DPI = 200.0
@@ -18,6 +27,162 @@ LONG_EDGE_CEILING = 6000
 PIXEL_COUNT_CEILING = 24_000_000
 
 RenderProfile = Literal["standard", "detail"]
+
+
+def pdf_page_count(path: str | Path) -> int:
+    try:
+        document = pdfium.PdfDocument(str(Path(path).resolve()))
+    except pdfium.PdfiumError as error:
+        if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
+            raise ValueError(f"Cannot open encrypted PDF: {path}") from error
+        raise ValueError(f"Cannot open PDF: {path}") from error
+    except Exception as error:
+        raise ValueError(f"Cannot open PDF: {path}") from error
+    try:
+        count = len(document)
+    finally:
+        document.close()
+    if count == 0:
+        raise ValueError(f"Cannot open PDF: {path} has no pages")
+    return count
+
+
+def prepare_pdf_job(
+    source: str | Path,
+    *,
+    run_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    slide_size: str = "both",
+    lang: str = "ch",
+) -> Path:
+    source_path = Path(source).resolve()
+    if not source_path.is_file() or source_path.suffix.casefold() != ".pdf":
+        raise ValueError(f"PDF input must be an existing .pdf file: {source_path}")
+    if slide_size not in {"original", "16:9", "both"}:
+        raise ValueError(f"Unsupported slide_size: {slide_size}")
+
+    page_count = pdf_page_count(source_path)
+    job_id = new_job_id()
+    root = Path(run_dir).resolve() if run_dir is not None else Path.cwd() / "runs" / job_id
+    resolved_output = validate_pptx_output_path(
+        output_path, source_paths=[source_path], run_root=root
+    )
+    store = RunStore.create(root)
+    try:
+        copied_relative = Path("input") / "original.pdf"
+        copied_path = store.root / copied_relative
+        copied_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, copied_path)
+        digest = sha256_file(copied_path)
+        page_ids = [f"page_{index:03d}" for index in range(1, page_count + 1)]
+        output_paths = [
+            store.root / "pages" / page_id / "source.png" for page_id in page_ids
+        ]
+        renders = render_pdf_document(copied_path, output_paths, profile="standard")
+        ratios = [record["width_pt"] / record["height_pt"] for record in renders]
+        page_ratios_equal = all(
+            math.isclose(ratio, ratios[0], rel_tol=1e-4, abs_tol=1e-6)
+            for ratio in ratios[1:]
+        )
+        for page_id, render in zip(page_ids, renders):
+            source_relative = (Path("pages") / page_id / "source.png").as_posix()
+            store.write_json(
+                Path("pages") / page_id / "page_request.json",
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "page_id": page_id,
+                    "source_type": "pdf",
+                    "source": source_relative,
+                    "sha256": render["sha256"],
+                    "render": render,
+                },
+            )
+            store.write_json(
+                Path("pages") / page_id / "render_history.json",
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "renders": [render],
+                    "detail_used": False,
+                },
+            )
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": job_id,
+            "input": {
+                "type": "pdf",
+                "original_path": str(source_path),
+                "source": copied_relative.as_posix(),
+                "sha256": digest,
+                "page_count": page_count,
+                "page_ratios_equal": page_ratios_equal,
+            },
+            "output_format": "pptx",
+            "options": {
+                "lang": lang,
+                "slide_size": slide_size,
+                "output_path": (
+                    str(resolved_output) if resolved_output is not None else None
+                ),
+            },
+            "pages": page_ids,
+        }
+        store.initialize(manifest, page_ids)
+        store.transition_run(RunStatus.PREPARED)
+        return store.root
+    except Exception:
+        shutil.rmtree(store.root)
+        store.root.mkdir(parents=True)
+        raise
+
+
+def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
+    store = RunStore.open(run_dir)
+    manifest = store.read_json("job_manifest.json")
+    if manifest.get("input", {}).get("type") != "pdf":
+        raise RuntimeError("Detail rendering is only available for PDF runs")
+    if store.read_json("run_state.json")["status"] != RunStatus.PREPARED.value:
+        raise RuntimeError("Run must be prepared for detail rendering")
+    page_jobs = store.read_json("page_jobs.json")["pages"]
+    if page_id not in page_jobs:
+        raise KeyError(f"Unknown page_id: {page_id}")
+    if page_jobs[page_id]["status"] != "pending":
+        raise RuntimeError(f"Page must be pending for detail rendering: {page_id}")
+
+    request_path = Path("pages") / page_id / "page_request.json"
+    history_path = Path("pages") / page_id / "render_history.json"
+    request = store.read_json(request_path)
+    history = store.read_json(history_path)
+    if history["detail_used"]:
+        raise RuntimeError(f"Detail rendering already used for page: {page_id}")
+
+    detail_relative = (Path("pages") / page_id / "source_detail.png").as_posix()
+    detail_path = store.root / detail_relative
+    detail = render_pdf_page(
+        store.root / manifest["input"]["source"],
+        request["render"]["page_index"],
+        detail_path,
+        profile="detail",
+    )
+    standard = history["renders"][0]
+    activated = (
+        detail["pixel_width"] > standard["pixel_width"]
+        and detail["pixel_height"] > standard["pixel_height"]
+    )
+    if activated:
+        detail["result"] = "detail_activated"
+        detail["source"] = detail_relative
+        request["source"] = detail_relative
+        request["sha256"] = detail["sha256"]
+        request["render"] = detail
+        store.write_json(request_path, request)
+    else:
+        detail_path.unlink(missing_ok=True)
+        detail["result"] = "detail_not_higher"
+        detail["source"] = None
+    history["renders"].append(detail)
+    history["detail_used"] = True
+    store.write_json(history_path, history)
+    return {"detail_used": True, "activated": activated}
 
 
 @dataclass(frozen=True)
