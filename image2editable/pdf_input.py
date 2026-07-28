@@ -31,7 +31,7 @@ class PdfRenderPlan:
 
 
 def _pixel_dimensions(width_pt: float, height_pt: float, scale: float) -> tuple[int, int]:
-    return max(1, round(width_pt * scale)), max(1, round(height_pt * scale))
+    return max(1, math.ceil(width_pt * scale)), max(1, math.ceil(height_pt * scale))
 
 
 def _fits_hard_limits(width_pt: float, height_pt: float, scale: float) -> bool:
