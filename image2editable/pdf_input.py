@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
@@ -71,8 +72,13 @@ def plan_pdf_render(width_pt: float, height_pt: float, profile: RenderProfile) -
     if max(width_pt, height_pt) * scale > LONG_EDGE_CEILING:
         scale = LONG_EDGE_CEILING / max(width_pt, height_pt)
         reasons.append("long_edge_ceiling")
-    if width_pt * height_pt * scale * scale > PIXEL_COUNT_CEILING:
-        scale *= math.sqrt(PIXEL_COUNT_CEILING / (width_pt * height_pt * scale * scale))
+    pixel_cap_scale = (
+        math.sqrt(PIXEL_COUNT_CEILING)
+        / math.sqrt(width_pt)
+        / math.sqrt(height_pt)
+    )
+    if scale > pixel_cap_scale:
+        scale = pixel_cap_scale
         reasons.append("pixel_count_ceiling")
 
     scale = _integer_safe_scale(width_pt, height_pt, scale)
@@ -88,8 +94,8 @@ def plan_pdf_render(width_pt: float, height_pt: float, profile: RenderProfile) -
     )
 
 
-def _box_values(box: Sequence[float] | None, fallback: list[float]) -> list[float]:
-    return [float(value) for value in box] if box is not None else fallback
+def _box_values(box: Sequence[float] | None) -> list[float] | None:
+    return [float(value) for value in box] if box is not None else None
 
 
 def _renderer_version() -> str:
@@ -97,6 +103,25 @@ def _renderer_version() -> str:
     if version is not None:
         return str(version)
     return str(pdfium.version.PYPDFIUM_INFO)
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    return first == second or (
+        first.exists() and second.exists() and os.path.samefile(first, second)
+    )
+
+
+def _normalize_render_paths(
+    source: str | Path, outputs: Sequence[str | Path]
+) -> tuple[Path, tuple[Path, ...]]:
+    source_path = Path(source).resolve()
+    output_paths = tuple(Path(output).resolve() for output in outputs)
+    for index, output in enumerate(output_paths):
+        if _same_file(source_path, output):
+            raise ValueError(f"PDF output must not overwrite source: {output}")
+        if any(_same_file(output, prior) for prior in output_paths[:index]):
+            raise ValueError(f"PDF outputs must be unique: {output}")
+    return source_path, output_paths
 
 
 def _render_open_page(
@@ -110,8 +135,10 @@ def _render_open_page(
         width_pt = float(page.get_width())
         height_pt = float(page.get_height())
         plan = plan_pdf_render(width_pt, height_pt, profile)
-        media_box = _box_values(page.get_mediabox(), [0.0, 0.0, width_pt, height_pt])
-        crop_box = _box_values(page.get_cropbox(), media_box)
+        media_box = _box_values(page.get_mediabox(fallback_ok=False))
+        crop_box = _box_values(page.get_cropbox(fallback_ok=False))
+        if crop_box is None and media_box is not None:
+            crop_box = media_box.copy()
         bitmap = page.render(scale=plan.scale)
         try:
             image = bitmap.to_pil()
@@ -154,9 +181,10 @@ def render_pdf_page(
     *,
     profile: RenderProfile,
 ) -> dict[str, object]:
-    document = pdfium.PdfDocument(str(source))
+    source_path, (output_path,) = _normalize_render_paths(source, [output])
+    document = pdfium.PdfDocument(str(source_path))
     try:
-        return _render_open_page(document, index, output, profile)
+        return _render_open_page(document, index, output_path, profile)
     finally:
         document.close()
 
@@ -167,13 +195,14 @@ def render_pdf_document(
     *,
     profile: RenderProfile,
 ) -> list[dict[str, object]]:
-    document = pdfium.PdfDocument(str(source))
+    source_path, output_paths = _normalize_render_paths(source, outputs)
+    document = pdfium.PdfDocument(str(source_path))
     try:
-        if len(outputs) != len(document):
+        if len(output_paths) != len(document):
             raise ValueError("outputs must contain one path for every PDF page")
         return [
             _render_open_page(document, index, output, profile)
-            for index, output in enumerate(outputs)
+            for index, output in enumerate(output_paths)
         ]
     finally:
         document.close()
