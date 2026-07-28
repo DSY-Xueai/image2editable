@@ -137,8 +137,6 @@ def _render_open_page(
         plan = plan_pdf_render(width_pt, height_pt, profile)
         media_box = _box_values(page.get_mediabox(fallback_ok=False))
         crop_box = _box_values(page.get_cropbox(fallback_ok=False))
-        if crop_box is None and media_box is not None:
-            crop_box = media_box.copy()
         bitmap = page.render(scale=plan.scale)
         try:
             image = bitmap.to_pil()
