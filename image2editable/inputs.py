@@ -15,9 +15,12 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 _HASH_CHUNK_SIZE = 1024 * 1024
 
 
-def resolve_image_inputs(inputs: Iterable[str | Path]) -> list[Path]:
+def resolve_image_inputs(
+    inputs: str | Path | Iterable[str | Path],
+) -> list[Path]:
     resolved_inputs: list[Path] = []
-    for value in inputs:
+    values = (inputs,) if isinstance(inputs, (str, Path)) else inputs
+    for value in values:
         path = Path(value).resolve()
         if not path.exists():
             raise FileNotFoundError(f"Input path does not exist: {path}")
@@ -55,7 +58,7 @@ def _new_job_id() -> str:
 
 
 def prepare_image_job(
-    inputs: Iterable[str | Path],
+    inputs: str | Path | Iterable[str | Path],
     *,
     run_dir: str | Path | None = None,
     output_path: str | Path | None = None,
@@ -68,6 +71,21 @@ def prepare_image_job(
     source_paths = resolve_image_inputs(inputs)
     job_id = _new_job_id()
     root = Path(run_dir).resolve() if run_dir is not None else Path.cwd() / "runs" / job_id
+    resolved_output: Path | None = None
+    if output_path is not None:
+        resolved_output = Path(output_path).resolve()
+        if resolved_output.suffix.casefold() != ".pptx":
+            raise ValueError(f"Invalid output path; expected .pptx: {resolved_output}")
+        if resolved_output.is_dir():
+            raise ValueError(f"Invalid output path; path is a directory: {resolved_output}")
+        if resolved_output in source_paths:
+            raise ValueError(f"Invalid output path; overwrites source: {resolved_output}")
+        if resolved_output.is_relative_to(root) and not resolved_output.is_relative_to(
+            root / "final"
+        ):
+            raise ValueError(
+                f"Invalid output path; run outputs must be under final: {resolved_output}"
+            )
     store = RunStore.create(root)
     try:
         items = []
@@ -107,9 +125,7 @@ def prepare_image_job(
                 "lang": lang,
                 "slide_size": slide_size,
                 "output_path": (
-                    str(Path(output_path).resolve())
-                    if output_path is not None
-                    else None
+                    str(resolved_output) if resolved_output is not None else None
                 ),
             },
             "pages": page_ids,

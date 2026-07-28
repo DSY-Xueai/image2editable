@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 from image2editable.contracts import (
     PageStatus,
     RunStatus,
     SCHEMA_VERSION,
     transition_page_document,
+    validate_schema_version,
 )
 from image2editable.inputs import prepare_image_job
 from image2editable.legacy import execute_legacy
@@ -15,7 +16,7 @@ from image2editable.store import RunStore
 
 
 def prepare_job(
-    inputs: Sequence[str | Path],
+    inputs: str | Path | Iterable[str | Path],
     *,
     run_dir: str | Path | None = None,
     output_path: str | Path | None = None,
@@ -104,7 +105,9 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
     state = store.read_json("run_state.json")
     if state["status"] == RunStatus.COMPLETED.value:
-        return store.read_json("run_summary.json")
+        summary = store.read_json("run_summary.json")
+        validate_schema_version(summary)
+        return summary
     if state["status"] != RunStatus.PREPARED.value:
         raise RuntimeError(
             f"Run must be prepared before execution; current status is {state['status']}"
@@ -149,6 +152,7 @@ def _has_failed_summary(store: RunStore) -> bool:
         summary = store.read_json("run_summary.json")
     except FileNotFoundError:
         return False
+    validate_schema_version(summary)
     return summary.get("status") == RunStatus.FAILED.value
 
 
@@ -205,7 +209,7 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
 
 
 def convert(
-    inputs: Sequence[str | Path],
+    inputs: str | Path | Iterable[str | Path],
     *,
     run_dir: str | Path | None = None,
     output_path: str | Path | None = None,

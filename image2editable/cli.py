@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
+import sys
 from typing import Sequence
 
 from image2editable import runtime
@@ -55,39 +57,48 @@ def _print_json(value: object) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
-        report = check_environment()
+        with redirect_stdout(sys.stderr):
+            report = check_environment()
         _print_json(report)
         return 0 if report["ready"] else 1
 
     if args.command == "convert":
-        summary = runtime.convert(
-            args.images,
-            run_dir=args.run_dir,
-            output_path=args.output,
-            slide_size=args.slide_size,
-            lang=args.lang,
-        )
+        with redirect_stdout(sys.stderr):
+            summary = runtime.convert(
+                args.images,
+                run_dir=args.run_dir,
+                output_path=args.output,
+                slide_size=args.slide_size,
+                lang=args.lang,
+            )
         _print_json(summary)
         return 0
 
     if args.command == "prepare":
-        run_dir = runtime.prepare_job(
-            args.images,
-            run_dir=args.run_dir,
-            output_path=args.output,
-            slide_size=args.slide_size,
-            lang=args.lang,
-        )
+        with redirect_stdout(sys.stderr):
+            run_dir = runtime.prepare_job(
+                args.images,
+                run_dir=args.run_dir,
+                output_path=args.output,
+                slide_size=args.slide_size,
+                lang=args.lang,
+            )
         _print_json({"run_dir": str(Path(run_dir).resolve()), "status": "prepared"})
         return 0
 
     if args.run_command == "status":
-        _print_json(runtime.get_status(args.run_dir))
+        with redirect_stdout(sys.stderr):
+            status = runtime.get_status(args.run_dir)
+        _print_json(status)
         return 0
     if args.run_command == "execute":
-        _print_json(runtime.run_job(args.run_dir))
+        with redirect_stdout(sys.stderr):
+            summary = runtime.run_job(args.run_dir)
+        _print_json(summary)
         return 0
     if args.run_command == "retry":
-        _print_json(runtime.retry_page(args.run_dir, args.page))
+        with redirect_stdout(sys.stderr):
+            status = runtime.retry_page(args.run_dir, args.page)
+        _print_json(status)
         return 0
     raise AssertionError("argparse returned an unsupported command")

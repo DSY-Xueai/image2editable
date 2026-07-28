@@ -47,6 +47,21 @@ class RunStore:
                 validate_schema_version(document)
             except ValueError as error:
                 raise ValueError(f"Invalid {path}: {error}") from error
+            if relative == "page_jobs.json":
+                pages = document.get("pages")
+                if not isinstance(pages, dict):
+                    raise ValueError(f"Invalid {path}: pages must be an object")
+                for page_id, page in pages.items():
+                    if not isinstance(page, dict):
+                        raise ValueError(
+                            f"Invalid {path}: page {page_id} must be an object"
+                        )
+                    try:
+                        validate_schema_version(page)
+                    except ValueError as error:
+                        raise ValueError(
+                            f"Invalid {path} page {page_id}: {error}"
+                        ) from error
         return store
 
     def _resolve(self, relative: str | Path) -> Path:
