@@ -48,7 +48,7 @@ _PAGE_TRANSITIONS = {
         PageStatus.PRESERVED_WITH_WARNING,
         PageStatus.FAILED,
     },
-    PageStatus.VALIDATED: {PageStatus.REPLACED},
+    PageStatus.VALIDATED: {PageStatus.REPLACED, PageStatus.FAILED},
     PageStatus.FAILED: {PageStatus.PENDING},
     PageStatus.PRESERVED: set(),
     PageStatus.REPLACED: set(),
