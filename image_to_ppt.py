@@ -461,17 +461,31 @@ def _run_cleanup_preserving_exception(
         logger.error("%s cleanup failed; preserving original exception", resource_name)
 
 
+def _work_directory(root: str | Path | None, index: int) -> Path:
+    if root is None:
+        return Path(tempfile.mkdtemp(prefix=f"img2ppt_{index}_")).resolve()
+    work_dir = Path(root).resolve() / f"page_{index + 1:03d}"
+    work_dir.mkdir(parents=True, exist_ok=False)
+    return work_dir
+
+
 def _prepare_single_image(
     image_path: str | Path,
     lang: str,
+    _work_root: str | Path | None = None,
 ) -> tuple[dict, Path]:
-    slide_data = _prepare_multiple_images([image_path], lang)[0]
+    slide_data = _prepare_multiple_images(
+        [image_path],
+        lang,
+        _work_root=_work_root,
+    )[0]
     return slide_data, Path(slide_data["background_original_path"]).parent
 
 
 def _prepare_multiple_images(
     image_paths: list[str | Path],
     lang: str,
+    _work_root: str | Path | None = None,
 ) -> list[dict]:
     resolved_paths = [_resolve_image_path(path) for path in image_paths]
     if not resolved_paths:
@@ -481,7 +495,7 @@ def _prepare_multiple_images(
     print(f"Processing {total} image(s)...\n")
     prepared_pages = []
     for index, image_path in enumerate(resolved_paths):
-        work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{index}_")).resolve()
+        work_dir = _work_directory(_work_root, index)
         prepared_pages.append((image_path, work_dir))
 
     text_analyses = []
@@ -630,6 +644,7 @@ def convert(
     min_component_area: int = 20,
     add_reference: bool = False,
     slide_size: str = "16:9",
+    _work_root: str | Path | None = None,
 ) -> str:
     """Full pipeline: image → PPTX.
 
@@ -653,7 +668,11 @@ def convert(
         output_path = Path(image_path).resolve().with_suffix(".pptx")
     output_path = Path(output_path).resolve()
 
-    slide_data, work_dir = _prepare_single_image(image_path, lang)
+    slide_data, work_dir = _prepare_single_image(
+        image_path,
+        lang,
+        _work_root=_work_root,
+    )
     print("[3/3] Assembling PPTX...")
     result = _assemble_prepared_slide(
         slide_data,
@@ -679,12 +698,17 @@ def convert_variants(
     bg_period: int = 32,
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
+    _work_root: str | Path | None = None,
 ) -> dict[str, str]:
     original_output, widescreen_output = _variant_output_paths(
         image_path,
         output_path,
     )
-    slide_data, work_dir = _prepare_single_image(image_path, lang)
+    slide_data, work_dir = _prepare_single_image(
+        image_path,
+        lang,
+        _work_root=_work_root,
+    )
     print("[3/3] Assembling original and 16:9 PPTX files...")
     original_result = _assemble_prepared_slide(
         slide_data,
@@ -714,6 +738,7 @@ def convert_batch(
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
     add_reference: bool = False,
+    _work_root: str | Path | None = None,
 ) -> str:
     """Process multiple images into a single multi-slide PPTX.
 
@@ -729,7 +754,11 @@ def convert_batch(
     Returns:
         Path to the output PPTX file.
     """
-    slides_data = _prepare_multiple_images(image_paths, lang)
+    slides_data = _prepare_multiple_images(
+        image_paths,
+        lang,
+        _work_root=_work_root,
+    )
     if output_path is None:
         output_path = Path(slides_data[0]["original_image_path"]).with_suffix(".pptx")
     output_path = Path(output_path).resolve()
@@ -761,8 +790,13 @@ def convert_batch_variants(
     min_component_area: int = 20,
     combine_original: bool = False,
     original_aspect_ratio: float | None = None,
+    _work_root: str | Path | None = None,
 ) -> dict[str, str | list[str] | None]:
-    slides_data = _prepare_multiple_images(image_paths, lang)
+    slides_data = _prepare_multiple_images(
+        image_paths,
+        lang,
+        _work_root=_work_root,
+    )
     source_paths = [
         Path(slide_data["original_image_path"]).resolve()
         for slide_data in slides_data

@@ -16,7 +16,7 @@ from image2editable.contracts import (
     validate_schema_version,
 )
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
-from image2editable.legacy import execute_legacy
+from image2editable.legacy import _safe_rmtree, execute_legacy
 from image2editable.resources import (
     apply_resource_policy,
     validate_resource_policy,
@@ -166,6 +166,12 @@ def _record_failure(
         }
         if retry_blocked:
             summary["retry_blocked"] = True
+        try:
+            work = _run_work_directory(store)
+        except (OSError, RuntimeError):
+            work = None
+        if work is not None:
+            summary["diagnostics"] = str(work[0])
         store.write_json(
             "run_summary.json",
             summary,
@@ -262,6 +268,31 @@ def _path_entry_exists(path: Path) -> bool:
     except FileNotFoundError:
         return False
     return True
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _run_work_directory(
+    store: RunStore,
+) -> tuple[Path, tuple[int, int]] | None:
+    work_root = store.root / "work"
+    try:
+        status = work_root.lstat()
+    except FileNotFoundError:
+        return None
+    if _is_link_or_reparse(status):
+        raise RuntimeError(f"Run work directory is a link or reparse point: {work_root}")
+    if not stat.S_ISDIR(status.st_mode):
+        raise RuntimeError(f"Run work path is not a directory: {work_root}")
+    resolved = work_root.resolve()
+    if not resolved.is_relative_to(store.root):
+        raise RuntimeError(f"Run work directory is outside run directory: {work_root}")
+    return resolved, (status.st_dev, status.st_ino)
 
 
 def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
@@ -826,6 +857,9 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
             f"PPTX retry is blocked while an output entry may be owned "
             f"by another process: {page_id}"
         )
+    work = _run_work_directory(store)
+    if work is not None:
+        _safe_rmtree(*work)
     if orphaned_failed_batch:
         store.transition_run(RunStatus.FAILED)
         run_status = RunStatus.FAILED.value
