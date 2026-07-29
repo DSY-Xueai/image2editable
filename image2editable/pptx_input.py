@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import math
+import os
 import posixpath
+import shutil
+import tempfile
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -11,7 +15,18 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
-from image2editable.inputs import sha256_file
+from image2editable.contracts import (
+    PageStatus,
+    RunStatus,
+    SCHEMA_VERSION,
+    validate_schema_version,
+)
+from image2editable.inputs import (
+    new_job_id,
+    sha256_file,
+    validate_pptx_output_path,
+)
+from image2editable.store import RunStore
 
 
 P = "http://schemas.openxmlformats.org/presentationml/2006/main"
@@ -29,6 +44,8 @@ MAX_COMPRESSION_RATIO = 200
 MAX_XML_SIZE = 16 * 1024 * 1024
 MAX_IMAGE_READ_SIZE = 128 * 1024 * 1024
 _HASH_CHUNK_SIZE = 1024 * 1024
+MIN_OOXML_INTEGER = -(2**63)
+MAX_OOXML_INTEGER = 2**63 - 1
 PRESENTATION_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
 RELS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
@@ -43,6 +60,12 @@ NOTES_SLIDE_RELATIONSHIP_TYPES = frozenset(
     {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide",
         "http://purl.oclc.org/ooxml/officeDocument/relationships/notesSlide",
+    }
+)
+IMAGE_RELATIONSHIP_TYPES = frozenset(
+    {
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/image",
     }
 )
 SUPPORTED_MC_NAMESPACE_URIS = frozenset({P, A, R})
@@ -63,6 +86,299 @@ SHAPE_TREE_METADATA_TAGS = frozenset(
         f"{{{P}}}extLst",
     }
 )
+
+
+def picture_slide_coverage(
+    picture: dict[str, object],
+    slide_width: int | float,
+    slide_height: int | float,
+) -> float:
+    """Return the fraction of the slide covered by the clipped picture bounds."""
+    if (
+        isinstance(slide_width, bool)
+        or isinstance(slide_height, bool)
+        or not isinstance(slide_width, (int, float))
+        or not isinstance(slide_height, (int, float))
+        or not _reliable_ooxml_number(slide_width)
+        or not _reliable_ooxml_number(slide_height)
+        or slide_width <= 0
+        or slide_height <= 0
+    ):
+        raise ValueError("Slide dimensions must be positive numbers")
+    if picture.get(
+        "transform_reliable", picture.get("_transform_reliable")
+    ) is False:
+        raise ValueError("Picture transform must be reliable")
+    values = [picture.get(key) for key in ("x", "y", "cx", "cy")]
+    if any(
+        isinstance(value, bool)
+        or not _reliable_ooxml_number(value)
+        for value in values
+    ) or values[2] <= 0 or values[3] <= 0:
+        raise ValueError("Picture transform must be reliable with positive extents")
+    x, y, width, height = values
+    intersection_width = max(0, min(x + width, slide_width) - max(x, 0))
+    intersection_height = max(0, min(y + height, slide_height) - max(y, 0))
+    return intersection_width * intersection_height / (slide_width * slide_height)
+
+
+def prepare_pptx_job(
+    source: str | Path,
+    *,
+    run_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    slide_size: str = "both",
+    lang: str = "ch",
+) -> Path:
+    source_path = Path(source).resolve()
+    if not source_path.is_file() or source_path.suffix.casefold() != ".pptx":
+        raise ValueError(
+            f"PPTX input must be an existing .pptx file: {source_path}"
+        )
+    if slide_size not in {"original", "16:9", "both"}:
+        raise ValueError(f"Unsupported slide_size: {slide_size}")
+
+    job_id = new_job_id()
+    root = (
+        Path(run_dir).resolve()
+        if run_dir is not None
+        else Path.cwd() / "runs" / job_id
+    )
+    checked_output = (
+        _path_without_symlinks(output_path)
+        if output_path is not None
+        else None
+    )
+    resolved_output = validate_pptx_output_path(
+        checked_output, source_paths=[source_path], run_root=root
+    )
+    store = RunStore.create(root)
+    try:
+        copied_relative = Path("input") / "original.pptx"
+        copied_path = store.root / copied_relative
+        copied_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, copied_path)
+        inventory = scan_pptx(copied_path)
+        digest = inventory["source_sha256"]
+        pages = [
+            f"page_{index:03d}"
+            for index in range(1, inventory["slide_count"] + 1)
+        ]
+        object_count = 0
+        candidate_count = 0
+        for page_id, slide in zip(pages, inventory["slides"]):
+            objects = slide["objects"]
+            candidates = [
+                item for item in objects if item["action"] == "candidate"
+            ]
+            object_count += len(objects)
+            candidate_count += len(candidates)
+            common = {
+                "schema_version": SCHEMA_VERSION,
+                "page_id": page_id,
+                "slide_index": slide["slide_index"],
+                "slide_part": slide["slide_part"],
+                "slide_width": inventory["slide_width"],
+                "slide_height": inventory["slide_height"],
+            }
+            store.write_json(
+                Path("pages") / page_id / "native_objects.json",
+                {**common, "objects": objects},
+            )
+            store.write_json(
+                Path("pages") / page_id / "screenshot_candidates.json",
+                {**common, "candidates": candidates},
+            )
+
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": job_id,
+            "input": {
+                "type": "pptx",
+                "original_path": str(source_path),
+                "source": copied_relative.as_posix(),
+                "sha256": digest,
+                "slide_count": inventory["slide_count"],
+                "object_count": object_count,
+                "candidate_count": candidate_count,
+                "slide_width": inventory["slide_width"],
+                "slide_height": inventory["slide_height"],
+            },
+            "output_format": "pptx",
+            "options": {
+                "lang": lang,
+                "slide_size": slide_size,
+                "output_path": (
+                    str(resolved_output)
+                    if resolved_output is not None
+                    else None
+                ),
+            },
+            "pages": pages,
+        }
+        store.initialize(manifest, pages)
+        for page_id in pages:
+            store.transition_page(page_id, PageStatus.ANALYZED)
+        store.transition_run(RunStatus.PREPARED)
+        return store.root
+    except Exception as error:
+        cleanup_error = None
+        try:
+            shutil.rmtree(store.root)
+        except Exception as caught:
+            cleanup_error = caught
+        try:
+            store.root.mkdir(parents=True, exist_ok=True)
+        except Exception as caught:
+            if cleanup_error is None:
+                cleanup_error = caught
+        if cleanup_error is not None:
+            raise error from cleanup_error
+        raise
+
+
+def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
+    manifest = store.read_json("job_manifest.json")
+    validate_schema_version(manifest)
+    input_record = manifest.get("input")
+    if not isinstance(input_record, dict) or input_record.get("type") != "pptx":
+        raise RuntimeError("PPTX preserve requires a PPTX manifest")
+    if manifest.get("output_format") != "pptx":
+        raise RuntimeError("PPTX manifest output_format must be pptx")
+    pages = _manifest_count(input_record, "slide_count")
+    preserved_objects = _manifest_count(input_record, "object_count")
+    pending_candidates = _manifest_count(input_record, "candidate_count")
+    page_ids = manifest.get("pages")
+    if (
+        not isinstance(page_ids, list)
+        or len(page_ids) != pages
+        or any(
+            page_id != f"page_{index:03d}"
+            for index, page_id in enumerate(page_ids, start=1)
+        )
+    ):
+        raise RuntimeError("PPTX manifest pages do not match slide_count")
+    if pending_candidates > preserved_objects:
+        raise RuntimeError(
+            "PPTX manifest candidate_count exceeds object_count"
+        )
+    source_value = input_record.get("source")
+    if not isinstance(source_value, str):
+        raise RuntimeError("PPTX manifest source must be a relative path")
+    source_path = (store.root / source_value).resolve()
+    if (
+        Path(source_value).is_absolute()
+        or not source_path.is_relative_to(store.root)
+        or not source_path.is_file()
+        or source_path.suffix.casefold() != ".pptx"
+    ):
+        raise RuntimeError(f"Invalid PPTX manifest source: {source_value}")
+
+    options = manifest.get("options")
+    if not isinstance(options, dict):
+        raise RuntimeError("PPTX manifest options must be an object")
+    output_value = options.get("output_path")
+    if output_value is None:
+        output_path = _path_without_symlinks(
+            store.root / "final" / "output.pptx"
+        )
+    elif isinstance(output_value, str):
+        checked_output = _path_without_symlinks(output_value)
+        output_path = validate_pptx_output_path(
+            checked_output,
+            source_paths=[source_path],
+            run_root=store.root,
+        )
+    else:
+        raise RuntimeError("PPTX manifest output_path must be a string or null")
+    if output_path is None:
+        raise RuntimeError("PPTX output path is missing")
+    if _same_file(source_path, output_path):
+        raise ValueError(f"PPTX output must not overwrite source: {output_path}")
+    if output_path.exists() or output_path.is_symlink():
+        raise FileExistsError(f"PPTX output already exists: {output_path}")
+
+    input_sha256 = sha256_file(source_path)
+    expected_sha256 = input_record.get("sha256")
+    if expected_sha256 != input_sha256:
+        raise RuntimeError("PPTX input hash does not match manifest")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _path_without_symlinks(output_path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as file:
+            temporary = Path(file.name)
+        shutil.copyfile(source_path, temporary)
+        output_sha256 = sha256_file(temporary)
+        if output_sha256 != input_sha256:
+            raise RuntimeError("PPTX preserve copy hash mismatch")
+        _publish_pptx_no_clobber(temporary, output_path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+    warnings = (
+        ["P1 preserved screenshot candidates without replacement"]
+        if pending_candidates
+        else []
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": RunStatus.COMPLETED.value,
+        "pages": pages,
+        "preserved_objects": preserved_objects,
+        "pending_candidates": pending_candidates,
+        "warnings": warnings,
+        "outputs": {"pptx": str(output_path)},
+        "input_sha256": input_sha256,
+        "output_sha256": output_sha256,
+    }
+
+
+def _manifest_count(record: dict[str, object], name: str) -> int:
+    value = record.get(name)
+    if type(value) is not int or value < 0:
+        raise RuntimeError(f"Invalid PPTX manifest {name}: {value}")
+    return value
+
+
+def _reliable_ooxml_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    return MIN_OOXML_INTEGER <= value <= MAX_OOXML_INTEGER
+
+
+def _path_without_symlinks(value: str | Path) -> Path:
+    lexical = Path(os.path.abspath(value))
+    try:
+        resolved = lexical.resolve()
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"PPTX output path contains a symlink: {lexical}") from error
+    if resolved != lexical:
+        raise ValueError(f"PPTX output path contains a symlink: {lexical}")
+    return lexical
+
+
+def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
+    try:
+        os.link(temporary, output)
+    except FileExistsError as error:
+        raise FileExistsError(f"PPTX output already exists: {output}") from error
+    temporary.unlink()
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    return first == second or (
+        first.exists() and second.exists() and os.path.samefile(first, second)
+    )
 
 
 def scan_pptx(path: str | Path) -> dict[str, object]:
@@ -94,6 +410,20 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
             size = presentation.find("p:sldSz", NS)
             if size is None or size.get("cx") is None or size.get("cy") is None:
                 raise ValueError("Missing slide size in ppt/presentation.xml")
+            try:
+                slide_width = int(size.get("cx"))
+                slide_height = int(size.get("cy"))
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "Slide dimensions must be positive numbers"
+                ) from error
+            if slide_width <= 0 or slide_height <= 0:
+                raise ValueError("Slide dimensions must be positive numbers")
+            if (
+                slide_width > MAX_OOXML_INTEGER
+                or slide_height > MAX_OOXML_INTEGER
+            ):
+                raise ValueError("Slide dimensions must be reliable integers")
             slides: list[dict[str, object]] = []
             ids = presentation.findall("p:sldIdLst/p:sldId", NS)
             for index, slide_id in enumerate(ids, start=1):
@@ -142,6 +472,8 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     names,
                     parts,
                     choice_namespace_scopes,
+                    slide_width,
+                    slide_height,
                 )
                 slides.append(
                     {
@@ -158,8 +490,8 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                 "source": str(source),
                 "source_sha256": sha256_file(source),
                 "slide_count": len(slides),
-                "slide_width": int(size.get("cx")),
-                "slide_height": int(size.get("cy")),
+                "slide_width": slide_width,
+                "slide_height": slide_height,
                 "parts": parts,
                 "slides": slides,
             }
@@ -411,6 +743,8 @@ def _objects(
     names: set[str],
     parts: dict[str, str],
     choice_namespace_scopes: dict[int, dict[str, str]],
+    slide_width: int,
+    slide_height: int,
     group_path: list[str] | None = None,
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
@@ -427,6 +761,8 @@ def _objects(
             archive,
             names,
             parts,
+            slide_width,
+            slide_height,
         )
         result.append(item)
         if node.tag == f"{{{P}}}grpSp":
@@ -440,6 +776,8 @@ def _objects(
                     names,
                     parts,
                     choice_namespace_scopes,
+                    slide_width,
+                    slide_height,
                     group_path + [item["shape_id"]],
                 )
             )
@@ -500,6 +838,8 @@ def _object(
     archive: zipfile.ZipFile,
     names: set[str],
     parts: dict[str, str],
+    slide_width: int,
+    slide_height: int,
 ) -> dict[str, object]:
     shape_id, name = _non_visual(node)
     object_type = _type(node)
@@ -525,6 +865,10 @@ def _object(
     }
     if object_type == "picture":
         result.update(_picture_details(node, related, archive, names, parts))
+        _mark_picture_safety(result, slide_width, slide_height, names, parts)
+    else:
+        result.pop("_transform_reliable")
+        result.update({"action": "preserve", "safety_reasons": []})
     return result
 
 
@@ -567,21 +911,72 @@ def _transform(node: ET.Element) -> dict[str, object]:
         xfrm = None
     off = xfrm.find("a:off", NS) if xfrm is not None else None
     ext = xfrm.find("a:ext", NS) if xfrm is not None else None
-    rotation = int(xfrm.get("rot", "0")) if xfrm is not None else 0
+    x, x_reliable = _integer_attribute(off, "x")
+    y, y_reliable = _integer_attribute(off, "y")
+    cx, cx_reliable = _integer_attribute(ext, "cx")
+    cy, cy_reliable = _integer_attribute(ext, "cy")
+    rotation, rotation_reliable = _integer_attribute(
+        xfrm, "rot", default=0
+    )
+    flip_h, flip_h_reliable = _boolean_attribute(xfrm, "flipH")
+    flip_v, flip_v_reliable = _boolean_attribute(xfrm, "flipV")
     return {
-        "x": int(off.get("x", "0")) if off is not None else 0,
-        "y": int(off.get("y", "0")) if off is not None else 0,
-        "cx": int(ext.get("cx", "0")) if ext is not None else 0,
-        "cy": int(ext.get("cy", "0")) if ext is not None else 0,
+        "x": x,
+        "y": y,
+        "cx": cx,
+        "cy": cy,
         "rotation": rotation,
-        "rotation_degrees": rotation / 60000.0,
-        "flip_h": _bool(xfrm.get("flipH")) if xfrm is not None else False,
-        "flip_v": _bool(xfrm.get("flipV")) if xfrm is not None else False,
+        "rotation_degrees": (
+            rotation / 60000.0 if rotation_reliable else 0.0
+        ),
+        "flip_h": flip_h,
+        "flip_v": flip_v,
+        "_transform_reliable": all(
+            (
+                x_reliable,
+                y_reliable,
+                cx_reliable,
+                cy_reliable,
+                rotation_reliable,
+                flip_h_reliable,
+                flip_v_reliable,
+            )
+        ),
     }
 
 
-def _bool(value: str | None) -> bool:
-    return value is not None and value.casefold() in {"1", "true", "on"}
+def _integer_attribute(
+    element: ET.Element | None,
+    name: str,
+    *,
+    default: int | None = None,
+) -> tuple[int, bool]:
+    if element is None:
+        return (0 if default is None else default), False
+    value = element.get(name)
+    if value is None:
+        return (0 if default is None else default), default is not None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return (0 if default is None else default), False
+    return parsed, MIN_OOXML_INTEGER <= parsed <= MAX_OOXML_INTEGER
+
+
+def _boolean_attribute(
+    element: ET.Element | None, name: str
+) -> tuple[bool, bool]:
+    if element is None:
+        return False, False
+    value = element.get(name)
+    if value is None:
+        return False, True
+    normalized = value.casefold()
+    if normalized in {"1", "true", "on"}:
+        return True, True
+    if normalized in {"0", "false", "off"}:
+        return False, True
+    return False, False
 
 
 def _referenced_relationships(node: ET.Element, rels: dict[str, dict[str, object]]) -> list[dict[str, object]]:
@@ -609,10 +1004,10 @@ def _picture_details(
 ) -> dict[str, object]:
     src_rect = node.find(".//a:srcRect", NS)
     crop = {
-        "crop_left": int(src_rect.get("l", "0")) if src_rect is not None else 0,
-        "crop_top": int(src_rect.get("t", "0")) if src_rect is not None else 0,
-        "crop_right": int(src_rect.get("r", "0")) if src_rect is not None else 0,
-        "crop_bottom": int(src_rect.get("b", "0")) if src_rect is not None else 0,
+        "crop_left": _crop_value(src_rect, "l"),
+        "crop_top": _crop_value(src_rect, "t"),
+        "crop_right": _crop_value(src_rect, "r"),
+        "crop_bottom": _crop_value(src_rect, "b"),
     }
     blip = node.find("p:blipFill/a:blip", NS)
     primary_id = None
@@ -635,6 +1030,83 @@ def _picture_details(
             except Exception:
                 pass
     return {**crop, "primary_relationship": primary, "media_sha256": media_sha256, "pixel_width": pixel_width, "pixel_height": pixel_height}
+
+
+def _crop_value(src_rect: ET.Element | None, name: str) -> int:
+    if src_rect is None:
+        return 0
+    try:
+        return int(src_rect.get(name, "0"))
+    except ValueError:
+        return 1
+
+
+def _mark_picture_safety(
+    picture: dict[str, object],
+    slide_width: int,
+    slide_height: int,
+    names: set[str],
+    parts: dict[str, str],
+) -> None:
+    reasons: list[str] = []
+    reliable = bool(picture.pop("_transform_reliable"))
+    coverage = None
+    if not reliable or picture["cx"] <= 0 or picture["cy"] <= 0:
+        reasons.append("unreliable_transform")
+    elif picture["inside_group"]:
+        reasons.append("inside_group")
+    else:
+        coverage = picture_slide_coverage(picture, slide_width, slide_height)
+        if coverage < 0.80:
+            reasons.append("coverage_below_threshold")
+    picture["slide_coverage"] = coverage
+
+    if picture["rotation"] != 0 or picture["flip_h"] or picture["flip_v"]:
+        reasons.append("rotation_or_flip")
+    if any(
+        picture[key] != 0
+        for key in (
+            "crop_left",
+            "crop_top",
+            "crop_right",
+            "crop_bottom",
+        )
+    ):
+        reasons.append("nonzero_crop")
+
+    relation = picture.get("primary_relationship")
+    if isinstance(relation, dict) and relation.get("target_mode") == "External":
+        reasons.append("external_relationship")
+    elif not _is_valid_picture_media(picture, relation, names, parts):
+        reasons.append("missing_media")
+    if picture["has_extension"] or picture["has_timing_reference"]:
+        reasons.append("unsupported_extension")
+
+    picture["action"] = "candidate" if not reasons else "preserve"
+    picture["safety_reasons"] = reasons
+
+
+def _is_valid_picture_media(
+    picture: dict[str, object],
+    relation: object,
+    names: set[str],
+    parts: dict[str, str],
+) -> bool:
+    if not isinstance(relation, dict):
+        return False
+    target = relation.get("target")
+    content_type = relation.get("content_type")
+    return (
+        relation.get("target_mode") == "Internal"
+        and relation.get("type") in IMAGE_RELATIONSHIP_TYPES
+        and isinstance(target, str)
+        and target.startswith("ppt/media/")
+        and target in names
+        and target in parts
+        and isinstance(content_type, str)
+        and content_type.casefold().startswith("image/")
+        and picture.get("media_sha256") == parts[target]
+    )
 
 
 def _canonical_hash(node: ET.Element) -> str:
