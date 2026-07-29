@@ -234,17 +234,107 @@ def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
     )
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _pptx_manifest_expectations(
+    manifest: dict[str, Any],
+) -> tuple[int, int, str]:
+    input_record = manifest["input"]
+    preserved_objects = input_record.get("object_count")
+    pending_candidates = input_record.get("candidate_count")
+    input_sha256 = input_record.get("sha256")
+    if (
+        type(preserved_objects) is not int
+        or preserved_objects < 0
+        or type(pending_candidates) is not int
+        or pending_candidates < 0
+        or pending_candidates > preserved_objects
+    ):
+        raise RuntimeError("PPTX manifest input counts are invalid")
+    if not _is_sha256(input_sha256):
+        raise RuntimeError("PPTX manifest input sha256 is invalid")
+    return preserved_objects, pending_candidates, input_sha256
+
+
+def _validate_pptx_execution_summary(
+    summary: dict[str, Any],
+    expected_output: Path,
+    page_count: int,
+    preserved_objects: int,
+    pending_candidates: int,
+    input_sha256: str,
+) -> None:
+    if not isinstance(summary, dict):
+        raise RuntimeError("PPTX execution summary must be an object")
+    outputs = summary.get("outputs")
+    if (
+        not isinstance(outputs, dict)
+        or outputs != {"pptx": str(expected_output)}
+    ):
+        raise RuntimeError(
+            "PPTX execution summary did not return the expected output path"
+        )
+    expected_public_keys = {
+        "schema_version",
+        "status",
+        "pages",
+        "preserved_objects",
+        "pending_candidates",
+        "warnings",
+        "outputs",
+        "input_sha256",
+        "output_sha256",
+    }
+    if set(summary) - {"_output_identity"} != expected_public_keys:
+        raise RuntimeError("PPTX execution summary fields are invalid")
+    warnings = summary.get("warnings")
+    expected_warnings = (
+        ["P1 preserved screenshot candidates without replacement"]
+        if pending_candidates
+        else []
+    )
+    if (
+        type(summary.get("schema_version")) is not int
+        or summary["schema_version"] != SCHEMA_VERSION
+        or summary.get("status") != RunStatus.COMPLETED.value
+        or type(summary.get("pages")) is not int
+        or summary["pages"] != page_count
+        or type(summary.get("preserved_objects")) is not int
+        or summary["preserved_objects"] != preserved_objects
+        or type(summary.get("pending_candidates")) is not int
+        or summary["pending_candidates"] != pending_candidates
+        or not isinstance(warnings, list)
+        or any(type(warning) is not str for warning in warnings)
+        or warnings != expected_warnings
+    ):
+        raise RuntimeError("PPTX execution summary values are invalid")
+    token = summary.get("_output_identity")
+    if (
+        not _is_sha256(summary.get("input_sha256"))
+        or summary["input_sha256"] != input_sha256
+        or not _is_sha256(summary.get("output_sha256"))
+        or summary["output_sha256"] != input_sha256
+        or not isinstance(token, dict)
+        or not _is_sha256(token.get("sha256"))
+        or token["sha256"] != input_sha256
+    ):
+        raise RuntimeError(
+            "PPTX execution summary or identity token hash does not match manifest"
+        )
+
+
 def _claim_pptx_output(
     summary: dict[str, Any],
     expected_output: Path,
     output_existed: bool,
 ) -> tuple[Path, tuple[int, int, int, int, int], str]:
-    token = summary.pop("_output_identity", None)
-    outputs = summary.get("outputs")
-    output_value = outputs.get("pptx") if isinstance(outputs, dict) else None
-    expected_hash = summary.get("output_sha256")
-    if output_value != str(expected_output):
-        raise RuntimeError("PPTX execution did not return the expected output path")
+    token = summary.get("_output_identity")
     if output_existed:
         raise RuntimeError("PPTX expected output already existed before execution")
     token_keys = {
@@ -267,12 +357,10 @@ def _claim_pptx_output(
             type(token.get(name)) is not int
             for name in ("dev", "ino", "mode", "size", "mtime_ns")
         )
-        or not isinstance(token.get("sha256"), str)
-        or not isinstance(expected_hash, str)
+        or not _is_sha256(token.get("sha256"))
     ):
         raise RuntimeError("PPTX execution output identity token is invalid")
-    if token["sha256"] != expected_hash:
-        raise RuntimeError("PPTX execution output hash does not match identity token")
+    expected_hash = token["sha256"]
     identity = (
         token["dev"],
         token["ino"],
@@ -368,6 +456,11 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         page_ids = _pptx_page_ids(
             manifest, page_jobs, PageStatus.ANALYZED
         )
+        (
+            pptx_preserved_objects,
+            pptx_pending_candidates,
+            pptx_input_sha256,
+        ) = _pptx_manifest_expectations(manifest)
         pptx_expected_output = _pptx_output_path(store, manifest)
         pptx_output_existed = _path_entry_exists(pptx_expected_output)
     else:
@@ -382,12 +475,38 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         if input_type == "pptx":
             summary = execute_pptx_preserve(store)
             pptx_output_published = True
-            pptx_output_record = _claim_pptx_output(
-                summary,
-                pptx_expected_output,
-                pptx_output_existed,
-            )
-            validate_schema_version(summary)
+            try:
+                if pptx_output_existed:
+                    raise RuntimeError(
+                        "PPTX expected output already existed before execution"
+                    )
+                _validate_pptx_execution_summary(
+                    summary,
+                    pptx_expected_output,
+                    len(page_ids),
+                    pptx_preserved_objects,
+                    pptx_pending_candidates,
+                    pptx_input_sha256,
+                )
+            except Exception:
+                try:
+                    pptx_output_record = _claim_pptx_output(
+                        summary,
+                        pptx_expected_output,
+                        pptx_output_existed,
+                    )
+                except Exception:
+                    pass
+                raise
+            else:
+                pptx_output_record = _claim_pptx_output(
+                    summary,
+                    pptx_expected_output,
+                    pptx_output_existed,
+                )
+            finally:
+                if isinstance(summary, dict):
+                    summary.pop("_output_identity", None)
             _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)
         else:
