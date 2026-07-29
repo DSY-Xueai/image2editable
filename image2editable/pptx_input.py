@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import math
+import json
 import os
 import posixpath
 import shutil
@@ -43,6 +43,8 @@ MAX_TOTAL_UNCOMPRESSED = 2 * 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 MAX_XML_SIZE = 16 * 1024 * 1024
 MAX_IMAGE_READ_SIZE = 128 * 1024 * 1024
+MAX_INVENTORY_JSON_SIZE = 16 * 1024 * 1024
+MAX_TOTAL_INVENTORY_OBJECTS = 1_000_000
 _HASH_CHUNK_SIZE = 1024 * 1024
 MIN_OOXML_INTEGER = -(2**63)
 MAX_OOXML_INTEGER = 2**63 - 1
@@ -68,6 +70,14 @@ IMAGE_RELATIONSHIP_TYPES = frozenset(
         "http://purl.oclc.org/ooxml/officeDocument/relationships/image",
     }
 )
+SUPPORTED_IMAGE_CONTENT_TYPES = {
+    "BMP": frozenset({"image/bmp", "image/x-ms-bmp"}),
+    "GIF": frozenset({"image/gif"}),
+    "JPEG": frozenset({"image/jpeg", "image/jpg"}),
+    "PNG": frozenset({"image/png"}),
+    "TIFF": frozenset({"image/tiff"}),
+    "WEBP": frozenset({"image/webp"}),
+}
 SUPPORTED_MC_NAMESPACE_URIS = frozenset({P, A, R})
 SHAPE_TAGS = frozenset(
     {
@@ -90,17 +100,13 @@ SHAPE_TREE_METADATA_TAGS = frozenset(
 
 def picture_slide_coverage(
     picture: dict[str, object],
-    slide_width: int | float,
-    slide_height: int | float,
+    slide_width: int,
+    slide_height: int,
 ) -> float:
     """Return the fraction of the slide covered by the clipped picture bounds."""
     if (
-        isinstance(slide_width, bool)
-        or isinstance(slide_height, bool)
-        or not isinstance(slide_width, (int, float))
-        or not isinstance(slide_height, (int, float))
-        or not _reliable_ooxml_number(slide_width)
-        or not _reliable_ooxml_number(slide_height)
+        not _reliable_ooxml_integer(slide_width)
+        or not _reliable_ooxml_integer(slide_height)
         or slide_width <= 0
         or slide_height <= 0
     ):
@@ -111,8 +117,7 @@ def picture_slide_coverage(
         raise ValueError("Picture transform must be reliable")
     values = [picture.get(key) for key in ("x", "y", "cx", "cy")]
     if any(
-        isinstance(value, bool)
-        or not _reliable_ooxml_number(value)
+        not _reliable_ooxml_integer(value)
         for value in values
     ) or values[2] <= 0 or values[3] <= 0:
         raise ValueError("Picture transform must be reliable with positive extents")
@@ -262,6 +267,16 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         raise RuntimeError(
             "PPTX manifest candidate_count exceeds object_count"
         )
+    if pages > MAX_MEMBERS:
+        raise RuntimeError("PPTX manifest slide_count is too large")
+    if preserved_objects > MAX_TOTAL_INVENTORY_OBJECTS:
+        raise RuntimeError("PPTX manifest object_count is too large")
+    preserved_objects, pending_candidates = _validate_pptx_inventories(
+        store,
+        page_ids,
+        preserved_objects,
+        pending_candidates,
+    )
     source_value = input_record.get("source")
     if not isinstance(source_value, str):
         raise RuntimeError("PPTX manifest source must be a relative path")
@@ -318,10 +333,14 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         if output_sha256 != input_sha256:
             raise RuntimeError("PPTX preserve copy hash mismatch")
         _publish_pptx_no_clobber(temporary, output_path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    except Exception as error:
+        cleanup_error = _unlink_file(temporary)
+        if cleanup_error is not None:
+            raise error from cleanup_error
+        raise
+    cleanup_error = _unlink_file(temporary)
+    if cleanup_error is not None:
+        raise cleanup_error
 
     warnings = (
         ["P1 preserved screenshot candidates without replacement"]
@@ -348,12 +367,97 @@ def _manifest_count(record: dict[str, object], name: str) -> int:
     return value
 
 
-def _reliable_ooxml_number(value: object) -> bool:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    if isinstance(value, float) and not math.isfinite(value):
-        return False
-    return MIN_OOXML_INTEGER <= value <= MAX_OOXML_INTEGER
+def _validate_pptx_inventories(
+    store: RunStore,
+    page_ids: list[str],
+    expected_objects: int,
+    expected_candidates: int,
+) -> tuple[int, int]:
+    object_count = 0
+    candidate_count = 0
+    for page_id in page_ids:
+        native = _read_pptx_inventory(
+            store, Path("pages") / page_id / "native_objects.json"
+        )
+        candidates_document = _read_pptx_inventory(
+            store, Path("pages") / page_id / "screenshot_candidates.json"
+        )
+        for document in (native, candidates_document):
+            validate_schema_version(document)
+            if document.get("page_id") != page_id:
+                raise RuntimeError(
+                    f"PPTX inventory page_id does not match: {page_id}"
+                )
+
+        objects = native.get("objects")
+        candidates = candidates_document.get("candidates")
+        if not isinstance(objects, list) or not isinstance(candidates, list):
+            raise RuntimeError(f"PPTX inventory lists are invalid: {page_id}")
+        if object_count + len(objects) > MAX_TOTAL_INVENTORY_OBJECTS:
+            raise RuntimeError("PPTX inventory has too many objects")
+        if any(
+            not isinstance(item, dict)
+            or item.get("action") not in {"candidate", "preserve"}
+            for item in objects
+        ):
+            raise RuntimeError(f"PPTX native objects are invalid: {page_id}")
+        native_candidates = [
+            item for item in objects if item["action"] == "candidate"
+        ]
+        if any(
+            not isinstance(item, dict) or item.get("action") != "candidate"
+            for item in candidates
+        ) or candidates != native_candidates:
+            raise RuntimeError(
+                f"PPTX screenshot candidates are invalid: {page_id}"
+            )
+        object_count += len(objects)
+        candidate_count += len(candidates)
+
+    if (
+        object_count != expected_objects
+        or candidate_count != expected_candidates
+    ):
+        raise RuntimeError("PPTX manifest counts do not match inventories")
+    return object_count, candidate_count
+
+
+def _read_pptx_inventory(
+    store: RunStore, relative: Path
+) -> dict[str, object]:
+    path = (store.root / relative).resolve()
+    if not path.is_relative_to(store.root) or not path.is_file():
+        raise RuntimeError(f"Missing PPTX inventory: {relative.as_posix()}")
+    with path.open("rb") as file:
+        data = file.read(MAX_INVENTORY_JSON_SIZE + 1)
+    if len(data) > MAX_INVENTORY_JSON_SIZE:
+        raise RuntimeError(f"PPTX inventory is too large: {relative.as_posix()}")
+    try:
+        document = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        raise ValueError(f"Invalid PPTX inventory: {relative.as_posix()}") from error
+    if not isinstance(document, dict):
+        raise ValueError(
+            f"PPTX inventory must be an object: {relative.as_posix()}"
+        )
+    return document
+
+
+def _reliable_ooxml_integer(value: object) -> bool:
+    return (
+        type(value) is int
+        and MIN_OOXML_INTEGER <= value <= MAX_OOXML_INTEGER
+    )
+
+
+def _parse_ooxml_integer(value: str | None) -> int | None:
+    if not isinstance(value, str) or not value or len(value) > 20:
+        return None
+    digits = value[1:] if value[0] in {"+", "-"} else value
+    if not digits or any(character < "0" or character > "9" for character in digits):
+        return None
+    parsed = int(value)
+    return parsed if _reliable_ooxml_integer(parsed) else None
 
 
 def _path_without_symlinks(value: str | Path) -> Path:
@@ -370,9 +474,60 @@ def _path_without_symlinks(value: str | Path) -> Path:
 def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
     try:
         os.link(temporary, output)
+        return
     except FileExistsError as error:
         raise FileExistsError(f"PPTX output already exists: {output}") from error
-    temporary.unlink()
+    except OSError:
+        pass
+
+    descriptor: int | None = None
+    created = False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        try:
+            descriptor = os.open(output, flags, 0o666)
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"PPTX output already exists: {output}"
+            ) from error
+        created = True
+        with os.fdopen(descriptor, "wb") as destination:
+            descriptor = None
+            _copy_pptx_to_fd(temporary, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if sha256_file(output) != sha256_file(temporary):
+            raise RuntimeError("PPTX no-clobber fallback hash mismatch")
+    except Exception as error:
+        cleanup_error = None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except Exception as caught:
+                cleanup_error = caught
+        if created:
+            output_cleanup_error = _unlink_file(output)
+            if cleanup_error is None:
+                cleanup_error = output_cleanup_error
+        if cleanup_error is not None:
+            raise error from cleanup_error
+        raise
+
+
+def _copy_pptx_to_fd(source: Path, destination: object) -> None:
+    with source.open("rb") as input_file:
+        while chunk := input_file.read(_HASH_CHUNK_SIZE):
+            destination.write(chunk)
+
+
+def _unlink_file(path: Path | None) -> Exception | None:
+    if path is None:
+        return None
+    try:
+        path.unlink(missing_ok=True)
+    except Exception as error:
+        return error
+    return None
 
 
 def _same_file(first: Path, second: Path) -> bool:
@@ -410,20 +565,15 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
             size = presentation.find("p:sldSz", NS)
             if size is None or size.get("cx") is None or size.get("cy") is None:
                 raise ValueError("Missing slide size in ppt/presentation.xml")
-            try:
-                slide_width = int(size.get("cx"))
-                slide_height = int(size.get("cy"))
-            except (TypeError, ValueError) as error:
-                raise ValueError(
-                    "Slide dimensions must be positive numbers"
-                ) from error
-            if slide_width <= 0 or slide_height <= 0:
-                raise ValueError("Slide dimensions must be positive numbers")
+            slide_width = _parse_ooxml_integer(size.get("cx"))
+            slide_height = _parse_ooxml_integer(size.get("cy"))
             if (
-                slide_width > MAX_OOXML_INTEGER
-                or slide_height > MAX_OOXML_INTEGER
+                slide_width is None
+                or slide_height is None
+                or slide_width <= 0
+                or slide_height <= 0
             ):
-                raise ValueError("Slide dimensions must be reliable integers")
+                raise ValueError("Slide dimensions must be positive numbers")
             slides: list[dict[str, object]] = []
             ids = presentation.findall("p:sldIdLst/p:sldId", NS)
             for index, slide_id in enumerate(ids, start=1):
@@ -956,11 +1106,10 @@ def _integer_attribute(
     value = element.get(name)
     if value is None:
         return (0 if default is None else default), default is not None
-    try:
-        parsed = int(value)
-    except ValueError:
+    parsed = _parse_ooxml_integer(value)
+    if parsed is None:
         return (0 if default is None else default), False
-    return parsed, MIN_OOXML_INTEGER <= parsed <= MAX_OOXML_INTEGER
+    return parsed, True
 
 
 def _boolean_attribute(
@@ -1009,16 +1158,21 @@ def _picture_details(
         "crop_right": _crop_value(src_rect, "r"),
         "crop_bottom": _crop_value(src_rect, "b"),
     }
-    blip = node.find("p:blipFill/a:blip", NS)
-    primary_id = None
-    if blip is not None:
-        primary_id = blip.get(f"{{{R}}}embed") or blip.get(f"{{{R}}}link")
+    blip_sources = []
+    for blip in node.findall(".//a:blip", NS):
+        for kind in ("embed", "link"):
+            rel_id = blip.get(f"{{{R}}}{kind}")
+            if rel_id is not None:
+                blip_sources.append({"kind": kind, "id": rel_id})
+    primary_id = blip_sources[0]["id"] if blip_sources else None
     primary = next(
         (relation for relation in related if relation["id"] == primary_id),
         None,
     )
     media_sha256 = None
     pixel_width = pixel_height = None
+    media_format = None
+    media_valid = False
     if primary and primary["target_mode"] == "Internal" and isinstance(primary["target"], str) and primary["target"] in names:
         target = primary["target"]
         media_sha256 = parts[target]
@@ -1026,19 +1180,46 @@ def _picture_details(
             data = archive.read(target)
             try:
                 with Image.open(BytesIO(data)) as image:
-                    pixel_width, pixel_height = image.size
+                    detected_format = image.format
+                    image.verify()
+                with Image.open(BytesIO(data)) as image:
+                    image.load()
+                    width, height = image.size
+                    loaded_format = image.format
+                content_types = SUPPORTED_IMAGE_CONTENT_TYPES.get(
+                    detected_format or ""
+                )
+                if (
+                    detected_format == loaded_format
+                    and content_types is not None
+                    and primary.get("content_type") in content_types
+                    and type(width) is int
+                    and type(height) is int
+                    and width > 0
+                    and height > 0
+                ):
+                    media_format = detected_format
+                    pixel_width, pixel_height = width, height
+                    media_valid = True
             except Exception:
                 pass
-    return {**crop, "primary_relationship": primary, "media_sha256": media_sha256, "pixel_width": pixel_width, "pixel_height": pixel_height}
+    return {
+        **crop,
+        "blip_sources": blip_sources,
+        "primary_relationship": primary,
+        "media_sha256": media_sha256,
+        "media_format": media_format,
+        "media_valid": media_valid,
+        "pixel_width": pixel_width,
+        "pixel_height": pixel_height,
+    }
 
 
 def _crop_value(src_rect: ET.Element | None, name: str) -> int:
     if src_rect is None:
         return 0
-    try:
-        return int(src_rect.get(name, "0"))
-    except ValueError:
-        return 1
+    parsed = _parse_ooxml_integer(src_rect.get(name, "0"))
+    return parsed if parsed is not None else 1
 
 
 def _mark_picture_safety(
@@ -1075,10 +1256,33 @@ def _mark_picture_safety(
         reasons.append("nonzero_crop")
 
     relation = picture.get("primary_relationship")
-    if isinstance(relation, dict) and relation.get("target_mode") == "External":
+    relationships = picture["relationships"]
+    sources = picture["blip_sources"]
+    if any(
+        related.get("target_mode") == "External"
+        for related in relationships
+    ):
         reasons.append("external_relationship")
-    elif not _is_valid_picture_media(picture, relation, names, parts):
+    if (
+        len(sources) > 1
+        or len(relationships) != 1
+        or (
+            len(sources) == 1
+            and relationships
+            and sources[0]["id"] != relationships[0].get("id")
+        )
+    ):
+        reasons.append("ambiguous_media_source")
+    primary_external = (
+        isinstance(relation, dict)
+        and relation.get("target_mode") == "External"
+    )
+    if not primary_external and not _is_valid_picture_media(
+        picture, relation, names, parts
+    ):
         reasons.append("missing_media")
+    elif not primary_external and picture["media_valid"] is not True:
+        reasons.append("invalid_media")
     if picture["has_extension"] or picture["has_timing_reference"]:
         reasons.append("unsupported_extension")
 
