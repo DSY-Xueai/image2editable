@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 import os
 from pathlib import Path
+import secrets
 import stat
 import tempfile
 from typing import Any, Iterable, Sequence
@@ -16,6 +17,7 @@ from image2editable.contracts import (
     validate_schema_version,
 )
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
+from image2editable.execution import ExecutionLease
 from image2editable.legacy import _safe_rmtree, execute_legacy
 from image2editable.resources import (
     apply_resource_policy,
@@ -280,18 +282,29 @@ def _is_link_or_reparse(status: os.stat_result) -> bool:
 def _run_work_directory(
     store: RunStore,
 ) -> tuple[Path, tuple[int, int]] | None:
-    work_root = store.root / "work"
+    return _run_owned_directory(store, "work")
+
+
+def _run_owned_directory(
+    store: RunStore,
+    name: str,
+) -> tuple[Path, tuple[int, int]] | None:
+    path = store.root / name
     try:
-        status = work_root.lstat()
+        status = path.lstat()
     except FileNotFoundError:
         return None
     if _is_link_or_reparse(status):
-        raise RuntimeError(f"Run work directory is a link or reparse point: {work_root}")
+        raise RuntimeError(
+            f"Run {name} directory is a link or reparse point: {path}"
+        )
     if not stat.S_ISDIR(status.st_mode):
-        raise RuntimeError(f"Run work path is not a directory: {work_root}")
-    resolved = work_root.resolve()
+        raise RuntimeError(f"Run {name} path is not a directory: {path}")
+    resolved = path.resolve()
     if not resolved.is_relative_to(store.root):
-        raise RuntimeError(f"Run work directory is outside run directory: {work_root}")
+        raise RuntimeError(
+            f"Run {name} directory is outside run directory: {path}"
+        )
     return resolved, (status.st_dev, status.st_ino)
 
 
@@ -586,6 +599,14 @@ def _isolate_recorded_pptx_output(
 
 
 def run_job(run_dir: str | Path) -> dict[str, Any]:
+    return _run_job(run_dir, lease_acquired=False)
+
+
+def _run_job(
+    run_dir: str | Path,
+    *,
+    lease_acquired: bool,
+) -> dict[str, Any]:
     store = RunStore.open(run_dir)
     manifest, input_type = _manifest_input(store)
     resource_policy = _manifest_resource_policy(manifest)
@@ -624,7 +645,23 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         raise RuntimeError(
             f"Run must be prepared before execution; current status is {state['status']}"
         )
+    if not lease_acquired:
+        with ExecutionLease(
+            store.root / "execution.lock",
+            run_root=store.root,
+        ):
+            return _run_job(store.root, lease_acquired=True)
 
+    store.write_json(
+        "execution.json",
+        {
+            "schema_version": SCHEMA_VERSION,
+            "token": secrets.token_hex(16),
+            "pid": os.getpid(),
+            "started_at": utc_now(),
+            "input_type": input_type,
+        },
+    )
     apply_resource_policy(resource_policy)
     if input_type == "pptx":
         page_ids = _pptx_page_ids(
@@ -788,6 +825,15 @@ def _reset_pages_for_retry(
     *,
     analyzed: bool = False,
 ) -> None:
+    if _reset_page_jobs(page_jobs, analyzed=analyzed):
+        store.write_json("page_jobs.json", page_jobs)
+
+
+def _reset_page_jobs(
+    page_jobs: dict[str, Any],
+    *,
+    analyzed: bool,
+) -> bool:
     pages = page_jobs["pages"]
     updates = {}
     for page_id, page in pages.items():
@@ -817,7 +863,143 @@ def _reset_pages_for_retry(
         updates[page_id] = page
     if updates:
         pages.update(updates)
-        store.write_json("page_jobs.json", page_jobs)
+    return bool(updates)
+
+
+def _manifest_output_path(manifest: dict[str, Any]) -> Path | None:
+    options = manifest.get("options")
+    if not isinstance(options, dict):
+        raise RuntimeError("Run manifest options must be an object")
+    value = options.get("output_path")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError("Run manifest output_path must be a string or null")
+    path = Path(value)
+    if not path.is_absolute():
+        raise RuntimeError("Run manifest output_path must be absolute")
+    return path
+
+
+def _expected_legacy_output_entries(
+    manifest: dict[str, Any],
+    input_type: str,
+) -> list[Path]:
+    output = _manifest_output_path(manifest)
+    if output is None:
+        return []
+    entries = [output]
+    options = manifest["options"]
+    slide_size = options.get("slide_size")
+    if slide_size == "16:9":
+        return entries
+    pages = manifest.get("pages")
+    if not isinstance(pages, list):
+        raise RuntimeError("Run manifest pages must be an array")
+    base = output.with_suffix("")
+    if len(pages) == 1:
+        if slide_size == "both":
+            entries.extend(
+                (
+                    Path(f"{base}_16x9.pptx"),
+                    Path(f"{base}_original.pptx"),
+                )
+            )
+        return entries
+    if slide_size == "both":
+        entries.append(Path(f"{base}_16x9.pptx"))
+    if slide_size not in {"both", "original"}:
+        return entries
+    combine_original = (
+        input_type == "pdf"
+        and manifest["input"].get("page_ratios_equal") is True
+    )
+    if combine_original:
+        entries.append(Path(f"{base}_original.pptx"))
+    else:
+        entries.append(Path(f"{base}_original"))
+    return entries
+
+
+def _is_owned_final_output(store: RunStore, output: Path) -> bool:
+    parent = Path(os.path.abspath(output.parent))
+    final = Path(os.path.abspath(store.root / "final"))
+    if not parent.is_relative_to(final):
+        return False
+    current = final
+    for part in parent.relative_to(final).parts:
+        try:
+            status = current.lstat()
+        except FileNotFoundError:
+            return False
+        if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+            return False
+        current /= part
+    try:
+        status = current.lstat()
+    except FileNotFoundError:
+        return False
+    return not _is_link_or_reparse(status) and stat.S_ISDIR(status.st_mode)
+
+
+def recover_job(run_dir: str | Path) -> dict[str, Any]:
+    store = RunStore.open(run_dir)
+    with ExecutionLease(
+        store.root / "execution.lock",
+        run_root=store.root,
+    ):
+        store = RunStore.open(store.root)
+        state = store.read_json("run_state.json")
+        if state["status"] not in {
+            RunStatus.RUNNING.value,
+            RunStatus.FINALIZING.value,
+        }:
+            raise RuntimeError(
+                "Run must be running or finalizing before recovery; "
+                f"current status is {state['status']}"
+            )
+
+        manifest, input_type = _manifest_input(store)
+        if input_type == "pptx":
+            expected_output = _pptx_output_path(store, manifest)
+            if _path_entry_exists(expected_output):
+                raise RuntimeError(
+                    f"PPTX recovery is blocked by an existing output: "
+                    f"{expected_output}"
+                )
+        else:
+            for output in _expected_legacy_output_entries(
+                manifest, input_type
+            ):
+                if _path_entry_exists(
+                    output
+                ) and not _is_owned_final_output(store, output):
+                    raise RuntimeError(
+                        "Run recovery is blocked by an existing external "
+                        f"output: {output}"
+                    )
+
+        page_jobs = store.read_json("page_jobs.json")
+        pages_changed = _reset_page_jobs(
+            page_jobs,
+            analyzed=input_type == "pptx",
+        )
+        cleanup = [
+            directory
+            for directory in (
+                _run_owned_directory(store, "final"),
+                _run_owned_directory(store, "work"),
+            )
+            if directory is not None
+        ]
+
+        for directory in cleanup:
+            _safe_rmtree(*directory)
+        if pages_changed:
+            store.write_json("page_jobs.json", page_jobs)
+        store.transition_run(RunStatus.FAILED)
+        store.transition_run(RunStatus.PREPARED)
+        return get_status(store.root)
 
 
 def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:

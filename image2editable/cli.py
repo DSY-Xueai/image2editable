@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     execute_parser = run_subparsers.add_parser("execute")
     execute_parser.add_argument("run_dir")
 
+    recover_parser = run_subparsers.add_parser("recover")
+    recover_parser.add_argument("run_dir")
+
     retry_parser = run_subparsers.add_parser("retry")
     retry_parser.add_argument("run_dir")
     retry_parser.add_argument("--page", required=True)
@@ -103,6 +106,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         with redirect_stdout(sys.stderr):
             summary = runtime.run_job(args.run_dir)
         _print_json(summary)
+        return 0
+    if args.run_command == "recover":
+        with redirect_stdout(sys.stderr):
+            status = runtime.recover_job(args.run_dir)
+        _print_json(status)
         return 0
     if args.run_command == "retry":
         with redirect_stdout(sys.stderr):
