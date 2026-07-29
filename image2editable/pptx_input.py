@@ -63,7 +63,9 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     for node in slide.findall(".//p:spTgt", NS)
                     if node.get("spid") is not None
                 }
-                notes_part, notes_sha256 = _notes(slide_rels, parts)
+                notes_part, notes_sha256 = _notes(
+                    slide_rels, parts, archive, names
+                )
                 tree = slide.find("p:cSld/p:spTree", NS)
                 if tree is None:
                     raise ValueError(f"Missing shape tree in {slide_part}")
@@ -110,7 +112,13 @@ def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
         raise ValueError(f"Missing required PPTX part: {part}")
     data = archive.read(part)
     lowered = data.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
+    null_stripped = lowered.replace(b"\x00", b"")
+    if (
+        b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"<!doctype" in null_stripped
+        or b"<!entity" in null_stripped
+    ):
         raise ValueError(f"Unsafe XML in {part}: DOCTYPE and ENTITY are not allowed")
     try:
         return ET.fromstring(data)
@@ -158,10 +166,15 @@ def _relationships(
 
 
 def _part_target(source_part: str, target: str) -> str:
-    if not target or target.startswith("/") or "\\" in target:
+    if not target or "\\" in target or target.startswith("//"):
         raise ValueError(f"Unsafe relationship target from {source_part}: {target}")
-    normalized = posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
-    if normalized == "." or normalized.startswith("../"):
+    candidate = (
+        target.lstrip("/")
+        if target.startswith("/")
+        else posixpath.join(posixpath.dirname(source_part), target)
+    )
+    normalized = posixpath.normpath(candidate)
+    if normalized in {".", ".."} or normalized.startswith("../"):
         raise ValueError(f"Relationship target escapes package from {source_part}: {target}")
     return normalized
 
@@ -171,12 +184,18 @@ def _rels_name(part: str) -> str:
     return f"{directory}/_rels/{filename}.rels"
 
 
-def _notes(rels: dict[str, dict[str, object]], parts: dict[str, str]) -> tuple[str | None, str | None]:
+def _notes(
+    rels: dict[str, dict[str, object]],
+    parts: dict[str, str],
+    archive: zipfile.ZipFile,
+    names: set[str],
+) -> tuple[str | None, str | None]:
     for relation in rels.values():
         if str(relation["type"]).endswith("/notesSlide") and relation["target_mode"] == "Internal":
             target = relation["target"]
             if not isinstance(target, str) or target not in parts:
                 raise ValueError(f"Missing notes part: {target}")
+            _xml(archive, target, names)
             return target, parts[target]
     return None, None
 
@@ -274,9 +293,16 @@ def _type(node: ET.Element) -> str:
 
 
 def _transform(node: ET.Element) -> dict[str, object]:
-    xfrm = node.find(".//a:xfrm", NS)
-    if xfrm is None:
+    if node.tag == f"{{{P}}}graphicFrame":
         xfrm = node.find("p:xfrm", NS)
+    elif node.tag == f"{{{P}}}grpSp":
+        xfrm = node.find("p:grpSpPr/a:xfrm", NS)
+    elif node.tag in {f"{{{P}}}sp", f"{{{P}}}pic", f"{{{P}}}cxnSp"}:
+        xfrm = node.find("p:spPr/a:xfrm", NS)
+    elif node.tag == f"{{{P}}}contentPart":
+        xfrm = node.find("p:xfrm", NS)
+    else:
+        xfrm = None
     off = xfrm.find("a:off", NS) if xfrm is not None else None
     ext = xfrm.find("a:ext", NS) if xfrm is not None else None
     rotation = int(xfrm.get("rot", "0")) if xfrm is not None else 0
@@ -320,7 +346,14 @@ def _picture_details(node: ET.Element, related: list[dict[str, object]], archive
         "crop_right": int(src_rect.get("r", "0")) if src_rect is not None else 0,
         "crop_bottom": int(src_rect.get("b", "0")) if src_rect is not None else 0,
     }
-    primary = related[0] if related else None
+    blip = node.find("p:blipFill/a:blip", NS)
+    primary_id = None
+    if blip is not None:
+        primary_id = blip.get(f"{{{R}}}embed") or blip.get(f"{{{R}}}link")
+    primary = next(
+        (relation for relation in related if relation["id"] == primary_id),
+        None,
+    )
     media_sha256 = None
     pixel_width = pixel_height = None
     if primary and primary["target_mode"] == "Internal" and isinstance(primary["target"], str) and primary["target"] in names:
