@@ -46,6 +46,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
         manifest["input"].get("type") == "pdf"
         and manifest["input"].get("page_ratios_equal") is True
     )
+    original_aspect_ratio = manifest["input"].get("page_aspect_ratio")
     output_path = options["output_path"]
     if output_path is None:
         output_path = str(store.root / "final" / "output.pptx")
@@ -74,6 +75,8 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
             }
             if combine_original:
                 kwargs["combine_original"] = True
+                if original_aspect_ratio is not None:
+                    kwargs["original_aspect_ratio"] = original_aspect_ratio
             result = module.convert_batch_variants(
                 sources,
                 **kwargs,
@@ -86,6 +89,8 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
             }
             if combine_original:
                 kwargs["combine_original"] = True
+                if original_aspect_ratio is not None:
+                    kwargs["original_aspect_ratio"] = original_aspect_ratio
             result = module.convert_batch_variants(
                 sources,
                 **kwargs,

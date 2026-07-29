@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from numbers import Integral
+from numbers import Integral, Real
 from pathlib import Path
 
 from pptx import Presentation
@@ -240,6 +240,7 @@ def assemble_pptx_multi(
     output_path: str | Path,
     add_reference: bool = False,
     slide_size: str = "16:9",
+    original_aspect_ratio: float | None = None,
 ) -> str:
     """Assemble a multi-slide PPTX from multiple images' data.
 
@@ -263,28 +264,54 @@ def assemble_pptx_multi(
 
     original_transform = None
     if slide_size == "original":
-        first_width = slides_data[0]["img_width"]
-        first_height = slides_data[0]["img_height"]
-        if first_width <= 0 or first_height <= 0:
-            raise ValueError("original slides require positive image dimensions")
-        first_ratio = first_width / first_height
-        for data in slides_data[1:]:
+        for data in slides_data:
             img_w = data["img_width"]
             img_h = data["img_height"]
             if img_w <= 0 or img_h <= 0:
                 raise ValueError("original slides require positive image dimensions")
-            if not math.isclose(
-                img_w / img_h,
-                first_ratio,
-                rel_tol=1e-4,
-                abs_tol=1e-6,
+        if original_aspect_ratio is None:
+            first_width = slides_data[0]["img_width"]
+            first_height = slides_data[0]["img_height"]
+            first_ratio = first_width / first_height
+            for data in slides_data[1:]:
+                if not math.isclose(
+                    data["img_width"] / data["img_height"],
+                    first_ratio,
+                    rel_tol=1e-4,
+                    abs_tol=1e-6,
+                ):
+                    raise ValueError("original slides must have the same aspect ratio")
+            original_transform = compute_slide_transform(
+                first_width,
+                first_height,
+                "original",
+            )
+        else:
+            if (
+                isinstance(original_aspect_ratio, bool)
+                or not isinstance(original_aspect_ratio, Real)
+                or not math.isfinite(original_aspect_ratio)
+                or original_aspect_ratio <= 0
             ):
-                raise ValueError("original slides must have the same aspect ratio")
-        original_transform = compute_slide_transform(
-            first_width,
-            first_height,
-            "original",
-        )
+                raise ValueError("original_aspect_ratio must be positive and finite")
+            for data in slides_data:
+                img_w = data["img_width"]
+                img_h = data["img_height"]
+                lower = (img_w - 1) / img_h
+                upper = img_w / (img_h - 1) if img_h > 1 else math.inf
+                above_lower = original_aspect_ratio >= lower or math.isclose(
+                    original_aspect_ratio, lower, rel_tol=1e-12, abs_tol=1e-12
+                )
+                below_upper = original_aspect_ratio <= upper or math.isclose(
+                    original_aspect_ratio, upper, rel_tol=1e-12, abs_tol=1e-12
+                )
+                if not above_lower or not below_upper:
+                    raise ValueError("original slides must have the same aspect ratio")
+            original_transform = compute_slide_transform(
+                original_aspect_ratio,
+                1.0,
+                "original",
+            )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

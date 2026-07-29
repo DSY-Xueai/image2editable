@@ -80,10 +80,12 @@ def prepare_pdf_job(
         ]
         renders = render_pdf_document(copied_path, output_paths, profile="standard")
         ratios = [record["width_pt"] / record["height_pt"] for record in renders]
-        page_ratios_equal = all(
-            math.isclose(ratio, ratios[0], rel_tol=1e-4, abs_tol=1e-6)
+        page_ratios_equal = math.isfinite(ratios[0]) and all(
+            math.isfinite(ratio)
+            and math.isclose(ratio, ratios[0], rel_tol=1e-4, abs_tol=1e-6)
             for ratio in ratios[1:]
         )
+        page_aspect_ratio = ratios[0] if page_ratios_equal else None
         for page_id, render in zip(page_ids, renders):
             source_relative = (Path("pages") / page_id / "source.png").as_posix()
             store.write_json(
@@ -115,6 +117,7 @@ def prepare_pdf_job(
                 "sha256": digest,
                 "page_count": page_count,
                 "page_ratios_equal": page_ratios_equal,
+                "page_aspect_ratio": page_aspect_ratio,
             },
             "output_format": "pptx",
             "options": {

@@ -582,6 +582,7 @@ def convert_batch_variants(
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
     combine_original: bool = False,
+    original_aspect_ratio: float | None = None,
 ) -> dict[str, str | list[str] | None]:
     slides_data = _prepare_multiple_images(image_paths, lang)
     source_paths = [
@@ -610,6 +611,7 @@ def convert_batch_variants(
             output_path=str(Path(f"{base}_original.pptx")),
             add_reference=add_reference,
             slide_size="original",
+            original_aspect_ratio=original_aspect_ratio,
         )
         return {"16:9": widescreen_result, "original": original_result}
 
