@@ -228,29 +228,65 @@ def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
     return (
         status.st_dev,
         status.st_ino,
+        status.st_mode,
         status.st_size,
         status.st_mtime_ns,
-        status.st_ctime_ns,
     )
 
 
-def _record_pptx_output(
+def _claim_pptx_output(
     summary: dict[str, Any],
+    expected_output: Path,
+    output_existed: bool,
 ) -> tuple[Path, tuple[int, int, int, int, int], str]:
+    token = summary.pop("_output_identity", None)
     outputs = summary.get("outputs")
     output_value = outputs.get("pptx") if isinstance(outputs, dict) else None
     expected_hash = summary.get("output_sha256")
-    if not isinstance(output_value, str) or not isinstance(expected_hash, str):
-        raise RuntimeError("PPTX execution summary is missing output identity")
-    output = Path(output_value)
-    if not output.is_absolute():
-        raise RuntimeError("PPTX execution output path must be absolute")
-    identity = _pptx_output_identity(output)
-    if sha256_file(output) != expected_hash:
-        raise RuntimeError("PPTX execution output hash does not match summary")
-    if _pptx_output_identity(output) != identity:
-        raise RuntimeError("PPTX execution output changed while recording identity")
-    return output, identity, expected_hash
+    if output_value != str(expected_output):
+        raise RuntimeError("PPTX execution did not return the expected output path")
+    if output_existed:
+        raise RuntimeError("PPTX expected output already existed before execution")
+    token_keys = {
+        "version",
+        "path",
+        "dev",
+        "ino",
+        "mode",
+        "size",
+        "mtime_ns",
+        "sha256",
+    }
+    if (
+        not isinstance(token, dict)
+        or set(token) != token_keys
+        or type(token.get("version")) is not int
+        or token["version"] != 1
+        or token.get("path") != str(expected_output)
+        or any(
+            type(token.get(name)) is not int
+            for name in ("dev", "ino", "mode", "size", "mtime_ns")
+        )
+        or not isinstance(token.get("sha256"), str)
+        or not isinstance(expected_hash, str)
+    ):
+        raise RuntimeError("PPTX execution output identity token is invalid")
+    if token["sha256"] != expected_hash:
+        raise RuntimeError("PPTX execution output hash does not match identity token")
+    identity = (
+        token["dev"],
+        token["ino"],
+        token["mode"],
+        token["size"],
+        token["mtime_ns"],
+    )
+    if _pptx_output_identity(expected_output) != identity:
+        raise RuntimeError("PPTX execution output identity token does not match")
+    if sha256_file(expected_output) != expected_hash:
+        raise RuntimeError("PPTX execution output hash does not match identity token")
+    if _pptx_output_identity(expected_output) != identity:
+        raise RuntimeError("PPTX execution output changed during token verification")
+    return expected_output, identity, expected_hash
 
 
 def _restore_isolated_pptx_output(
@@ -346,7 +382,11 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         if input_type == "pptx":
             summary = execute_pptx_preserve(store)
             pptx_output_published = True
-            pptx_output_record = _record_pptx_output(summary)
+            pptx_output_record = _claim_pptx_output(
+                summary,
+                pptx_expected_output,
+                pptx_output_existed,
+            )
             validate_schema_version(summary)
             _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)

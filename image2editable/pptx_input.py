@@ -7,6 +7,7 @@ import json
 import os
 import posixpath
 import shutil
+import stat
 import tempfile
 import warnings
 import zipfile
@@ -334,7 +335,7 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         output_sha256 = sha256_file(temporary)
         if output_sha256 != input_sha256:
             raise RuntimeError("PPTX preserve copy hash mismatch")
-        _publish_pptx_no_clobber(temporary, output_path)
+        output_identity = _publish_pptx_no_clobber(temporary, output_path)
     except Exception as error:
         cleanup_error = _unlink_file(temporary)
         if cleanup_error is not None:
@@ -359,6 +360,7 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         "outputs": {"pptx": str(output_path)},
         "input_sha256": input_sha256,
         "output_sha256": output_sha256,
+        "_output_identity": output_identity,
     }
 
 
@@ -473,10 +475,46 @@ def _path_without_symlinks(value: str | Path) -> Path:
     return lexical
 
 
-def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
+def _published_output_identity(
+    output: Path, status: os.stat_result, digest: str
+) -> dict[str, object]:
+    if not stat.S_ISREG(status.st_mode):
+        raise RuntimeError(f"PPTX output is not a regular file: {output}")
+    return {
+        "version": 1,
+        "path": str(output),
+        "dev": status.st_dev,
+        "ino": status.st_ino,
+        "mode": status.st_mode,
+        "size": status.st_size,
+        "mtime_ns": status.st_mtime_ns,
+        "sha256": digest,
+    }
+
+
+def _publish_pptx_no_clobber(
+    temporary: Path, output: Path
+) -> dict[str, object]:
+    source_status = temporary.lstat()
+    source_identity = _published_output_identity(
+        output, source_status, sha256_file(temporary)
+    )
     try:
         os.link(temporary, output)
-        return
+        linked_source_status = temporary.lstat()
+        output_status = output.lstat()
+        linked_identity = _published_output_identity(
+            output, linked_source_status, source_identity["sha256"]
+        )
+        output_identity = _published_output_identity(
+            output, output_status, sha256_file(output)
+        )
+        if (
+            source_identity != linked_identity
+            or linked_identity != output_identity
+        ):
+            raise RuntimeError("PPTX hardlink output identity changed during publish")
+        return output_identity
     except FileExistsError as error:
         raise FileExistsError(f"PPTX output already exists: {output}") from error
     except OSError:
@@ -484,6 +522,8 @@ def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
 
     descriptor: int | None = None
     created = False
+    created_identity = None
+    output_identity = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         try:
@@ -493,13 +533,27 @@ def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
                 f"PPTX output already exists: {output}"
             ) from error
         created = True
+        created_status = os.fstat(descriptor)
+        created_identity = (created_status.st_dev, created_status.st_ino)
         with os.fdopen(descriptor, "wb") as destination:
             descriptor = None
             _copy_pptx_to_fd(temporary, destination)
             destination.flush()
             os.fsync(destination.fileno())
-        if sha256_file(output) != sha256_file(temporary):
+            output_identity = _published_output_identity(
+                output,
+                os.fstat(destination.fileno()),
+                source_identity["sha256"],
+            )
+        if sha256_file(output) != source_identity["sha256"]:
             raise RuntimeError("PPTX no-clobber fallback hash mismatch")
+        current_status = output.lstat()
+        current_identity = _published_output_identity(
+            output, current_status, source_identity["sha256"]
+        )
+        if output_identity != current_identity:
+            raise RuntimeError("PPTX fallback output identity changed during publish")
+        return output_identity
     except Exception as error:
         cleanup_error = None
         if descriptor is not None:
@@ -508,12 +562,113 @@ def _publish_pptx_no_clobber(temporary: Path, output: Path) -> None:
             except Exception as caught:
                 cleanup_error = caught
         if created:
-            output_cleanup_error = _unlink_file(output)
-            if cleanup_error is None:
-                cleanup_error = output_cleanup_error
+            try:
+                _remove_fallback_output(output, created_identity)
+            except Exception as caught:
+                if cleanup_error is None:
+                    cleanup_error = caught
         if cleanup_error is not None:
             raise error from cleanup_error
         raise
+
+
+def _remove_fallback_output(
+    output: Path, created_identity: tuple[int, int] | None
+) -> None:
+    descriptor, isolated_value = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.recovery-",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    isolated = Path(isolated_value)
+    try:
+        os.replace(output, isolated)
+    except FileNotFoundError:
+        isolated.unlink(missing_ok=True)
+        return
+    except Exception:
+        isolated.unlink(missing_ok=True)
+        raise
+
+    status = isolated.lstat()
+    if created_identity == (status.st_dev, status.st_ino):
+        isolated.unlink()
+        return
+    try:
+        _restore_isolated_file(isolated, output)
+    except Exception as error:
+        raise RuntimeError(
+            f"Concurrent PPTX output was preserved at {isolated}"
+        ) from error
+
+
+def _restore_isolated_file(isolated: Path, output: Path) -> None:
+    restored_identity = None
+    isolated_status = isolated.lstat()
+    try:
+        os.link(isolated, output, follow_symlinks=False)
+    except FileExistsError:
+        raise
+    except OSError:
+        if not stat.S_ISREG(isolated_status.st_mode):
+            raise
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(output, flags, 0o666)
+        try:
+            with os.fdopen(descriptor, "wb") as destination:
+                descriptor = -1
+                _copy_pptx_to_fd(isolated, destination)
+                destination.flush()
+                os.fsync(destination.fileno())
+                restored = os.fstat(destination.fileno())
+                restored_identity = (
+                    restored.st_dev,
+                    restored.st_ino,
+                    restored.st_mode,
+                    restored.st_size,
+                    restored.st_mtime_ns,
+                )
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+        current = output.lstat()
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            current.st_mode,
+            current.st_size,
+            current.st_mtime_ns,
+        )
+        output_digest = sha256_file(output)
+        isolated_digest = sha256_file(isolated)
+        stable = output.lstat()
+        stable_identity = (
+            stable.st_dev,
+            stable.st_ino,
+            stable.st_mode,
+            stable.st_size,
+            stable.st_mtime_ns,
+        )
+        if (
+            restored_identity != current_identity
+            or output_digest != isolated_digest
+            or stable_identity != current_identity
+        ):
+            raise RuntimeError("PPTX replacement changed while being restored")
+    else:
+        restored_status = output.lstat()
+        if (
+            restored_status.st_dev,
+            restored_status.st_ino,
+            restored_status.st_mode,
+        ) != (
+            isolated_status.st_dev,
+            isolated_status.st_ino,
+            isolated_status.st_mode,
+        ):
+            raise RuntimeError("PPTX replacement identity changed while restoring")
+    isolated.unlink()
 
 
 def _copy_pptx_to_fd(source: Path, destination: object) -> None:
