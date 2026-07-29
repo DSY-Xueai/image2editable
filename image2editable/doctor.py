@@ -55,6 +55,7 @@ def check_environment() -> dict[str, Any]:
         "opencv": _module_check("cv2"),
         "pillow": _module_check("PIL"),
         "numpy": _module_check("numpy"),
+        "pdfium": _module_check("pypdfium2"),
         "transformers": _module_check("transformers"),
         "sam2": _module_check("sam2"),
         "lama": _module_check("simple_lama_inpainting"),

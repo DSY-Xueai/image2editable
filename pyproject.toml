@@ -18,6 +18,8 @@ image2editable = "image2editable.cli:main"
 psd = ["aspose-psd>=26.5.0"]
 test = [
     "pytest",
+    "pypdf>=5",
+    "reportlab>=4",
     "tomli>=2; python_version < '3.11'",
 ]
 

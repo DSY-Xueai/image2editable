@@ -6,6 +6,7 @@ from image2editable.runtime import (
     convert,
     get_status,
     prepare_job,
+    rerender_pdf_page,
     retry_page,
     run_job,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "convert",
     "get_status",
     "prepare_job",
+    "rerender_pdf_page",
     "retry_page",
     "run_job",
 ]

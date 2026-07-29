@@ -10,9 +10,41 @@ from image2editable.contracts import (
     transition_page_document,
     validate_schema_version,
 )
-from image2editable.inputs import prepare_image_job
+from image2editable.inputs import classify_inputs, prepare_image_job
 from image2editable.legacy import execute_legacy
 from image2editable.store import RunStore
+
+
+def _pdf_function(name: str) -> Any:
+    try:
+        from image2editable import pdf_input
+    except ModuleNotFoundError as error:
+        if error.name == "pypdfium2":
+            raise ModuleNotFoundError(
+                "PDF support requires pypdfium2>=5.7.1,<6"
+            ) from error
+        raise
+    return getattr(pdf_input, name)
+
+
+def prepare_pdf_job(*args: Any, **kwargs: Any) -> Path:
+    return _pdf_function("prepare_pdf_job")(*args, **kwargs)
+
+
+def rerender_pdf_page(*args: Any, **kwargs: Any) -> dict[str, bool]:
+    return _pdf_function("rerender_pdf_page")(*args, **kwargs)
+
+
+def prepare_pptx_job(*args: Any, **kwargs: Any) -> Path:
+    from image2editable.pptx_input import prepare_pptx_job as prepare
+
+    return prepare(*args, **kwargs)
+
+
+def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
+    from image2editable.pptx_input import execute_pptx_preserve as execute
+
+    return execute(store)
 
 
 def prepare_job(
@@ -23,8 +55,15 @@ def prepare_job(
     slide_size: str = "both",
     lang: str = "ch",
 ) -> Path:
-    return prepare_image_job(
-        inputs,
+    input_type, paths = classify_inputs(inputs)
+    prepare = {
+        "images": prepare_image_job,
+        "pdf": prepare_pdf_job,
+        "pptx": prepare_pptx_job,
+    }[input_type]
+    source: Path | list[Path] = paths if input_type == "images" else paths[0]
+    return prepare(
+        source,
         run_dir=run_dir,
         output_path=output_path,
         slide_size=slide_size,
@@ -67,6 +106,7 @@ def _record_failure(
             if pages[page_id]["status"]
             in {
                 PageStatus.PENDING.value,
+                PageStatus.ANALYZED.value,
                 PageStatus.PROCESSING.value,
                 PageStatus.VALIDATED.value,
             }
@@ -101,10 +141,54 @@ def _record_failure(
     return cleanup_errors[0] if cleanup_errors else None
 
 
+def _manifest_input(
+    store: RunStore,
+) -> tuple[dict[str, Any], str]:
+    manifest = store.read_json("job_manifest.json")
+    validate_schema_version(manifest)
+    input_record = manifest.get("input")
+    if not isinstance(input_record, dict):
+        raise RuntimeError("Run manifest input must be an object")
+    input_type = input_record.get("type")
+    if input_type not in {"images", "pdf", "pptx"}:
+        raise RuntimeError(f"Unsupported input type: {input_type}")
+    return manifest, input_type
+
+
+def _pptx_page_ids(
+    manifest: dict[str, Any],
+    page_jobs: dict[str, Any],
+    expected_status: PageStatus,
+) -> list[str]:
+    manifest_pages = manifest.get("pages")
+    pages = page_jobs["pages"]
+    if (
+        not isinstance(manifest_pages, list)
+        or any(not isinstance(page_id, str) for page_id in manifest_pages)
+        or len(pages) != len(manifest_pages)
+        or set(pages) != set(manifest_pages)
+    ):
+        raise RuntimeError("PPTX manifest pages do not match page jobs")
+    invalid = [
+        page_id
+        for page_id in manifest_pages
+        if pages[page_id]["status"] != expected_status.value
+    ]
+    if invalid:
+        raise RuntimeError(
+            f"PPTX pages must be {expected_status.value}: {', '.join(invalid)}"
+        )
+    return manifest_pages
+
+
 def run_job(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
+    manifest, input_type = _manifest_input(store)
     state = store.read_json("run_state.json")
+    page_jobs = store.read_json("page_jobs.json")
     if state["status"] == RunStatus.COMPLETED.value:
+        if input_type == "pptx":
+            _pptx_page_ids(manifest, page_jobs, PageStatus.PRESERVED)
         summary = store.read_json("run_summary.json")
         validate_schema_version(summary)
         return summary
@@ -113,30 +197,41 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
             f"Run must be prepared before execution; current status is {state['status']}"
         )
 
-    page_ids = list(store.read_json("page_jobs.json")["pages"])
+    if input_type == "pptx":
+        page_ids = _pptx_page_ids(
+            manifest, page_jobs, PageStatus.ANALYZED
+        )
+    else:
+        page_ids = list(page_jobs["pages"])
     store.transition_run(RunStatus.RUNNING)
 
     try:
-        _transition_pages(store, page_ids, PageStatus.PROCESSING)
-        outputs = execute_legacy(store)
-        for page_id in page_ids:
-            store.write_json(
-                Path("pages") / page_id / "page_result.json",
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "page_id": page_id,
-                    "status": PageStatus.VALIDATED.value,
-                    "outputs": outputs,
-                },
-            )
-        _transition_pages(store, page_ids, PageStatus.VALIDATED)
-        store.transition_run(RunStatus.FINALIZING)
-        summary = {
-            "schema_version": SCHEMA_VERSION,
-            "status": RunStatus.COMPLETED.value,
-            "pages": len(page_ids),
-            "outputs": outputs,
-        }
+        if input_type == "pptx":
+            summary = execute_pptx_preserve(store)
+            validate_schema_version(summary)
+            _transition_pages(store, page_ids, PageStatus.PRESERVED)
+            store.transition_run(RunStatus.FINALIZING)
+        else:
+            _transition_pages(store, page_ids, PageStatus.PROCESSING)
+            outputs = execute_legacy(store)
+            for page_id in page_ids:
+                store.write_json(
+                    Path("pages") / page_id / "page_result.json",
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "page_id": page_id,
+                        "status": PageStatus.VALIDATED.value,
+                        "outputs": outputs,
+                    },
+                )
+            _transition_pages(store, page_ids, PageStatus.VALIDATED)
+            store.transition_run(RunStatus.FINALIZING)
+            summary = {
+                "schema_version": SCHEMA_VERSION,
+                "status": RunStatus.COMPLETED.value,
+                "pages": len(page_ids),
+                "outputs": outputs,
+            }
         store.write_json("run_summary.json", summary)
         store.transition_run(RunStatus.COMPLETED)
         return summary
@@ -157,13 +252,22 @@ def _has_failed_summary(store: RunStore) -> bool:
 
 
 def _reset_pages_for_retry(
-    store: RunStore, page_jobs: dict[str, Any]
+    store: RunStore,
+    page_jobs: dict[str, Any],
+    *,
+    analyzed: bool = False,
 ) -> None:
     pages = page_jobs["pages"]
     updates = {}
     for page_id, page in pages.items():
         status = PageStatus(page["status"])
         if status is PageStatus.PENDING:
+            if analyzed:
+                updates[page_id] = transition_page_document(
+                    page, PageStatus.ANALYZED
+                )
+            continue
+        if status is PageStatus.ANALYZED and analyzed:
             continue
         if status in {PageStatus.PROCESSING, PageStatus.VALIDATED}:
             page = transition_page_document(page, PageStatus.FAILED)
@@ -171,7 +275,10 @@ def _reset_pages_for_retry(
             raise RuntimeError(
                 f"Page cannot be reset for P0 retry: {page_id} ({status.value})"
             )
-        updates[page_id] = transition_page_document(page, PageStatus.PENDING)
+        page = transition_page_document(page, PageStatus.PENDING)
+        if analyzed:
+            page = transition_page_document(page, PageStatus.ANALYZED)
+        updates[page_id] = page
     if updates:
         pages.update(updates)
         store.write_json("page_jobs.json", page_jobs)
@@ -179,6 +286,7 @@ def _reset_pages_for_retry(
 
 def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
     store = RunStore.open(run_dir)
+    _, input_type = _manifest_input(store)
     page_jobs = store.read_json("page_jobs.json")
     if page_id not in page_jobs["pages"]:
         raise KeyError(f"Unknown page_id: {page_id}")
@@ -204,7 +312,9 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
         raise RuntimeError(f"Run is not failed or continuing a retry: {page_id}")
     if run_status == RunStatus.FAILED.value:
         store.transition_run(RunStatus.PREPARED)
-    _reset_pages_for_retry(store, page_jobs)
+    _reset_pages_for_retry(
+        store, page_jobs, analyzed=input_type == "pptx"
+    )
     return get_status(store.root)
 
 

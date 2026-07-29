@@ -12,7 +12,11 @@ from image2editable.doctor import check_environment
 
 
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("images", nargs="+", help="Image files or directories")
+    parser.add_argument(
+        "sources",
+        nargs="+",
+        help="Image files, directories, one PDF or one PPTX",
+    )
     parser.add_argument("-o", "--output", default=None)
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--lang", default="ch")
@@ -46,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("run_dir")
     retry_parser.add_argument("--page", required=True)
 
+    render_parser = run_subparsers.add_parser("render-detail")
+    render_parser.add_argument("run_dir")
+    render_parser.add_argument("--page", required=True)
+
     subparsers.add_parser("doctor")
     return parser
 
@@ -65,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "convert":
         with redirect_stdout(sys.stderr):
             summary = runtime.convert(
-                args.images,
+                args.sources,
                 run_dir=args.run_dir,
                 output_path=args.output,
                 slide_size=args.slide_size,
@@ -77,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "prepare":
         with redirect_stdout(sys.stderr):
             run_dir = runtime.prepare_job(
-                args.images,
+                args.sources,
                 run_dir=args.run_dir,
                 output_path=args.output,
                 slide_size=args.slide_size,
@@ -100,5 +108,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         with redirect_stdout(sys.stderr):
             status = runtime.retry_page(args.run_dir, args.page)
         _print_json(status)
+        return 0
+    if args.run_command == "render-detail":
+        with redirect_stdout(sys.stderr):
+            result = runtime.rerender_pdf_page(args.run_dir, args.page)
+        _print_json(result)
         return 0
     raise AssertionError("argparse returned an unsupported command")

@@ -15,6 +15,7 @@ python-pptx>=0.6.21
 opencv-python>=4.5.0
 Pillow>=9.0.0
 numpy>=1.20.0
+pypdfium2>=5.7.1,<6
 
 # ─────────────────────────────────────────────────────────────
 # OCR engines (at least one required for text detection)
