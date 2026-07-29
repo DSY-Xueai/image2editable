@@ -244,11 +244,24 @@ def _is_sha256(value: object) -> bool:
 
 def _pptx_manifest_expectations(
     manifest: dict[str, Any],
-) -> tuple[int, int, str]:
+    page_jobs: dict[str, Any],
+) -> tuple[int, int, int, str]:
     input_record = manifest["input"]
+    slide_count = input_record.get("slide_count")
     preserved_objects = input_record.get("object_count")
     pending_candidates = input_record.get("candidate_count")
     input_sha256 = input_record.get("sha256")
+    manifest_pages = manifest.get("pages")
+    job_pages = page_jobs.get("pages")
+    if (
+        type(slide_count) is not int
+        or slide_count < 0
+        or not isinstance(manifest_pages, list)
+        or not isinstance(job_pages, dict)
+        or slide_count != len(manifest_pages)
+        or slide_count != len(job_pages)
+    ):
+        raise RuntimeError("PPTX manifest slide_count is invalid")
     if (
         type(preserved_objects) is not int
         or preserved_objects < 0
@@ -259,22 +272,22 @@ def _pptx_manifest_expectations(
         raise RuntimeError("PPTX manifest input counts are invalid")
     if not _is_sha256(input_sha256):
         raise RuntimeError("PPTX manifest input sha256 is invalid")
-    return preserved_objects, pending_candidates, input_sha256
+    return slide_count, preserved_objects, pending_candidates, input_sha256
 
 
-def _validate_pptx_execution_summary(
-    summary: dict[str, Any],
+def _validate_pptx_public_summary(
+    summary: object,
     expected_output: Path,
-    page_count: int,
+    slide_count: int,
     preserved_objects: int,
     pending_candidates: int,
     input_sha256: str,
 ) -> None:
-    if not isinstance(summary, dict):
+    if type(summary) is not dict:
         raise RuntimeError("PPTX execution summary must be an object")
     outputs = summary.get("outputs")
     if (
-        not isinstance(outputs, dict)
+        type(outputs) is not dict
         or outputs != {"pptx": str(expected_output)}
     ):
         raise RuntimeError(
@@ -291,7 +304,7 @@ def _validate_pptx_execution_summary(
         "input_sha256",
         "output_sha256",
     }
-    if set(summary) - {"_output_identity"} != expected_public_keys:
+    if set(summary) != expected_public_keys:
         raise RuntimeError("PPTX execution summary fields are invalid")
     warnings = summary.get("warnings")
     expected_warnings = (
@@ -302,25 +315,50 @@ def _validate_pptx_execution_summary(
     if (
         type(summary.get("schema_version")) is not int
         or summary["schema_version"] != SCHEMA_VERSION
-        or summary.get("status") != RunStatus.COMPLETED.value
+        or type(summary.get("status")) is not str
+        or summary["status"] != RunStatus.COMPLETED.value
         or type(summary.get("pages")) is not int
-        or summary["pages"] != page_count
+        or summary["pages"] != slide_count
         or type(summary.get("preserved_objects")) is not int
         or summary["preserved_objects"] != preserved_objects
         or type(summary.get("pending_candidates")) is not int
         or summary["pending_candidates"] != pending_candidates
-        or not isinstance(warnings, list)
+        or type(warnings) is not list
         or any(type(warning) is not str for warning in warnings)
         or warnings != expected_warnings
     ):
         raise RuntimeError("PPTX execution summary values are invalid")
-    token = summary.get("_output_identity")
     if (
         not _is_sha256(summary.get("input_sha256"))
         or summary["input_sha256"] != input_sha256
         or not _is_sha256(summary.get("output_sha256"))
         or summary["output_sha256"] != input_sha256
-        or not isinstance(token, dict)
+    ):
+        raise RuntimeError("PPTX execution summary hash does not match manifest")
+
+
+def _validate_pptx_execution_summary(
+    summary: object,
+    expected_output: Path,
+    slide_count: int,
+    preserved_objects: int,
+    pending_candidates: int,
+    input_sha256: str,
+) -> None:
+    if type(summary) is not dict:
+        raise RuntimeError("PPTX execution summary must be an object")
+    public_summary = dict(summary)
+    token = public_summary.pop("_output_identity", None)
+    _validate_pptx_public_summary(
+        public_summary,
+        expected_output,
+        slide_count,
+        preserved_objects,
+        pending_candidates,
+        input_sha256,
+    )
+    if (
+        not isinstance(token, dict)
         or not _is_sha256(token.get("sha256"))
         or token["sha256"] != input_sha256
     ):
@@ -444,6 +482,22 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
     if state["status"] == RunStatus.COMPLETED.value:
         if input_type == "pptx":
             _pptx_page_ids(manifest, page_jobs, PageStatus.PRESERVED)
+            (
+                pptx_slide_count,
+                pptx_preserved_objects,
+                pptx_pending_candidates,
+                pptx_input_sha256,
+            ) = _pptx_manifest_expectations(manifest, page_jobs)
+            summary = store.read_json("run_summary.json")
+            _validate_pptx_public_summary(
+                summary,
+                _pptx_output_path(store, manifest),
+                pptx_slide_count,
+                pptx_preserved_objects,
+                pptx_pending_candidates,
+                pptx_input_sha256,
+            )
+            return summary
         summary = store.read_json("run_summary.json")
         validate_schema_version(summary)
         return summary
@@ -457,10 +511,11 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
             manifest, page_jobs, PageStatus.ANALYZED
         )
         (
+            pptx_slide_count,
             pptx_preserved_objects,
             pptx_pending_candidates,
             pptx_input_sha256,
-        ) = _pptx_manifest_expectations(manifest)
+        ) = _pptx_manifest_expectations(manifest, page_jobs)
         pptx_expected_output = _pptx_output_path(store, manifest)
         pptx_output_existed = _path_entry_exists(pptx_expected_output)
     else:
@@ -483,7 +538,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                 _validate_pptx_execution_summary(
                     summary,
                     pptx_expected_output,
-                    len(page_ids),
+                    pptx_slide_count,
                     pptx_preserved_objects,
                     pptx_pending_candidates,
                     pptx_input_sha256,
