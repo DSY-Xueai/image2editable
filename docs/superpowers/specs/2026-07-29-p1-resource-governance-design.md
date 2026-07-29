@@ -212,7 +212,7 @@ Unified Runtime 调用 Legacy adapter 时，把页面工作目录放到 Run 根�
 
 ```text
 shape_id = "background"
-shape_name = "Slide Background Image"
+name = "Slide Background Image"
 z_order = -1
 type = "slide_background_image"
 slide_coverage = 1.0
