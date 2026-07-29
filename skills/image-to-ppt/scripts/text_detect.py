@@ -22,6 +22,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
+_PADDLE_OCR_ENGINES: dict[str, object] = {}
+
 # Characters considered "noise" — lines consisting only of these are filtered
 _NOISE_PATTERN = re.compile(r'^[\s\-_=.|/\\:;,!?~`@#$%^&*(){}\[\]<>+\'\"]+$')
 
@@ -134,23 +136,15 @@ def _try_paddleocr(
 ) -> list[dict] | None:
     """Detect text with PaddleOCR. Returns None if unavailable."""
     try:
-        from paddleocr import PaddleOCR
+        ocr = _get_paddleocr(lang)
     except ImportError:
         logger.debug("PaddleOCR not installed, skipping.")
         return None
+    except Exception as exc:
+        logger.warning("PaddleOCR failed: %s", exc)
+        return None
 
     try:
-        # Fix OneDNN bug in PaddlePaddle 3.x on Windows:
-        # Default run_mode='mkldnn' triggers a ConvertPirAttribute2RuntimeAttribute
-        # error. Force run_mode='paddle' to use plain CPU inference.
-        _patch_paddle_mkldnn()
-
-        ocr = PaddleOCR(
-            lang=lang,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-        )
         result = ocr.predict(str(image_path))
         if not result:
             return []
@@ -190,6 +184,28 @@ def _try_paddleocr(
     except Exception as exc:
         logger.warning("PaddleOCR failed: %s", exc)
         return None
+
+
+def _create_paddleocr(lang: str) -> object:
+    from paddleocr import PaddleOCR
+
+    _patch_paddle_mkldnn()
+    return PaddleOCR(
+        lang=lang,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+    )
+
+
+def _get_paddleocr(lang: str) -> object:
+    if lang not in _PADDLE_OCR_ENGINES:
+        _PADDLE_OCR_ENGINES[lang] = _create_paddleocr(lang)
+    return _PADDLE_OCR_ENGINES[lang]
+
+
+def close_ocr_engines() -> None:
+    _PADDLE_OCR_ENGINES.clear()
 
 
 def _patch_paddle_mkldnn() -> None:

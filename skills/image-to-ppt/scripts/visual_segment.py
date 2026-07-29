@@ -874,7 +874,7 @@ def create_sam_generator(checkpoint_path, device=None):
     return mask_generator.SAM2AutomaticMaskGenerator(
         model,
         points_per_side=16,
-        points_per_batch=16 if str(selected_device).startswith("cuda") else 4,
+        points_per_batch=4,
         pred_iou_thresh=0.86,
         stability_score_thresh=0.92,
         crop_n_layers=0,
