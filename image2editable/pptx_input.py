@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import posixpath
 import shutil
@@ -901,6 +902,10 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
         raise ValueError(f"PPTX input must be an existing .pptx file: {source}")
     try:
         archive = zipfile.ZipFile(source)
+    except UnicodeError as error:
+        raise ValueError(
+            f"PPTX ZIP has invalid member name encoding: {source}"
+        ) from error
     except (OSError, zipfile.BadZipFile) as error:
         raise ValueError(f"Cannot open PPTX ZIP: {source}") from error
     try:
@@ -1012,36 +1017,34 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
 
 
 def _validate_archive(archive: zipfile.ZipFile) -> set[str]:
-    infos = archive.infolist()
+    try:
+        infos = archive.infolist()
+    except UnicodeError as error:
+        raise ValueError(
+            "PPTX ZIP has invalid member name encoding"
+        ) from error
     if len(infos) > MAX_MEMBERS:
         raise ValueError(f"PPTX ZIP has too many members: {len(infos)}")
     names: set[str] = set()
+    member_names: set[str] = set()
     normalized_names: set[str] = set()
     total_size = 0
     for info in infos:
+        _normalized_member_name(info.orig_filename)
         name = info.filename
-        if info.is_dir():
-            raise ValueError(f"Directory ZIP member is not allowed: {name}")
-        if (
-            not name
-            or posixpath.isabs(name)
-            or "\\" in name
-            or "\x00" in name
-        ):
-            raise ValueError(f"Unsafe ZIP member name: {name}")
-        normalized = posixpath.normpath(name)
-        if (
-            normalized in {".", ".."}
-            or normalized.startswith("../")
-            or normalized != name
-        ):
-            raise ValueError(f"Unsafe ZIP member name: {name}")
-        if name in names:
+        normalized = _normalized_member_name(name)
+        if name in member_names:
             raise ValueError(f"Duplicate ZIP member: {name}")
         if normalized in normalized_names:
             raise ValueError(f"Duplicate normalized ZIP member: {name}")
         if info.flag_bits & 1:
             raise ValueError(f"Encrypted ZIP member: {name}")
+        if info.is_dir():
+            if info.file_size or info.compress_size:
+                raise ValueError(f"Directory ZIP member has payload: {name}")
+            member_names.add(name)
+            normalized_names.add(normalized)
+            continue
         if info.file_size > MAX_PART_SIZE:
             raise ValueError(f"PPTX ZIP member is too large: {name}")
         total_size += info.file_size
@@ -1054,16 +1057,47 @@ def _validate_archive(archive: zipfile.ZipFile) -> set[str]:
             ):
                 raise ValueError(f"PPTX ZIP member compression ratio is too high: {name}")
         names.add(name)
+        member_names.add(name)
         normalized_names.add(normalized)
     return names
 
 
+def _normalized_member_name(name: str) -> str:
+    drive, _ = ntpath.splitdrive(name)
+    normalized = name[:-1] if name.endswith("/") else name
+    if (
+        not normalized
+        or posixpath.isabs(normalized)
+        or drive
+        or "\\" in normalized
+        or "\x00" in normalized
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+        or posixpath.normpath(normalized) != normalized
+    ):
+        raise ValueError(f"Unsafe ZIP member name: {name}")
+    return normalized
+
+
 def _sha256_member(archive: zipfile.ZipFile, part: str) -> str:
     digest = hashlib.sha256()
-    with archive.open(part) as file:
-        while chunk := file.read(_HASH_CHUNK_SIZE):
-            digest.update(chunk)
+    try:
+        with archive.open(part) as file:
+            while chunk := file.read(_HASH_CHUNK_SIZE):
+                digest.update(chunk)
+    except UnicodeError as error:
+        raise ValueError(
+            f"PPTX ZIP member has invalid member name encoding: {part}"
+        ) from error
     return digest.hexdigest()
+
+
+def _read_member(archive: zipfile.ZipFile, part: str) -> bytes:
+    try:
+        return archive.read(part)
+    except UnicodeError as error:
+        raise ValueError(
+            f"PPTX ZIP member has invalid member name encoding: {part}"
+        ) from error
 
 
 def _read_xml_bytes(
@@ -1075,7 +1109,7 @@ def _read_xml_bytes(
         raise ValueError(f"Missing required PPTX part: {part}")
     if archive.getinfo(part).file_size > MAX_XML_SIZE:
         raise ValueError(f"XML part is too large: {part}")
-    data = archive.read(part)
+    data = _read_member(archive, part)
     lowered = data.lower()
     null_stripped = lowered.replace(b"\x00", b"")
     if (
@@ -1585,7 +1619,7 @@ def _picture_details(
         if cached is None:
             cached = {**media, "media_sha256": parts[target]}
             if archive.getinfo(target).file_size <= MAX_IMAGE_READ_SIZE:
-                data = archive.read(target)
+                data = _read_member(archive, target)
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter(
