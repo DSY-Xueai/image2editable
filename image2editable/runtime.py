@@ -17,6 +17,10 @@ from image2editable.contracts import (
 )
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
 from image2editable.legacy import execute_legacy
+from image2editable.resources import (
+    apply_resource_policy,
+    validate_resource_policy,
+)
 from image2editable.store import RunStore
 
 
@@ -186,6 +190,31 @@ def _manifest_input(
     return manifest, input_type
 
 
+def _manifest_resource_policy(manifest: dict[str, Any]) -> dict[str, object]:
+    options = manifest.get("options")
+    if type(options) is not dict:
+        raise ValueError("Run manifest resource policy requires options")
+    return validate_resource_policy(options.get("resource_policy"))
+
+
+def _validate_completed_resource_policy(
+    summary: dict[str, Any],
+    resource_policy: dict[str, object],
+) -> None:
+    try:
+        summary_policy = validate_resource_policy(
+            summary.get("resource_policy")
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            "Run completion summary resource policy is invalid"
+        ) from error
+    if summary_policy != resource_policy:
+        raise RuntimeError(
+            "Run completion summary resource policy does not match manifest"
+        )
+
+
 def _pptx_page_ids(
     manifest: dict[str, Any],
     page_jobs: dict[str, Any],
@@ -320,6 +349,7 @@ def _validate_pptx_public_summary(
     preserved_objects: int,
     pending_candidates: int,
     input_sha256: str,
+    resource_policy: dict[str, object],
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX execution summary must be an object")
@@ -341,9 +371,18 @@ def _validate_pptx_public_summary(
         "outputs",
         "input_sha256",
         "output_sha256",
+        "resource_policy",
     }
     if set(summary) != expected_public_keys:
         raise RuntimeError("PPTX execution summary fields are invalid")
+    try:
+        summary_resource_policy = validate_resource_policy(
+            summary.get("resource_policy")
+        )
+    except ValueError as error:
+        raise RuntimeError(
+            "PPTX execution summary resource policy is invalid"
+        ) from error
     warnings = summary.get("warnings")
     expected_warnings = (
         ["P1 preserved screenshot candidates without replacement"]
@@ -364,6 +403,7 @@ def _validate_pptx_public_summary(
         or type(warnings) is not list
         or any(type(warning) is not str for warning in warnings)
         or warnings != expected_warnings
+        or summary_resource_policy != resource_policy
     ):
         raise RuntimeError("PPTX execution summary values are invalid")
     if (
@@ -382,6 +422,7 @@ def _validate_pptx_execution_summary(
     preserved_objects: int,
     pending_candidates: int,
     input_sha256: str,
+    resource_policy: dict[str, object],
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX execution summary must be an object")
@@ -394,6 +435,7 @@ def _validate_pptx_execution_summary(
         preserved_objects,
         pending_candidates,
         input_sha256,
+        resource_policy,
     )
     if (
         not isinstance(token, dict)
@@ -515,6 +557,7 @@ def _isolate_recorded_pptx_output(
 def run_job(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
     manifest, input_type = _manifest_input(store)
+    resource_policy = _manifest_resource_policy(manifest)
     state = store.read_json("run_state.json")
     page_jobs = store.read_json("page_jobs.json")
     if state["status"] == RunStatus.COMPLETED.value:
@@ -535,6 +578,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                 pptx_preserved_objects,
                 pptx_pending_candidates,
                 pptx_input_sha256,
+                resource_policy,
             )
             _validate_completed_pptx_output(
                 _pptx_output_path(store, manifest),
@@ -543,12 +587,14 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
             return summary
         summary = store.read_json("run_summary.json")
         validate_schema_version(summary)
+        _validate_completed_resource_policy(summary, resource_policy)
         return summary
     if state["status"] != RunStatus.PREPARED.value:
         raise RuntimeError(
             f"Run must be prepared before execution; current status is {state['status']}"
         )
 
+    apply_resource_policy(resource_policy)
     if input_type == "pptx":
         page_ids = _pptx_page_ids(
             manifest, page_jobs, PageStatus.ANALYZED
@@ -578,6 +624,8 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
             finally:
                 _PPTX_EXECUTION_MANIFEST.reset(manifest_token)
             pptx_output_published = True
+            if isinstance(summary, dict):
+                summary["resource_policy"] = resource_policy
             try:
                 if pptx_output_existed:
                     raise RuntimeError(
@@ -590,6 +638,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                     pptx_preserved_objects,
                     pptx_pending_candidates,
                     pptx_input_sha256,
+                    resource_policy,
                 )
             except Exception:
                 try:
@@ -632,6 +681,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                 "status": RunStatus.COMPLETED.value,
                 "pages": len(page_ids),
                 "outputs": outputs,
+                "resource_policy": resource_policy,
             }
         store.write_json("run_summary.json", summary)
         store.transition_run(RunStatus.COMPLETED)

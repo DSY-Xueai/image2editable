@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
+from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
 
 
@@ -177,6 +178,7 @@ def prepare_image_job(
                 "output_path": (
                     str(resolved_output) if resolved_output is not None else None
                 ),
+                "resource_policy": safe_default_policy(),
             },
             "pages": page_ids,
         }

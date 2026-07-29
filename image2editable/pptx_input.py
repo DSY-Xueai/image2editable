@@ -28,6 +28,7 @@ from image2editable.inputs import (
     sha256_file,
     validate_pptx_output_path,
 )
+from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
 
 
@@ -259,6 +260,7 @@ def prepare_pptx_job(
                     if resolved_output is not None
                     else None
                 ),
+                "resource_policy": safe_default_policy(),
             },
             "pages": pages,
         }
