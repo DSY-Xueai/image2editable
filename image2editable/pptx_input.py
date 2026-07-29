@@ -11,13 +11,27 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
+from image2editable.inputs import sha256_file
+
 
 P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PR = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
-NS = {"p": P, "a": A, "r": R, "pr": PR, "ct": CT}
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+NS = {"p": P, "a": A, "r": R, "pr": PR, "ct": CT, "mc": MC}
+
+MAX_MEMBERS = 10_000
+MAX_PART_SIZE = 512 * 1024 * 1024
+MAX_TOTAL_UNCOMPRESSED = 2 * 1024 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
+MAX_XML_SIZE = 16 * 1024 * 1024
+MAX_IMAGE_READ_SIZE = 128 * 1024 * 1024
+_HASH_CHUNK_SIZE = 1024 * 1024
+PRESENTATION_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
+RELS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
 
 
 def scan_pptx(path: str | Path) -> dict[str, object]:
@@ -32,8 +46,16 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
     try:
         try:
             names = _validate_archive(archive)
-            parts = {name: hashlib.sha256(archive.read(name)).hexdigest() for name in sorted(names)}
+            parts = {
+                name: _sha256_member(archive, name)
+                for name in sorted(names)
+            }
             content_types = _content_types(archive, names)
+            _require_content_type(
+                content_types,
+                "ppt/presentation.xml",
+                PRESENTATION_CONTENT_TYPE,
+            )
             presentation = _xml(archive, "ppt/presentation.xml", names)
             presentation_rels = _relationships(
                 archive, "ppt/_rels/presentation.xml.rels", "ppt/presentation.xml", names, content_types
@@ -50,7 +72,14 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                 relation = presentation_rels[rel_id]
                 if relation["target_mode"] == "External" or not relation["target"]:
                     raise ValueError(f"Slide relationship must target an internal part: {rel_id}")
+                if not str(relation["type"]).endswith("/slide"):
+                    raise ValueError(f"Invalid slide relationship type: {rel_id}")
                 slide_part = relation["target"]
+                _require_content_type(
+                    content_types,
+                    slide_part,
+                    SLIDE_CONTENT_TYPE,
+                )
                 slide = _xml(archive, slide_part, names)
                 slide_rels_name = _rels_name(slide_part)
                 slide_rels = (
@@ -69,7 +98,15 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                 tree = slide.find("p:cSld/p:spTree", NS)
                 if tree is None:
                     raise ValueError(f"Missing shape tree in {slide_part}")
-                objects = _objects(tree, slide_part, slide_rels, timing_ids, archive, names)
+                objects = _objects(
+                    tree,
+                    slide_part,
+                    slide_rels,
+                    timing_ids,
+                    archive,
+                    names,
+                    parts,
+                )
                 slides.append(
                     {
                         "slide_index": index,
@@ -83,7 +120,7 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
             return {
                 "schema_version": 1,
                 "source": str(source),
-                "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "source_sha256": sha256_file(source),
                 "slide_count": len(slides),
                 "slide_width": int(size.get("cx")),
                 "slide_height": int(size.get("cy")),
@@ -97,19 +134,65 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
 
 
 def _validate_archive(archive: zipfile.ZipFile) -> set[str]:
+    infos = archive.infolist()
+    if len(infos) > MAX_MEMBERS:
+        raise ValueError(f"PPTX ZIP has too many members: {len(infos)}")
     names: set[str] = set()
-    for info in archive.infolist():
-        if info.filename in names:
-            raise ValueError(f"Duplicate ZIP member: {info.filename}")
+    normalized_names: set[str] = set()
+    total_size = 0
+    for info in infos:
+        name = info.filename
+        if info.is_dir():
+            raise ValueError(f"Directory ZIP member is not allowed: {name}")
+        if (
+            not name
+            or posixpath.isabs(name)
+            or "\\" in name
+            or "\x00" in name
+        ):
+            raise ValueError(f"Unsafe ZIP member name: {name}")
+        normalized = posixpath.normpath(name)
+        if (
+            normalized in {".", ".."}
+            or normalized.startswith("../")
+            or normalized != name
+        ):
+            raise ValueError(f"Unsafe ZIP member name: {name}")
+        if name in names:
+            raise ValueError(f"Duplicate ZIP member: {name}")
+        if normalized in normalized_names:
+            raise ValueError(f"Duplicate normalized ZIP member: {name}")
         if info.flag_bits & 1:
-            raise ValueError(f"Encrypted ZIP member: {info.filename}")
-        names.add(info.filename)
+            raise ValueError(f"Encrypted ZIP member: {name}")
+        if info.file_size > MAX_PART_SIZE:
+            raise ValueError(f"PPTX ZIP member is too large: {name}")
+        total_size += info.file_size
+        if total_size > MAX_TOTAL_UNCOMPRESSED:
+            raise ValueError("PPTX ZIP total uncompressed size is too large")
+        if info.file_size:
+            if (
+                info.compress_size == 0
+                or info.file_size / info.compress_size > MAX_COMPRESSION_RATIO
+            ):
+                raise ValueError(f"PPTX ZIP member compression ratio is too high: {name}")
+        names.add(name)
+        normalized_names.add(normalized)
     return names
+
+
+def _sha256_member(archive: zipfile.ZipFile, part: str) -> str:
+    digest = hashlib.sha256()
+    with archive.open(part) as file:
+        while chunk := file.read(_HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
     if part not in names:
         raise ValueError(f"Missing required PPTX part: {part}")
+    if archive.getinfo(part).file_size > MAX_XML_SIZE:
+        raise ValueError(f"XML part is too large: {part}")
     data = archive.read(part)
     lowered = data.lower()
     null_stripped = lowered.replace(b"\x00", b"")
@@ -128,15 +211,28 @@ def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
 
 def _content_types(archive: zipfile.ZipFile, names: set[str]) -> dict[str, str]:
     root = _xml(archive, "[Content_Types].xml", names)
-    defaults = {
-        node.get("Extension", "").casefold(): node.get("ContentType", "")
-        for node in root.findall("ct:Default", NS)
-    }
-    overrides = {
-        node.get("PartName", "").lstrip("/"): node.get("ContentType", "")
-        for node in root.findall("ct:Override", NS)
-    }
+    defaults: dict[str, str] = {}
+    for node in root.findall("ct:Default", NS):
+        extension = node.get("Extension", "").casefold()
+        if extension in defaults:
+            raise ValueError(f"Duplicate content type Default: {extension}")
+        defaults[extension] = node.get("ContentType", "")
+    overrides: dict[str, str] = {}
+    for node in root.findall("ct:Override", NS):
+        part_name = node.get("PartName", "").lstrip("/")
+        if part_name in overrides:
+            raise ValueError(f"Duplicate content type Override: {part_name}")
+        overrides[part_name] = node.get("ContentType", "")
     return {name: overrides.get(name, defaults.get(posixpath.splitext(name)[1][1:].casefold())) for name in names}
+
+
+def _require_content_type(
+    content_types: dict[str, str],
+    part: str,
+    expected: str,
+) -> None:
+    if content_types.get(part) != expected:
+        raise ValueError(f"Invalid content type for {part}: {content_types.get(part)}")
 
 
 def _relationships(
@@ -146,12 +242,15 @@ def _relationships(
     names: set[str],
     content_types: dict[str, str],
 ) -> dict[str, dict[str, object]]:
+    _require_content_type(content_types, rels_part, RELS_CONTENT_TYPE)
     root = _xml(archive, rels_part, names)
     records: dict[str, dict[str, object]] = {}
     for node in root.findall("pr:Relationship", NS):
         rel_id = node.get("Id")
         if not rel_id:
             continue
+        if rel_id in records:
+            raise ValueError(f"Duplicate relationship Id in {rels_part}: {rel_id}")
         target_mode = node.get("TargetMode", "Internal")
         target = node.get("Target", "")
         internal_target = None if target_mode.casefold() == "external" else _part_target(source_part, target)
@@ -207,26 +306,67 @@ def _objects(
     timing_ids: set[str],
     archive: zipfile.ZipFile,
     names: set[str],
+    parts: dict[str, str],
     group_path: list[str] | None = None,
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     group_path = [] if group_path is None else group_path
-    shape_children = [child for child in parent if _is_shape(child)]
+    shape_children = _shape_children(parent)
     for z_order, node in enumerate(shape_children):
-        item = _object(node, z_order, group_path, slide_part, rels, timing_ids, archive, names)
+        item = _object(
+            node,
+            z_order,
+            group_path,
+            slide_part,
+            rels,
+            timing_ids,
+            archive,
+            names,
+            parts,
+        )
         result.append(item)
         if node.tag == f"{{{P}}}grpSp":
-            result.extend(_objects(node, slide_part, rels, timing_ids, archive, names, group_path + [item["shape_id"]]))
+            result.extend(
+                _objects(
+                    node,
+                    slide_part,
+                    rels,
+                    timing_ids,
+                    archive,
+                    names,
+                    parts,
+                    group_path + [item["shape_id"]],
+                )
+            )
     return result
 
 
 def _is_shape(node: ET.Element) -> bool:
-    if node.tag in {f"{{{P}}}nvGrpSpPr", f"{{{P}}}grpSpPr"}:
-        return False
     return node.tag in {
         f"{{{P}}}sp", f"{{{P}}}pic", f"{{{P}}}grpSp", f"{{{P}}}cxnSp",
         f"{{{P}}}graphicFrame", f"{{{P}}}contentPart",
-    } or node.tag.startswith(f"{{{P}}}")
+    }
+
+
+def _shape_children(parent: ET.Element) -> list[ET.Element]:
+    result: list[ET.Element] = []
+    for child in parent:
+        if _is_shape(child):
+            result.append(child)
+            continue
+        if child.tag != f"{{{MC}}}AlternateContent":
+            continue
+        branch = child.find("mc:Fallback", NS)
+        if branch is None:
+            choices = child.findall("mc:Choice", NS)
+            branch = choices[0] if choices else None
+        if branch is None:
+            raise ValueError("Unsupported AlternateContent without a usable branch")
+        expanded = _shape_children(branch)
+        if not expanded:
+            raise ValueError("Unsupported AlternateContent branch without a shape")
+        result.extend(expanded)
+    return result
 
 
 def _object(
@@ -238,6 +378,7 @@ def _object(
     timing_ids: set[str],
     archive: zipfile.ZipFile,
     names: set[str],
+    parts: dict[str, str],
 ) -> dict[str, object]:
     shape_id, name = _non_visual(node)
     object_type = _type(node)
@@ -262,7 +403,7 @@ def _object(
         "xml_c14n_sha256": _canonical_hash(node),
     }
     if object_type == "picture":
-        result.update(_picture_details(node, related, archive, names))
+        result.update(_picture_details(node, related, archive, names, parts))
     return result
 
 
@@ -338,7 +479,13 @@ def _referenced_relationships(node: ET.Element, rels: dict[str, dict[str, object
     return result
 
 
-def _picture_details(node: ET.Element, related: list[dict[str, object]], archive: zipfile.ZipFile, names: set[str]) -> dict[str, object]:
+def _picture_details(
+    node: ET.Element,
+    related: list[dict[str, object]],
+    archive: zipfile.ZipFile,
+    names: set[str],
+    parts: dict[str, str],
+) -> dict[str, object]:
     src_rect = node.find(".//a:srcRect", NS)
     crop = {
         "crop_left": int(src_rect.get("l", "0")) if src_rect is not None else 0,
@@ -357,16 +504,21 @@ def _picture_details(node: ET.Element, related: list[dict[str, object]], archive
     media_sha256 = None
     pixel_width = pixel_height = None
     if primary and primary["target_mode"] == "Internal" and isinstance(primary["target"], str) and primary["target"] in names:
-        data = archive.read(primary["target"])
-        media_sha256 = hashlib.sha256(data).hexdigest()
-        try:
-            with Image.open(BytesIO(data)) as image:
-                pixel_width, pixel_height = image.size
-        except Exception:
-            pass
+        target = primary["target"]
+        media_sha256 = parts[target]
+        if archive.getinfo(target).file_size <= MAX_IMAGE_READ_SIZE:
+            data = archive.read(target)
+            try:
+                with Image.open(BytesIO(data)) as image:
+                    pixel_width, pixel_height = image.size
+            except Exception:
+                pass
     return {**crop, "primary_relationship": primary, "media_sha256": media_sha256, "pixel_width": pixel_width, "pixel_height": pixel_height}
 
 
 def _canonical_hash(node: ET.Element) -> str:
-    canonical = ET.canonicalize(xml_data=ET.tostring(node, encoding="unicode"))
+    canonical = ET.canonicalize(
+        xml_data=ET.tostring(node, encoding="unicode"),
+        rewrite_prefixes=True,
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
