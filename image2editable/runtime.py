@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any, Iterable, Sequence
 
 from image2editable.contracts import (
@@ -8,9 +11,10 @@ from image2editable.contracts import (
     RunStatus,
     SCHEMA_VERSION,
     transition_page_document,
+    utc_now,
     validate_schema_version,
 )
-from image2editable.inputs import classify_inputs, prepare_image_job
+from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
 from image2editable.legacy import execute_legacy
 from image2editable.store import RunStore
 
@@ -95,7 +99,12 @@ def _transition_pages(
 
 
 def _record_failure(
-    store: RunStore, page_ids: Sequence[str], error: Exception
+    store: RunStore,
+    page_ids: Sequence[str],
+    error: Exception,
+    *,
+    recover_completed: bool = False,
+    retry_blocked: bool = False,
 ) -> Exception | None:
     cleanup_errors = []
     try:
@@ -116,24 +125,32 @@ def _record_failure(
         cleanup_errors.append(cleanup_error)
 
     try:
-        status = store.read_json("run_state.json")["status"]
+        run_state = store.read_json("run_state.json")
+        status = run_state["status"]
         if status in {RunStatus.RUNNING.value, RunStatus.FINALIZING.value}:
             store.transition_run(RunStatus.FAILED)
+        elif status == RunStatus.COMPLETED.value and recover_completed:
+            run_state["status"] = RunStatus.FAILED.value
+            run_state["updated_at"] = utc_now()
+            store.write_json("run_state.json", run_state)
     except Exception as cleanup_error:
         cleanup_errors.append(cleanup_error)
 
     try:
+        summary = {
+            "schema_version": SCHEMA_VERSION,
+            "status": RunStatus.FAILED.value,
+            "error": {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+            "outputs": {},
+        }
+        if retry_blocked:
+            summary["retry_blocked"] = True
         store.write_json(
             "run_summary.json",
-            {
-                "schema_version": SCHEMA_VERSION,
-                "status": RunStatus.FAILED.value,
-                "error": {
-                    "type": type(error).__name__,
-                    "message": str(error),
-                },
-                "outputs": {},
-            },
+            summary,
         )
     except Exception as cleanup_error:
         cleanup_errors.append(cleanup_error)
@@ -181,6 +198,120 @@ def _pptx_page_ids(
     return manifest_pages
 
 
+def _pptx_output_path(store: RunStore, manifest: dict[str, Any]) -> Path:
+    options = manifest.get("options")
+    if not isinstance(options, dict):
+        raise RuntimeError("PPTX manifest options must be an object")
+    output_value = options.get("output_path")
+    if output_value is None:
+        return store.root / "final" / "output.pptx"
+    if not isinstance(output_value, str):
+        raise RuntimeError("PPTX manifest output_path must be a string or null")
+    output = Path(output_value)
+    if not output.is_absolute():
+        raise RuntimeError("PPTX manifest output_path must be absolute")
+    return output
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
+    status = path.lstat()
+    if not stat.S_ISREG(status.st_mode):
+        raise RuntimeError(f"PPTX output is not a regular file: {path}")
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_size,
+        status.st_mtime_ns,
+        status.st_ctime_ns,
+    )
+
+
+def _record_pptx_output(
+    summary: dict[str, Any],
+) -> tuple[Path, tuple[int, int, int, int, int], str]:
+    outputs = summary.get("outputs")
+    output_value = outputs.get("pptx") if isinstance(outputs, dict) else None
+    expected_hash = summary.get("output_sha256")
+    if not isinstance(output_value, str) or not isinstance(expected_hash, str):
+        raise RuntimeError("PPTX execution summary is missing output identity")
+    output = Path(output_value)
+    if not output.is_absolute():
+        raise RuntimeError("PPTX execution output path must be absolute")
+    identity = _pptx_output_identity(output)
+    if sha256_file(output) != expected_hash:
+        raise RuntimeError("PPTX execution output hash does not match summary")
+    if _pptx_output_identity(output) != identity:
+        raise RuntimeError("PPTX execution output changed while recording identity")
+    return output, identity, expected_hash
+
+
+def _restore_isolated_pptx_output(
+    isolated: Path,
+    output: Path,
+) -> None:
+    try:
+        if stat.S_ISREG(isolated.lstat().st_mode):
+            from image2editable.pptx_input import _publish_pptx_no_clobber
+
+            _publish_pptx_no_clobber(isolated, output)
+        else:
+            os.link(isolated, output, follow_symlinks=False)
+        isolated.unlink()
+    except Exception as error:
+        raise RuntimeError(
+            f"Concurrent PPTX output was preserved at {isolated}"
+        ) from error
+
+
+def _isolate_recorded_pptx_output(
+    record: tuple[Path, tuple[int, int, int, int, int], str],
+) -> None:
+    output, expected_identity, expected_hash = record
+    descriptor, isolated_value = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.recovery-",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    isolated = Path(isolated_value)
+    try:
+        os.replace(output, isolated)
+    except FileNotFoundError:
+        isolated.unlink(missing_ok=True)
+        return
+    except Exception:
+        isolated.unlink(missing_ok=True)
+        raise
+
+    try:
+        identity = _pptx_output_identity(isolated)
+        digest = sha256_file(isolated)
+        stable_identity = _pptx_output_identity(isolated)
+    except Exception as error:
+        _restore_isolated_pptx_output(isolated, output)
+        raise RuntimeError(
+            "PPTX output cannot be safely verified for removal"
+        ) from error
+    if (
+        identity != expected_identity
+        or stable_identity != expected_identity
+        or digest != expected_hash
+    ):
+        _restore_isolated_pptx_output(isolated, output)
+        raise RuntimeError(
+            "PPTX output changed and cannot be safely removed"
+        )
+    isolated.unlink()
+
+
 def run_job(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
     manifest, input_type = _manifest_input(store)
@@ -201,13 +332,21 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         page_ids = _pptx_page_ids(
             manifest, page_jobs, PageStatus.ANALYZED
         )
+        pptx_expected_output = _pptx_output_path(store, manifest)
+        pptx_output_existed = _path_entry_exists(pptx_expected_output)
     else:
         page_ids = list(page_jobs["pages"])
+        pptx_expected_output = None
+        pptx_output_existed = False
     store.transition_run(RunStatus.RUNNING)
+    pptx_output_published = False
+    pptx_output_record = None
 
     try:
         if input_type == "pptx":
             summary = execute_pptx_preserve(store)
+            pptx_output_published = True
+            pptx_output_record = _record_pptx_output(summary)
             validate_schema_version(summary)
             _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)
@@ -236,19 +375,68 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
         store.transition_run(RunStatus.COMPLETED)
         return summary
     except Exception as error:
-        cleanup_error = _record_failure(store, page_ids, error)
+        compensation_error = None
+        pptx_output_removed = False
+        pages_restored = False
+        if (
+            input_type == "pptx"
+            and not pptx_output_published
+            and not pptx_output_existed
+            and pptx_expected_output is not None
+            and _path_entry_exists(pptx_expected_output)
+        ):
+            pptx_output_published = True
+        retry_blocked = (
+            input_type == "pptx"
+            and pptx_output_published
+            and pptx_output_record is None
+        )
+        if input_type == "pptx" and pptx_output_published:
+            try:
+                if pptx_output_record is None:
+                    _transition_pages(
+                        store, page_ids, PageStatus.PRESERVED
+                    )
+                else:
+                    _isolate_recorded_pptx_output(pptx_output_record)
+                    pptx_output_removed = True
+                    store.write_json("page_jobs.json", page_jobs)
+                    pages_restored = True
+            except Exception as caught:
+                compensation_error = caught
+                if pptx_output_removed:
+                    try:
+                        store.write_json("page_jobs.json", page_jobs)
+                        pages_restored = True
+                    except Exception as retry_error:
+                        compensation_error.__cause__ = retry_error
+                if not (pptx_output_removed and pages_restored):
+                    retry_blocked = True
+        cleanup_error = _record_failure(
+            store,
+            page_ids,
+            error,
+            recover_completed=(
+                input_type == "pptx" and pptx_output_published
+            ),
+            retry_blocked=retry_blocked,
+        )
+        if compensation_error is not None:
+            raise error from compensation_error
         if cleanup_error is not None:
             raise error from cleanup_error
         raise
 
 
-def _has_failed_summary(store: RunStore) -> bool:
+def _failed_summary(store: RunStore) -> dict[str, Any] | None:
     try:
         summary = store.read_json("run_summary.json")
     except FileNotFoundError:
-        return False
+        return None
     validate_schema_version(summary)
-    return summary.get("status") == RunStatus.FAILED.value
+    if summary.get("status") != RunStatus.FAILED.value:
+        return None
+    return summary
 
 
 def _reset_pages_for_retry(
@@ -269,6 +457,11 @@ def _reset_pages_for_retry(
             continue
         if status is PageStatus.ANALYZED and analyzed:
             continue
+        if status is PageStatus.PRESERVED and analyzed:
+            raise RuntimeError(
+                f"PPTX retry is blocked because its output could not be "
+                f"safely recovered: {page_id}"
+            )
         if status in {PageStatus.PROCESSING, PageStatus.VALIDATED}:
             page = transition_page_document(page, PageStatus.FAILED)
         elif status is not PageStatus.FAILED:
@@ -286,35 +479,49 @@ def _reset_pages_for_retry(
 
 def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
     store = RunStore.open(run_dir)
-    _, input_type = _manifest_input(store)
+    manifest, input_type = _manifest_input(store)
     page_jobs = store.read_json("page_jobs.json")
     if page_id not in page_jobs["pages"]:
         raise KeyError(f"Unknown page_id: {page_id}")
 
     run_status = store.read_json("run_state.json")["status"]
-    failed_summary = _has_failed_summary(store)
+    failed_summary = _failed_summary(store)
+    has_failed_summary = failed_summary is not None
     orphaned_failed_batch = (
         run_status in {RunStatus.RUNNING.value, RunStatus.FINALIZING.value}
-        and failed_summary
+        and has_failed_summary
         and all(
             page["status"] == PageStatus.FAILED.value
             for page in page_jobs["pages"].values()
         )
     )
-    if orphaned_failed_batch:
-        store.transition_run(RunStatus.FAILED)
-        run_status = RunStatus.FAILED.value
-    retrying_failed_run = run_status == RunStatus.FAILED.value
+    retrying_failed_run = (
+        run_status == RunStatus.FAILED.value or orphaned_failed_batch
+    )
     continuing_retry = (
-        run_status == RunStatus.PREPARED.value and failed_summary
+        run_status == RunStatus.PREPARED.value and has_failed_summary
     )
     if not retrying_failed_run and not continuing_retry:
         raise RuntimeError(f"Run is not failed or continuing a retry: {page_id}")
-    if run_status == RunStatus.FAILED.value:
-        store.transition_run(RunStatus.PREPARED)
+    if input_type == "pptx" and (
+        (
+            failed_summary is not None
+            and failed_summary.get("retry_blocked") is True
+        )
+        or _path_entry_exists(_pptx_output_path(store, manifest))
+    ):
+        raise RuntimeError(
+            f"PPTX retry is blocked while an output entry may be owned "
+            f"by another process: {page_id}"
+        )
+    if orphaned_failed_batch:
+        store.transition_run(RunStatus.FAILED)
+        run_status = RunStatus.FAILED.value
     _reset_pages_for_retry(
         store, page_jobs, analyzed=input_type == "pptx"
     )
+    if run_status == RunStatus.FAILED.value:
+        store.transition_run(RunStatus.PREPARED)
     return get_status(store.root)
 
 
