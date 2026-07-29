@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 import os
 from pathlib import Path
 import stat
@@ -17,6 +18,11 @@ from image2editable.contracts import (
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
 from image2editable.legacy import execute_legacy
 from image2editable.store import RunStore
+
+
+_PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_PPTX_EXECUTION_MANIFEST", default=None
+)
 
 
 def _pdf_function(name: str) -> Any:
@@ -48,7 +54,15 @@ def prepare_pptx_job(*args: Any, **kwargs: Any) -> Path:
 def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
     from image2editable.pptx_input import execute_pptx_preserve as execute
 
-    return execute(store)
+    return execute(store, _PPTX_EXECUTION_MANIFEST.get())
+
+
+def validate_pptx_inventories(
+    store: RunStore, manifest: dict[str, Any]
+) -> tuple[int, int]:
+    from image2editable.pptx_input import validate_pptx_inventories as validate
+
+    return validate(store, manifest)
 
 
 def prepare_job(
@@ -296,9 +310,6 @@ def _pptx_manifest_expectations(
         raise RuntimeError("PPTX manifest input counts are invalid")
     if not _is_sha256(input_sha256):
         raise RuntimeError("PPTX manifest input sha256 is invalid")
-    from image2editable.pptx_input import _manifest_inventory_records
-
-    _manifest_inventory_records(input_record, manifest_pages)
     return slide_count, preserved_objects, pending_candidates, input_sha256
 
 
@@ -515,6 +526,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                 pptx_pending_candidates,
                 pptx_input_sha256,
             ) = _pptx_manifest_expectations(manifest, page_jobs)
+            validate_pptx_inventories(store, manifest)
             summary = store.read_json("run_summary.json")
             _validate_pptx_public_summary(
                 summary,
@@ -547,6 +559,7 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
             pptx_pending_candidates,
             pptx_input_sha256,
         ) = _pptx_manifest_expectations(manifest, page_jobs)
+        validate_pptx_inventories(store, manifest)
         pptx_expected_output = _pptx_output_path(store, manifest)
         pptx_output_existed = _path_entry_exists(pptx_expected_output)
     else:
@@ -559,7 +572,11 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
 
     try:
         if input_type == "pptx":
-            summary = execute_pptx_preserve(store)
+            manifest_token = _PPTX_EXECUTION_MANIFEST.set(manifest)
+            try:
+                summary = execute_pptx_preserve(store)
+            finally:
+                _PPTX_EXECUTION_MANIFEST.reset(manifest_token)
             pptx_output_published = True
             try:
                 if pptx_output_existed:

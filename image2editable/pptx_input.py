@@ -283,43 +283,18 @@ def prepare_pptx_job(
         raise
 
 
-def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
-    manifest = store.read_json("job_manifest.json")
-    validate_schema_version(manifest)
-    input_record = manifest.get("input")
-    if not isinstance(input_record, dict) or input_record.get("type") != "pptx":
-        raise RuntimeError("PPTX preserve requires a PPTX manifest")
-    if manifest.get("output_format") != "pptx":
-        raise RuntimeError("PPTX manifest output_format must be pptx")
-    pages = _manifest_count(input_record, "slide_count")
-    preserved_objects = _manifest_count(input_record, "object_count")
-    pending_candidates = _manifest_count(input_record, "candidate_count")
-    page_ids = manifest.get("pages")
-    if (
-        not isinstance(page_ids, list)
-        or len(page_ids) != pages
-        or any(
-            page_id != f"page_{index:03d}"
-            for index, page_id in enumerate(page_ids, start=1)
-        )
-    ):
-        raise RuntimeError("PPTX manifest pages do not match slide_count")
-    if pending_candidates > preserved_objects:
-        raise RuntimeError(
-            "PPTX manifest candidate_count exceeds object_count"
-        )
-    if pages > MAX_MEMBERS:
-        raise RuntimeError("PPTX manifest slide_count is too large")
-    if preserved_objects > MAX_TOTAL_INVENTORY_OBJECTS:
-        raise RuntimeError("PPTX manifest object_count is too large")
-    inventory_records = _manifest_inventory_records(input_record, page_ids)
-    preserved_objects, pending_candidates = _validate_pptx_inventories(
-        store,
-        page_ids,
-        inventory_records,
-        preserved_objects,
-        pending_candidates,
+def execute_pptx_preserve(
+    store: RunStore,
+    manifest: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if manifest is None:
+        manifest = store.read_json("job_manifest.json")
+    preserved_objects, pending_candidates = validate_pptx_inventories(
+        store, manifest
     )
+    input_record = manifest["input"]
+    pages = input_record["slide_count"]
+
     source_value = input_record.get("source")
     if not isinstance(source_value, str):
         raise RuntimeError("PPTX manifest source must be a relative path")
@@ -402,6 +377,50 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         "output_sha256": output_sha256,
         "_output_identity": output_identity,
     }
+
+
+def validate_pptx_inventories(
+    store: RunStore,
+    manifest: dict[str, object] | None = None,
+) -> tuple[int, int]:
+    if manifest is None:
+        manifest = store.read_json("job_manifest.json")
+    validate_schema_version(manifest)
+    input_record = manifest.get("input")
+    if not isinstance(input_record, dict) or input_record.get("type") != "pptx":
+        raise RuntimeError("PPTX preserve requires a PPTX manifest")
+    if manifest.get("output_format") != "pptx":
+        raise RuntimeError("PPTX manifest output_format must be pptx")
+    pages = _manifest_count(input_record, "slide_count")
+    preserved_objects = _manifest_count(input_record, "object_count")
+    pending_candidates = _manifest_count(input_record, "candidate_count")
+    page_ids = manifest.get("pages")
+    if (
+        not isinstance(page_ids, list)
+        or len(page_ids) != pages
+        or any(
+            page_id != f"page_{index:03d}"
+            for index, page_id in enumerate(page_ids, start=1)
+        )
+    ):
+        raise RuntimeError("PPTX manifest pages do not match slide_count")
+    if pending_candidates > preserved_objects:
+        raise RuntimeError(
+            "PPTX manifest candidate_count exceeds object_count"
+        )
+    if pages > MAX_MEMBERS:
+        raise RuntimeError("PPTX manifest slide_count is too large")
+    if preserved_objects > MAX_TOTAL_INVENTORY_OBJECTS:
+        raise RuntimeError("PPTX manifest object_count is too large")
+    inventory_records = _manifest_inventory_records(input_record, page_ids)
+    preserved_objects, pending_candidates = _validate_pptx_inventories(
+        store,
+        page_ids,
+        inventory_records,
+        preserved_objects,
+        pending_candidates,
+    )
+    return preserved_objects, pending_candidates
 
 
 def _manifest_count(record: dict[str, object], name: str) -> int:
@@ -572,11 +591,35 @@ def _read_pptx_inventory(
         or not stat.S_ISREG(status.st_mode)
     ):
         raise RuntimeError(f"Missing PPTX inventory: {relative.as_posix()}")
+    identity = _pptx_inventory_identity(status)
     with path.open("rb") as file:
+        if _pptx_inventory_identity(os.fstat(file.fileno())) != identity:
+            raise RuntimeError(
+                f"PPTX inventory changed during verification: {relative.as_posix()}"
+            )
         data = file.read(MAX_INVENTORY_JSON_SIZE + 1)
+        if _pptx_inventory_identity(os.fstat(file.fileno())) != identity:
+            raise RuntimeError(
+                f"PPTX inventory changed during verification: {relative.as_posix()}"
+            )
     if len(data) > MAX_INVENTORY_JSON_SIZE:
         raise RuntimeError(f"PPTX inventory is too large: {relative.as_posix()}")
-    if hashlib.sha256(data).hexdigest() != expected_sha256:
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        stable_status = lexical_path.lstat()
+        stable_path = lexical_path.resolve()
+    except OSError as error:
+        raise RuntimeError(
+            f"PPTX inventory changed during verification: {relative.as_posix()}"
+        ) from error
+    if (
+        stable_path != path
+        or _pptx_inventory_identity(stable_status) != identity
+    ):
+        raise RuntimeError(
+            f"PPTX inventory changed during verification: {relative.as_posix()}"
+        )
+    if digest != expected_sha256:
         raise RuntimeError(
             f"PPTX inventory hash does not match manifest: {relative.as_posix()}"
         )
@@ -589,6 +632,18 @@ def _read_pptx_inventory(
             f"PPTX inventory must be an object: {relative.as_posix()}"
         )
     return document
+
+
+def _pptx_inventory_identity(
+    status: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+    )
 
 
 def _reliable_ooxml_integer(value: object) -> bool:
