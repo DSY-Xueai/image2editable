@@ -146,10 +146,10 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 ```bash
 # Images and directories continue through the existing editable-PPTX pipeline
-image2editable convert input.png -o output.pptx
+image2editable convert input.png -o output.pptx --slide-size original
 
 # Convert a PDF directly, or prepare it and request one detail rerender per page before execution
-image2editable convert input.pdf -o output.pptx
+image2editable convert input.pdf -o output.pptx --slide-size original
 image2editable prepare input.pdf --run-dir runs/pdf-job
 image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job

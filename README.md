@@ -145,10 +145,10 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 ```bash
 # 图片或目录继续使用现有可编辑 PPTX 管线
-image2editable convert input.png -o output.pptx
+image2editable convert input.png -o output.pptx --slide-size original
 
 # PDF 可直接转换，也可准备任务后按页请求一次细节重渲染再执行
-image2editable convert input.pdf -o output.pptx
+image2editable convert input.pdf -o output.pptx --slide-size original
 image2editable prepare input.pdf --run-dir runs/pdf-job
 image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
