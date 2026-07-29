@@ -18,9 +18,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 import cv2
@@ -37,14 +39,14 @@ from scripts.fg_extract import (
     export_visual_components,
     repair_exported_component_text,
 )
-from scripts.lama_inpaint import inpaint_large_mask
+from scripts.lama_inpaint import inpaint_large_mask, release_model
 from scripts.object_detect import (
     create_object_detector,
     filter_text_overlapping_proposals,
     generate_object_proposals,
 )
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
-from scripts.text_detect import detect_text
+from scripts.text_detect import close_ocr_engines, detect_text
 from scripts.visual_segment import (
     VisualSegmentationError,
     create_sam_generator,
@@ -141,17 +143,118 @@ def _compose_exported_components(
     return np.asarray(canvas.convert("RGB"))
 
 
+def _persist_element_masks(
+    work_dir: Path,
+    masks: list[np.ndarray],
+) -> list[str]:
+    masks_dir = (work_dir / "element-masks").resolve()
+    masks_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index, mask in enumerate(masks):
+        mask_path = (masks_dir / f"{index:04d}.png").resolve()
+        Image.fromarray(np.asarray(mask)).save(mask_path)
+        paths.append(str(mask_path))
+    return paths
+
+
+def _finalize_slide_quality(slide_data: dict, lang: str) -> dict:
+    work_dir = Path(slide_data.pop("_work_dir"))
+    text_mask_path = Path(slide_data.pop("_text_mask_path"))
+    element_mask_paths = slide_data.pop("_element_mask_paths")
+    element_masks = []
+    img = None
+    clean_background = None
+    text_mask = None
+    visual_only = None
+    try:
+        img = _load_rgb(slide_data["original_image_path"])
+        clean_background = _load_rgb(slide_data["background_original_path"])
+        with Image.open(text_mask_path) as stored_text_mask:
+            text_mask = np.asarray(stored_text_mask.convert("L")).copy()
+        for mask_path in element_mask_paths:
+            with Image.open(mask_path) as stored_mask:
+                element_masks.append(np.asarray(stored_mask).copy())
+
+        components = slide_data["components"]
+        visual_only = _compose_exported_components(clean_background, components)
+        visual_only_path = work_dir / "visual-only.png"
+        _save_rgb(str(visual_only_path), visual_only)
+
+        raster_text_items, raster_text_mask = detect_text(
+            visual_only_path,
+            lang=lang,
+        )
+        if raster_text_items:
+            repair_kwargs = {"text_items": raster_text_items}
+            if all("box" in item for item in raster_text_items):
+                repair_kwargs["cleaned_rgb"] = _interpolate_text_item_boxes(
+                    visual_only,
+                    raster_text_items,
+                )
+            repair_exported_component_text(
+                components,
+                raster_text_mask,
+                visual_only,
+                **repair_kwargs,
+            )
+            visual_only = _compose_exported_components(
+                clean_background,
+                components,
+            )
+            _save_rgb(str(visual_only_path), visual_only)
+            raster_text_items, _ = detect_text(visual_only_path, lang=lang)
+        if raster_text_items:
+            raise VisualSegmentationError(
+                "visual components still contain raster text after cleanup"
+            )
+
+        quality = visual_difference(img, visual_only, text_mask)
+        diagnostics_dir = (work_dir / "diagnostics").resolve()
+        write_segmentation_diagnostics(
+            diagnostics_dir,
+            source=img,
+            masks=element_masks,
+            reconstructed=visual_only,
+            metrics=quality,
+        )
+        try:
+            require_visual_quality(quality)
+        except VisualSegmentationError as exc:
+            raise VisualSegmentationError(
+                f"{exc}; mae={quality['mae']:.3f}, p95={quality['p95']:.3f}, "
+                f"diagnostics={diagnostics_dir}"
+            ) from exc
+        slide_data["quality"] = quality
+        return slide_data
+    finally:
+        element_masks.clear()
+        img = None
+        clean_background = None
+        text_mask = None
+        visual_only = None
+
+
 def _process_image(
     image_path: Path,
     work_dir: Path,
     object_detector,
     mask_generator,
     lang: str,
+    text_analysis: dict | None = None,
+    defer_quality: bool = False,
 ) -> dict:
     work_dir.mkdir(parents=True, exist_ok=True)
     img = _load_rgb(str(image_path))
     img_h, img_w = img.shape[:2]
-    text_items, text_mask = detect_text(image_path, lang=lang)
+    if text_analysis is None:
+        text_items, text_mask = detect_text(image_path, lang=lang)
+        text_mask_path = (work_dir / "source-text-mask.png").resolve()
+        Image.fromarray(text_mask, mode="L").save(text_mask_path)
+    else:
+        text_items = text_analysis["items"]
+        text_mask_path = Path(text_analysis["mask_path"]).resolve()
+        with Image.open(text_mask_path) as stored_text_mask:
+            text_mask = np.asarray(stored_text_mask.convert("L")).copy()
     text_ink_mask = _build_text_ink_mask(img, text_mask)
     valid_text_items = bool(text_items) and all(
         "box" in item for item in text_items
@@ -271,51 +374,8 @@ def _process_image(
         str(background_difference_path),
         cv2.absdiff(img, clean_background),
     )
-
-    visual_only = _compose_exported_components(clean_background, components)
-    visual_only_path = work_dir / "visual-only.png"
-    _save_rgb(str(visual_only_path), visual_only)
-
-    raster_text_items, raster_text_mask = detect_text(visual_only_path, lang=lang)
-    if raster_text_items:
-        repair_kwargs = {"text_items": raster_text_items}
-        if all("box" in item for item in raster_text_items):
-            repair_kwargs["cleaned_rgb"] = _interpolate_text_item_boxes(
-                visual_only,
-                raster_text_items,
-            )
-        repair_exported_component_text(
-            components,
-            raster_text_mask,
-            visual_only,
-            **repair_kwargs,
-        )
-        visual_only = _compose_exported_components(clean_background, components)
-        _save_rgb(str(visual_only_path), visual_only)
-        raster_text_items, _ = detect_text(visual_only_path, lang=lang)
-    if raster_text_items:
-        raise VisualSegmentationError(
-            "visual components still contain raster text after cleanup"
-        )
-
-    quality = visual_difference(img, visual_only, text_mask)
-    diagnostics_dir = (work_dir / "diagnostics").resolve()
-    write_segmentation_diagnostics(
-        diagnostics_dir,
-        source=img,
-        masks=element_masks,
-        reconstructed=visual_only,
-        metrics=quality,
-    )
-    try:
-        require_visual_quality(quality)
-    except VisualSegmentationError as exc:
-        raise VisualSegmentationError(
-            f"{exc}; mae={quality['mae']:.3f}, p95={quality['p95']:.3f}, "
-            f"diagnostics={diagnostics_dir}"
-        ) from exc
-
-    return {
+    element_mask_paths = _persist_element_masks(work_dir, element_masks)
+    slide_data = {
         "background_path": str(background_widescreen_path),
         "background_original_path": str(background_original_path),
         "background_widescreen_path": str(background_widescreen_path),
@@ -329,8 +389,13 @@ def _process_image(
         "content_offset_y": content_offset_y,
         "widescreen_background_method": widescreen_background_method,
         "original_image_path": str(image_path),
-        "quality": quality,
+        "_work_dir": str(work_dir.resolve()),
+        "_text_mask_path": str(text_mask_path),
+        "_element_mask_paths": element_mask_paths,
     }
+    if defer_quality:
+        return slide_data
+    return _finalize_slide_quality(slide_data, lang)
 
 
 def _resolve_image_path(image_path: str | Path) -> Path:
@@ -349,25 +414,59 @@ def _resolve_image_path(image_path: str | Path) -> Path:
     return resolved
 
 
+def _release_visual_resources() -> None:
+    release_model()
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _clear_exception_traceback_graph(
+    exception: BaseException | None,
+    boundary: BaseException | None,
+) -> None:
+    pending = [exception]
+    visited = set()
+    while pending:
+        current = pending.pop()
+        if current is None or current is boundary or id(current) in visited:
+            continue
+        visited.add(id(current))
+        if current.__traceback__ is not None:
+            traceback.clear_frames(current.__traceback__)
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+
+
+def _run_cleanup_preserving_exception(
+    cleanup,
+    resource_name: str,
+    primary_exception: BaseException | None,
+    primary_traceback,
+    exception_boundary: BaseException | None,
+) -> None:
+    if primary_traceback is not None:
+        traceback.clear_frames(primary_traceback)
+    _clear_exception_traceback_graph(primary_exception, exception_boundary)
+    try:
+        cleanup()
+    except BaseException as cleanup_exception:
+        if primary_exception is None:
+            raise
+        _clear_exception_traceback_graph(cleanup_exception, exception_boundary)
+        logger.error("%s cleanup failed; preserving original exception", resource_name)
+
+
 def _prepare_single_image(
     image_path: str | Path,
     lang: str,
 ) -> tuple[dict, Path]:
-    resolved = _resolve_image_path(image_path)
-    print("[1/3] Loading visual models...")
-    object_detector = create_object_detector()
-    mask_generator = create_sam_generator(resolve_sam_checkpoint())
-    work_dir = Path(tempfile.mkdtemp(prefix="img2ppt_")).resolve()
-    print(f"[2/3] Decomposing image: {resolved.name}")
-    print(f"  Assets/diagnostics: {work_dir}")
-    slide_data = _process_image(
-        resolved,
-        work_dir,
-        object_detector,
-        mask_generator,
-        lang,
-    )
-    return slide_data, work_dir
+    slide_data = _prepare_multiple_images([image_path], lang)[0]
+    return slide_data, Path(slide_data["background_original_path"]).parent
 
 
 def _prepare_multiple_images(
@@ -380,22 +479,101 @@ def _prepare_multiple_images(
 
     total = len(resolved_paths)
     print(f"Processing {total} image(s)...\n")
-    object_detector = create_object_detector()
-    mask_generator = create_sam_generator(resolve_sam_checkpoint())
-    slides_data = []
+    prepared_pages = []
     for index, image_path in enumerate(resolved_paths):
-        print(f"=== Image {index + 1}/{total}: {image_path.name} ===")
         work_dir = Path(tempfile.mkdtemp(prefix=f"img2ppt_{index}_")).resolve()
-        print(f"  Assets/diagnostics: {work_dir}")
-        slide_data = _process_image(
-            image_path,
-            work_dir,
-            object_detector,
-            mask_generator,
-            lang,
+        prepared_pages.append((image_path, work_dir))
+
+    text_analyses = []
+    text_mask = None
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        for image_path, work_dir in prepared_pages:
+            text_items, text_mask = detect_text(image_path, lang=lang)
+            text_mask_path = (work_dir / "source-text-mask.png").resolve()
+            Image.fromarray(text_mask, mode="L").save(text_mask_path)
+            text_analyses.append({
+                "items": text_items,
+                "mask_path": str(text_mask_path),
+            })
+            text_mask = None
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
+    finally:
+        text_mask = None
+        _run_cleanup_preserving_exception(
+            close_ocr_engines,
+            "OCR",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
         )
-        slides_data.append(slide_data)
-        print(f"         {len(slide_data['components'])} components extracted\n")
+
+    slides_data = []
+    object_detector = None
+    mask_generator = None
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        object_detector = create_object_detector()
+        mask_generator = create_sam_generator(resolve_sam_checkpoint())
+        for index, ((image_path, work_dir), text_analysis) in enumerate(
+            zip(prepared_pages, text_analyses)
+        ):
+            print(f"=== Image {index + 1}/{total}: {image_path.name} ===")
+            print(f"  Assets/diagnostics: {work_dir}")
+            slide_data = _process_image(
+                image_path,
+                work_dir,
+                object_detector,
+                mask_generator,
+                lang,
+                text_analysis=text_analysis,
+                defer_quality=True,
+            )
+            slides_data.append(slide_data)
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
+    finally:
+        mask_generator = None
+        object_detector = None
+        _run_cleanup_preserving_exception(
+            _release_visual_resources,
+            "visual resource",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
+
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        for index, slide_data in enumerate(slides_data):
+            slides_data[index] = _finalize_slide_quality(slide_data, lang)
+            print(
+                f"         {len(slides_data[index]['components'])} "
+                "components extracted\n"
+            )
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
+    finally:
+        _run_cleanup_preserving_exception(
+            close_ocr_engines,
+            "OCR",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
     return slides_data
 
 

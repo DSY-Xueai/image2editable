@@ -43,6 +43,11 @@ def _get_model():
     return _MODEL
 
 
+def release_model() -> None:
+    global _MODEL
+    _MODEL = None
+
+
 def inpaint_large_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Repair a large mask with LaMa while preserving every unmasked pixel."""
     source = np.asarray(image)
