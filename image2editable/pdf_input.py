@@ -4,9 +4,11 @@ import hashlib
 import math
 import os
 import shutil
+import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import BinaryIO, Literal, Sequence
 
 from PIL import Image
 import pypdfium2 as pdfium
@@ -159,6 +161,200 @@ def _remove_files(paths: Sequence[Path]) -> Exception | None:
     return first_error
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    status = path.lstat()
+    if not stat.S_ISREG(status.st_mode):
+        raise RuntimeError(f"PDF detail source is not a regular file: {path}")
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+    )
+
+
+def _validate_pdf_detail_source(
+    store: RunStore,
+    input_record: dict[str, object],
+) -> tuple[Path, tuple[int, int, int, int, int], str]:
+    source_value = input_record.get("source")
+    if type(source_value) is not str:
+        raise RuntimeError("PDF detail source must be a relative path")
+    relative = Path(source_value)
+    if (
+        not source_value
+        or relative.is_absolute()
+        or relative.as_posix() != source_value
+        or ".." in relative.parts
+        or relative.suffix.casefold() != ".pdf"
+    ):
+        raise RuntimeError(f"Invalid PDF detail source path: {source_value}")
+    expected_sha256 = input_record.get("sha256")
+    if not _is_sha256(expected_sha256):
+        raise RuntimeError("PDF detail source sha256 is invalid")
+
+    lexical_path = store.root / relative
+    current = store.root
+    try:
+        for part in relative.parts:
+            current /= part
+            status = current.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                raise RuntimeError(
+                    f"PDF detail source contains a symlink: {source_value}"
+                )
+        resolved = lexical_path.resolve()
+    except RuntimeError:
+        raise
+    except OSError as error:
+        raise RuntimeError(
+            f"PDF detail source is missing: {source_value}"
+        ) from error
+    if resolved != lexical_path or not resolved.is_relative_to(store.root):
+        raise RuntimeError(
+            f"PDF detail source contains a symlink: {source_value}"
+        )
+
+    identity = _file_identity(lexical_path)
+    digest = sha256_file(lexical_path)
+    if _file_identity(lexical_path) != identity:
+        raise RuntimeError(
+            "PDF detail source changed during verification"
+        )
+    if digest != expected_sha256:
+        raise RuntimeError("PDF detail source hash does not match manifest")
+    return lexical_path, identity, expected_sha256
+
+
+def _verify_pdf_detail_source_after_render(
+    path: Path,
+    source_file: BinaryIO,
+    expected_identity: tuple[int, int, int, int, int],
+    expected_sha256: str,
+) -> None:
+    try:
+        identity = _open_file_identity(source_file)
+        digest = _sha256_open_file(source_file)
+        stable_identity = _open_file_identity(source_file)
+        path_identity = _file_identity(path)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(
+            "PDF detail source changed during rendering"
+        ) from error
+    if (
+        identity != expected_identity
+        or stable_identity != expected_identity
+        or path_identity != expected_identity
+    ):
+        raise RuntimeError("PDF detail source changed during rendering")
+    if digest != expected_sha256:
+        raise RuntimeError(
+            "PDF detail source hash changed during rendering"
+        )
+
+
+def _open_file_identity(source_file: BinaryIO) -> tuple[int, int, int, int, int]:
+    status = os.fstat(source_file.fileno())
+    if not stat.S_ISREG(status.st_mode):
+        raise RuntimeError("PDF detail source descriptor is not a regular file")
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+    )
+
+
+def _sha256_open_file(source_file: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    source_file.seek(0)
+    while chunk := source_file.read(1024 * 1024):
+        digest.update(chunk)
+    source_file.seek(0)
+    return digest.hexdigest()
+
+
+def _copy_pdf_detail_snapshot(
+    source_file: BinaryIO, snapshot_file: BinaryIO
+) -> None:
+    source_file.seek(0)
+    snapshot_file.seek(0)
+    snapshot_file.truncate()
+    while chunk := source_file.read(1024 * 1024):
+        snapshot_file.write(chunk)
+    snapshot_file.flush()
+    source_file.seek(0)
+    snapshot_file.seek(0)
+
+
+def _verify_pdf_detail_snapshot_after_render(
+    snapshot_file: BinaryIO,
+    expected_identity: tuple[int, int, int, int, int],
+    expected_sha256: str,
+) -> None:
+    identity = _open_file_identity(snapshot_file)
+    digest = _sha256_open_file(snapshot_file)
+    stable_identity = _open_file_identity(snapshot_file)
+    if identity != expected_identity or stable_identity != expected_identity:
+        raise RuntimeError("PDF detail snapshot changed during rendering")
+    if digest != expected_sha256:
+        raise RuntimeError("PDF detail snapshot hash changed during rendering")
+
+
+def _open_verified_pdf_detail_source(
+    path: Path,
+    expected_identity: tuple[int, int, int, int, int],
+    expected_sha256: str,
+) -> BinaryIO:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RuntimeError(
+            "PDF detail source changed before rendering"
+        ) from error
+    try:
+        source_file = os.fdopen(descriptor, "rb")
+    except Exception:
+        os.close(descriptor)
+        raise
+    try:
+        identity = _open_file_identity(source_file)
+        digest = _sha256_open_file(source_file)
+        stable_identity = _open_file_identity(source_file)
+        path_identity = _file_identity(path)
+        if (
+            identity != expected_identity
+            or stable_identity != expected_identity
+            or path_identity != expected_identity
+        ):
+            raise RuntimeError(
+                "PDF detail source changed before rendering"
+            )
+        if digest != expected_sha256:
+            raise RuntimeError(
+                "PDF detail source hash changed before rendering"
+            )
+        return source_file
+    except Exception:
+        source_file.close()
+        raise
+
+
 def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
     store = RunStore.open(run_dir)
     manifest = store.read_json("job_manifest.json")
@@ -178,6 +374,9 @@ def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
     history = store.read_json(history_path)
     if history["detail_used"]:
         raise RuntimeError(f"Detail rendering already used for page: {page_id}")
+    source_path, source_identity, source_sha256 = (
+        _validate_pdf_detail_source(store, manifest["input"])
+    )
 
     standard = history["renders"][0]
     standard_request = dict(request)
@@ -205,12 +404,47 @@ def rerender_pdf_page(run_dir: str | Path, page_id: str) -> dict[str, bool]:
         raise cleanup_error
 
     try:
-        detail = render_pdf_page(
-            store.root / manifest["input"]["source"],
-            standard["page_index"],
-            detail_temp_path,
-            profile="detail",
-        )
+        with _open_verified_pdf_detail_source(
+            source_path,
+            source_identity,
+            source_sha256,
+        ) as source_file:
+            with tempfile.TemporaryFile(mode="w+b") as snapshot_file:
+                _copy_pdf_detail_snapshot(source_file, snapshot_file)
+                snapshot_identity = _open_file_identity(snapshot_file)
+                snapshot_digest = _sha256_open_file(snapshot_file)
+                stable_snapshot_identity = _open_file_identity(snapshot_file)
+                if (
+                    snapshot_identity != stable_snapshot_identity
+                    or snapshot_digest != source_sha256
+                ):
+                    raise RuntimeError(
+                        "PDF detail snapshot hash does not match manifest"
+                    )
+                if (
+                    _open_file_identity(source_file) != source_identity
+                    or _file_identity(source_path) != source_identity
+                ):
+                    raise RuntimeError(
+                        "PDF detail source changed while creating snapshot"
+                    )
+                detail = _render_pdf_page_from_stream(
+                    snapshot_file,
+                    standard["page_index"],
+                    detail_temp_path,
+                    profile="detail",
+                )
+                _verify_pdf_detail_snapshot_after_render(
+                    snapshot_file,
+                    snapshot_identity,
+                    source_sha256,
+                )
+            _verify_pdf_detail_source_after_render(
+                source_path,
+                source_file,
+                source_identity,
+                source_sha256,
+            )
         activated = (
             detail["pixel_width"] > standard["pixel_width"]
             and detail["pixel_height"] > standard["pixel_height"]
@@ -408,6 +642,20 @@ def render_pdf_page(
     document = pdfium.PdfDocument(str(source_path))
     try:
         return _render_open_page(document, index, output_path, profile)
+    finally:
+        document.close()
+
+
+def _render_pdf_page_from_stream(
+    source_file: BinaryIO,
+    index: int,
+    output: str | Path,
+    *,
+    profile: RenderProfile,
+) -> dict[str, object]:
+    document = pdfium.PdfDocument(source_file)
+    try:
+        return _render_open_page(document, index, Path(output).resolve(), profile)
     finally:
         document.close()
 

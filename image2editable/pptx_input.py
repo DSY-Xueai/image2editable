@@ -174,6 +174,7 @@ def prepare_pptx_job(
         ]
         object_count = 0
         candidate_count = 0
+        inventory_records = []
         for page_id, slide in zip(pages, inventory["slides"]):
             objects = slide["objects"]
             candidates = [
@@ -189,13 +190,39 @@ def prepare_pptx_job(
                 "slide_width": inventory["slide_width"],
                 "slide_height": inventory["slide_height"],
             }
+            native_relative = (
+                Path("pages") / page_id / "native_objects.json"
+            )
+            candidates_relative = (
+                Path("pages") / page_id / "screenshot_candidates.json"
+            )
             store.write_json(
-                Path("pages") / page_id / "native_objects.json",
+                native_relative,
                 {**common, "objects": objects},
             )
             store.write_json(
-                Path("pages") / page_id / "screenshot_candidates.json",
+                candidates_relative,
                 {**common, "candidates": candidates},
+            )
+            inventory_records.append(
+                {
+                    key: common[key]
+                    for key in (
+                        "page_id",
+                        "slide_index",
+                        "slide_part",
+                        "slide_width",
+                        "slide_height",
+                    )
+                }
+                | {
+                    "native_objects_sha256": sha256_file(
+                        store.root / native_relative
+                    ),
+                    "screenshot_candidates_sha256": sha256_file(
+                        store.root / candidates_relative
+                    ),
+                }
             )
 
         manifest = {
@@ -211,6 +238,7 @@ def prepare_pptx_job(
                 "candidate_count": candidate_count,
                 "slide_width": inventory["slide_width"],
                 "slide_height": inventory["slide_height"],
+                "inventories": inventory_records,
             },
             "output_format": "pptx",
             "options": {
@@ -274,9 +302,11 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
         raise RuntimeError("PPTX manifest slide_count is too large")
     if preserved_objects > MAX_TOTAL_INVENTORY_OBJECTS:
         raise RuntimeError("PPTX manifest object_count is too large")
+    inventory_records = _manifest_inventory_records(input_record, page_ids)
     preserved_objects, pending_candidates = _validate_pptx_inventories(
         store,
         page_ids,
+        inventory_records,
         preserved_objects,
         pending_candidates,
     )
@@ -371,27 +401,116 @@ def _manifest_count(record: dict[str, object], name: str) -> int:
     return value
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _manifest_inventory_records(
+    input_record: dict[str, object],
+    page_ids: list[str],
+) -> list[dict[str, object]]:
+    records = input_record.get("inventories")
+    if (
+        type(records) is not list
+        or len(records) != len(page_ids)
+        or len(records) > MAX_MEMBERS
+    ):
+        raise RuntimeError("PPTX manifest inventories are invalid")
+    expected_keys = {
+        "page_id",
+        "slide_index",
+        "slide_part",
+        "slide_width",
+        "slide_height",
+        "native_objects_sha256",
+        "screenshot_candidates_sha256",
+    }
+    slide_width = input_record.get("slide_width")
+    slide_height = input_record.get("slide_height")
+    if (
+        not _reliable_ooxml_integer(slide_width)
+        or not _reliable_ooxml_integer(slide_height)
+        or slide_width <= 0
+        or slide_height <= 0
+    ):
+        raise RuntimeError("PPTX manifest slide dimensions are invalid")
+    for index, (page_id, record) in enumerate(
+        zip(page_ids, records), start=1
+    ):
+        if (
+            type(record) is not dict
+            or set(record) != expected_keys
+            or type(record.get("page_id")) is not str
+            or record["page_id"] != page_id
+            or type(record.get("slide_index")) is not int
+            or record["slide_index"] != index
+            or type(record.get("slide_part")) is not str
+            or not record["slide_part"]
+            or type(record.get("slide_width")) is not int
+            or record["slide_width"] != slide_width
+            or type(record.get("slide_height")) is not int
+            or record["slide_height"] != slide_height
+            or not _is_sha256(record.get("native_objects_sha256"))
+            or not _is_sha256(
+                record.get("screenshot_candidates_sha256")
+            )
+        ):
+            raise RuntimeError(
+                f"PPTX manifest inventory record is invalid: {page_id}"
+            )
+    return records
+
+
 def _validate_pptx_inventories(
     store: RunStore,
     page_ids: list[str],
+    inventory_records: list[dict[str, object]],
     expected_objects: int,
     expected_candidates: int,
 ) -> tuple[int, int]:
     object_count = 0
     candidate_count = 0
-    for page_id in page_ids:
+    common_keys = {
+        "schema_version",
+        "page_id",
+        "slide_index",
+        "slide_part",
+        "slide_width",
+        "slide_height",
+    }
+    for page_id, inventory_record in zip(page_ids, inventory_records):
         native = _read_pptx_inventory(
-            store, Path("pages") / page_id / "native_objects.json"
+            store,
+            Path("pages") / page_id / "native_objects.json",
+            inventory_record["native_objects_sha256"],
         )
         candidates_document = _read_pptx_inventory(
-            store, Path("pages") / page_id / "screenshot_candidates.json"
+            store,
+            Path("pages") / page_id / "screenshot_candidates.json",
+            inventory_record["screenshot_candidates_sha256"],
         )
-        for document in (native, candidates_document):
+        for document, list_key in (
+            (native, "objects"),
+            (candidates_document, "candidates"),
+        ):
             validate_schema_version(document)
-            if document.get("page_id") != page_id:
+            if set(document) != common_keys | {list_key}:
                 raise RuntimeError(
-                    f"PPTX inventory page_id does not match: {page_id}"
+                    f"PPTX inventory fields are invalid: {page_id}"
                 )
+            for key in common_keys - {"schema_version"}:
+                expected = inventory_record[key]
+                if (
+                    type(document.get(key)) is not type(expected)
+                    or document[key] != expected
+                ):
+                    raise RuntimeError(
+                        f"PPTX inventory metadata does not match manifest: {page_id}"
+                    )
 
         objects = native.get("objects")
         candidates = candidates_document.get("candidates")
@@ -427,15 +546,30 @@ def _validate_pptx_inventories(
 
 
 def _read_pptx_inventory(
-    store: RunStore, relative: Path
+    store: RunStore, relative: Path, expected_sha256: str
 ) -> dict[str, object]:
-    path = (store.root / relative).resolve()
-    if not path.is_relative_to(store.root) or not path.is_file():
+    lexical_path = store.root / relative
+    try:
+        status = lexical_path.lstat()
+        path = lexical_path.resolve()
+    except OSError as error:
+        raise RuntimeError(
+            f"Missing PPTX inventory: {relative.as_posix()}"
+        ) from error
+    if (
+        not path.is_relative_to(store.root)
+        or path != lexical_path
+        or not stat.S_ISREG(status.st_mode)
+    ):
         raise RuntimeError(f"Missing PPTX inventory: {relative.as_posix()}")
     with path.open("rb") as file:
         data = file.read(MAX_INVENTORY_JSON_SIZE + 1)
     if len(data) > MAX_INVENTORY_JSON_SIZE:
         raise RuntimeError(f"PPTX inventory is too large: {relative.as_posix()}")
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise RuntimeError(
+            f"PPTX inventory hash does not match manifest: {relative.as_posix()}"
+        )
     try:
         document = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:

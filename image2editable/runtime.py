@@ -234,6 +234,30 @@ def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
     )
 
 
+def _validate_completed_pptx_output(path: Path, expected_sha256: str) -> None:
+    try:
+        identity = _pptx_output_identity(path)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(
+            f"PPTX completed output is not a regular file: {path}"
+        ) from error
+    try:
+        digest = sha256_file(path)
+        stable_identity = _pptx_output_identity(path)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError(
+            f"PPTX completed output cannot be verified: {path}"
+        ) from error
+    if stable_identity != identity:
+        raise RuntimeError(
+            f"PPTX completed output changed during verification: {path}"
+        )
+    if digest != expected_sha256:
+        raise RuntimeError(
+            f"PPTX completed output hash does not match manifest: {path}"
+        )
+
+
 def _is_sha256(value: object) -> bool:
     return (
         type(value) is str
@@ -272,6 +296,9 @@ def _pptx_manifest_expectations(
         raise RuntimeError("PPTX manifest input counts are invalid")
     if not _is_sha256(input_sha256):
         raise RuntimeError("PPTX manifest input sha256 is invalid")
+    from image2editable.pptx_input import _manifest_inventory_records
+
+    _manifest_inventory_records(input_record, manifest_pages)
     return slide_count, preserved_objects, pending_candidates, input_sha256
 
 
@@ -495,6 +522,10 @@ def run_job(run_dir: str | Path) -> dict[str, Any]:
                 pptx_slide_count,
                 pptx_preserved_objects,
                 pptx_pending_candidates,
+                pptx_input_sha256,
+            )
+            _validate_completed_pptx_output(
+                _pptx_output_path(store, manifest),
                 pptx_input_sha256,
             )
             return summary
