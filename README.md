@@ -141,22 +141,32 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 ### 命令行运行
 
-#### 统一 Runtime（P0 仅支持图片输入）
+#### 统一 Runtime（P1）
 
 ```bash
-# 直接转换，并为任务保留 Manifest 和状态
-image2editable convert input.png
+# 图片或目录继续使用现有可编辑 PPTX 管线
+image2editable convert input.png -o output.pptx
 
-# 只准备任务，再单独执行和查询状态
-image2editable prepare input.png --run-dir runs/example
-image2editable run execute runs/example
-image2editable run status runs/example
+# PDF 可直接转换，也可准备任务后按页请求一次细节重渲染再执行
+image2editable convert input.pdf -o output.pptx
+image2editable prepare input.pdf --run-dir runs/pdf-job
+image2editable run render-detail runs/pdf-job --page page_001
+image2editable run execute runs/pdf-job
+
+# PPTX 在 P1 中无损保留
+image2editable convert input.pptx -o preserved.pptx
 
 # 检查本地依赖
 image2editable doctor
 ```
 
-统一 Runtime 当前接回现有图片转换管线，不改变 OCR、视觉拆分、背景修复和 PPTX 组装结果。原有 `python image_to_ppt.py` 和 `python image_to_psd.py` 入口继续兼容。P0 的 retry 会重置 legacy batch 中的整批失败页面，并非真正的逐页重试；PDF、图片版/混合 PPTX 与 Agent 页面调度将在后续阶段接入。
+Unified CLI 的位置参数概念为 `sources`：可输入图片文件/目录、单个 PDF 或单个 PPTX。文档输入不能与其他来源混用，也不能重复传入；原有 `python image_to_ppt.py` 和 `python image_to_psd.py` 图片入口继续兼容。
+
+PDF 会先自适应渲染，再复用现有“图像转可编辑 PPTX”管线。标准目标为 200 DPI；小页会提高到短边至少 1200 px，但不超过 300 DPI；所有渲染均限制长边不超过 6000 px、总像素不超过 24 MP。Agent 或用户可对每页调用一次 `render-detail`，以 300 DPI 目标重新渲染。物理宽高比相同的 PDF 页面可合并为保持该比例的多页 PPTX；混合宽高比时，`original` 输出为逐页文件，同时仍可生成统一 16:9 版本。所有布局均等比放置，不做非均匀拉伸。
+
+PPTX 输入只读扫描 OOXML 原生对象、备注、图片关系和稳定指纹，仅将覆盖幻灯片至少 80% 且结构安全的大图标记为候选。P1 执行输出与输入 PPTX byte-identical，因此已有可编辑文字、形状、表格、图表等原生对象全部保留，不经过 CV，也不会自动拆图或替换。Agent 最终截图分类、OCR/重建与 OOXML 原位替换属于 P2，尚未实现。
+
+正式支持 Python 3.10–3.12；`doctor` 现在也检查 PDFium。
 
 #### 兼容入口
 

@@ -142,22 +142,32 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 ### Command Line
 
-#### Unified Runtime (P0 supports image inputs only)
+#### Unified Runtime (P1)
 
 ```bash
-# Convert directly while keeping the manifest and state
-image2editable convert input.png
+# Images and directories continue through the existing editable-PPTX pipeline
+image2editable convert input.png -o output.pptx
 
-# Prepare, execute, and inspect a run separately
-image2editable prepare input.png --run-dir runs/example
-image2editable run execute runs/example
-image2editable run status runs/example
+# Convert a PDF directly, or prepare it and request one detail rerender per page before execution
+image2editable convert input.pdf -o output.pptx
+image2editable prepare input.pdf --run-dir runs/pdf-job
+image2editable run render-detail runs/pdf-job --page page_001
+image2editable run execute runs/pdf-job
+
+# P1 preserves PPTX inputs losslessly
+image2editable convert input.pptx -o preserved.pptx
 
 # Inspect local dependencies
 image2editable doctor
 ```
 
-The unified runtime currently delegates to the existing image conversion pipeline, so OCR, visual segmentation, background repair, and PPTX assembly semantics remain unchanged. The existing `python image_to_ppt.py` and `python image_to_psd.py` commands remain compatible. In P0, retry resets all failed pages in the legacy batch rather than providing true page-level retry; PDF, image-based/mixed PPTX, and Agent page orchestration will be added in later stages.
+The Unified CLI calls its positional inputs `sources`. It accepts image files/directories, one PDF, or one PPTX. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
+
+PDF pages are rendered adaptively and then reuse the existing image-to-editable-PPTX pipeline. The standard target is 200 DPI. Small pages are raised to a 1200 px short-edge floor without exceeding 300 DPI; every render is capped at a 6000 px long edge and 24 MP. An Agent or user may call `render-detail` once per page to rerender it with a 300 DPI target. PDF pages with the same physical aspect ratio can be combined into a ratio-preserving multi-slide PPTX. With mixed aspect ratios, `original` produces one output per page while a uniform 16:9 version remains available. Layout is always scaled uniformly, with no non-uniform stretching.
+
+For PPTX inputs, P1 read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe large images covering at least 80% of a slide are marked as candidates. P1 execution produces a byte-identical copy of the input PPTX, preserving existing editable text, shapes, tables, charts, and other native objects; they do not pass through CV, and images are not automatically separated or replaced. Final-screenshot classification by the Agent, OCR/reconstruction, and in-place OOXML replacement belong to P2 and are not implemented yet.
+
+Python 3.10–3.12 is supported; `doctor` now checks PDFium as well.
 
 #### Compatible Entry Points
 
