@@ -8,6 +8,7 @@ import os
 import posixpath
 import shutil
 import tempfile
+import warnings
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -43,6 +44,7 @@ MAX_TOTAL_UNCOMPRESSED = 2 * 1024 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 MAX_XML_SIZE = 16 * 1024 * 1024
 MAX_IMAGE_READ_SIZE = 128 * 1024 * 1024
+PIXEL_COUNT_CEILING = 24_000_000
 MAX_INVENTORY_JSON_SIZE = 16 * 1024 * 1024
 MAX_TOTAL_INVENTORY_OBJECTS = 1_000_000
 _HASH_CHUNK_SIZE = 1024 * 1024
@@ -575,6 +577,7 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
             ):
                 raise ValueError("Slide dimensions must be positive numbers")
             slides: list[dict[str, object]] = []
+            media_cache: dict[str, dict[str, object]] = {}
             ids = presentation.findall("p:sldIdLst/p:sldId", NS)
             for index, slide_id in enumerate(ids, start=1):
                 rel_id = slide_id.get(f"{{{R}}}id")
@@ -621,6 +624,7 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     archive,
                     names,
                     parts,
+                    media_cache,
                     choice_namespace_scopes,
                     slide_width,
                     slide_height,
@@ -892,6 +896,7 @@ def _objects(
     archive: zipfile.ZipFile,
     names: set[str],
     parts: dict[str, str],
+    media_cache: dict[str, dict[str, object]],
     choice_namespace_scopes: dict[int, dict[str, str]],
     slide_width: int,
     slide_height: int,
@@ -911,6 +916,7 @@ def _objects(
             archive,
             names,
             parts,
+            media_cache,
             slide_width,
             slide_height,
         )
@@ -925,6 +931,7 @@ def _objects(
                     archive,
                     names,
                     parts,
+                    media_cache,
                     choice_namespace_scopes,
                     slide_width,
                     slide_height,
@@ -988,6 +995,7 @@ def _object(
     archive: zipfile.ZipFile,
     names: set[str],
     parts: dict[str, str],
+    media_cache: dict[str, dict[str, object]],
     slide_width: int,
     slide_height: int,
 ) -> dict[str, object]:
@@ -1014,7 +1022,16 @@ def _object(
         "xml_c14n_sha256": _canonical_hash(node),
     }
     if object_type == "picture":
-        result.update(_picture_details(node, related, archive, names, parts))
+        result.update(
+            _picture_details(
+                node,
+                related,
+                archive,
+                names,
+                parts,
+                media_cache,
+            )
+        )
         _mark_picture_safety(result, slide_width, slide_height, names, parts)
     else:
         result.pop("_transform_reliable")
@@ -1150,6 +1167,7 @@ def _picture_details(
     archive: zipfile.ZipFile,
     names: set[str],
     parts: dict[str, str],
+    media_cache: dict[str, dict[str, object]],
 ) -> dict[str, object]:
     src_rect = node.find(".//a:srcRect", NS)
     crop = {
@@ -1169,49 +1187,66 @@ def _picture_details(
         (relation for relation in related if relation["id"] == primary_id),
         None,
     )
-    media_sha256 = None
-    pixel_width = pixel_height = None
-    media_format = None
-    media_valid = False
+    media = {
+        "media_sha256": None,
+        "media_format": None,
+        "media_valid": False,
+        "pixel_width": None,
+        "pixel_height": None,
+    }
     if primary and primary["target_mode"] == "Internal" and isinstance(primary["target"], str) and primary["target"] in names:
         target = primary["target"]
-        media_sha256 = parts[target]
-        if archive.getinfo(target).file_size <= MAX_IMAGE_READ_SIZE:
-            data = archive.read(target)
-            try:
-                with Image.open(BytesIO(data)) as image:
-                    detected_format = image.format
-                    image.verify()
-                with Image.open(BytesIO(data)) as image:
-                    image.load()
-                    width, height = image.size
-                    loaded_format = image.format
-                content_types = SUPPORTED_IMAGE_CONTENT_TYPES.get(
-                    detected_format or ""
-                )
-                if (
-                    detected_format == loaded_format
-                    and content_types is not None
-                    and primary.get("content_type") in content_types
-                    and type(width) is int
-                    and type(height) is int
-                    and width > 0
-                    and height > 0
-                ):
-                    media_format = detected_format
-                    pixel_width, pixel_height = width, height
-                    media_valid = True
-            except Exception:
-                pass
+        cached = media_cache.get(target)
+        if cached is None:
+            cached = {**media, "media_sha256": parts[target]}
+            if archive.getinfo(target).file_size <= MAX_IMAGE_READ_SIZE:
+                data = archive.read(target)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter(
+                            "error", Image.DecompressionBombWarning
+                        )
+                        with Image.open(BytesIO(data)) as image:
+                            detected_format = image.format
+                            width, height = image.size
+                            if (
+                                type(width) is not int
+                                or type(height) is not int
+                                or width <= 0
+                                or height <= 0
+                                or width > PIXEL_COUNT_CEILING // height
+                            ):
+                                raise ValueError("Unsafe picture pixel dimensions")
+                            image.verify()
+                        with Image.open(BytesIO(data)) as image:
+                            image.load()
+                            loaded_width, loaded_height = image.size
+                            loaded_format = image.format
+                    content_types = SUPPORTED_IMAGE_CONTENT_TYPES.get(
+                        detected_format or ""
+                    )
+                    if (
+                        detected_format == loaded_format
+                        and (loaded_width, loaded_height) == (width, height)
+                        and content_types is not None
+                        and primary.get("content_type") in content_types
+                    ):
+                        cached = {
+                            **cached,
+                            "media_format": detected_format,
+                            "media_valid": True,
+                            "pixel_width": width,
+                            "pixel_height": height,
+                        }
+                except Exception:
+                    pass
+            media_cache[target] = cached
+        media = cached
     return {
         **crop,
         "blip_sources": blip_sources,
         "primary_relationship": primary,
-        "media_sha256": media_sha256,
-        "media_format": media_format,
-        "media_valid": media_valid,
-        "pixel_width": pixel_width,
-        "pixel_height": pixel_height,
+        **media,
     }
 
 
