@@ -990,6 +990,19 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     slide_width,
                     slide_height,
                 )
+                background = _background_image(
+                    slide,
+                    slide_part,
+                    slide_rels,
+                    archive,
+                    names,
+                    parts,
+                    media_cache,
+                    slide_width,
+                    slide_height,
+                )
+                if background is not None:
+                    objects.insert(0, background)
                 slides.append(
                     {
                         "slide_index": index,
@@ -1357,6 +1370,66 @@ def _objects(
                     group_path + [item["shape_id"]],
                 )
             )
+    return result
+
+
+def _background_image(
+    slide: ET.Element,
+    slide_part: str,
+    rels: dict[str, dict[str, object]],
+    archive: zipfile.ZipFile,
+    names: set[str],
+    parts: dict[str, str],
+    media_cache: dict[str, dict[str, object]],
+    slide_width: int,
+    slide_height: int,
+) -> dict[str, object] | None:
+    background = slide.find("p:cSld/p:bg", NS)
+    if (
+        background is None
+        or background.find("p:bgPr/a:blipFill", NS) is None
+    ):
+        return None
+    related = _referenced_relationships(background, rels)
+    result: dict[str, object] = {
+        "shape_id": "background",
+        "name": "Slide Background Image",
+        "type": "slide_background_image",
+        "z_order": -1,
+        "group_path": [],
+        "inside_group": False,
+        "slide_part": slide_part,
+        "x": 0,
+        "y": 0,
+        "cx": slide_width,
+        "cy": slide_height,
+        "rotation": 0,
+        "rotation_degrees": 0.0,
+        "flip_h": False,
+        "flip_v": False,
+        "_transform_reliable": True,
+        "crop_left": 0,
+        "crop_top": 0,
+        "crop_right": 0,
+        "crop_bottom": 0,
+        "has_extension": any(
+            element.tag.endswith("}extLst") for element in background.iter()
+        ),
+        "has_timing_reference": False,
+        "relationships": related,
+        "xml_c14n_sha256": _canonical_hash(background),
+    }
+    result.update(
+        _picture_details(
+            background,
+            related,
+            archive,
+            names,
+            parts,
+            media_cache,
+        )
+    )
+    _mark_picture_safety(result, slide_width, slide_height, names, parts)
     return result
 
 
