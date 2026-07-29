@@ -45,7 +45,7 @@ NOTES_SLIDE_RELATIONSHIP_TYPES = frozenset(
         "http://purl.oclc.org/ooxml/officeDocument/relationships/notesSlide",
     }
 )
-SUPPORTED_MC_PREFIXES = frozenset({"p", "a", "r"})
+SUPPORTED_MC_NAMESPACE_URIS = frozenset({P, A, R})
 SHAPE_TAGS = frozenset(
     {
         f"{{{P}}}sp",
@@ -111,7 +111,11 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     slide_part,
                     SLIDE_CONTENT_TYPE,
                 )
-                slide = _xml(archive, slide_part, names)
+                slide, choice_namespace_scopes = _xml_with_namespace_scopes(
+                    archive,
+                    slide_part,
+                    names,
+                )
                 slide_rels_name = _rels_name(slide_part)
                 slide_rels = (
                     _relationships(archive, slide_rels_name, slide_part, names, content_types)
@@ -137,6 +141,7 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                     archive,
                     names,
                     parts,
+                    choice_namespace_scopes,
                 )
                 slides.append(
                     {
@@ -219,7 +224,11 @@ def _sha256_member(archive: zipfile.ZipFile, part: str) -> str:
     return digest.hexdigest()
 
 
-def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
+def _read_xml_bytes(
+    archive: zipfile.ZipFile,
+    part: str,
+    names: set[str],
+) -> bytes:
     if part not in names:
         raise ValueError(f"Missing required PPTX part: {part}")
     if archive.getinfo(part).file_size > MAX_XML_SIZE:
@@ -234,8 +243,45 @@ def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
         or b"<!entity" in null_stripped
     ):
         raise ValueError(f"Unsafe XML in {part}: DOCTYPE and ENTITY are not allowed")
+    return data
+
+
+def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
+    data = _read_xml_bytes(archive, part, names)
     try:
         return ET.fromstring(data)
+    except ET.ParseError as error:
+        raise ValueError(f"Invalid XML in {part}: {error}") from error
+
+
+def _xml_with_namespace_scopes(
+    archive: zipfile.ZipFile,
+    part: str,
+    names: set[str],
+) -> tuple[ET.Element, dict[int, dict[str, str]]]:
+    data = _read_xml_bytes(archive, part, names)
+    namespace_scopes: dict[int, dict[str, str]] = {}
+    scope_stack: list[dict[str, str]] = []
+    pending_namespaces: list[tuple[str, str]] = []
+    try:
+        parser = ET.iterparse(
+            BytesIO(data),
+            events=("start-ns", "start", "end"),
+        )
+        for event, item in parser:
+            if event == "start-ns":
+                pending_namespaces.append(item)
+                continue
+            if event == "start":
+                scope = dict(scope_stack[-1]) if scope_stack else {}
+                scope.update(pending_namespaces)
+                pending_namespaces.clear()
+                scope_stack.append(scope)
+                if item.tag == f"{{{MC}}}Choice":
+                    namespace_scopes[id(item)] = scope
+                continue
+            scope_stack.pop()
+        return parser.root, namespace_scopes
     except ET.ParseError as error:
         raise ValueError(f"Invalid XML in {part}: {error}") from error
 
@@ -364,11 +410,12 @@ def _objects(
     archive: zipfile.ZipFile,
     names: set[str],
     parts: dict[str, str],
+    choice_namespace_scopes: dict[int, dict[str, str]],
     group_path: list[str] | None = None,
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     group_path = [] if group_path is None else group_path
-    shape_children = _shape_children(parent)
+    shape_children = _shape_children(parent, choice_namespace_scopes)
     for z_order, node in enumerate(shape_children):
         item = _object(
             node,
@@ -392,6 +439,7 @@ def _objects(
                     archive,
                     names,
                     parts,
+                    choice_namespace_scopes,
                     group_path + [item["shape_id"]],
                 )
             )
@@ -411,7 +459,10 @@ def _is_shape(node: ET.Element) -> bool:
     )
 
 
-def _shape_children(parent: ET.Element) -> list[ET.Element]:
+def _shape_children(
+    parent: ET.Element,
+    choice_namespace_scopes: dict[int, dict[str, str]],
+) -> list[ET.Element]:
     result: list[ET.Element] = []
     for child in parent:
         if child.tag != f"{{{MC}}}AlternateContent":
@@ -421,8 +472,9 @@ def _shape_children(parent: ET.Element) -> list[ET.Element]:
         branch = None
         for choice in child.findall("mc:Choice", NS):
             requires = choice.get("Requires", "").split()
+            namespace_scope = choice_namespace_scopes.get(id(choice), {})
             if requires and all(
-                prefix in SUPPORTED_MC_PREFIXES
+                namespace_scope.get(prefix) in SUPPORTED_MC_NAMESPACE_URIS
                 for prefix in requires
             ):
                 branch = choice
@@ -431,7 +483,7 @@ def _shape_children(parent: ET.Element) -> list[ET.Element]:
             branch = child.find("mc:Fallback", NS)
         if branch is None:
             raise ValueError("Unsupported AlternateContent without a usable branch")
-        expanded = _shape_children(branch)
+        expanded = _shape_children(branch, choice_namespace_scopes)
         if not expanded:
             raise ValueError("Unsupported AlternateContent branch without a shape")
         result.extend(expanded)
