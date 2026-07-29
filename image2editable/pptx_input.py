@@ -32,6 +32,37 @@ _HASH_CHUNK_SIZE = 1024 * 1024
 PRESENTATION_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
 SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml"
 RELS_CONTENT_TYPE = "application/vnd.openxmlformats-package.relationships+xml"
+NOTES_SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"
+SLIDE_RELATIONSHIP_TYPES = frozenset(
+    {
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/slide",
+    }
+)
+NOTES_SLIDE_RELATIONSHIP_TYPES = frozenset(
+    {
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/notesSlide",
+    }
+)
+SUPPORTED_MC_PREFIXES = frozenset({"p", "a", "r"})
+SHAPE_TAGS = frozenset(
+    {
+        f"{{{P}}}sp",
+        f"{{{P}}}pic",
+        f"{{{P}}}grpSp",
+        f"{{{P}}}cxnSp",
+        f"{{{P}}}graphicFrame",
+        f"{{{P}}}contentPart",
+    }
+)
+SHAPE_TREE_METADATA_TAGS = frozenset(
+    {
+        f"{{{P}}}nvGrpSpPr",
+        f"{{{P}}}grpSpPr",
+        f"{{{P}}}extLst",
+    }
+)
 
 
 def scan_pptx(path: str | Path) -> dict[str, object]:
@@ -72,7 +103,7 @@ def scan_pptx(path: str | Path) -> dict[str, object]:
                 relation = presentation_rels[rel_id]
                 if relation["target_mode"] == "External" or not relation["target"]:
                     raise ValueError(f"Slide relationship must target an internal part: {rel_id}")
-                if not str(relation["type"]).endswith("/slide"):
+                if relation["type"] not in SLIDE_RELATIONSHIP_TYPES:
                     raise ValueError(f"Invalid slide relationship type: {rel_id}")
                 slide_part = relation["target"]
                 _require_content_type(
@@ -252,13 +283,21 @@ def _relationships(
         if rel_id in records:
             raise ValueError(f"Duplicate relationship Id in {rels_part}: {rel_id}")
         target_mode = node.get("TargetMode", "Internal")
+        if target_mode not in {"Internal", "External"}:
+            raise ValueError(
+                f"Invalid relationship TargetMode in {rels_part}: {target_mode}"
+            )
         target = node.get("Target", "")
-        internal_target = None if target_mode.casefold() == "external" else _part_target(source_part, target)
+        internal_target = (
+            None
+            if target_mode == "External"
+            else _part_target(source_part, target)
+        )
         records[rel_id] = {
             "id": rel_id,
             "type": node.get("Type"),
             "target": internal_target if internal_target is not None else target,
-            "target_mode": "External" if target_mode.casefold() == "external" else "Internal",
+            "target_mode": target_mode,
             "content_type": content_types.get(internal_target) if internal_target else None,
         }
     return records
@@ -290,12 +329,30 @@ def _notes(
     names: set[str],
 ) -> tuple[str | None, str | None]:
     for relation in rels.values():
-        if str(relation["type"]).endswith("/notesSlide") and relation["target_mode"] == "Internal":
-            target = relation["target"]
-            if not isinstance(target, str) or target not in parts:
-                raise ValueError(f"Missing notes part: {target}")
-            _xml(archive, target, names)
-            return target, parts[target]
+        relation_type = relation["type"]
+        is_notes = (
+            relation_type in NOTES_SLIDE_RELATIONSHIP_TYPES
+            or relation["content_type"] == NOTES_SLIDE_CONTENT_TYPE
+        )
+        if not is_notes:
+            continue
+        if relation_type not in NOTES_SLIDE_RELATIONSHIP_TYPES:
+            raise ValueError(
+                f"Invalid notes relationship type: {relation_type}"
+            )
+        if relation["target_mode"] != "Internal":
+            raise ValueError(
+                f"Invalid notes relationship TargetMode: {relation['target_mode']}"
+            )
+        if relation["content_type"] != NOTES_SLIDE_CONTENT_TYPE:
+            raise ValueError(
+                f"Invalid notes content type: {relation['content_type']}"
+            )
+        target = relation["target"]
+        if not isinstance(target, str) or target not in parts:
+            raise ValueError(f"Missing notes part: {target}")
+        _xml(archive, target, names)
+        return target, parts[target]
     return None, None
 
 
@@ -342,24 +399,36 @@ def _objects(
 
 
 def _is_shape(node: ET.Element) -> bool:
-    return node.tag in {
-        f"{{{P}}}sp", f"{{{P}}}pic", f"{{{P}}}grpSp", f"{{{P}}}cxnSp",
-        f"{{{P}}}graphicFrame", f"{{{P}}}contentPart",
-    }
+    if node.tag in SHAPE_TREE_METADATA_TAGS:
+        return False
+    if node.tag in SHAPE_TAGS:
+        return True
+    c_nv_pr = node.find(".//p:cNvPr", NS)
+    return (
+        c_nv_pr is not None
+        and bool(c_nv_pr.get("id"))
+        and c_nv_pr.get("name") is not None
+    )
 
 
 def _shape_children(parent: ET.Element) -> list[ET.Element]:
     result: list[ET.Element] = []
     for child in parent:
-        if _is_shape(child):
-            result.append(child)
-            continue
         if child.tag != f"{{{MC}}}AlternateContent":
+            if _is_shape(child):
+                result.append(child)
             continue
-        branch = child.find("mc:Fallback", NS)
+        branch = None
+        for choice in child.findall("mc:Choice", NS):
+            requires = choice.get("Requires", "").split()
+            if requires and all(
+                prefix in SUPPORTED_MC_PREFIXES
+                for prefix in requires
+            ):
+                branch = choice
+                break
         if branch is None:
-            choices = child.findall("mc:Choice", NS)
-            branch = choices[0] if choices else None
+            branch = child.find("mc:Fallback", NS)
         if branch is None:
             raise ValueError("Unsupported AlternateContent without a usable branch")
         expanded = _shape_children(branch)
