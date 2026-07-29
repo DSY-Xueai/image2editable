@@ -34,10 +34,18 @@ from image2editable.store import RunStore
 P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+STRICT_P = "http://purl.oclc.org/ooxml/presentationml/main"
+STRICT_A = "http://purl.oclc.org/ooxml/drawingml/main"
+STRICT_R = "http://purl.oclc.org/ooxml/officeDocument/relationships"
 PR = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"p": P, "a": A, "r": R, "pr": PR, "ct": CT, "mc": MC}
+STRICT_OOXML_NAMESPACES = {
+    STRICT_P: P,
+    STRICT_A: A,
+    STRICT_R: R,
+}
 
 MAX_MEMBERS = 10_000
 MAX_PART_SIZE = 512 * 1024 * 1024
@@ -81,7 +89,9 @@ SUPPORTED_IMAGE_CONTENT_TYPES = {
     "TIFF": frozenset({"image/tiff"}),
     "WEBP": frozenset({"image/webp"}),
 }
-SUPPORTED_MC_NAMESPACE_URIS = frozenset({P, A, R})
+SUPPORTED_MC_NAMESPACE_URIS = frozenset(
+    {P, A, R, STRICT_P, STRICT_A, STRICT_R}
+)
 SHAPE_TAGS = frozenset(
     {
         f"{{{P}}}sp",
@@ -1024,7 +1034,7 @@ def _read_xml_bytes(
 def _xml(archive: zipfile.ZipFile, part: str, names: set[str]) -> ET.Element:
     data = _read_xml_bytes(archive, part, names)
     try:
-        return ET.fromstring(data)
+        return _normalize_supported_ooxml_namespaces(ET.fromstring(data))
     except ET.ParseError as error:
         raise ValueError(f"Invalid XML in {part}: {error}") from error
 
@@ -1056,9 +1066,38 @@ def _xml_with_namespace_scopes(
                     namespace_scopes[id(item)] = scope
                 continue
             scope_stack.pop()
-        return parser.root, namespace_scopes
+        return (
+            _normalize_supported_ooxml_namespaces(parser.root),
+            namespace_scopes,
+        )
     except ET.ParseError as error:
         raise ValueError(f"Invalid XML in {part}: {error}") from error
+
+
+def _normalize_supported_ooxml_namespaces(root: ET.Element) -> ET.Element:
+    for node in root.iter():
+        node.tag = _normalize_supported_ooxml_name(node.tag)
+        attributes: dict[str, str] = {}
+        for name, value in node.attrib.items():
+            normalized = _normalize_supported_ooxml_name(name)
+            if normalized in attributes:
+                raise ValueError(
+                    "Conflicting Strict and Transitional OOXML attributes"
+                )
+            attributes[normalized] = value
+        node.attrib.clear()
+        node.attrib.update(attributes)
+    return root
+
+
+def _normalize_supported_ooxml_name(name: str) -> str:
+    if not name.startswith("{"):
+        return name
+    namespace, separator, local = name[1:].partition("}")
+    normalized = STRICT_OOXML_NAMESPACES.get(namespace)
+    if not separator or normalized is None:
+        return name
+    return f"{{{normalized}}}{local}"
 
 
 def _content_types(archive: zipfile.ZipFile, names: set[str]) -> dict[str, str]:
