@@ -12,7 +12,11 @@ Usage:
 from __future__ import annotations
 
 import logging
+import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -37,6 +41,9 @@ def detect_text(
     lang: str = "ch",
     confidence_threshold: float = 0.7,
     mask_padding: int = 6,
+    *,
+    isolated: bool = False,
+    worker_root: str | Path | None = None,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect text regions and estimate styling.
 
@@ -55,7 +62,13 @@ def detect_text(
     img_rgb = _load_rgb(image_path)
     h, w = img_rgb.shape[:2]
 
-    raw_boxes = _ocr_detect(image_path, lang, confidence_threshold)
+    raw_boxes = _ocr_detect(
+        image_path,
+        lang,
+        confidence_threshold,
+        isolated=isolated,
+        worker_root=worker_root,
+    )
 
     if not raw_boxes:
         logger.warning("No text detected by OCR.")
@@ -116,10 +129,23 @@ def detect_text(
 
 
 def _ocr_detect(
-    image_path: Path, lang: str, conf_threshold: float
+    image_path: Path,
+    lang: str,
+    conf_threshold: float,
+    *,
+    isolated: bool = False,
+    worker_root: str | Path | None = None,
 ) -> list[dict]:
     """Try PaddleOCR first, fall back to pytesseract."""
-    results = _try_paddleocr(image_path, lang, conf_threshold)
+    if isolated:
+        results = _try_isolated_paddleocr(
+            image_path,
+            lang,
+            conf_threshold,
+            worker_root=worker_root,
+        )
+    else:
+        results = _try_paddleocr(image_path, lang, conf_threshold)
     if results is not None:
         return results
 
@@ -129,6 +155,104 @@ def _ocr_detect(
 
     logger.error("No OCR engine available (tried PaddleOCR, pytesseract).")
     return []
+
+
+def _try_isolated_paddleocr(
+    image_path: Path,
+    lang: str,
+    conf_threshold: float,
+    *,
+    worker_root: str | Path | None,
+) -> list[dict] | None:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="ocr-",
+            dir=worker_root,
+        ) as temporary:
+            work_dir = Path(temporary)
+            detection_result = work_dir / "detection.json"
+            recognition_result = work_dir / "recognition.json"
+            commands = [
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("ocr_worker.py").resolve()),
+                    "detect",
+                    "--image",
+                    str(image_path),
+                    "--work-dir",
+                    str(work_dir),
+                    "--result",
+                    str(detection_result),
+                ],
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("ocr_worker.py").resolve()),
+                    "recognize",
+                    "--detection-result",
+                    str(detection_result),
+                    "--result",
+                    str(recognition_result),
+                    "--lang",
+                    lang,
+                ],
+            ]
+            for stage, command, result_path in (
+                ("detection", commands[0], detection_result),
+                ("recognition", commands[1], recognition_result),
+            ):
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode or not result_path.is_file():
+                    diagnostic = completed.stderr.strip()
+                    logger.warning(
+                        "Isolated OCR %s failed (exit=%s): %s",
+                        stage,
+                        completed.returncode,
+                        diagnostic or f"missing result {result_path}",
+                    )
+                    return None
+            payload = json.loads(
+                recognition_result.read_text(encoding="utf-8")
+            )
+    except Exception as error:
+        logger.warning("Isolated OCR failed: %s", error)
+        return None
+
+    boxes = []
+    for item in payload.get("items", []):
+        confidence = float(item.get("score", 0.0))
+        text = str(item.get("text", "")).strip()
+        if confidence < conf_threshold or not text:
+            continue
+        poly = item["poly"]
+        bx, by, width, height = _poly_to_box(poly)
+        if width < 2 or height < 2:
+            continue
+        boxes.append(
+            {
+                "box": (bx, by, width, height),
+                "text": text,
+                "confidence": confidence,
+            }
+        )
+    return boxes
+
+
+def _poly_to_box(poly: object) -> tuple[int, int, int, int]:
+    x_values = [point[0] for point in poly]
+    y_values = [point[1] for point in poly]
+    x1, x2 = min(x_values), max(x_values)
+    y1, y2 = min(y_values), max(y_values)
+    return (
+        int(x1),
+        int(y1),
+        int(x2 - x1),
+        int(y2 - y1),
+    )
 
 
 def _try_paddleocr(
@@ -167,12 +291,7 @@ def _try_paddleocr(
                 if not text:
                     continue
                 poly = polys[i]
-                x1, y1 = poly[0]
-                x2, y2 = poly[2]
-                bx = int(min(x1, x2))
-                by = int(min(y1, y2))
-                bw = int(abs(x2 - x1))
-                bh = int(abs(y2 - y1))
+                bx, by, bw, bh = _poly_to_box(poly)
                 if bw < 2 or bh < 2:
                     continue
                 boxes.append({
@@ -195,6 +314,9 @@ def _create_paddleocr(lang: str) -> object:
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
+        text_recognition_batch_size=1,
+        cpu_threads=1,
+        enable_mkldnn=False,
     )
 
 

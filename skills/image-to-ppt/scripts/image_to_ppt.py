@@ -157,7 +157,11 @@ def _persist_element_masks(
     return paths
 
 
-def _finalize_slide_quality(slide_data: dict, lang: str) -> dict:
+def _finalize_slide_quality(
+    slide_data: dict,
+    lang: str,
+    _resource_isolation: bool = False,
+) -> dict:
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
     element_mask_paths = slide_data.pop("_element_mask_paths")
@@ -180,9 +184,11 @@ def _finalize_slide_quality(slide_data: dict, lang: str) -> dict:
         visual_only_path = work_dir / "visual-only.png"
         _save_rgb(str(visual_only_path), visual_only)
 
+        ocr_kwargs = {}
+        if _resource_isolation:
+            ocr_kwargs = {"isolated": True, "worker_root": work_dir}
         raster_text_items, raster_text_mask = detect_text(
-            visual_only_path,
-            lang=lang,
+            visual_only_path, lang=lang, **ocr_kwargs
         )
         if raster_text_items:
             repair_kwargs = {"text_items": raster_text_items}
@@ -202,7 +208,9 @@ def _finalize_slide_quality(slide_data: dict, lang: str) -> dict:
                 components,
             )
             _save_rgb(str(visual_only_path), visual_only)
-            raster_text_items, _ = detect_text(visual_only_path, lang=lang)
+            raster_text_items, _ = detect_text(
+                visual_only_path, lang=lang, **ocr_kwargs
+            )
         if raster_text_items:
             raise VisualSegmentationError(
                 "visual components still contain raster text after cleanup"
@@ -473,11 +481,13 @@ def _prepare_single_image(
     image_path: str | Path,
     lang: str,
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> tuple[dict, Path]:
+    prepare_kwargs = {"_work_root": _work_root}
+    if _resource_isolation:
+        prepare_kwargs["_resource_isolation"] = True
     slide_data = _prepare_multiple_images(
-        [image_path],
-        lang,
-        _work_root=_work_root,
+        [image_path], lang, **prepare_kwargs
     )[0]
     return slide_data, Path(slide_data["background_original_path"]).parent
 
@@ -486,6 +496,7 @@ def _prepare_multiple_images(
     image_paths: list[str | Path],
     lang: str,
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> list[dict]:
     resolved_paths = [_resolve_image_path(path) for path in image_paths]
     if not resolved_paths:
@@ -505,7 +516,18 @@ def _prepare_multiple_images(
     primary_traceback = None
     try:
         for image_path, work_dir in prepared_pages:
-            text_items, text_mask = detect_text(image_path, lang=lang)
+            if _resource_isolation:
+                text_items, text_mask = detect_text(
+                    image_path,
+                    lang=lang,
+                    isolated=True,
+                    worker_root=work_dir,
+                )
+            else:
+                text_items, text_mask = detect_text(
+                    image_path,
+                    lang=lang,
+                )
             text_mask_path = (work_dir / "source-text-mask.png").resolve()
             Image.fromarray(text_mask, mode="L").save(text_mask_path)
             text_analyses.append({
@@ -571,7 +593,17 @@ def _prepare_multiple_images(
     primary_traceback = None
     try:
         for index, slide_data in enumerate(slides_data):
-            slides_data[index] = _finalize_slide_quality(slide_data, lang)
+            if _resource_isolation:
+                slides_data[index] = _finalize_slide_quality(
+                    slide_data,
+                    lang,
+                    _resource_isolation=True,
+                )
+            else:
+                slides_data[index] = _finalize_slide_quality(
+                    slide_data,
+                    lang,
+                )
             print(
                 f"         {len(slides_data[index]['components'])} "
                 "components extracted\n"
@@ -645,6 +677,7 @@ def convert(
     add_reference: bool = False,
     slide_size: str = "16:9",
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> str:
     """Full pipeline: image → PPTX.
 
@@ -668,10 +701,11 @@ def convert(
         output_path = Path(image_path).resolve().with_suffix(".pptx")
     output_path = Path(output_path).resolve()
 
+    prepare_kwargs = {"_work_root": _work_root}
+    if _resource_isolation:
+        prepare_kwargs["_resource_isolation"] = True
     slide_data, work_dir = _prepare_single_image(
-        image_path,
-        lang,
-        _work_root=_work_root,
+        image_path, lang, **prepare_kwargs
     )
     print("[3/3] Assembling PPTX...")
     result = _assemble_prepared_slide(
@@ -699,15 +733,17 @@ def convert_variants(
     diff_threshold: float = 20.0,
     min_component_area: int = 20,
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> dict[str, str]:
     original_output, widescreen_output = _variant_output_paths(
         image_path,
         output_path,
     )
+    prepare_kwargs = {"_work_root": _work_root}
+    if _resource_isolation:
+        prepare_kwargs["_resource_isolation"] = True
     slide_data, work_dir = _prepare_single_image(
-        image_path,
-        lang,
-        _work_root=_work_root,
+        image_path, lang, **prepare_kwargs
     )
     print("[3/3] Assembling original and 16:9 PPTX files...")
     original_result = _assemble_prepared_slide(
@@ -739,6 +775,7 @@ def convert_batch(
     min_component_area: int = 20,
     add_reference: bool = False,
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> str:
     """Process multiple images into a single multi-slide PPTX.
 
@@ -754,10 +791,11 @@ def convert_batch(
     Returns:
         Path to the output PPTX file.
     """
+    prepare_kwargs = {"_work_root": _work_root}
+    if _resource_isolation:
+        prepare_kwargs["_resource_isolation"] = True
     slides_data = _prepare_multiple_images(
-        image_paths,
-        lang,
-        _work_root=_work_root,
+        image_paths, lang, **prepare_kwargs
     )
     if output_path is None:
         output_path = Path(slides_data[0]["original_image_path"]).with_suffix(".pptx")
@@ -791,11 +829,13 @@ def convert_batch_variants(
     combine_original: bool = False,
     original_aspect_ratio: float | None = None,
     _work_root: str | Path | None = None,
+    _resource_isolation: bool = False,
 ) -> dict[str, str | list[str] | None]:
+    prepare_kwargs = {"_work_root": _work_root}
+    if _resource_isolation:
+        prepare_kwargs["_resource_isolation"] = True
     slides_data = _prepare_multiple_images(
-        image_paths,
-        lang,
-        _work_root=_work_root,
+        image_paths, lang, **prepare_kwargs
     )
     source_paths = [
         Path(slide_data["original_image_path"]).resolve()
@@ -966,6 +1006,7 @@ def main() -> None:
             bg_period=args.period,
             diff_threshold=args.diff_threshold,
             min_component_area=args.min_area,
+            _resource_isolation=True,
         )
     elif len(image_files) == 1:
         convert(
@@ -977,6 +1018,7 @@ def main() -> None:
             min_component_area=args.min_area,
             add_reference=add_reference,
             slide_size=args.slide_size,
+            _resource_isolation=True,
         )
     elif args.slide_size == "both":
         convert_batch_variants(
@@ -987,6 +1029,7 @@ def main() -> None:
             bg_period=args.period,
             diff_threshold=args.diff_threshold,
             min_component_area=args.min_area,
+            _resource_isolation=True,
         )
     elif args.slide_size == "original":
         convert_batch_variants(
@@ -998,6 +1041,7 @@ def main() -> None:
             bg_period=args.period,
             diff_threshold=args.diff_threshold,
             min_component_area=args.min_area,
+            _resource_isolation=True,
         )
     else:
         convert_batch(
@@ -1008,6 +1052,7 @@ def main() -> None:
             diff_threshold=args.diff_threshold,
             min_component_area=args.min_area,
             add_reference=add_reference,
+            _resource_isolation=True,
         )
 
 

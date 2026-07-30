@@ -354,6 +354,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                 output_path=output_path,
                 lang=options["lang"],
                 _work_root=work_root,
+                _resource_isolation=True,
             )
         elif len(sources) == 1:
             result = {
@@ -363,6 +364,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                     lang=options["lang"],
                     slide_size=slide_size,
                     _work_root=work_root,
+                    _resource_isolation=True,
                 )
             }
         elif slide_size == "both":
@@ -370,6 +372,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                 "output_path": output_path,
                 "lang": options["lang"],
                 "_work_root": work_root,
+                "_resource_isolation": True,
             }
             if combine_original:
                 kwargs["combine_original"] = True
@@ -385,6 +388,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                 "lang": options["lang"],
                 "include_widescreen": False,
                 "_work_root": work_root,
+                "_resource_isolation": True,
             }
             if combine_original:
                 kwargs["combine_original"] = True
@@ -401,6 +405,7 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
                     output_path=output_path,
                     lang=options["lang"],
                     _work_root=work_root,
+                    _resource_isolation=True,
                 )
             }
     result = _absolute_outputs(result)
