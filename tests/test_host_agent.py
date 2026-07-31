@@ -54,9 +54,11 @@ def _publish_request(run_dir: Path) -> Path:
 
 
 def _capability_response(item: dict) -> dict:
+    run_dir = Path(item["image_path"]).parent
+    expected = json.loads((run_dir / "host_challenge.json").read_text(encoding="utf-8"))["expected"]
     return {"schema_version": 1, "kind": "host_capability_response",
             "challenge_id": item["challenge_id"],
-            "observed": {"shape": "triangle", "color": "#2f6fed", "count": 3}}
+            "observed": expected}
 
 
 def _write_json(path: Path, value: dict) -> Path:
@@ -75,6 +77,62 @@ def test_host_next_returns_random_hash_bound_visual_handshake_before_page(host_r
     assert metadata["image_sha256"] == hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest()
 
 
+def test_visual_answer_is_random_per_run_and_matches_rendered_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices = iter(["triangle", "#d9485f", 2, "circle", "#2b8a3e", 4])
+    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
+    observed = []
+    for index in range(2):
+        source = tmp_path / f"source-{index}.png"
+        source.write_bytes(b"image")
+        run_dir = prepare_image_job(source, run_dir=tmp_path / f"run-{index}")
+        store = RunStore.open(run_dir)
+        store.transition_run(RunStatus.RUNNING)
+        store.transition_run(RunStatus.AWAITING_AGENT)
+        item = next_host_agent_item(run_dir)
+        metadata = json.loads((run_dir / "host_challenge.json").read_text(encoding="utf-8"))
+        observed.append(metadata["expected"])
+        from PIL import Image
+        image = Image.open(item["image_path"]).convert("RGB")
+        color = tuple(bytes.fromhex(metadata["expected"]["color"][1:]))
+        components = _color_components(image, color)
+        assert len(components) == metadata["expected"]["count"]
+        if metadata["expected"]["shape"] == "triangle":
+            assert all(component["top_width"] < component["bottom_width"] for component in components)
+        else:
+            assert all(component["top_width"] < component["middle_width"] for component in components)
+    assert observed == [
+        {"shape": "triangle", "color": "#d9485f", "count": 2},
+        {"shape": "circle", "color": "#2b8a3e", "count": 4},
+    ]
+
+
+def _color_components(image: object, color: tuple[int, int, int]) -> list[dict]:
+    pixels = image.load()
+    width, height = image.size
+    remaining = {(x, y) for y in range(height) for x in range(width) if pixels[x, y] == color}
+    components = []
+    while remaining:
+        pending = [remaining.pop()]
+        points = []
+        while pending:
+            point = pending.pop()
+            points.append(point)
+            x, y = point
+            for neighbor in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    pending.append(neighbor)
+        ys = [point[1] for point in points]
+        top, bottom = min(ys), max(ys)
+        middle = (top + bottom) // 2
+        row_width = lambda row: sum(point[1] == row for point in points)
+        components.append({"top_width": row_width(top), "middle_width": row_width(middle),
+                           "bottom_width": row_width(bottom)})
+    return components
+
+
 def test_host_module_does_not_import_or_download_local_models() -> None:
     source = Path(host_agent.__file__).read_text(encoding="utf-8")
     for forbidden in ("local_agent", "transformers", "torch", "huggingface"):
@@ -84,10 +142,23 @@ def test_host_module_does_not_import_or_download_local_models() -> None:
 def test_capability_must_match_exact_visual_answer(host_run: Path, tmp_path: Path) -> None:
     item = next_host_agent_item(host_run)
     response = _capability_response(item)
-    response["observed"]["count"] = 2
+    response["observed"]["count"] = 2 if response["observed"]["count"] != 2 else 3
     with pytest.raises(ValueError, match="capability"):
         record_host_plan(host_run, _write_json(tmp_path / "bad.json", response))
     assert not (host_run / "host_capabilities.json").exists()
+
+
+def test_hard_coded_old_capability_answer_is_rejected(
+    host_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices = iter(["circle", "#2b8a3e", 4])
+    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
+    item = next_host_agent_item(host_run)
+    response = {"schema_version": 1, "kind": "host_capability_response",
+                "challenge_id": item["challenge_id"],
+                "observed": {"shape": "triangle", "color": "#2f6fed", "count": 3}}
+    with pytest.raises(ValueError, match="capability"):
+        record_host_plan(host_run, _write_json(tmp_path / "old.json", response))
 
 
 def test_capability_success_exposes_bound_component_request(host_run: Path, tmp_path: Path) -> None:
@@ -161,3 +232,66 @@ def test_record_valid_plan_is_atomic_resumable_and_not_repeatable(host_run: Path
     assert Path(result["plan_path"]).is_file()
     with pytest.raises(RuntimeError, match="already recorded"):
         record_host_plan(host_run, plan_path)
+
+
+def test_same_plan_recovers_state_transition_after_plan_publication(
+    host_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_request(host_run)
+    handshake = next_host_agent_item(host_run)
+    record_host_plan(host_run, _write_json(tmp_path / "capability.json", _capability_response(handshake)))
+    request = next_host_agent_item(host_run)
+    plan = {"schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+            "provider": "host", "repair_round": 1,
+            "request_sha256": request["request_sha256"], "actions": []}
+    plan_path = _write_json(tmp_path / "plan.json", plan)
+    real_transition = RunStore.transition_run
+    failed = False
+
+    def fail_once(store: RunStore, target: RunStatus) -> dict:
+        nonlocal failed
+        if target is RunStatus.PREPARED and not failed:
+            failed = True
+            raise OSError("simulated transition failure")
+        return real_transition(store, target)
+
+    monkeypatch.setattr(RunStore, "transition_run", fail_once)
+    with pytest.raises(OSError, match="transition failure"):
+        record_host_plan(host_run, plan_path)
+    records = list(host_run.glob("host-component-plan-*.json"))
+    assert len(records) == 1
+    before = records[0].read_bytes()
+    assert RunStore.open(host_run).read_json("run_state.json")["status"] == "awaiting_agent"
+
+    result = record_host_plan(host_run, plan_path)
+
+    assert result["status"] == "recorded"
+    assert result["recovered"] is True
+    assert records[0].read_bytes() == before
+    assert RunStore.open(host_run).read_json("run_state.json")["status"] == "prepared"
+    with pytest.raises(RuntimeError, match="already recorded"):
+        record_host_plan(host_run, plan_path)
+
+
+def test_different_plan_cannot_recover_half_committed_record(
+    host_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_request(host_run)
+    handshake = next_host_agent_item(host_run)
+    record_host_plan(host_run, _write_json(tmp_path / "capability.json", _capability_response(handshake)))
+    request = next_host_agent_item(host_run)
+    plan = {"schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+            "provider": "host", "repair_round": 1,
+            "request_sha256": request["request_sha256"], "actions": []}
+    plan_path = _write_json(tmp_path / "plan.json", plan)
+    real_transition = RunStore.transition_run
+    monkeypatch.setattr(RunStore, "transition_run", lambda store, target: (_ for _ in ()).throw(OSError("fail")) if target is RunStatus.PREPARED else real_transition(store, target))
+    with pytest.raises(OSError):
+        record_host_plan(host_run, plan_path)
+    monkeypatch.setattr(RunStore, "transition_run", real_transition)
+    changed = {**plan, "actions": [{"action": "accept", "object_ids": ["candidate_1"],
+                                     "parameters": {}, "confidence": 0.9,
+                                     "evidence": ["visible boundary"]}]}
+    with pytest.raises(RuntimeError, match="different|already recorded"):
+        record_host_plan(host_run, _write_json(tmp_path / "changed.json", changed))
+    assert RunStore.open(host_run).read_json("run_state.json")["status"] == "awaiting_agent"

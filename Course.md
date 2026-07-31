@@ -64,11 +64,11 @@
 
 ## P2.3 Task 5 本轮变更
 
-- `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge，固定验证视觉、本地文件读取、工具调用和结构化 JSON 四项能力；Host 路径不导入本地模型模块、不下载模型。
-- capability response 必须严格匹配三个蓝色三角形，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
+- `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge；形状、颜色和数量均从严格白名单逐 Run 随机，验证视觉、本地文件读取、工具调用和结构化 JSON 四项能力。Host 路径不导入本地模型模块、不下载模型。
+- capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
 - `image2editable agent record RUN_DIR --plan PLAN.json` 严格校验计划字段、动作对象、归一化坐标、置信度和非空证据；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、冲突动作均拒绝。
-- Agent next/record 与执行、恢复共用 Run 的非阻塞 OS lease；计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖，只有成功记录才执行 `awaiting_agent → prepared`。
+- Agent next/record 与执行、恢复共用 Run 的非阻塞 OS lease；计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
 
 ## 关键修改文件
 
