@@ -7,6 +7,32 @@ AGENT_PROVIDERS = frozenset({"host", "local"})
 MAX_REPAIR_ROUNDS = 5
 COMPONENT_STATES = frozenset({"pending", "failed", "frozen", "inactive"})
 COMPONENT_KINDS = frozenset({"parent", "child", "text"})
+COMPONENT_EVIDENCE_NAMES = frozenset(
+    {
+        "source.png",
+        "numbered-masks.png",
+        "ocr-overlay.png",
+        "ownership.png",
+        "reconstructed.png",
+        "difference.png",
+        "component-graph.json",
+        "quality-report.json",
+    }
+)
+
+_COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "page_id",
+        "provider",
+        "repair_round",
+        "source_sha256",
+        "graph_sha256",
+        "candidate_ids",
+        "frozen_ids",
+        "evidence",
+    }
+)
 
 _COMPONENT_NODE_FIELDS = frozenset(
     {
@@ -40,6 +66,72 @@ def validate_agent_provider(value: object) -> str:
             "Invalid agent_provider; expected one of: host, local"
         )
     return value
+
+
+def _validate_sha256(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} is invalid")
+    return value
+
+
+def validate_repair_round(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_REPAIR_ROUNDS:
+        raise ValueError(
+            f"repair_round must be between 1 and {MAX_REPAIR_ROUNDS}"
+        )
+    return value
+
+
+def validate_component_agent_request(request: object) -> dict:
+    if not isinstance(request, dict) or set(request) != _COMPONENT_AGENT_REQUEST_FIELDS:
+        raise ValueError("component agent request fields are invalid")
+    if type(request["schema_version"]) is not int or request["schema_version"] != 1:
+        raise ValueError("component agent request schema_version is invalid")
+    page_id = request["page_id"]
+    if (
+        type(page_id) is not str
+        or not page_id
+        or "/" in page_id
+        or "\\" in page_id
+        or page_id in {".", ".."}
+    ):
+        raise ValueError("component agent request page_id is invalid")
+    validate_agent_provider(request["provider"])
+    validate_repair_round(request["repair_round"])
+    _validate_sha256(request["source_sha256"], "source_sha256")
+    _validate_sha256(request["graph_sha256"], "graph_sha256")
+    for field in ("candidate_ids", "frozen_ids"):
+        values = request[field]
+        if (
+            not isinstance(values, list)
+            or any(type(value) is not str or not value for value in values)
+            or values != sorted(set(values))
+        ):
+            raise ValueError(f"component agent request {field} is invalid")
+    if set(request["candidate_ids"]) & set(request["frozen_ids"]):
+        raise ValueError("candidate_ids and frozen_ids must be disjoint")
+    evidence = request["evidence"]
+    if not isinstance(evidence, dict) or set(evidence) != COMPONENT_EVIDENCE_NAMES:
+        raise ValueError("component agent request evidence fields are invalid")
+    for name, record in evidence.items():
+        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+            raise ValueError(f"component evidence record is invalid: {name}")
+        path = record["path"]
+        if type(path) is not str or not path or "\\" in path or ":" in path:
+            raise ValueError(f"component evidence path is invalid: {name}")
+        pure_path = PurePosixPath(path)
+        if (
+            pure_path.is_absolute()
+            or ".." in pure_path.parts
+            or pure_path != PurePosixPath(name)
+        ):
+            raise ValueError(f"component evidence path is invalid: {name}")
+        _validate_sha256(record["sha256"], f"component evidence sha256: {name}")
+    return request
 
 
 def _validate_component_node(node: object) -> dict:

@@ -15,6 +15,69 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     assert MAX_REPAIR_ROUNDS == 5
 
 
+def test_component_agent_request_contract_is_strict() -> None:
+    request = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "a" * 64,
+        "graph_sha256": "b" * 64,
+        "candidate_ids": ["component_0001"],
+        "frozen_ids": ["component_0002"],
+        "evidence": {
+            name: {"path": name, "sha256": "c" * 64}
+            for name in component_contracts.COMPONENT_EVIDENCE_NAMES
+        },
+    }
+
+    assert component_contracts.validate_component_agent_request(request) is request
+    request["extra"] = None
+    with pytest.raises(ValueError, match="request fields"):
+        component_contracts.validate_component_agent_request(request)
+
+
+def test_component_agent_request_rejects_mislabeled_evidence_path() -> None:
+    request = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "a" * 64,
+        "graph_sha256": "b" * 64,
+        "candidate_ids": [],
+        "frozen_ids": [],
+        "evidence": {
+            name: {"path": name, "sha256": "c" * 64}
+            for name in component_contracts.COMPONENT_EVIDENCE_NAMES
+        },
+    }
+    request["evidence"]["source.png"]["path"] = "ownership.png"
+
+    with pytest.raises(ValueError, match="evidence path"):
+        component_contracts.validate_component_agent_request(request)
+
+
+def test_component_agent_request_rejects_boolean_schema_version() -> None:
+    request = {
+        "schema_version": True,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "a" * 64,
+        "graph_sha256": "b" * 64,
+        "candidate_ids": [],
+        "frozen_ids": [],
+        "evidence": {
+            name: {"path": name, "sha256": "c" * 64}
+            for name in component_contracts.COMPONENT_EVIDENCE_NAMES
+        },
+    }
+
+    with pytest.raises(ValueError, match="schema_version"):
+        component_contracts.validate_component_agent_request(request)
+
+
 @pytest.mark.parametrize("value", ["host", "local"])
 def test_validate_agent_provider_accepts_supported_lowercase_values(value: str) -> None:
     assert validate_agent_provider(value) == value

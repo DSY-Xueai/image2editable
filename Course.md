@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 3 已完成：初始分层具备类别无关的父子组件树、冻结约束和唯一像素所有权报告；组件动作与 Agent 状态机尚未接入。
+- P2.3 Task 4 已完成：每页最多五轮的 Agent 输入已具备不可变、哈希绑定的八项证据包；组件动作与 Agent 状态机尚未接入。
 
 ## P2.2 既有行为
 
@@ -48,9 +48,15 @@
 - 原始组件与文字交叠不再提前误杀；只有显式提供可靠 `text_items` 和已验证 `text_clean_image` 才进入清字导出，避免整块 OCR 框擦断线条；missing 仅依据显式非文字前景证据判定。
 - mask 校验、union 和像素所有权改为流式 bool 累计，文字洞修复只保留一张 owner map，无文字时不分配 repair map；不再构造随组件数增长的 `N×H×W` 堆叠或全页 repair 列表。Skill 同步携带组件契约与质量模块，可脱离仓库导入。
 
+## P2.3 Task 4 本轮变更
+
+- 每轮固定发布 `source.png`、编号掩码、OCR/所有权叠加图、重建图、差异图、组件图和质量报告八项证据；请求逐项记录 SHA-256，并绑定源图、组件图、Provider、页面、轮次及待修/冻结组件 ID。
+- 轮目录固定为 `reconstruction/agent/round-01` 至 `round-05`；先写唯一 staging 再整目录发布，已有轮次不可覆盖，同页同轮并发发布只有一个成功。
+- 构建和读取均限制在当前页面 reconstruction 内；证据采用同一文件句柄校验身份并读取，拒绝路径穿越、跨页、符号链接、重解析点、硬链接和读取中变化，任何证据篡改都会在 Agent 调用前失败。
+
 ## 关键修改文件
 
-- Agent 契约、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
+- Agent 契约、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
 - PPTX 扫描与执行：`image2editable/pptx_input.py`
 - CV 重建：`image2editable/pptx_reconstruct.py`
 - OOXML 替换：`image2editable/pptx_shadow.py`
@@ -85,7 +91,7 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–3 已完成 Provider、可恢复初始视觉资产、组件树和所有权基础，尚未接入组件决策、修复、五轮循环或 Host/Local 调用。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–4 已完成 Provider、可恢复初始视觉资产、组件树、所有权和五轮证据包基础，尚未接入组件决策、修复循环或 Host/Local 调用。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通非 Agent `convert` 仍保留旧的保守 fallback；P2.3 Agent 路径将通过组件级清字、重修和父组件折叠提取完整组件，不再以整页清空组件作为成功结果。
