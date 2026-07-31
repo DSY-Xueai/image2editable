@@ -109,6 +109,50 @@ def test_get_status_rejects_missing_or_invalid_manifest_agent_provider(
         runtime.get_status(run_dir)
 
 
+@pytest.mark.parametrize(
+    "entry_name",
+    ["record_decision", "rerender_pdf_page", "recover_job", "retry_page"],
+)
+@pytest.mark.parametrize("provider", [None, "remote"])
+def test_public_runtime_entries_reject_missing_or_invalid_agent_provider(
+    tmp_path, entry_name: str, provider: object
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = runtime.RunStore.open(run_dir)
+    if entry_name == "recover_job":
+        store.transition_run(RunStatus.RUNNING)
+    manifest_path = run_dir / "job_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if provider is None:
+        del manifest["options"]["agent_provider"]
+    else:
+        manifest["options"]["agent_provider"] = provider
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    calls = {
+        "record_decision": lambda: runtime.record_decision(
+            run_dir,
+            page_id="page_001",
+            object_id="candidate_001",
+            decision="preserve",
+            confidence=1.0,
+            category="unknown",
+            evidence=["test"],
+        ),
+        "rerender_pdf_page": lambda: runtime.rerender_pdf_page(
+            run_dir, "page_001"
+        ),
+        "recover_job": lambda: runtime.recover_job(run_dir),
+        "retry_page": lambda: runtime.retry_page(run_dir, "page_001"),
+    }
+    with pytest.raises(RuntimeError, match="manifest.*agent_provider"):
+        calls[entry_name]()
+    if entry_name == "recover_job":
+        assert store.read_json("run_state.json")["status"] == "running"
+
+
 def test_run_state_rejects_skipped_transition() -> None:
     state = {
         "schema_version": SCHEMA_VERSION,

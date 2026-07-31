@@ -9,7 +9,7 @@
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
 - P2.3 Task 1 已完成：Run 清单冻结 `host`/`local` Agent Provider，所有读取 Run 清单的运行时入口（包括状态查询）均拒绝缺失或非法 Provider；后续组件动作尚未实现。
 
-## 本轮新增或变更
+## P2.2 既有行为
 
 - 支持替换两类整页截图：幻灯片背景图片、铺满页面的普通图片形状。
 - 普通图片形状按原始 `x/y/cx/cy` 矩形映射并保持原 z-order；被连接线或动画引用的图片安全回退，不留下悬空 shape ID。
@@ -24,6 +24,9 @@
 - 低对比度浅灰源对象使用更敏感的残影检测阈值，不再只检测深色文字或组件。
 - 组件掩码与可编辑文字区域发生实质重叠时，自动降级为“干净底图 + 可编辑文字”，避免透明组件和底图留下浅灰栅格残影。
 - 资源策略保持 `safe-default`：重型页面串行、数值线程最多 8、SAM `points_per_batch=1`。
+
+## P2.3 Task 1 本轮变更
+
 - `convert` 与 `prepare` 支持 `--agent-provider host|local`，默认 `host`；Provider 在创建 Run 时写入清单，后续 CLI 子命令不能覆盖。
 - Run/Page 状态机增加 `awaiting_agent` 暂停状态，仅允许 `running → awaiting_agent → prepared` 和 `processing → awaiting_agent → processing` 的新增路径。
 
@@ -70,5 +73,4 @@ image2editable run execute runs/pptx-job
 - 当前优先保证视觉稳定和文字可编辑；与文字冲突的独立视觉组件会保留在净化底图中，不强行拆成透明对象。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
 - 实测单页 PDF 转换的 Python 工作集合计约 2.2 GiB；`test1.pptx` 两页运行目录约 35.6 MiB，未出现内存或磁盘 100%。
-- `Course.md`、`tests/`、`tmp/` 被 `.gitignore` 忽略，仅作为本地文档、测试和验收材料保留。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

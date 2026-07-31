@@ -3202,9 +3202,9 @@ def test_convert_prepares_then_runs(monkeypatch: pytest.MonkeyPatch) -> None:
                 {
                     "run_dir": "run",
                     "output_path": "output.pptx",
-                        "slide_size": "original",
-                        "lang": "en",
-                        "agent_provider": "host",
+                    "slide_size": "original",
+                    "lang": "en",
+                    "agent_provider": "host",
                 },
             ),
         ),
