@@ -1618,6 +1618,51 @@ def _prepared_owned_file(
     return resolved
 
 
+def _read_prepared_owned_bytes(
+    work_dir: Path,
+    value: str | Path,
+    label: str,
+    *,
+    relative_only: bool = False,
+) -> tuple[Path, bytes]:
+    owned = _prepared_owned_file(
+        work_dir,
+        value,
+        label,
+        relative_only=relative_only,
+    )
+    try:
+        path_before = os.lstat(owned)
+        with owned.open("rb") as source:
+            handle_before = os.fstat(source.fileno())
+            content = source.read()
+            handle_after = os.fstat(source.fileno())
+        path_after = os.lstat(owned)
+    except OSError as exc:
+        raise ValueError(f"{label} asset changed while being read: {owned}") from exc
+
+    statuses = (path_before, handle_before, handle_after, path_after)
+    for status in statuses:
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+        ):
+            raise ValueError(f"{label} asset changed while being read: {owned}")
+    identities = {
+        (
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+        )
+        for status in statuses
+    }
+    if len(identities) != 1 or len(content) != handle_before.st_size:
+        raise ValueError(f"{label} asset changed while being read: {owned}")
+    return owned, content
+
+
 def _prepared_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -1627,14 +1672,18 @@ def _prepared_sha256(path: Path) -> str:
 
 
 def _prepared_asset_record(work_dir: Path, path: str | Path, label: str) -> dict:
-    owned = _prepared_owned_file(work_dir, path, label)
+    owned, content = _read_prepared_owned_bytes(work_dir, path, label)
     return {
         "path": owned.relative_to(work_dir).as_posix(),
-        "sha256": _prepared_sha256(owned),
+        "sha256": hashlib.sha256(content).hexdigest(),
     }
 
 
-def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
+def _read_prepared_asset_bytes(
+    work_dir: Path,
+    record: object,
+    label: str,
+) -> tuple[Path, bytes]:
     if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
         raise ValueError(f"{label} asset record is invalid")
     relative = record["path"]
@@ -1647,14 +1696,19 @@ def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
         or any(character not in "0123456789abcdef" for character in expected)
     ):
         raise ValueError(f"{label} asset sha256 is invalid")
-    owned = _prepared_owned_file(
+    owned, content = _read_prepared_owned_bytes(
         work_dir,
         relative,
         label,
         relative_only=True,
     )
-    if _prepared_sha256(owned) != expected:
+    if hashlib.sha256(content).hexdigest() != expected:
         raise ValueError(f"{label} asset sha256 mismatch")
+    return owned, content
+
+
+def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
+    owned, _ = _read_prepared_asset_bytes(work_dir, record, label)
     return str(owned)
 
 
@@ -1866,14 +1920,16 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
     }
     _validate_prepared_payload(manifest)
     state_path = work_dir / _PREPARED_PAGE_NAME
+    state_text = json.dumps(manifest, ensure_ascii=False, indent=2)
+    state_bytes = state_text.encode("utf-8")
     _atomic_write_prepared_text(
         work_dir,
         state_path,
-        json.dumps(manifest, ensure_ascii=False, indent=2),
+        state_text,
         encoding="utf-8",
         label="prepared state",
     )
-    state_sha256 = _prepared_sha256(state_path)
+    state_sha256 = hashlib.sha256(state_bytes).hexdigest()
     _atomic_write_prepared_text(
         work_dir,
         work_dir / _PREPARED_PAGE_SIDECAR_NAME,
@@ -1884,29 +1940,34 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
     return state_path.resolve()
 
 
-def load_component_layers(state_path: str | Path) -> dict:
+def _load_component_layer_state(
+    state_path: str | Path,
+) -> tuple[dict, dict]:
     lexical_state = Path(os.path.abspath(state_path))
     if lexical_state.name != _PREPARED_PAGE_NAME:
         raise ValueError(f"state path must name {_PREPARED_PAGE_NAME}")
     work_dir = _validate_prepared_work_dir(lexical_state.parent)
-    state_file = _prepared_owned_file(work_dir, lexical_state, "prepared state")
-    sidecar_file = _prepared_owned_file(
+    sidecar_file, sidecar = _read_prepared_owned_bytes(
         work_dir,
         work_dir / _PREPARED_PAGE_SIDECAR_NAME,
         "prepared state sidecar",
     )
-    sidecar = sidecar_file.read_bytes()
     if (
         len(sidecar) != 65
         or sidecar[-1:] != b"\n"
         or any(character not in b"0123456789abcdef" for character in sidecar[:64])
     ):
         raise ValueError("prepared state sidecar format is invalid")
-    if _prepared_sha256(state_file) != sidecar[:64].decode("ascii"):
+    state_file, state_bytes = _read_prepared_owned_bytes(
+        work_dir,
+        lexical_state,
+        "prepared state",
+    )
+    if hashlib.sha256(state_bytes).hexdigest() != sidecar[:64].decode("ascii"):
         raise ValueError("prepared state sha256 mismatch")
     try:
-        manifest = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = json.loads(state_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("prepared page state is invalid JSON") from exc
     if not isinstance(manifest, dict) or set(manifest) != _PREPARED_PAGE_FIELDS:
         raise ValueError("prepared page state fields are invalid")
@@ -1963,7 +2024,7 @@ def load_component_layers(state_path: str | Path) -> dict:
             ),
         })
 
-    return {
+    loaded = {
         "phase": "initial_layers",
         "initial_component_count": initial_count,
         "state_path": str(state_file),
@@ -1988,6 +2049,12 @@ def load_component_layers(state_path: str | Path) -> dict:
             else {}
         ),
     }
+    return loaded, manifest
+
+
+def load_component_layers(state_path: str | Path) -> dict:
+    loaded, _ = _load_component_layer_state(state_path)
+    return loaded
 
 
 def prepare_component_layers(
@@ -2080,10 +2147,23 @@ def prepare_component_layers(
     return load_component_layers(state_path)
 
 
+def _snapshot_prepared_asset(
+    work_dir: Path,
+    record: object,
+    label: str,
+    staged_dir: Path,
+    name: str,
+) -> str:
+    owned, content = _read_prepared_asset_bytes(work_dir, record, label)
+    staged_path = staged_dir / f"{name}{owned.suffix}"
+    staged_path.write_bytes(content)
+    return str(staged_path.resolve())
+
+
 def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
     if type(prepared) is not dict or type(prepared.get("state_path")) is not str:
         raise ValueError("prepared layers must contain a state_path")
-    fresh = load_component_layers(prepared["state_path"])
+    fresh, manifest = _load_component_layer_state(prepared["state_path"])
     if prepared != fresh:
         raise ValueError("prepared layers do not match fresh prepared state")
     if type(accepted) is not dict or set(accepted) != {
@@ -2103,37 +2183,10 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
 
     work_dir = Path(fresh["_work_dir"])
     components = fresh["components"]
-    element_mask_paths = fresh["_element_mask_paths"]
     initial_count = fresh["initial_component_count"]
     if initial_count and not components:
         raise VisualSegmentationError(
             "agent-managed quality failed: initial components cannot be empty"
-        )
-
-    original = _load_rgb(
-        _prepared_owned_file(
-            work_dir, fresh["original_image_path"], "source image"
-        )
-    )
-    with Image.open(
-        _prepared_owned_file(work_dir, fresh["_text_mask_path"], "OCR mask")
-    ) as stored_text_mask:
-        text_mask = np.asarray(stored_text_mask.convert("L")).copy()
-    masks = []
-    for mask_path in element_mask_paths:
-        with Image.open(
-            _prepared_owned_file(work_dir, mask_path, "element mask")
-        ) as stored_mask:
-            masks.append(np.asarray(stored_mask).copy())
-    quality_text_items = fresh.get("text_items") or []
-    quality_text_mask = _build_text_cleanup_mask(
-        original,
-        text_mask,
-        quality_text_items,
-    )
-    if quality_text_items and _has_component_text_overlap(masks, quality_text_mask):
-        raise VisualSegmentationError(
-            "agent-managed quality failed: component_text_overlap"
         )
 
     staged_dir = None
@@ -2142,27 +2195,122 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
         staged_dir = Path(
             tempfile.mkdtemp(prefix="quality-components-", dir=work_dir)
         )
-        staged_components = []
-        for index, component in enumerate(components):
-            source_component = _prepared_owned_file(
-                work_dir, component["path"], "component RGBA"
+        assets = manifest["assets"]
+        staged_assets = {
+            key: _snapshot_prepared_asset(
+                work_dir,
+                assets[key],
+                label,
+                staged_dir,
+                name,
             )
-            staged_path = staged_dir / f"component_{index:04d}.png"
-            shutil.copyfile(source_component, staged_path)
+            for key, label, name in (
+                ("source_image", "source image", "source-image"),
+                ("ocr_mask", "OCR mask", "ocr-mask"),
+                (
+                    "background_original",
+                    "original background",
+                    "background-original",
+                ),
+                (
+                    "background_widescreen",
+                    "widescreen background",
+                    "background-widescreen",
+                ),
+                (
+                    "background_removal_mask",
+                    "background removal mask",
+                    "background-removal-mask",
+                ),
+                (
+                    "background_difference",
+                    "background difference",
+                    "background-difference",
+                ),
+            )
+        }
+        staged_text_clean = None
+        if assets["text_clean"] is not None:
+            staged_text_clean = _snapshot_prepared_asset(
+                work_dir,
+                assets["text_clean"],
+                "text-clean image",
+                staged_dir,
+                "text-clean",
+            )
+        staged_element_masks = [
+            _snapshot_prepared_asset(
+                work_dir,
+                record,
+                "element mask",
+                staged_dir,
+                f"element-mask-{index:04d}",
+            )
+            for index, record in enumerate(assets["element_masks"])
+        ]
+        staged_components = []
+        for index, (component, record) in enumerate(
+            zip(components, manifest["components"])
+        ):
+            staged_component = _snapshot_prepared_asset(
+                work_dir,
+                record["asset"],
+                "component RGBA",
+                staged_dir,
+                f"component_{index:04d}",
+            )
             staged_components.append({
                 **component,
-                "path": str(staged_path.resolve()),
+                "path": staged_component,
             })
         slide_data = {
             key: value
             for key, value in fresh.items()
             if key not in {"phase", "initial_component_count", "state_path"}
         }
-        slide_data["components"] = staged_components
-        slide_data["_element_mask_paths"] = [
-            str(_prepared_owned_file(work_dir, path, "element mask"))
-            for path in element_mask_paths
-        ]
+        slide_data.update({
+            "original_image_path": staged_assets["source_image"],
+            "background_path": staged_assets["background_widescreen"],
+            "background_original_path": staged_assets["background_original"],
+            "background_widescreen_path": staged_assets[
+                "background_widescreen"
+            ],
+            "background_removal_mask_path": staged_assets[
+                "background_removal_mask"
+            ],
+            "background_difference_path": staged_assets[
+                "background_difference"
+            ],
+            "components": staged_components,
+            "_text_mask_path": staged_assets["ocr_mask"],
+            "_element_mask_paths": staged_element_masks,
+        })
+        if staged_text_clean is None:
+            slide_data.pop("_text_clean_path", None)
+        else:
+            slide_data["_text_clean_path"] = staged_text_clean
+
+        original = _load_rgb(staged_assets["source_image"])
+        with Image.open(staged_assets["ocr_mask"]) as stored_text_mask:
+            text_mask = np.asarray(stored_text_mask.convert("L")).copy()
+        masks = []
+        for mask_path in staged_element_masks:
+            with Image.open(mask_path) as stored_mask:
+                masks.append(np.asarray(stored_mask).copy())
+        quality_text_items = fresh.get("text_items") or []
+        quality_text_mask = _build_text_cleanup_mask(
+            original,
+            text_mask,
+            quality_text_items,
+        )
+        if quality_text_items and _has_component_text_overlap(
+            masks,
+            quality_text_mask,
+        ):
+            raise VisualSegmentationError(
+                "agent-managed quality failed: component_text_overlap"
+            )
+
         exception_boundary = sys.exc_info()[1]
         primary_exception = None
         primary_traceback = None

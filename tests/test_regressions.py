@@ -5136,6 +5136,37 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
             assert_asset(component["asset"])
 
 
+def test_prepare_component_layers_does_not_authorize_state_replaced_after_publish(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    real_atomic_write = image_to_ppt._atomic_write_prepared_text
+    replaced = False
+
+    def replace_after_state_publish(work_dir, path, content, **kwargs):
+        nonlocal replaced
+        real_atomic_write(work_dir, path, content, **kwargs)
+        if path.name == "prepared_page.json" and not replaced:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifest["resource_isolation"] = True
+            path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            replaced = True
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_atomic_write_prepared_text",
+        replace_after_state_publish,
+    )
+
+    with pytest.raises(ValueError, match="state sha256"):
+        _prepare_component_layers_fixture(tmp_path, monkeypatch)
+
+    assert replaced is True
+
+
 def test_prepare_component_layers_rejects_preexisting_asset_reparse_point(
     tmp_path: Path,
     monkeypatch,
@@ -5281,6 +5312,67 @@ def test_load_component_layers_rejects_json_changed_without_sidecar_update(
 
     with pytest.raises(ValueError, match="state sha256"):
         image_to_ppt.load_component_layers(state_path)
+
+
+def test_load_component_layers_never_parses_state_modified_after_hash(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    original_resource_isolation = prepared["_resource_isolation"]
+    replacement_manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    replacement_manifest["resource_isolation"] = not original_resource_isolation
+    replacement_bytes = json.dumps(replacement_manifest).encode("utf-8")
+    real_open = Path.open
+    modified = False
+
+    def modify_state() -> None:
+        nonlocal modified
+        if modified:
+            return
+        modified = True
+        with real_open(state_path, "wb") as destination:
+            destination.write(replacement_bytes)
+
+    class StateReader:
+        def __init__(self, source) -> None:
+            self.source = source
+
+        def __enter__(self):
+            self.source.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.source.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.source, name)
+
+        def read(self, *args, **kwargs):
+            data = self.source.read(*args, **kwargs)
+            requested_size = args[0] if args else -1
+            if requested_size == -1 or data == b"":
+                modify_state()
+            return data
+
+    def controlled_open(path, *args, **kwargs):
+        source = real_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if Path(path) == state_path and mode == "rb" and not modified:
+            return StateReader(source)
+        return source
+
+    monkeypatch.setattr(Path, "open", controlled_open)
+
+    try:
+        restored = image_to_ppt.load_component_layers(state_path)
+    except ValueError:
+        pass
+    else:
+        assert restored["_resource_isolation"] is original_resource_isolation
+
+    assert modified is True
 
 
 @pytest.mark.parametrize("sidecar", ["", "0" * 64, "A" * 64 + "\n"])
@@ -5487,6 +5579,20 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
         }
         staged_path = Path(slide_data["components"][0]["path"])
         assert staged_path != original_path
+        staged_dir = staged_path.parent
+        staged_asset_paths = [
+            slide_data["original_image_path"],
+            slide_data["background_path"],
+            slide_data["background_original_path"],
+            slide_data["background_widescreen_path"],
+            slide_data["background_removal_mask_path"],
+            slide_data["background_difference_path"],
+            slide_data["_text_mask_path"],
+            slide_data["_text_clean_path"],
+            *slide_data["_element_mask_paths"],
+            *(component["path"] for component in slide_data["components"]),
+        ]
+        assert all(Path(path).parent == staged_dir for path in staged_asset_paths)
         staged_path.write_bytes(b"mutated during quality")
         raise image_to_ppt.VisualSegmentationError(
             "agent-managed quality failed: background_residual"
@@ -5594,6 +5700,120 @@ def test_agent_managed_finalize_reloads_state_before_consuming_assets(
         image_to_ppt.finalize_component_layers(prepared, accepted, lang="en")
 
 
+@pytest.mark.parametrize(
+    "target_label,target_path,mode,size,color",
+    [
+        (
+            "source_image",
+            lambda prepared: prepared["original_image_path"],
+            "RGB",
+            (16, 10),
+            "green",
+        ),
+        (
+            "background_original",
+            lambda prepared: prepared["background_original_path"],
+            "RGB",
+            (16, 10),
+            "green",
+        ),
+        (
+            "ocr_mask",
+            lambda prepared: prepared["_text_mask_path"],
+            "L",
+            (16, 10),
+            255,
+        ),
+        (
+            "text_clean",
+            lambda prepared: prepared["_text_clean_path"],
+            "RGB",
+            (16, 10),
+            "green",
+        ),
+        (
+            "element mask",
+            lambda prepared: prepared["_element_mask_paths"][0],
+            "L",
+            (16, 10),
+            127,
+        ),
+        (
+            "component RGBA",
+            lambda prepared: prepared["components"][0]["path"],
+            "RGBA",
+            (4, 4),
+            "green",
+        ),
+    ],
+)
+def test_agent_managed_finalize_rejects_asset_replaced_after_load_validation(
+    tmp_path: Path,
+    monkeypatch,
+    target_label: str,
+    target_path,
+    mode: str,
+    size: tuple[int, int],
+    color,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    if target_label == "background_original":
+        state_path = Path(prepared["state_path"])
+        manifest = json.loads(state_path.read_text(encoding="utf-8"))
+        original_record = manifest["assets"]["background_original"]
+        widescreen_path = work_dir / "background-widescreen.png"
+        widescreen_path.write_bytes(
+            (work_dir / original_record["path"]).read_bytes()
+        )
+        manifest["assets"]["background_widescreen"] = {
+            "path": widescreen_path.relative_to(work_dir).as_posix(),
+            "sha256": hashlib.sha256(widescreen_path.read_bytes()).hexdigest(),
+        }
+        _write_prepared_manifest(state_path, manifest)
+        prepared = image_to_ppt.load_component_layers(state_path)
+
+    owned_target = Path(target_path(prepared))
+    replacement_path = work_dir / f"replacement-{target_label.replace(' ', '-')}.png"
+    Image.new(mode, size, color).save(replacement_path)
+    real_load_asset = image_to_ppt._load_prepared_asset
+    replaced = False
+
+    def replace_after_validation(asset_work_dir, record, label):
+        nonlocal replaced
+        loaded_path = real_load_asset(asset_work_dir, record, label)
+        if label == target_label and Path(loaded_path) == owned_target and not replaced:
+            replaced = True
+            os.replace(replacement_path, owned_target)
+        return loaded_path
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_load_prepared_asset",
+        replace_after_validation,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_has_component_text_overlap",
+        lambda masks, text_mask: False,
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_finalize_slide_quality",
+        lambda slide_data, lang, **kwargs: slide_data,
+    )
+
+    with pytest.raises(ValueError, match="sha256|changed while being read"):
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
+
+    assert replaced is True
+    assert not list(work_dir.glob("quality-components-*"))
+
+
 def test_agent_managed_finalize_rejects_tampered_prepared_dict(
     tmp_path: Path,
     monkeypatch,
@@ -5637,7 +5857,7 @@ def test_agent_managed_finalize_cleans_staging_when_result_becomes_empty(
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
 
 
-def test_agent_managed_finalize_cleans_staging_when_component_copy_fails(
+def test_agent_managed_finalize_cleans_staging_when_component_snapshot_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -5647,25 +5867,28 @@ def test_agent_managed_finalize_cleans_staging_when_component_copy_fails(
         "_has_component_text_overlap",
         lambda masks, text_mask: False,
     )
-    original_copyfile = image_to_ppt.shutil.copyfile
-    staged_copy_count = 0
+    original_write_bytes = Path.write_bytes
+    staged_snapshot_count = 0
 
-    def fail_second_staged_copy(source, destination):
-        nonlocal staged_copy_count
-        if Path(destination).parent.name.startswith("quality-components-"):
-            staged_copy_count += 1
-            if staged_copy_count == 2:
-                raise OSError("staged copy failed")
-        return original_copyfile(source, destination)
+    def fail_second_component_snapshot(path, content):
+        nonlocal staged_snapshot_count
+        if (
+            path.parent.name.startswith("quality-components-")
+            and path.name.startswith("component_")
+        ):
+            staged_snapshot_count += 1
+            if staged_snapshot_count == 2:
+                raise OSError("staged snapshot failed")
+        return original_write_bytes(path, content)
 
-    monkeypatch.setattr(image_to_ppt.shutil, "copyfile", fail_second_staged_copy)
+    monkeypatch.setattr(Path, "write_bytes", fail_second_component_snapshot)
 
-    with pytest.raises(OSError, match="staged copy failed"):
+    with pytest.raises(OSError, match="staged snapshot failed"):
         image_to_ppt.finalize_component_layers(
             prepared,
             _accepted_component_layers(prepared),
             lang="en",
         )
 
-    assert staged_copy_count == 2
+    assert staged_snapshot_count == 2
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
