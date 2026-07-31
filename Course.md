@@ -34,7 +34,7 @@
 
 - `prepare_component_layers` 将源图、OCR mask、text-clean、element masks、component RGBA 与背景/差异资产写入页面工作目录，并原子生成带相对路径和逐文件 SHA-256 的 `prepared_page.json`；sidecar 直接哈希同一份待发布 JSON bytes，不回读已发布路径。
 - `load_component_layers` 严格校验 sidecar、schema、路径所有权、链接/reparse/hardlink 与资产哈希；state 由单一句柄读取，前后 `fstat`/`lstat` 校验身份、大小和 mtime，哈希与 JSON 解析只消费同一份 bytes。
-- `finalize_component_layers` 只接受与 fresh prepared state 完全一致的当前 components 与 element masks；质量检查前从单句柄校验的资产 bytes 建立完整 staging 快照，质量流程不再打开原资产路径，要求 fallback 时明确失败且不清空初始组件。
+- `finalize_component_layers` 只接受与 fresh prepared state 完全一致的当前 components 与 element masks；质量检查前用 exclusive/no-follow 句柄从已校验 bytes 建立 staging 快照，并核对 fd/path 身份与单链接属性；质量流程不再打开原资产路径，要求 fallback 时仍明确失败且不清空初始组件。
 - 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
 
 ## 关键修改文件

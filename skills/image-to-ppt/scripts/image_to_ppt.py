@@ -2156,8 +2156,35 @@ def _snapshot_prepared_asset(
 ) -> str:
     owned, content = _read_prepared_asset_bytes(work_dir, record, label)
     staged_path = staged_dir / f"{name}{owned.suffix}"
-    staged_path.write_bytes(content)
-    return str(staged_path.resolve())
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(staged_path, flags, 0o600)
+    try:
+        written = 0
+        view = memoryview(content)
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError(f"staged snapshot write failed: {staged_path}")
+            written += count
+        os.fsync(descriptor)
+        handle_status = os.fstat(descriptor)
+        path_status = os.lstat(staged_path)
+        if (
+            _is_link_or_reparse(path_status)
+            or not stat.S_ISREG(handle_status.st_mode)
+            or not stat.S_ISREG(path_status.st_mode)
+            or handle_status.st_nlink != 1
+            or path_status.st_nlink != 1
+            or (handle_status.st_dev, handle_status.st_ino)
+            != (path_status.st_dev, path_status.st_ino)
+            or handle_status.st_size != len(content)
+            or path_status.st_size != len(content)
+        ):
+            raise ValueError(f"staged snapshot identity is invalid: {staged_path}")
+    finally:
+        os.close(descriptor)
+    return str(staged_path)
 
 
 def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:

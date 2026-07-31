@@ -5867,21 +5867,28 @@ def test_agent_managed_finalize_cleans_staging_when_component_snapshot_fails(
         "_has_component_text_overlap",
         lambda masks, text_mask: False,
     )
-    original_write_bytes = Path.write_bytes
+    original_snapshot = image_to_ppt._snapshot_prepared_asset
     staged_snapshot_count = 0
 
-    def fail_second_component_snapshot(path, content):
+    def fail_second_component_snapshot(
+        work_dir,
+        record,
+        label,
+        staged_dir,
+        name,
+    ):
         nonlocal staged_snapshot_count
-        if (
-            path.parent.name.startswith("quality-components-")
-            and path.name.startswith("component_")
-        ):
+        if name.startswith("component_"):
             staged_snapshot_count += 1
             if staged_snapshot_count == 2:
                 raise OSError("staged snapshot failed")
-        return original_write_bytes(path, content)
+        return original_snapshot(work_dir, record, label, staged_dir, name)
 
-    monkeypatch.setattr(Path, "write_bytes", fail_second_component_snapshot)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_snapshot_prepared_asset",
+        fail_second_component_snapshot,
+    )
 
     with pytest.raises(OSError, match="staged snapshot failed"):
         image_to_ppt.finalize_component_layers(
@@ -5892,3 +5899,60 @@ def test_agent_managed_finalize_cleans_staging_when_component_snapshot_fails(
 
     assert staged_snapshot_count == 2
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
+
+
+def test_agent_managed_finalize_does_not_overwrite_hardlink_occupying_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    external_path = tmp_path / "external-snapshot.bin"
+    external_content = b"external content must remain unchanged"
+    external_path.write_bytes(external_content)
+    real_read_asset = image_to_ppt._read_prepared_asset_bytes
+    occupied = False
+
+    def occupy_source_snapshot(asset_work_dir, record, label):
+        nonlocal occupied
+        owned, content = real_read_asset(asset_work_dir, record, label)
+        if label == "source image" and not occupied:
+            staged_dirs = list(work_dir.glob("quality-components-*"))
+            assert len(staged_dirs) == 1
+            os.link(
+                external_path,
+                staged_dirs[0] / f"source-image{owned.suffix}",
+            )
+            occupied = True
+        return owned, content
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_read_prepared_asset_bytes",
+        occupy_source_snapshot,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_has_component_text_overlap",
+        lambda masks, text_mask: False,
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_finalize_slide_quality",
+        lambda slide_data, lang, **kwargs: slide_data,
+    )
+    exclusive_error = None
+
+    try:
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
+    except FileExistsError as error:
+        exclusive_error = error
+
+    assert occupied is True
+    assert external_path.read_bytes() == external_content
+    assert exclusive_error is not None
+    assert not list(work_dir.glob("quality-components-*"))
