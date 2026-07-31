@@ -216,6 +216,14 @@ def prepare_pptx_job(
                 candidates_relative,
                 {**common, "candidates": candidates},
             )
+            _write_agent_request(
+                store,
+                copied_path,
+                page_id,
+                slide,
+                candidates,
+                common,
+            )
             inventory_records.append(
                 {
                     key: common[key]
@@ -284,6 +292,90 @@ def prepare_pptx_job(
         if cleanup_error is not None:
             raise error from cleanup_error
         raise
+
+
+def _write_agent_request(
+    store: RunStore,
+    source_path: Path,
+    page_id: str,
+    slide: dict[str, object],
+    candidates: list[dict[str, object]],
+    common: dict[str, object],
+) -> None:
+    page_root = store.root / "pages" / page_id
+    counts: dict[str, int] = {}
+    for item in slide["objects"]:
+        object_type = item["type"]
+        counts[object_type] = counts.get(object_type, 0) + 1
+
+    records = []
+    with zipfile.ZipFile(source_path) as archive:
+        for index, candidate in enumerate(candidates, start=1):
+            relation = candidate["primary_relationship"]
+            target = relation["target"]
+            data = _read_member(archive, target)
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != candidate["media_sha256"]:
+                raise RuntimeError(
+                    "PPTX candidate media hash changed during prepare"
+                )
+            suffix = {
+                "BMP": ".bmp",
+                "GIF": ".gif",
+                "JPEG": ".jpg",
+                "PNG": ".png",
+                "TIFF": ".tif",
+                "WEBP": ".webp",
+            }[candidate["media_format"]]
+            relative_image = (
+                Path("candidate_assets")
+                / f"candidate_{index:03d}{suffix}"
+            )
+            image_path = page_root / relative_image
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(data)
+            slide_width = common["slide_width"]
+            slide_height = common["slide_height"]
+            records.append(
+                {
+                    "candidate_id": f"candidate_{index:03d}",
+                    "source_shape_id": candidate["shape_id"],
+                    "source_object_sha256": candidate["xml_c14n_sha256"],
+                    "image": relative_image.as_posix(),
+                    "image_sha256": digest,
+                    "media_format": candidate["media_format"],
+                    "pixel_width": candidate["pixel_width"],
+                    "pixel_height": candidate["pixel_height"],
+                    "slide_coverage": candidate["slide_coverage"],
+                    "edge_gaps": {
+                        "left": max(candidate["x"], 0) / slide_width,
+                        "top": max(candidate["y"], 0) / slide_height,
+                        "right": max(
+                            slide_width
+                            - candidate["x"]
+                            - candidate["cx"],
+                            0,
+                        )
+                        / slide_width,
+                        "bottom": max(
+                            slide_height
+                            - candidate["y"]
+                            - candidate["cy"],
+                            0,
+                        )
+                        / slide_height,
+                    },
+                    "z_order": candidate["z_order"],
+                }
+            )
+    store.write_json(
+        Path("pages") / page_id / "agent_request.json",
+        {
+            **common,
+            "native_object_counts": counts,
+            "candidates": records,
+        },
+    )
 
 
 def execute_pptx_preserve(

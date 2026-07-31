@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     execute_parser = run_subparsers.add_parser("execute")
     execute_parser.add_argument("run_dir")
 
+    next_parser = run_subparsers.add_parser("next")
+    next_parser.add_argument("run_dir")
+
     recover_parser = run_subparsers.add_parser("recover")
     recover_parser.add_argument("run_dir")
 
@@ -56,6 +59,37 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser = run_subparsers.add_parser("render-detail")
     render_parser.add_argument("run_dir")
     render_parser.add_argument("--page", required=True)
+
+    decision_parser = subparsers.add_parser("decision")
+    decision_subparsers = decision_parser.add_subparsers(
+        dest="decision_command",
+        required=True,
+    )
+    record_parser = decision_subparsers.add_parser("record")
+    record_parser.add_argument("run_dir")
+    record_parser.add_argument("--page", required=True)
+    record_parser.add_argument("--object", required=True)
+    record_parser.add_argument(
+        "--decision",
+        choices=("replace", "preserve", "ambiguous"),
+        required=True,
+    )
+    record_parser.add_argument("--confidence", type=float, required=True)
+    record_parser.add_argument(
+        "--category",
+        choices=(
+            "full_slide_screenshot",
+            "partial_slide_screenshot",
+            "rasterized_diagram",
+            "rasterized_chart",
+            "photo",
+            "logo",
+            "decorative_asset",
+            "unknown",
+        ),
+        required=True,
+    )
+    record_parser.add_argument("--evidence", action="append", required=True)
 
     subparsers.add_parser("doctor")
     return parser
@@ -97,6 +131,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_json({"run_dir": str(Path(run_dir).resolve()), "status": "prepared"})
         return 0
 
+    if args.command == "decision" and args.decision_command == "record":
+        with redirect_stdout(sys.stderr):
+            result = runtime.record_decision(
+                args.run_dir,
+                page_id=args.page,
+                object_id=args.object,
+                decision=args.decision,
+                confidence=args.confidence,
+                category=args.category,
+                evidence=args.evidence,
+            )
+        _print_json(result)
+        return 0
+
     if args.run_command == "status":
         with redirect_stdout(sys.stderr):
             status = runtime.get_status(args.run_dir)
@@ -106,6 +154,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         with redirect_stdout(sys.stderr):
             summary = runtime.run_job(args.run_dir)
         _print_json(summary)
+        return 0
+    if args.run_command == "next":
+        with redirect_stdout(sys.stderr):
+            candidate = runtime.next_candidate(args.run_dir)
+        _print_json(candidate)
         return 0
     if args.run_command == "recover":
         with redirect_stdout(sys.stderr):

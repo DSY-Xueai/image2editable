@@ -39,6 +39,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 | Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
 | PSD export | Generates a layered PSD with a background layer, foreground pixel layers, and Photoshop text layers |
 | Batch processing | Accepts multiple images or a directory; PPTX files are combined into multiple slides, while PSD exports one file per image |
+| Agent screenshot routing | Produces auditable candidates for structurally safe PPTX images covering at least 80% of a slide; only high-confidence full-slide screenshot decisions enter the shadow-run queue |
 
 ---
 
@@ -162,7 +163,16 @@ image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
 image2editable run recover runs/pdf-job
 
-# P1 preserves PPTX inputs losslessly
+# PPTX P2.1: prepare high-confidence candidates, inspect image_path, then record the Agent decision
+image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable run next runs/pptx-job
+image2editable decision record runs/pptx-job \
+  --page page_001 --object 7 \
+  --decision replace --confidence 0.96 \
+  --category full_slide_screenshot \
+  --evidence "complete slide layout"
+
+# Execution still preserves PPTX bytes; OOXML replacement follows in the shadow-run stage
 image2editable convert input.pptx -o preserved.pptx
 
 # Inspect local dependencies
@@ -175,7 +185,7 @@ The Unified CLI calls its positional inputs `sources`. It accepts image files/di
 
 PDF pages are rendered adaptively and then reuse the existing image-to-editable-PPTX pipeline. The standard target is 200 DPI. Small pages are raised to a 1200 px short-edge floor without exceeding 300 DPI; every render is capped at a 6000 px long edge and 24 MP. An Agent or user may call `render-detail` once per page to rerender it with a 300 DPI target. PDF pages with the same physical aspect ratio can be combined into a ratio-preserving multi-slide PPTX. With mixed aspect ratios, `original` produces one output per page while a uniform 16:9 version remains available. Layout is always scaled uniformly, with no non-uniform stretching.
 
-For PPTX inputs, P1 read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe large images covering at least 80% of a slide are marked as candidates. P1 execution produces a byte-identical copy of the input PPTX, preserving existing editable text, shapes, tables, charts, and other native objects; they do not pass through CV, and images are not automatically separated or replaced. Final-screenshot classification by the Agent, OCR/reconstruction, and in-place OOXML replacement belong to P2 and are not implemented yet.
+For PPTX inputs, the Runtime read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe images covering at least 80% of a slide are candidates. P2.1 extracts each candidate's original bytes and gives the Agent bound hashes, coverage, edge gaps, and native-object counts. Only `replace + full_slide_screenshot + confidence >= 0.92` enters the later shadow-run queue; photos, logos, decorative assets, and uncertain cases are preserved without asking the user about every object. Execution still produces a byte-identical PPTX copy. OCR/reconstruction, shadow QA, and in-place OOXML replacement are not connected yet.
 
 Python 3.10–3.12 is supported; `doctor` now checks PDFium as well.
 

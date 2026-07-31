@@ -63,6 +63,21 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
     return execute(store, _PPTX_EXECUTION_MANIFEST.get())
 
 
+def next_candidate(run_dir: str | Path) -> dict[str, object]:
+    from image2editable.agent import next_candidate as find_next
+
+    return find_next(run_dir)
+
+
+def record_decision(
+    run_dir: str | Path,
+    **kwargs: object,
+) -> dict[str, object]:
+    from image2editable.agent import record_decision as record
+
+    return record(run_dir, **kwargs)
+
+
 def validate_pptx_inventories(
     store: RunStore, manifest: dict[str, Any]
 ) -> tuple[int, int]:

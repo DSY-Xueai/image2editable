@@ -39,6 +39,7 @@
 | 资源保护 | 重型页面串行，OCR、LaMa、DINO、SAM 和整页视觉阶段使用顺序子进程；SAM2.1 Large 默认单批推理 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
 | 批量处理 | 多张图片或目录输入；PPTX 合并为多页，PSD 每图一个文件 |
+| Agent 截图路由 | 对 PPTX 中覆盖页面至少 80% 且结构安全的大图生成可审计候选；只有 Agent 高置信判定为完整幻灯片截图时才进入 shadow-run 队列 |
 
 ---
 
@@ -161,7 +162,16 @@ image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
 image2editable run recover runs/pdf-job
 
-# PPTX 在 P1 中无损保留
+# PPTX P2.1：准备高置信候选，Agent 查看 image_path 后记录判断
+image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable run next runs/pptx-job
+image2editable decision record runs/pptx-job \
+  --page page_001 --object 7 \
+  --decision replace --confidence 0.96 \
+  --category full_slide_screenshot \
+  --evidence "complete slide layout"
+
+# 当前执行路径仍无损保留 PPTX；OOXML 替换将在后续 shadow-run 阶段接入
 image2editable convert input.pptx -o preserved.pptx
 
 # 检查本地依赖
@@ -174,7 +184,7 @@ Unified CLI 的位置参数概念为 `sources`：可输入图片文件/目录、
 
 PDF 会先自适应渲染，再复用现有“图像转可编辑 PPTX”管线。标准目标为 200 DPI；小页会提高到短边至少 1200 px，但不超过 300 DPI；所有渲染均限制长边不超过 6000 px、总像素不超过 24 MP。Agent 或用户可对每页调用一次 `render-detail`，以 300 DPI 目标重新渲染。物理宽高比相同的 PDF 页面可合并为保持该比例的多页 PPTX；混合宽高比时，`original` 输出为逐页文件，同时仍可生成统一 16:9 版本。所有布局均等比放置，不做非均匀拉伸。
 
-PPTX 输入只读扫描 OOXML 原生对象、备注、图片关系和稳定指纹，仅将覆盖幻灯片至少 80% 且结构安全的大图标记为候选。P1 执行输出与输入 PPTX byte-identical，因此已有可编辑文字、形状、表格、图表等原生对象全部保留，不经过 CV，也不会自动拆图或替换。Agent 最终截图分类、OCR/重建与 OOXML 原位替换属于 P2，尚未实现。
+PPTX 输入只读扫描 OOXML 原生对象、备注、图片关系和稳定指纹，仅将覆盖幻灯片至少 80% 且结构安全的大图标记为候选。P2.1 会逐字节提取候选原图，向 Agent 提供覆盖率、边距、原生对象统计和绑定哈希；Runtime 只允许 `replace + full_slide_screenshot + confidence >= 0.92` 进入后续 shadow-run 队列，照片、Logo、装饰图和不确定项全部保留，且不需要逐对象询问用户。当前执行输出仍与输入 PPTX byte-identical；OCR/重建、shadow QA 与 OOXML 原位替换尚未接入。
 
 正式支持 Python 3.10–3.12；`doctor` 现在也检查 PDFium。
 

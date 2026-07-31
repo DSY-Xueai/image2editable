@@ -54,6 +54,24 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 旧 `convert()` 保持兼容：默认返回单个 16:9 PPTX 路径字符串；CLI 默认输出两种尺寸。
 
+## PPTX Agent 候选路由
+
+在完整仓库环境中，P2.1 支持让 Agent 审核 PPTX 内的高置信截图候选：
+
+```bash
+image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable run next runs/pptx-job
+image2editable decision record runs/pptx-job \
+  --page page_001 --object 7 \
+  --decision replace --confidence 0.96 \
+  --category full_slide_screenshot \
+  --evidence "complete slide layout"
+```
+
+每次先查看 `run next` 返回的绝对 `image_path`。只有图片覆盖大部分页面、包含标题/多个文字区/图表或卡片等完整页面结构，且明显不是照片、Logo、头像或装饰素材时，才记录 `replace + full_slide_screenshot`。证据冲突或不确定时记录 `preserve` 或 `ambiguous`；不要为了提高拆分数量抬高置信度。
+
+Runtime 只有在 `confidence >= 0.92` 时才把完整截图送入后续 shadow-run 队列。P2.1 只生成并记录候选判断，尚不修改 PPTX；当前执行路径仍逐字节保留原生文字、形状和其他对象。
+
 ## 严格管线
 
 1. 使用现有 OCR 逻辑检测文字并生成文字遮罩。
