@@ -53,6 +53,8 @@
 - 每轮固定发布 `source.png`、编号掩码、OCR/所有权叠加图、重建图、差异图、组件图和质量报告八项证据；请求逐项记录 SHA-256，并绑定源图、组件图、Provider、页面、轮次及待修/冻结组件 ID。
 - 轮目录固定为 `reconstruction/agent/round-01` 至 `round-05`；先写唯一 staging 再整目录发布，已有轮次不可覆盖，同页同轮并发发布只有一个成功。
 - 构建和读取均限制在当前页面 reconstruction 内；证据采用同一文件句柄校验身份并读取，拒绝路径穿越、跨页、符号链接、重解析点、硬链接和读取中变化，任何证据篡改都会在 Agent 调用前失败。
+- Loader 进一步强制 `pages/<page_id>/reconstruction/agent/round-XX` 完整目录拓扑；每轮在 `agent` 目录额外独占发布请求摘要 marker，绑定请求原始 bytes、Provider、页面和轮次，缺失 marker 或发布中断均 fail closed。
+- 文件读写会在打开前快照从 `pages` 到目标父目录的完整身份，并在打开后及 I/O 后复核；父目录在检查与打开之间被替换时拒绝结果，marker 写入也使用相同保护。
 
 ## 关键修改文件
 
