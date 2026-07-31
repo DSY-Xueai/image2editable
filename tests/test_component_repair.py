@@ -6,6 +6,7 @@ import hmac
 import multiprocessing
 import os
 from pathlib import Path
+import queue
 import shutil
 import stat
 
@@ -113,6 +114,23 @@ def _publish(session: dict, ready: object, result: object) -> None:
         result.put("rejected")
     else:
         result.put("published")
+
+
+def _publish_round(session: dict, repair_round: int, started: object, result: object) -> None:
+    started.set()
+    try:
+        build_component_agent_request(session, repair_round=repair_round)
+    except RuntimeError:
+        result.put("rejected")
+    else:
+        result.put("published")
+
+
+def _hold_publication_lease(reconstruction: str, ready: object, release: object) -> None:
+    with component_repair._run_publication_lease(Path(reconstruction)):
+        component_repair._load_integrity_key(Path(reconstruction))
+        ready.set()
+        release.wait(10)
 
 
 def _refresh_marker_for_contract_test(request_path: Path) -> None:
@@ -563,6 +581,8 @@ def test_staging_replacement_before_rename_is_removed_and_retryable(
 
     round_dir = reconstruction / "agent" / "round-01"
     assert not round_dir.exists()
+    quarantines = list((reconstruction / "agent").glob(".quarantine-round-*"))
+    assert any((path / "forged").read_bytes() == b"forged" for path in quarantines)
     monkeypatch.setattr(Path, "rename", real_rename)
     assert build_component_agent_request(page_session, repair_round=1).is_file()
 
@@ -625,6 +645,110 @@ def test_missing_key_scan_rejects_simulated_reparse_agent_directory(
 
     with pytest.raises(RuntimeError, match="agent.+reparse"):
         build_component_agent_request(page_session, repair_round=2)
+    assert not anchor.exists()
+
+
+def test_cleanup_quarantines_replaced_staging_without_deleting_unknown_content(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    component_repair._load_or_create_integrity_key(reconstruction)
+    real_write = component_repair._write_exclusive
+    real_rename = Path.rename
+    swapped = False
+
+    def fail_marker(path: Path, payload: bytes, reconstruction: Path) -> None:
+        if path.name == "publication-marker.json":
+            raise OSError("marker failure")
+        real_write(path, payload, reconstruction)
+
+    def swap_before_quarantine(path: Path, target: Path) -> Path:
+        nonlocal swapped
+        if (
+            not swapped
+            and path.name.startswith(".round-01.tmp-")
+            and ".quarantine-" in target.name
+        ):
+            original = path.with_name(path.name + ".original")
+            attacker = path.with_name(path.name + ".attacker")
+            real_rename(path, original)
+            attacker.mkdir()
+            (attacker / "unknown.txt").write_text("do not delete", encoding="utf-8")
+            real_rename(attacker, path)
+            swapped = True
+        return real_rename(path, target)
+
+    monkeypatch.setattr(component_repair, "_write_exclusive", fail_marker)
+    monkeypatch.setattr(Path, "rename", swap_before_quarantine)
+
+    with pytest.raises(OSError, match="marker failure"):
+        build_component_agent_request(page_session, repair_round=1)
+
+    quarantines = list((reconstruction / "agent").glob(".quarantine-*"))
+    assert swapped is True
+    assert any((path / "unknown.txt").read_text(encoding="utf-8") == "do not delete" for path in quarantines if (path / "unknown.txt").is_file())
+    assert not (reconstruction / "agent" / "round-01").exists()
+
+
+def test_normal_marker_failure_cleans_owned_quarantine_without_residue(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    real_write = component_repair._write_exclusive
+
+    def fail_marker(path: Path, payload: bytes, reconstruction: Path) -> None:
+        if path.name == "publication-marker.json":
+            raise OSError("marker failure")
+        real_write(path, payload, reconstruction)
+
+    monkeypatch.setattr(component_repair, "_write_exclusive", fail_marker)
+    with pytest.raises(OSError, match="marker failure"):
+        build_component_agent_request(page_session, repair_round=1)
+
+    agent = reconstruction / "agent"
+    assert not list(agent.glob(".quarantine-*"))
+    assert not list(agent.glob(".delete-*"))
+    assert not (agent / "round-01").exists()
+
+
+def test_run_publication_lease_blocks_key_rotation_during_inflight_publish(
+    page_session: dict,
+) -> None:
+    first = build_component_agent_request(page_session, repair_round=1)
+    reconstruction = Path(page_session["reconstruction_dir"])
+    anchor = first.parents[5] / ".component-agent-integrity"
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_publication_lease,
+        args=(str(reconstruction), ready, release),
+    )
+    holder.start()
+    assert ready.wait(10)
+    shutil.rmtree(anchor)
+
+    started = context.Event()
+    result = context.Queue()
+    contender = context.Process(
+        target=_publish_round,
+        args=(page_session, 2, started, result),
+    )
+    contender.start()
+    assert started.wait(10)
+    contender.join(0.5)
+    assert contender.is_alive()
+    with pytest.raises(queue.Empty):
+        result.get_nowait()
+
+    release.set()
+    holder.join(10)
+    contender.join(10)
+    assert holder.exitcode == 0
+    assert contender.exitcode == 0
+    assert result.get(timeout=2) == "rejected"
     assert not anchor.exists()
 
 

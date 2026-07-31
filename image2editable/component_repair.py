@@ -4,10 +4,12 @@ import hashlib
 import hmac
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import stat
+import time
 import uuid
 
 from image2editable.component_contracts import (
@@ -17,6 +19,7 @@ from image2editable.component_contracts import (
     validate_component_graph,
     validate_repair_round,
 )
+from image2editable.execution import ExecutionLease
 
 
 EVIDENCE_NAMES = tuple(sorted(COMPONENT_EVIDENCE_NAMES))
@@ -24,6 +27,7 @@ REQUEST_NAME = "component_agent_request.json"
 MARKER_NAME = "publication-marker.json"
 INTEGRITY_DIRECTORY = ".component-agent-integrity"
 INTEGRITY_KEY_NAME = "key.bin"
+PUBLICATION_LOCK_NAME = ".component-agent-publication.lock"
 IO_CHUNK_SIZE = 1024 * 1024
 GRAPH_JSON_LIMIT = 16 * 1024 * 1024
 REQUEST_JSON_LIMIT = 4 * 1024 * 1024
@@ -36,7 +40,17 @@ def build_component_agent_request(
     repair_round: int,
 ) -> Path:
     repair_round = validate_repair_round(repair_round)
-    page_id, provider, reconstruction, sources = _validate_page_session(page_session)
+    validated = _validate_page_session(page_session)
+    reconstruction = validated[2]
+    with _run_publication_lease(reconstruction):
+        return _build_component_agent_request_locked(validated, repair_round)
+
+
+def _build_component_agent_request_locked(
+    validated: tuple[str, str, Path, dict],
+    repair_round: int,
+) -> Path:
+    page_id, provider, reconstruction, sources = validated
     integrity_key = _load_or_create_integrity_key(reconstruction)
     agent_dir = reconstruction / "agent"
     _ensure_owned_directory(agent_dir, reconstruction)
@@ -367,8 +381,13 @@ def _cleanup_owned_staging(
     staging: Path,
     expected: tuple[int, int, int, int],
 ) -> None:
+    quarantine = staging.with_name(f".quarantine-{uuid.uuid4().hex}")
     try:
-        status = staging.lstat()
+        staging.rename(quarantine)
+    except OSError:
+        return
+    try:
+        status = quarantine.lstat()
     except FileNotFoundError:
         return
     if (
@@ -377,25 +396,98 @@ def _cleanup_owned_staging(
         or _directory_identity(status) != expected
     ):
         return
-    shutil.rmtree(staging)
+    try:
+        _delete_owned_flat_quarantine(quarantine, expected)
+    except (OSError, RuntimeError):
+        return
+
+
+def _delete_owned_flat_quarantine(
+    quarantine: Path,
+    expected: tuple[int, int, int, int],
+) -> None:
+    allowed = set(EVIDENCE_NAMES) | {REQUEST_NAME, MARKER_NAME}
+    entries = list(quarantine.iterdir())
+    if any(entry.name not in allowed for entry in entries):
+        return
+    tombstones = []
+    for entry in entries:
+        _require_single_directory_identity(quarantine, expected)
+        status = entry.lstat()
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+        ):
+            return
+        identity = (status.st_dev, status.st_ino)
+        tombstone = quarantine.parent / f".delete-{uuid.uuid4().hex}"
+        try:
+            entry.rename(tombstone)
+        except OSError:
+            return
+        moved = tombstone.lstat()
+        if (
+            _is_link_or_reparse(moved)
+            or not stat.S_ISREG(moved.st_mode)
+            or moved.st_nlink != 1
+            or (moved.st_dev, moved.st_ino) != identity
+        ):
+            return
+        tombstones.append((tombstone, identity))
+    _require_single_directory_identity(quarantine, expected)
+    try:
+        quarantine.rmdir()
+    except OSError:
+        return
+    for tombstone, identity in tombstones:
+        try:
+            status = tombstone.lstat()
+        except FileNotFoundError:
+            continue
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+            or (status.st_dev, status.st_ino) != identity
+        ):
+            continue
+        tombstone.unlink()
 
 
 def _remove_rejected_round(round_dir: Path, agent_dir: Path) -> None:
     if round_dir.parent != agent_dir or not _is_round_name(round_dir.name):
         raise RuntimeError("Refusing to clean an invalid Agent round path")
-    status = round_dir.lstat()
-    if _is_link_or_reparse(status):
-        if stat.S_ISLNK(status.st_mode):
-            round_dir.unlink()
-        else:
-            round_dir.rmdir()
-        return
-    if not stat.S_ISDIR(status.st_mode):
-        raise RuntimeError("Refusing to clean an unsafe Agent round")
-    expected = _directory_identity(status)
-    if _directory_identity(round_dir.lstat()) != expected:
-        raise RuntimeError("Refusing to clean a replaced Agent round")
-    shutil.rmtree(round_dir)
+    quarantine = agent_dir / f".quarantine-round-{uuid.uuid4().hex}"
+    try:
+        round_dir.rename(quarantine)
+    except OSError as error:
+        raise RuntimeError("Failed to quarantine a rejected Agent round") from error
+
+
+@contextmanager
+def _run_publication_lease(reconstruction: Path):
+    run_root = reconstruction.parent.parent.parent
+    deadline = time.monotonic() + 30.0
+    lease = ExecutionLease(
+        run_root / PUBLICATION_LOCK_NAME,
+        run_root=run_root,
+    )
+    while True:
+        try:
+            lease.__enter__()
+            break
+        except RuntimeError as error:
+            if "already executing" not in str(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    try:
+        yield
+    except BaseException as error:
+        lease.__exit__(type(error), error, error.__traceback__)
+        raise
+    else:
+        lease.__exit__(None, None, None)
 
 
 def _verify_staged_bundle(

@@ -59,6 +59,8 @@
 - 威胁边界：防止 Run/reconstruction 内请求、证据和 marker 被同步改写后伪装为合法发布；若同一 OS 账户已失陷并主动读取 integrity key，则不属于 Task 4 的防护范围。
 - 证据构建和复核使用 1 MiB 分块复制/增量 SHA-256，普通图片不设内容大小上限且不会八项同时常驻；仅结构化 JSON 限制为组件图 16 MiB、请求 4 MiB、marker 64 KiB，超限在解析前失败。
 - Run 已有任意发布轮次时，integrity key 缺失或损坏会拒绝继续构建，禁止自动生成新 key 使旧轮失效；固定 `pages/<page>/reconstruction/agent/round-*` 扫描同样拒绝链接与重解析点。
+- 同一 Run 的证据发布由安全的跨进程 OS lease 串行化，锁覆盖 key 生命周期、签名和 round 最终确认；这是控制资源峰值并防止在途发布与 key 恢复交错的既定策略。
+- 失败 staging 或身份不匹配的 round 先原子移入唯一 quarantine 释放固定名称；可证明属于本次 staging 的已知平面文件逐项校验清理，未知替代目录不递归删除并保留隔离，后续轮次仍可安全重试。
 
 ## 关键修改文件
 
