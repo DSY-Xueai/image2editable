@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import pytest
 
@@ -54,8 +56,8 @@ def _publish_request(run_dir: Path) -> Path:
 
 
 def _capability_response(item: dict) -> dict:
-    run_dir = Path(item["image_path"]).parent
-    expected = json.loads((run_dir / "host_challenge.json").read_text(encoding="utf-8"))["expected"]
+    challenge_dir = Path(item["image_path"]).parent
+    expected = json.loads((challenge_dir / "metadata.json").read_text(encoding="utf-8"))["expected"]
     return {"schema_version": 1, "kind": "host_capability_response",
             "challenge_id": item["challenge_id"],
             "observed": expected}
@@ -68,7 +70,7 @@ def _write_json(path: Path, value: dict) -> Path:
 
 def test_host_next_returns_random_hash_bound_visual_handshake_before_page(host_run: Path) -> None:
     item = next_host_agent_item(host_run)
-    metadata = json.loads((host_run / "host_challenge.json").read_text(encoding="utf-8"))
+    metadata = json.loads((host_run / "host-challenge/metadata.json").read_text(encoding="utf-8"))
     assert item["kind"] == "capability_handshake"
     assert Path(item["image_path"]).is_absolute()
     assert item["required_capabilities"] == [
@@ -77,35 +79,45 @@ def test_host_next_returns_random_hash_bound_visual_handshake_before_page(host_r
     assert metadata["image_sha256"] == hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest()
 
 
-def test_visual_answer_is_random_per_run_and_matches_rendered_image(
+@pytest.mark.parametrize("shape", ["triangle", "circle", "square"])
+def test_every_visual_shape_matches_label_color_count_and_square_bbox(
+    shape: str,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    choices = iter(["triangle", "#d9485f", 2, "circle", "#2b8a3e", 4])
-    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
-    observed = []
-    for index in range(2):
-        source = tmp_path / f"source-{index}.png"
-        source.write_bytes(b"image")
-        run_dir = prepare_image_job(source, run_dir=tmp_path / f"run-{index}")
-        store = RunStore.open(run_dir)
-        store.transition_run(RunStatus.RUNNING)
-        store.transition_run(RunStatus.AWAITING_AGENT)
-        item = next_host_agent_item(run_dir)
-        metadata = json.loads((run_dir / "host_challenge.json").read_text(encoding="utf-8"))
-        observed.append(metadata["expected"])
-        from PIL import Image
-        image = Image.open(item["image_path"]).convert("RGB")
-        color = tuple(bytes.fromhex(metadata["expected"]["color"][1:]))
-        components = _color_components(image, color)
-        assert len(components) == metadata["expected"]["count"]
-        if metadata["expected"]["shape"] == "triangle":
-            assert all(component["top_width"] < component["bottom_width"] for component in components)
-        else:
-            assert all(component["top_width"] < component["middle_width"] for component in components)
-    assert observed == [
-        {"shape": "triangle", "color": "#d9485f", "count": 2},
-        {"shape": "circle", "color": "#2b8a3e", "count": 4},
-    ]
+    nonce = _nonce_for(shape=shape, color="#d9485f", count=4)
+    monkeypatch.setattr(host_agent.secrets, "token_bytes", lambda size: nonce)
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    store.transition_run(RunStatus.RUNNING)
+    store.transition_run(RunStatus.AWAITING_AGENT)
+    item = next_host_agent_item(run_dir)
+    metadata = json.loads((run_dir / "host-challenge/metadata.json").read_text(encoding="utf-8"))
+    from PIL import Image
+    image = Image.open(item["image_path"]).convert("RGB")
+    color = tuple(bytes.fromhex(metadata["expected"]["color"][1:]))
+    components = _color_components(image, color)
+    assert metadata["expected"] == {"shape": shape, "color": "#d9485f", "count": 4}
+    assert len(components) == 4
+    assert all(component["width"] == component["height"] for component in components)
+    if shape == "triangle":
+        assert all(component["top_width"] < component["middle_width"] < component["bottom_width"] for component in components)
+    elif shape == "circle":
+        assert all(component["top_width"] < component["middle_width"] and component["bottom_width"] < component["middle_width"] for component in components)
+    else:
+        assert all(component["top_width"] == component["middle_width"] == component["bottom_width"] for component in components)
+
+
+def _nonce_for(*, shape: str, color: str, count: int) -> bytes:
+    for value in range(100000):
+        nonce = value.to_bytes(32, "big")
+        digest = hashlib.sha256(nonce).digest()
+        if (host_agent.CHALLENGE_SHAPES[digest[0] % len(host_agent.CHALLENGE_SHAPES)] == shape
+                and host_agent.CHALLENGE_COLORS[digest[1] % len(host_agent.CHALLENGE_COLORS)] == color
+                and host_agent.CHALLENGE_COUNTS[digest[2] % len(host_agent.CHALLENGE_COUNTS)] == count):
+            return nonce
+    raise AssertionError("nonce not found")
 
 
 def _color_components(image: object, color: tuple[int, int, int]) -> list[dict]:
@@ -129,7 +141,9 @@ def _color_components(image: object, color: tuple[int, int, int]) -> list[dict]:
         middle = (top + bottom) // 2
         row_width = lambda row: sum(point[1] == row for point in points)
         components.append({"top_width": row_width(top), "middle_width": row_width(middle),
-                           "bottom_width": row_width(bottom)})
+                           "bottom_width": row_width(bottom),
+                           "width": max(point[0] for point in points) - min(point[0] for point in points) + 1,
+                           "height": bottom - top + 1})
     return components
 
 
@@ -151,14 +165,89 @@ def test_capability_must_match_exact_visual_answer(host_run: Path, tmp_path: Pat
 def test_hard_coded_old_capability_answer_is_rejected(
     host_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    choices = iter(["circle", "#2b8a3e", 4])
-    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
+    nonce = _nonce_for(shape="circle", color="#2b8a3e", count=4)
+    monkeypatch.setattr(host_agent.secrets, "token_bytes", lambda size: nonce)
     item = next_host_agent_item(host_run)
     response = {"schema_version": 1, "kind": "host_capability_response",
                 "challenge_id": item["challenge_id"],
                 "observed": {"shape": "triangle", "color": "#2f6fed", "count": 3}}
     with pytest.raises(ValueError, match="capability"):
         record_host_plan(host_run, _write_json(tmp_path / "old.json", response))
+
+
+def test_metadata_expected_tampering_fails_even_when_value_is_whitelisted(
+    host_run: Path
+) -> None:
+    next_host_agent_item(host_run)
+    metadata_path = host_run / "host-challenge/metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["expected"]["shape"] = next(
+        value for value in host_agent.CHALLENGE_SHAPES
+        if value != metadata["expected"]["shape"]
+    )
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="metadata|expected|challenge"):
+        next_host_agent_item(host_run)
+
+
+def test_challenge_metadata_failure_leaves_no_publication_and_can_retry(
+    host_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = host_agent._write_challenge_metadata
+    monkeypatch.setattr(host_agent, "_write_challenge_metadata", lambda *args: (_ for _ in ()).throw(OSError("metadata fail")))
+    with pytest.raises(OSError, match="metadata fail"):
+        next_host_agent_item(host_run)
+    assert not (host_run / "host-challenge").exists()
+    assert not list(host_run.glob(".host-challenge.tmp-*"))
+    monkeypatch.setattr(host_agent, "_write_challenge_metadata", real_write)
+    assert next_host_agent_item(host_run)["kind"] == "capability_handshake"
+
+
+def test_challenge_rename_failure_cleans_staging_and_can_retry(
+    host_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_rename = Path.rename
+    failed = False
+
+    def fail_once(path: Path, target: Path) -> Path:
+        nonlocal failed
+        if path.name.startswith(".host-challenge.tmp-") and not failed:
+            failed = True
+            raise OSError("rename fail")
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_once)
+    with pytest.raises(RuntimeError, match="publication"):
+        next_host_agent_item(host_run)
+    assert not (host_run / "host-challenge").exists()
+    assert not list(host_run.glob(".host-challenge.tmp-*"))
+    assert next_host_agent_item(host_run)["kind"] == "capability_handshake"
+
+
+def test_concurrent_next_calls_load_one_complete_published_challenge(
+    host_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_create = host_agent._create_challenge
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_create(store: RunStore) -> dict:
+        started.set()
+        assert release.wait(10)
+        return real_create(store)
+
+    monkeypatch.setattr(host_agent, "_create_challenge", slow_create)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(next_host_agent_item, host_run)
+        assert started.wait(10)
+        second = executor.submit(next_host_agent_item, host_run)
+        release.set()
+        results = [first.result(timeout=10), second.result(timeout=10)]
+    assert results[0]["challenge_id"] == results[1]["challenge_id"]
+    assert results[0]["image_path"] == results[1]["image_path"]
+    assert (host_run / "host-challenge/challenge.png").is_file()
+    assert (host_run / "host-challenge/metadata.json").is_file()
+    assert not list(host_run.glob(".host-challenge.tmp-*"))
 
 
 def test_capability_success_exposes_bound_component_request(host_run: Path, tmp_path: Path) -> None:

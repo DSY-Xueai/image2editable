@@ -64,7 +64,8 @@
 
 ## P2.3 Task 5 本轮变更
 
-- `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge；形状、颜色和数量均从严格白名单逐 Run 随机，验证视觉、本地文件读取、工具调用和结构化 JSON 四项能力。Host 路径不导入本地模型模块、不下载模型。
+- `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge；随机 nonce 确定性派生严格白名单内的形状、颜色和数量，三角、圆和方形均使用等宽高边界。Host 路径不导入本地模型模块、不下载模型。
+- challenge ID 规范绑定 nonce、派生答案和 PNG 哈希；loader 会从 nonce 重算答案并复核图片，不能信任 metadata 自报值。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
 - capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
 - `image2editable agent record RUN_DIR --plan PLAN.json` 严格校验计划字段、动作对象、归一化坐标、置信度和非空证据；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、冲突动作均拒绝。

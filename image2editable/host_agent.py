@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import secrets
 import stat
 import tempfile
+import time
+import uuid
 
 from image2editable.component_contracts import validate_component_plan
 from image2editable.component_repair import load_component_agent_request
@@ -31,22 +34,58 @@ def next_host_agent_item(run_dir: str | Path) -> dict:
     store = RunStore.open(run_dir)
     with ExecutionLease(store.root / "execution.lock", run_root=store.root):
         store = RunStore.open(store.root)
-        manifest = store.read_json("job_manifest.json")
-        if manifest.get("options", {}).get("agent_provider") != "host":
-            raise RuntimeError("Host Agent requires provider host")
-        if store.read_json("run_state.json")["status"] != RunStatus.AWAITING_AGENT.value:
-            raise RuntimeError("Run must be awaiting_agent")
+        _validate_host_awaiting(store)
         capabilities = _load_capabilities(store)
-        if capabilities is None:
-            challenge = _load_or_create_challenge(store)
-            return {
-                "kind": "capability_handshake",
-                "challenge_id": challenge["challenge_id"],
-                "image_path": str((store.root / challenge["image_path"]).resolve()),
-                "required_capabilities": list(REQUIRED_CAPABILITIES),
-            }
-        request_path, request = _current_request(store)
-        return _request_item(request_path, request)
+        if capabilities is not None:
+            request_path, request = _current_request(store)
+            return _request_item(request_path, request)
+    with _challenge_publication_lease(store):
+        store = RunStore.open(store.root)
+        _validate_host_awaiting(store)
+        if _load_capabilities(store) is not None:
+            request_path, request = _current_request(store)
+            return _request_item(request_path, request)
+        challenge = _load_or_create_challenge(store)
+        return {
+            "kind": "capability_handshake",
+            "challenge_id": challenge["challenge_id"],
+            "image_path": str(
+                (store.root / "host-challenge" / challenge["image_path"]).resolve()
+            ),
+            "required_capabilities": list(REQUIRED_CAPABILITIES),
+        }
+
+
+def _validate_host_awaiting(store: RunStore) -> None:
+    manifest = store.read_json("job_manifest.json")
+    if manifest.get("options", {}).get("agent_provider") != "host":
+        raise RuntimeError("Host Agent requires provider host")
+    if store.read_json("run_state.json")["status"] != RunStatus.AWAITING_AGENT.value:
+        raise RuntimeError("Run must be awaiting_agent")
+
+
+@contextmanager
+def _challenge_publication_lease(store: RunStore):
+    deadline = time.monotonic() + 30.0
+    lease = ExecutionLease(
+        store.root / ".host-challenge-publication.lock",
+        run_root=store.root,
+    )
+    while True:
+        try:
+            lease.__enter__()
+            break
+        except RuntimeError as error:
+            if "already executing" not in str(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    try:
+        yield
+    except BaseException as error:
+        lease.__exit__(type(error), error, error.__traceback__)
+        raise
+    else:
+        lease.__exit__(None, None, None)
 
 
 def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
@@ -147,65 +186,179 @@ def _request_sha256(request: dict) -> str:
 
 
 def _load_or_create_challenge(store: RunStore) -> dict:
+    target = store.root / "host-challenge"
     try:
-        challenge = store.read_json("host_challenge.json")
+        target.lstat()
     except FileNotFoundError:
-        challenge = _create_challenge(store)
-    fields = {"schema_version", "challenge_id", "image_path", "image_sha256", "expected"}
-    if set(challenge) != fields or not _valid_expected_observation(challenge["expected"]):
-        raise RuntimeError("Host capability challenge metadata is invalid")
-    image = store.root / challenge["image_path"]
-    if hashlib.sha256(_read_regular_file(image, 1024 * 1024)).hexdigest() != challenge["image_sha256"]:
-        raise RuntimeError("Host capability challenge hash mismatch")
-    return challenge
+        return _create_challenge(store)
+    return _load_challenge_directory(target)
 
 
 def _create_challenge(store: RunStore) -> dict:
     from PIL import Image, ImageDraw
 
-    challenge_id = secrets.token_hex(16)
-    expected = {
-        "shape": secrets.choice(CHALLENGE_SHAPES),
-        "color": secrets.choice(CHALLENGE_COLORS),
-        "count": secrets.choice(CHALLENGE_COUNTS),
-    }
+    target = store.root / "host-challenge"
+    staging = store.root / f".host-challenge.tmp-{uuid.uuid4().hex}"
+    staging.mkdir()
+    staging_identity = _directory_identity(staging)
+    nonce = secrets.token_bytes(32)
+    expected = _expected_from_nonce(nonce)
     image = Image.new("RGB", (240, 120), "white")
     draw = ImageDraw.Draw(image)
     spacing = 220 // expected["count"]
     for index in range(expected["count"]):
-        left = 10 + index * spacing + (spacing - 42) // 2
-        top, right, bottom = 20, left + 42, 76
+        left = 10 + index * spacing + (spacing - 44) // 2
+        top, right, bottom = 20, left + 44, 64
         if expected["shape"] == "triangle":
-            draw.polygon([(left + 21, top), (left, bottom), (right, bottom)], fill=expected["color"])
+            draw.polygon([(left + 22, top), (left, bottom), (right, bottom)], fill=expected["color"])
         elif expected["shape"] == "circle":
             draw.ellipse((left, top, right, bottom), fill=expected["color"])
         else:
             draw.rectangle((left, top, right, bottom), fill=expected["color"])
-    nonce = secrets.token_bytes(16)
     for index, value in enumerate(nonce):
         image.putpixel((index, 119), (value, value, value))
-    target = store.root / "host_challenge.png"
-    temporary = None
     try:
-        with tempfile.NamedTemporaryFile(dir=store.root, suffix=".png", delete=False) as file:
-            temporary = Path(file.name)
-        image.save(temporary, format="PNG")
+        image_path = staging / "challenge.png"
+        image.save(image_path, format="PNG")
+        image_sha256 = hashlib.sha256(
+            _read_regular_file(image_path, 1024 * 1024)
+        ).hexdigest()
+        challenge_id = _challenge_id(nonce, expected, image_sha256)
+        challenge = {
+            "schema_version": SCHEMA_VERSION,
+            "challenge_id": challenge_id,
+            "nonce": nonce.hex(),
+            "image_path": "challenge.png",
+            "image_sha256": image_sha256,
+            "expected": expected,
+        }
+        _write_challenge_metadata(staging / "metadata.json", challenge)
+        _load_challenge_directory(staging)
         try:
-            os.link(temporary, target)
-        except FileExistsError as error:
-            raise RuntimeError("Host capability challenge already exists without metadata") from error
-        temporary.unlink()
-        temporary = None
-        payload = _read_regular_file(target, 1024 * 1024)
-        challenge = {"schema_version": SCHEMA_VERSION, "challenge_id": challenge_id,
-                     "image_path": target.name,
-                     "image_sha256": hashlib.sha256(payload).hexdigest(),
-                     "expected": expected}
-        store.write_json("host_challenge.json", challenge)
-        return challenge
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+            staging.rename(target)
+        except OSError as error:
+            _cleanup_challenge_staging(staging, staging_identity)
+            try:
+                target.lstat()
+            except FileNotFoundError:
+                raise RuntimeError("Host capability challenge publication failed") from error
+            return _load_challenge_directory(target)
+        return _load_challenge_directory(target)
+    except BaseException:
+        _cleanup_challenge_staging(staging, staging_identity)
+        raise
+
+
+def _load_challenge_directory(directory: Path) -> dict:
+    status = directory.lstat()
+    if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+        raise RuntimeError("Host capability challenge directory is unsafe")
+    identity = (status.st_dev, status.st_ino)
+    entries = {entry.name for entry in directory.iterdir()}
+    if entries != {"challenge.png", "metadata.json"}:
+        raise RuntimeError("Host capability challenge directory is incomplete")
+    _require_directory_identity(directory, identity)
+    metadata = _read_json_file(directory / "metadata.json")
+    _require_directory_identity(directory, identity)
+    fields = {
+        "schema_version", "challenge_id", "nonce", "image_path",
+        "image_sha256", "expected",
+    }
+    if set(metadata) != fields or metadata["schema_version"] != SCHEMA_VERSION:
+        raise RuntimeError("Host capability challenge metadata is invalid")
+    try:
+        nonce = bytes.fromhex(metadata["nonce"])
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("Host capability challenge nonce is invalid") from error
+    if len(nonce) != 32 or metadata["expected"] != _expected_from_nonce(nonce):
+        raise RuntimeError("Host capability challenge expected value is invalid")
+    if metadata["image_path"] != "challenge.png":
+        raise RuntimeError("Host capability challenge image path is invalid")
+    image_sha256 = hashlib.sha256(
+        _read_regular_file(directory / "challenge.png", 1024 * 1024)
+    ).hexdigest()
+    _require_directory_identity(directory, identity)
+    if image_sha256 != metadata["image_sha256"]:
+        raise RuntimeError("Host capability challenge hash mismatch")
+    if metadata["challenge_id"] != _challenge_id(
+        nonce, metadata["expected"], image_sha256
+    ):
+        raise RuntimeError("Host capability challenge ID is invalid")
+    return metadata
+
+
+def _require_directory_identity(directory: Path, identity: tuple[int, int]) -> None:
+    try:
+        status = directory.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError("Host capability challenge directory changed") from error
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        raise RuntimeError("Host capability challenge directory changed")
+
+
+def _expected_from_nonce(nonce: bytes) -> dict:
+    digest = hashlib.sha256(nonce).digest()
+    return {
+        "shape": CHALLENGE_SHAPES[digest[0] % len(CHALLENGE_SHAPES)],
+        "color": CHALLENGE_COLORS[digest[1] % len(CHALLENGE_COLORS)],
+        "count": CHALLENGE_COUNTS[digest[2] % len(CHALLENGE_COUNTS)],
+    }
+
+
+def _challenge_id(nonce: bytes, expected: dict, image_sha256: str) -> str:
+    canonical = json.dumps(
+        expected, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(nonce + b"\0" + canonical + b"\0" + image_sha256.encode("ascii")).hexdigest()
+
+
+def _write_challenge_metadata(path: Path, metadata: dict) -> None:
+    payload = json.dumps(
+        metadata, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False
+    ).encode("utf-8") + b"\n"
+    with path.open("xb") as file:
+        file.write(payload)
+        file.flush()
+        os.fsync(file.fileno())
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    status = path.lstat()
+    return status.st_dev, status.st_ino
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse
+    )
+
+
+def _cleanup_challenge_staging(staging: Path, identity: tuple[int, int]) -> None:
+    try:
+        status = staging.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        return
+    entries = list(staging.iterdir())
+    if any(entry.name not in {"challenge.png", "metadata.json"} for entry in entries):
+        return
+    for entry in entries:
+        child = entry.lstat()
+        if _is_link_or_reparse(child) or not stat.S_ISREG(child.st_mode) or child.st_nlink != 1:
+            return
+    for entry in entries:
+        entry.unlink()
+    staging.rmdir()
 
 
 def _load_capabilities(store: RunStore) -> dict | None:
@@ -251,19 +404,6 @@ def _record_capabilities(store: RunStore, document: dict) -> dict:
               "capabilities": list(REQUIRED_CAPABILITIES)}
     store.write_json("host_capabilities.json", record)
     return {"status": "capabilities_recorded", "capabilities": list(REQUIRED_CAPABILITIES)}
-
-
-def _valid_expected_observation(value: object) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == {"shape", "color", "count"}
-        and type(value["shape"]) is str
-        and value["shape"] in CHALLENGE_SHAPES
-        and type(value["color"]) is str
-        and value["color"] in CHALLENGE_COLORS
-        and type(value["count"]) is int
-        and value["count"] in CHALLENGE_COUNTS
-    )
 
 
 def _read_json_file(path: str | Path) -> dict:
