@@ -6,6 +6,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import stat
+import io
 
 import pytest
 
@@ -129,6 +130,85 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
         assert all(component["top_width"] < component["middle_width"] and component["bottom_width"] < component["middle_width"] for component in components)
     else:
         assert all(component["top_width"] == component["middle_width"] == component["bottom_width"] for component in components)
+
+
+def test_same_answer_has_different_salted_png_hash_across_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices = iter(["circle", "#2b8a3e", 3, "circle", "#2b8a3e", 3])
+    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
+    salts = iter([b"a" * 16, b"b" * 16])
+    real_token_bytes = host_agent.secrets.token_bytes
+    monkeypatch.setattr(
+        host_agent.secrets,
+        "token_bytes",
+        lambda size: next(salts) if size == 16 else real_token_bytes(size),
+    )
+    items = []
+    for index in range(2):
+        source = tmp_path / f"source-{index}.png"
+        source.write_bytes(b"image")
+        run_dir = prepare_image_job(source, run_dir=tmp_path / f"run-{index}")
+        store = RunStore.open(run_dir)
+        store.transition_run(RunStatus.RUNNING)
+        store.transition_run(RunStatus.AWAITING_AGENT)
+        items.append(next_host_agent_item(run_dir))
+    assert [_observe_challenge(Path(item["image_path"])) for item in items] == [
+        {"shape": "circle", "color": "#2b8a3e", "count": 3},
+        {"shape": "circle", "color": "#2b8a3e", "count": 3},
+    ]
+    assert len({hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest() for item in items}) == 2
+
+
+def test_salted_challenge_hash_is_not_in_public_36_image_dictionary(host_run: Path) -> None:
+    item = next_host_agent_item(host_run)
+    actual = hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest()
+    assert actual not in {
+        hashlib.sha256(_render_unsalted(shape, color, count)).hexdigest()
+        for shape in host_agent.CHALLENGE_SHAPES
+        for color in host_agent.CHALLENGE_COLORS
+        for count in host_agent.CHALLENGE_COUNTS
+    }
+
+
+def _render_unsalted(shape: str, color: str, count: int) -> bytes:
+    from PIL import Image, ImageDraw
+    image = Image.new("RGB", (240, 120), "white")
+    draw = ImageDraw.Draw(image)
+    spacing = 220 // count
+    for index in range(count):
+        left = 10 + index * spacing + (spacing - 44) // 2
+        top, right, bottom = 20, left + 44, 64
+        if shape == "triangle":
+            draw.polygon([(left + 22, top), (left, bottom), (right, bottom)], fill=color)
+        elif shape == "circle":
+            draw.ellipse((left, top, right, bottom), fill=color)
+        else:
+            draw.rectangle((left, top, right, bottom), fill=color)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_observer_rejects_wrong_dimensions_before_convert(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PIL import Image
+    image = Image.new("RGB", (10000, 1), "white")
+    payload = io.BytesIO()
+    image.save(payload, format="PNG")
+    converted = False
+    real_convert = Image.Image.convert
+
+    def tracked_convert(self: object, *args: object, **kwargs: object) -> object:
+        nonlocal converted
+        converted = True
+        return real_convert(self, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "convert", tracked_convert)
+    with pytest.raises(RuntimeError, match="dimensions"):
+        host_agent._observe_challenge_png(payload.getvalue())
+    assert converted is False
 
 
 def _color_components(image: object, color: tuple[int, int, int]) -> list[dict]:

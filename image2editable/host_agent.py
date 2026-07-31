@@ -226,6 +226,9 @@ def _create_challenge(store: RunStore) -> dict:
             draw.ellipse((left, top, right, bottom), fill=expected["color"])
         else:
             draw.rectangle((left, top, right, bottom), fill=expected["color"])
+    visual_salt = secrets.token_bytes(16)
+    for index, value in enumerate(visual_salt):
+        image.putpixel((index, 119), (value, value, value))
     try:
         image_path = staging / "challenge.png"
         image.save(image_path, format="PNG")
@@ -312,7 +315,10 @@ def _challenge_id(integrity_key: bytes, image_sha256: str) -> str:
 def _observe_challenge_png(payload: bytes) -> dict:
     from PIL import Image
 
-    image = Image.open(io.BytesIO(payload)).convert("RGB")
+    opened = Image.open(io.BytesIO(payload))
+    if opened.size != (240, 120):
+        raise RuntimeError("Host capability challenge dimensions are invalid")
+    image = opened.convert("RGB")
     pixels = image.load()
     width, height = image.size
     found = []
