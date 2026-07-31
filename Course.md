@@ -32,9 +32,9 @@
 
 ## P2.3 Task 2 本轮变更
 
-- `prepare_component_layers` 将源图、OCR mask、text-clean、element masks、component RGBA 与背景/差异资产写入页面工作目录，并原子生成带相对路径和逐文件 SHA-256 的 `prepared_page.json`；sidecar 直接哈希同一份待发布 JSON bytes，不回读已发布路径。
-- `load_component_layers` 严格校验 sidecar、schema、路径所有权、链接/reparse/hardlink 与资产哈希；state 由单一句柄读取，前后 `fstat`/`lstat` 校验身份、大小和 mtime，哈希与 JSON 解析只消费同一份 bytes。
-- `finalize_component_layers` 只接受与 fresh prepared state 完全一致的当前 components 与 element masks；质量检查前用 exclusive/no-follow 句柄从已校验 bytes 建立 staging 快照，并核对 fd/path 身份与单链接属性；质量流程不再打开原资产路径，要求 fallback 时仍明确失败且不清空初始组件。
+- `prepare_component_layers` 原子生成带逐文件 SHA-256 的可恢复资产；isolated text-clean 写盘后会在启动 visual worker 前释放大数组，OCR/visual/gc cleanup 不遮蔽主异常。
+- `load_component_layers` 只读校验已存在的工作目录，不会为缺失 state 创建目录；state 与资产继续使用单句柄 bytes、sidecar/hash、路径身份和链接属性校验。
+- `finalize_component_layers` 只接受与 fresh state 完全一致的 components 与 element masks；quality 单次加载 staging source/masks 并执行严格 overlap 检查，成功返回的组件继续由存活 staging 承载，失败则完整清理。
 - 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
 
 ## 关键修改文件

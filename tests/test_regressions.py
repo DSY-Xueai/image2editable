@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import types
+import weakref
 from pathlib import Path
 
 import pytest
@@ -4955,6 +4956,7 @@ def _prepare_component_layers_fixture(
     monkeypatch,
     *,
     resource_isolation: bool = False,
+    before_visual_worker=None,
 ) -> tuple[dict, Path]:
     source_path = tmp_path / "outside-source.png"
     Image.new("RGB", (16, 10), "white").save(source_path)
@@ -5051,6 +5053,8 @@ def _prepare_component_layers_fixture(
         return fake_slide(Path(path), Path(target), text_analysis)
 
     def fake_process_isolated(path, target, lang, text_analysis):
+        if before_visual_worker is not None:
+            before_visual_worker()
         return fake_slide(Path(path), Path(target), text_analysis)
 
     monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
@@ -5095,6 +5099,79 @@ def _write_prepared_manifest(state_path: Path, manifest: dict) -> None:
     state_path.with_name("prepared_page.sha256").write_bytes(
         f"{state_hash}\n".encode("ascii"),
     )
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_prepare_component_layers_isolated_releases_cleanup_arrays_before_worker(
+    tmp_path: Path,
+    monkeypatch,
+    write_fails: bool,
+) -> None:
+    references = {}
+    gc_calls = []
+
+    def fake_load_rgb(path):
+        source = image_to_ppt.np.full((10, 16, 3), 255, dtype=image_to_ppt.np.uint8)
+        references["source_image"] = weakref.ref(source)
+        return source
+
+    def fake_cleanup_mask(source_image, stored_mask, text_items):
+        references["stored_mask"] = weakref.ref(stored_mask)
+        removal_mask = image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8)
+        references["removal_mask"] = weakref.ref(removal_mask)
+        return removal_mask
+
+    def fake_repair(source_image, removal_mask, **kwargs):
+        text_clean = source_image.copy()
+        references["text_clean"] = weakref.ref(text_clean)
+        return text_clean
+
+    def fake_save(path, image):
+        if write_fails:
+            raise RuntimeError("text-clean write failed")
+        Image.fromarray(image).save(path)
+
+    def assert_released_before_worker():
+        assert gc_calls == ["collect"]
+        assert set(references) == {
+            "source_image",
+            "stored_mask",
+            "removal_mask",
+            "text_clean",
+        }
+        assert all(reference() is None for reference in references.values())
+
+    monkeypatch.setattr(image_to_ppt, "_load_rgb", fake_load_rgb)
+    monkeypatch.setattr(image_to_ppt, "_build_text_cleanup_mask", fake_cleanup_mask)
+    monkeypatch.setattr(image_to_ppt, "_repair_text_background", fake_repair)
+    monkeypatch.setattr(image_to_ppt, "_save_rgb", fake_save)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_isolated_large_inpainter",
+        lambda work_dir: object(),
+    )
+    monkeypatch.setattr(
+        image_to_ppt.gc,
+        "collect",
+        lambda: gc_calls.append("collect") or 0,
+    )
+
+    if write_fails:
+        with pytest.raises(RuntimeError, match="text-clean write failed"):
+            _prepare_component_layers_fixture(
+                tmp_path,
+                monkeypatch,
+                resource_isolation=True,
+            )
+        assert gc_calls == ["collect"]
+        assert all(reference() is None for reference in references.values())
+    else:
+        _prepare_component_layers_fixture(
+            tmp_path,
+            monkeypatch,
+            resource_isolation=True,
+            before_visual_worker=assert_released_before_worker,
+        )
 
 
 def test_prepare_component_layers_persists_initial_components_without_quality(
@@ -5273,6 +5350,74 @@ def test_prepare_component_layers_does_not_create_through_linked_parent(
     assert not (external / "new-work-dir").exists()
 
 
+def test_prepare_component_layers_ocr_cleanup_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("OCR primary failure")
+        ),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "close_ocr_engines",
+        lambda: (_ for _ in ()).throw(OSError("OCR cleanup failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="OCR primary failure"):
+        image_to_ppt.prepare_component_layers(
+            source_path,
+            tmp_path / "prepared",
+            lang="en",
+            resource_isolation=False,
+        )
+
+
+def test_prepare_component_layers_visual_cleanup_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: (
+            [],
+            image_to_ppt.np.zeros((4, 4), dtype=image_to_ppt.np.uint8),
+        ),
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    monkeypatch.setattr(image_to_ppt, "create_object_detector", lambda: object())
+    monkeypatch.setattr(image_to_ppt, "create_sam_generator", lambda path: object())
+    monkeypatch.setattr(image_to_ppt, "resolve_sam_checkpoint", lambda: Path("sam"))
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_process_image",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("visual primary failure")
+        ),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_release_visual_resources",
+        lambda: (_ for _ in ()).throw(OSError("visual cleanup failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="visual primary failure"):
+        image_to_ppt.prepare_component_layers(
+            source_path,
+            tmp_path / "prepared",
+            lang="en",
+            resource_isolation=False,
+        )
+
+
 def test_load_component_layers_recovers_absolute_owned_paths(
     tmp_path: Path,
     monkeypatch,
@@ -5298,6 +5443,17 @@ def test_load_component_layers_recovers_absolute_owned_paths(
     ]
     assert all(Path(value).is_absolute() for value in path_values)
     assert all(Path(value).is_relative_to(work_dir.resolve()) for value in path_values)
+
+
+def test_load_component_layers_does_not_create_missing_work_directory(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "missing-work" / "prepared_page.json"
+
+    with pytest.raises(ValueError, match="work directory.*does not exist"):
+        image_to_ppt.load_component_layers(state_path)
+
+    assert not state_path.parent.exists()
 
 
 def test_load_component_layers_rejects_json_changed_without_sidecar_update(
@@ -5529,6 +5685,7 @@ def test_agent_managed_finalize_rejects_component_text_overlap_without_mutation(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    real_finalize = image_to_ppt._finalize_slide_quality
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     component_records = [dict(component) for component in prepared["components"]]
     component_hashes = [
@@ -5540,6 +5697,7 @@ def test_agent_managed_finalize_rejects_component_text_overlap_without_mutation(
         "_has_component_text_overlap",
         lambda masks, text_mask: True,
     )
+    monkeypatch.setattr(image_to_ppt, "_finalize_slide_quality", real_finalize)
 
     with pytest.raises(
         image_to_ppt.VisualSegmentationError,
@@ -5620,6 +5778,101 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
     assert hashlib.sha256(original_path.read_bytes()).hexdigest() == original_hash
     assert cleanup_calls == ["close"]
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
+
+
+def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    prepared_components = [dict(component) for component in prepared["components"]]
+    prepared_paths = {
+        Path(path)
+        for path in (
+            prepared["original_image_path"],
+            prepared["background_original_path"],
+            prepared["background_widescreen_path"],
+            prepared["background_removal_mask_path"],
+            prepared["background_difference_path"],
+            prepared["_text_mask_path"],
+            prepared["_text_clean_path"],
+            *prepared["_element_mask_paths"],
+            *(component["path"] for component in prepared["components"]),
+        )
+    }
+    prepared_hashes = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in prepared_paths
+    }
+    load_calls = []
+    open_calls = []
+    cleanup_calls = []
+    staged_paths = []
+    real_load_rgb = image_to_ppt._load_rgb
+    real_image_open = image_to_ppt.Image.open
+
+    def tracked_load_rgb(path):
+        load_calls.append(Path(path))
+        return real_load_rgb(path)
+
+    def tracked_image_open(path, *args, **kwargs):
+        open_calls.append(Path(path))
+        return real_image_open(path, *args, **kwargs)
+
+    def fake_finalize(slide_data, lang, **kwargs):
+        staged_paths.extend(
+            Path(path)
+            for path in (
+                slide_data["original_image_path"],
+                slide_data["background_path"],
+                slide_data["background_original_path"],
+                slide_data["background_widescreen_path"],
+                slide_data["background_removal_mask_path"],
+                slide_data["background_difference_path"],
+                slide_data["_text_mask_path"],
+                slide_data["_text_clean_path"],
+                *slide_data["_element_mask_paths"],
+                *(component["path"] for component in slide_data["components"]),
+            )
+        )
+        return slide_data
+
+    monkeypatch.setattr(image_to_ppt, "_load_rgb", tracked_load_rgb)
+    monkeypatch.setattr(image_to_ppt.Image, "open", tracked_image_open)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_has_component_text_overlap",
+        lambda masks, text_mask: False,
+    )
+    monkeypatch.setattr(image_to_ppt, "_finalize_slide_quality", fake_finalize)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "close_ocr_engines",
+        lambda: cleanup_calls.append("close"),
+    )
+
+    result = image_to_ppt.finalize_component_layers(
+        prepared,
+        _accepted_component_layers(prepared),
+        lang="en",
+    )
+
+    assert result["phase"] == "quality_accepted"
+    assert result["initial_component_count"] == len(prepared_components)
+    assert prepared["components"] == prepared_components
+    assert cleanup_calls == ["close"]
+    assert load_calls == []
+    assert open_calls == []
+    assert staged_paths
+    staging_dirs = {path.parent for path in staged_paths}
+    assert len(staging_dirs) == 1
+    assert next(iter(staging_dirs)).name.startswith("quality-components-")
+    assert all(path.is_file() for path in staged_paths)
+    assert all(Path(component["path"]).is_file() for component in result["components"])
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in prepared_paths
+    } == prepared_hashes
 
 
 @pytest.mark.parametrize(

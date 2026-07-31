@@ -695,8 +695,24 @@ def _finalize_slide_quality(
             with Image.open(mask_path) as stored_mask:
                 element_masks.append(np.asarray(stored_mask).copy())
 
-        components = slide_data["components"]
+        quality_text_items = slide_data.get("text_items") or []
+        quality_text_mask = _build_text_cleanup_mask(
+            img,
+            text_mask,
+            quality_text_items,
+        )
         forced_fallback_reason = None
+        if quality_text_items and _has_component_text_overlap(
+            element_masks,
+            quality_text_mask,
+        ):
+            if not _allow_text_only_fallback:
+                raise VisualSegmentationError(
+                    "agent-managed quality failed: component_text_overlap"
+                )
+            forced_fallback_reason = "component_text_overlap"
+
+        components = slide_data["components"]
         visual_only = _compose_exported_components(clean_background, components)
         visual_only_path = work_dir / "visual-only.png"
         _save_rgb(str(visual_only_path), visual_only)
@@ -763,21 +779,6 @@ def _finalize_slide_quality(
         if raster_text_items:
             forced_fallback_reason = "component_raster_text"
 
-        quality_text_items = slide_data.get("text_items") or []
-        quality_text_mask = _build_text_cleanup_mask(
-            img,
-            text_mask,
-            quality_text_items,
-        )
-        if (
-            forced_fallback_reason is None
-            and quality_text_items
-            and _has_component_text_overlap(
-                element_masks,
-                quality_text_mask,
-            )
-        ):
-            forced_fallback_reason = "component_text_overlap"
         quality = visual_difference(img, visual_only, quality_text_mask)
         removal_mask = build_removal_mask(
             element_masks,
@@ -1547,7 +1548,11 @@ def _is_link_or_reparse(status: os.stat_result) -> bool:
     )
 
 
-def _validate_prepared_work_dir(work_dir: str | Path) -> Path:
+def _validate_prepared_work_dir(
+    work_dir: str | Path,
+    *,
+    create: bool,
+) -> Path:
     lexical = Path(os.path.abspath(work_dir))
     if lexical.resolve(strict=False) != lexical:
         raise ValueError(f"work directory resolves through a link: {lexical}")
@@ -1558,6 +1563,8 @@ def _validate_prepared_work_dir(work_dir: str | Path) -> Path:
         if not lexical.is_dir():
             raise ValueError(f"work directory is not a directory: {lexical}")
     else:
+        if not create:
+            raise ValueError(f"work directory does not exist: {lexical}")
         lexical.mkdir(parents=True)
     resolved = lexical.resolve(strict=True)
     if resolved != lexical:
@@ -1661,14 +1668,6 @@ def _read_prepared_owned_bytes(
     if len(identities) != 1 or len(content) != handle_before.st_size:
         raise ValueError(f"{label} asset changed while being read: {owned}")
     return owned, content
-
-
-def _prepared_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _prepared_asset_record(work_dir: Path, path: str | Path, label: str) -> dict:
@@ -1946,7 +1945,10 @@ def _load_component_layer_state(
     lexical_state = Path(os.path.abspath(state_path))
     if lexical_state.name != _PREPARED_PAGE_NAME:
         raise ValueError(f"state path must name {_PREPARED_PAGE_NAME}")
-    work_dir = _validate_prepared_work_dir(lexical_state.parent)
+    work_dir = _validate_prepared_work_dir(
+        lexical_state.parent,
+        create=False,
+    )
     sidecar_file, sidecar = _read_prepared_owned_bytes(
         work_dir,
         work_dir / _PREPARED_PAGE_SIDECAR_NAME,
@@ -2053,6 +2055,7 @@ def _load_component_layer_state(
 
 
 def load_component_layers(state_path: str | Path) -> dict:
+    """Load a prepared page from an existing, validated state directory."""
     loaded, _ = _load_component_layer_state(state_path)
     return loaded
 
@@ -2064,14 +2067,18 @@ def prepare_component_layers(
     lang: str,
     resource_isolation: bool,
 ) -> dict:
+    """Persist recoverable OCR and visual layers for Agent review."""
     source = _resolve_image_path(image_path)
-    owned_work_dir = _validate_prepared_work_dir(work_dir)
+    owned_work_dir = _validate_prepared_work_dir(work_dir, create=True)
     _reject_prepared_links(owned_work_dir)
     owned_source = owned_work_dir / f"source-image{source.suffix.lower()}"
     if source != owned_source:
         shutil.copyfile(source, owned_source)
 
     text_mask = None
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
     try:
         ocr_kwargs = (
             {"isolated": True, "worker_root": owned_work_dir}
@@ -2089,33 +2096,72 @@ def prepare_component_layers(
             "items": text_items,
             "mask_path": str(text_mask_path),
         }
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
     finally:
         text_mask = None
-        close_ocr_engines()
+        _run_cleanup_preserving_exception(
+            close_ocr_engines,
+            "OCR",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
 
     if resource_isolation and text_items and all("box" in item for item in text_items):
-        source_image = _load_rgb(owned_source)
-        with Image.open(text_analysis["mask_path"]) as stored_text_mask:
-            stored_mask = np.asarray(stored_text_mask.convert("L")).copy()
-        removal_mask = _build_text_cleanup_mask(
-            source_image,
-            stored_mask,
-            text_items,
-        )
-        removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
-        Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
-        text_clean_path = owned_work_dir / "text-clean.png"
-        text_clean = _repair_text_background(
-            source_image,
-            removal_mask,
-            text_items=text_items,
-            large_inpainter=_isolated_large_inpainter(owned_work_dir),
-        )
-        _save_rgb(text_clean_path, text_clean)
-        text_analysis["text_clean_path"] = str(text_clean_path)
+        source_image = None
+        stored_text_mask = None
+        stored_mask = None
+        removal_mask = None
+        text_clean = None
+        exception_boundary = sys.exc_info()[1]
+        primary_exception = None
+        primary_traceback = None
+        try:
+            source_image = _load_rgb(owned_source)
+            with Image.open(text_analysis["mask_path"]) as stored_text_mask:
+                stored_mask = np.asarray(stored_text_mask.convert("L")).copy()
+            removal_mask = _build_text_cleanup_mask(
+                source_image,
+                stored_mask,
+                text_items,
+            )
+            removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
+            Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+            text_clean_path = owned_work_dir / "text-clean.png"
+            text_clean = _repair_text_background(
+                source_image,
+                removal_mask,
+                text_items=text_items,
+                large_inpainter=_isolated_large_inpainter(owned_work_dir),
+            )
+            _save_rgb(text_clean_path, text_clean)
+            text_analysis["text_clean_path"] = str(text_clean_path)
+        except BaseException as exc:
+            primary_exception = exc
+            primary_traceback = exc.__traceback__
+            raise
+        finally:
+            source_image = None
+            stored_text_mask = None
+            stored_mask = None
+            removal_mask = None
+            text_clean = None
+            _run_cleanup_preserving_exception(
+                gc.collect,
+                "isolated text cleanup arrays",
+                primary_exception,
+                primary_traceback,
+                exception_boundary,
+            )
 
     object_detector = None
     mask_generator = None
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
     try:
         if resource_isolation:
             slide_data = _process_image_isolated(
@@ -2136,10 +2182,20 @@ def prepare_component_layers(
                 text_analysis=text_analysis,
                 defer_quality=True,
             )
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
     finally:
         mask_generator = None
         object_detector = None
-        _release_visual_resources()
+        _run_cleanup_preserving_exception(
+            _release_visual_resources,
+            "visual resources",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
 
     slide_data["original_image_path"] = str(owned_source)
     slide_data["_resource_isolation"] = resource_isolation
@@ -2188,6 +2244,11 @@ def _snapshot_prepared_asset(
 
 
 def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
+    """Finalize the exact current components and ``_element_mask_paths``.
+
+    ``accepted`` must map ``components`` to ``prepared["components"]`` and
+    ``element_masks`` to ``prepared["_element_mask_paths"]``.
+    """
     if type(prepared) is not dict or type(prepared.get("state_path")) is not str:
         raise ValueError("prepared layers must contain a state_path")
     fresh, manifest = _load_component_layer_state(prepared["state_path"])
@@ -2198,7 +2259,8 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
         "element_masks",
     }:
         raise ValueError(
-            "accepted layers must contain only components and element_masks"
+            "accepted layers must map components to prepared['components'] and "
+            "element_masks to prepared['_element_mask_paths']"
         )
     if (
         type(accepted["components"]) is not list
@@ -2206,15 +2268,14 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
         or accepted["components"] != fresh["components"]
         or accepted["element_masks"] != fresh["_element_mask_paths"]
     ):
-        raise ValueError("accepted layers must match the current prepared state")
+        raise ValueError(
+            "accepted components and element_masks must match current prepared state: "
+            "prepared['components'] and prepared['_element_mask_paths']"
+        )
 
     work_dir = Path(fresh["_work_dir"])
     components = fresh["components"]
     initial_count = fresh["initial_component_count"]
-    if initial_count and not components:
-        raise VisualSegmentationError(
-            "agent-managed quality failed: initial components cannot be empty"
-        )
 
     staged_dir = None
     keep_staging = False
@@ -2316,27 +2377,6 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             slide_data.pop("_text_clean_path", None)
         else:
             slide_data["_text_clean_path"] = staged_text_clean
-
-        original = _load_rgb(staged_assets["source_image"])
-        with Image.open(staged_assets["ocr_mask"]) as stored_text_mask:
-            text_mask = np.asarray(stored_text_mask.convert("L")).copy()
-        masks = []
-        for mask_path in staged_element_masks:
-            with Image.open(mask_path) as stored_mask:
-                masks.append(np.asarray(stored_mask).copy())
-        quality_text_items = fresh.get("text_items") or []
-        quality_text_mask = _build_text_cleanup_mask(
-            original,
-            text_mask,
-            quality_text_items,
-        )
-        if quality_text_items and _has_component_text_overlap(
-            masks,
-            quality_text_mask,
-        ):
-            raise VisualSegmentationError(
-                "agent-managed quality failed: component_text_overlap"
-            )
 
         exception_boundary = sys.exc_info()[1]
         primary_exception = None
