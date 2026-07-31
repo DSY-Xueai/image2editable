@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
+import secrets
 import shutil
 import stat
 import uuid
@@ -20,7 +22,9 @@ from image2editable.component_contracts import (
 
 EVIDENCE_NAMES = tuple(sorted(COMPONENT_EVIDENCE_NAMES))
 REQUEST_NAME = "component_agent_request.json"
-MARKER_SUFFIX = ".request.json"
+MARKER_NAME = "publication-marker.json"
+INTEGRITY_DIRECTORY = ".component-agent-integrity"
+INTEGRITY_KEY_NAME = "key.bin"
 
 
 def build_component_agent_request(
@@ -30,6 +34,7 @@ def build_component_agent_request(
 ) -> Path:
     repair_round = validate_repair_round(repair_round)
     page_id, provider, reconstruction, sources = _validate_page_session(page_session)
+    integrity_key = _load_or_create_integrity_key(reconstruction)
     agent_dir = reconstruction / "agent"
     _ensure_owned_directory(agent_dir, reconstruction)
     round_dir = agent_dir / f"round-{repair_round:02d}"
@@ -75,6 +80,29 @@ def build_component_agent_request(
             sort_keys=True,
         ).encode("utf-8") + b"\n"
         _write_exclusive(staging / REQUEST_NAME, request_bytes, reconstruction)
+        marker_fields = {
+            "schema_version": 1,
+            "page_id": page_id,
+            "provider": provider,
+            "repair_round": repair_round,
+            "request_path": f"{round_dir.name}/{REQUEST_NAME}",
+            "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+        }
+        marker = {
+            **marker_fields,
+            "hmac_sha256": hmac.new(
+                integrity_key,
+                _canonical_marker_fields(marker_fields),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        marker_bytes = json.dumps(
+            marker,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        _write_exclusive(staging / MARKER_NAME, marker_bytes, reconstruction)
         agent_identity = _snapshot_directory_chain(agent_dir, reconstruction)
         try:
             staging.rename(round_dir)
@@ -83,25 +111,6 @@ def build_component_agent_request(
                 f"Agent evidence round is already published: {round_dir}"
             ) from error
         _require_directory_chain_identity(agent_identity)
-        marker = {
-            "schema_version": 1,
-            "page_id": page_id,
-            "provider": provider,
-            "repair_round": repair_round,
-            "request_path": f"{round_dir.name}/{REQUEST_NAME}",
-            "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
-        }
-        marker_bytes = json.dumps(
-            marker,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ).encode("utf-8") + b"\n"
-        _write_exclusive(
-            agent_dir / f"{round_dir.name}{MARKER_SUFFIX}",
-            marker_bytes,
-            reconstruction,
-        )
     except BaseException:
         if staging.exists():
             shutil.rmtree(staging)
@@ -126,12 +135,23 @@ def load_component_agent_request(request_path: str | Path) -> dict:
             "reconstruction/agent/round-XX"
         )
     _validate_directory_chain(round_dir, reconstruction)
-    marker_path = agent_dir / f"{round_dir.name}{MARKER_SUFFIX}"
+    integrity_key = _load_integrity_key(reconstruction)
+    marker_path = round_dir / MARKER_NAME
     try:
         marker = json.loads(_read_bound_file(marker_path, reconstruction).decode("utf-8"))
     except (FileNotFoundError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         raise RuntimeError("Component agent request marker is missing or invalid") from error
     _validate_request_marker(marker)
+    marker_fields = {
+        key: value for key, value in marker.items() if key != "hmac_sha256"
+    }
+    expected_signature = hmac.new(
+        integrity_key,
+        _canonical_marker_fields(marker_fields),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(marker["hmac_sha256"], expected_signature):
+        raise RuntimeError("Component agent publication signature mismatch")
     request_bytes = _read_bound_file(request_path, reconstruction)
     if hashlib.sha256(request_bytes).hexdigest() != marker["request_sha256"]:
         raise RuntimeError("Component agent request hash mismatch")
@@ -315,13 +335,133 @@ def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
         flags |= getattr(os, name, 0)
-    descriptor = os.open(path, flags, 0o600)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as error:
+        _require_directory_chain_identity(directory_identity)
+        raise RuntimeError(f"Evidence file cannot be created safely: {path}") from error
     with os.fdopen(descriptor, "wb") as target:
         _require_directory_chain_identity(directory_identity)
         target.write(payload)
         target.flush()
         os.fsync(target.fileno())
         _require_directory_chain_identity(directory_identity)
+
+
+def _load_or_create_integrity_key(reconstruction: Path) -> bytes:
+    run_root = reconstruction.parent.parent.parent
+    anchor = run_root / INTEGRITY_DIRECTORY
+    if anchor.exists() or anchor.is_symlink():
+        return _read_integrity_key(anchor, run_root)
+    staging = run_root / f".{INTEGRITY_DIRECTORY}.tmp-{uuid.uuid4().hex}"
+    try:
+        staging.mkdir(mode=0o700)
+        key_path = staging / INTEGRITY_KEY_NAME
+        key = secrets.token_bytes(32)
+        _write_new_integrity_key(key_path, key, staging, run_root)
+        try:
+            staging.rename(anchor)
+        except OSError:
+            if staging.exists():
+                shutil.rmtree(staging)
+            if not anchor.exists() and not anchor.is_symlink():
+                raise RuntimeError("Component agent integrity key creation failed")
+        return _read_integrity_key(anchor, run_root)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+
+
+def _load_integrity_key(reconstruction: Path) -> bytes:
+    run_root = reconstruction.parent.parent.parent
+    anchor = run_root / INTEGRITY_DIRECTORY
+    if not anchor.exists() and not anchor.is_symlink():
+        raise RuntimeError("Component agent integrity key is missing")
+    return _read_integrity_key(anchor, run_root)
+
+
+def _write_new_integrity_key(
+    path: Path,
+    key: bytes,
+    staging: Path,
+    run_root: Path,
+) -> None:
+    directory_identity = _snapshot_key_directory_chain(staging, run_root)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as target:
+        _require_directory_chain_identity(directory_identity)
+        target.write(key)
+        target.flush()
+        os.fsync(target.fileno())
+        os.chmod(path, 0o600)
+        _require_directory_chain_identity(directory_identity)
+
+
+def _read_integrity_key(anchor: Path, run_root: Path) -> bytes:
+    directory_identity = _snapshot_key_directory_chain(anchor, run_root)
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    key_path = anchor / INTEGRITY_KEY_NAME
+    try:
+        descriptor = os.open(key_path, flags)
+    except OSError as error:
+        raise RuntimeError("Component agent integrity key cannot be opened safely") from error
+    with os.fdopen(descriptor, "rb") as source:
+        _require_directory_chain_identity(directory_identity)
+        opened = os.fstat(source.fileno())
+        path_status = key_path.lstat()
+        if _is_link_or_reparse(path_status):
+            raise RuntimeError("Component agent integrity key is a link or reparse point")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(path_status.st_mode)
+            or opened.st_nlink != 1
+            or path_status.st_nlink != 1
+        ):
+            raise RuntimeError("Component agent integrity key is an unsafe hard link")
+        if (opened.st_dev, opened.st_ino) != (path_status.st_dev, path_status.st_ino):
+            raise RuntimeError("Component agent integrity key identity changed")
+        key = source.read()
+        stable = os.fstat(source.fileno())
+        if (
+            len(key) != 32
+            or (opened.st_dev, opened.st_ino, opened.st_size)
+            != (stable.st_dev, stable.st_ino, stable.st_size)
+        ):
+            raise RuntimeError("Component agent integrity key is damaged")
+        if os.name != "nt" and stat.S_IMODE(path_status.st_mode) & 0o077:
+            raise RuntimeError("Component agent integrity key permissions are unsafe")
+        _require_directory_chain_identity(directory_identity)
+        return key
+
+
+def _snapshot_key_directory_chain(
+    directory: Path,
+    run_root: Path,
+) -> list[tuple[Path, tuple[int, int, int, int]]]:
+    try:
+        relative = directory.relative_to(run_root)
+    except ValueError as error:
+        raise RuntimeError("Component agent integrity key is outside run root") from error
+    current = run_root
+    identities = []
+    for part in (Path(), *relative.parts):
+        if part != Path():
+            current /= part
+        status = current.lstat()
+        if _is_link_or_reparse(status):
+            raise RuntimeError(
+                "Component agent integrity key directory is a link or reparse point"
+            )
+        if not stat.S_ISDIR(status.st_mode):
+            raise RuntimeError("Component agent integrity key parent is not a directory")
+        identities.append((current, _directory_identity(status)))
+    return identities
 
 
 def _validate_request_marker(marker: object) -> dict:
@@ -332,6 +472,7 @@ def _validate_request_marker(marker: object) -> dict:
         "repair_round",
         "request_path",
         "request_sha256",
+        "hmac_sha256",
     }
     if not isinstance(marker, dict) or set(marker) != fields:
         raise ValueError("Component agent request marker fields are invalid")
@@ -344,14 +485,24 @@ def _validate_request_marker(marker: object) -> dict:
     expected_path = f"round-{marker['repair_round']:02d}/{REQUEST_NAME}"
     if marker["request_path"] != expected_path:
         raise ValueError("Component agent request marker path is invalid")
-    digest = marker["request_sha256"]
-    if (
-        type(digest) is not str
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-    ):
-        raise ValueError("Component agent request marker sha256 is invalid")
+    for field in ("request_sha256", "hmac_sha256"):
+        digest = marker[field]
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"Component agent request marker {field} is invalid")
     return marker
+
+
+def _canonical_marker_fields(fields: dict) -> bytes:
+    return json.dumps(
+        fields,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
 
 
 def _is_link_or_reparse(status: os.stat_result) -> bool:

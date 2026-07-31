@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import multiprocessing
 import os
 from pathlib import Path
@@ -33,7 +34,11 @@ def _node(component_id: str, state: str, z_index: int) -> dict:
 
 @pytest.fixture
 def page_session(tmp_path: Path) -> dict:
-    reconstruction = tmp_path / "pages" / "page_001" / "reconstruction"
+    return _make_page_session(tmp_path, "page_001")
+
+
+def _make_page_session(run_root: Path, page_id: str) -> dict:
+    reconstruction = run_root / "pages" / page_id / "reconstruction"
     evidence_root = reconstruction / "evidence-source"
     evidence_root.mkdir(parents=True)
     graph = {
@@ -53,7 +58,7 @@ def page_session(tmp_path: Path) -> dict:
             path.write_bytes((name + " data").encode())
         sources[name] = path
     return {
-        "page_id": "page_001",
+        "page_id": page_id,
         "provider": "host",
         "reconstruction_dir": reconstruction,
         "evidence": sources,
@@ -110,9 +115,24 @@ def _publish(session: dict, ready: object, result: object) -> None:
 
 
 def _refresh_marker_for_contract_test(request_path: Path) -> None:
-    marker_path = request_path.parent.parent / f"{request_path.parent.name}.request.json"
+    marker_path = request_path.parent / "publication-marker.json"
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     marker["request_sha256"] = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    key_path = (
+        request_path.parents[5]
+        / ".component-agent-integrity"
+        / "key.bin"
+    )
+    fields = {key: value for key, value in marker.items() if key != "hmac_sha256"}
+    canonical = json.dumps(
+        fields,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    marker["hmac_sha256"] = hmac.new(
+        key_path.read_bytes(), canonical, hashlib.sha256
+    ).hexdigest()
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
 
 
@@ -251,7 +271,7 @@ def test_load_rejects_request_moved_under_similar_fake_directory(
 
 def test_load_requires_external_request_digest_marker(page_session: dict) -> None:
     request_path = build_component_agent_request(page_session, repair_round=1)
-    marker = request_path.parent.parent / "round-01.request.json"
+    marker = request_path.parent / "publication-marker.json"
     marker.unlink()
 
     with pytest.raises(RuntimeError, match="marker"):
@@ -281,6 +301,154 @@ def test_load_rejects_evidence_and_request_hash_changed_together(
     request_path.write_text(json.dumps(request), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="request hash"):
+        load_component_agent_request(request_path)
+
+
+def test_load_rejects_synchronized_request_evidence_and_marker_without_key(
+    page_session: dict,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    evidence_path = request_path.parent / "ocr-overlay.png"
+    evidence_path.write_bytes(b"coordinated replacement")
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request["evidence"]["ocr-overlay.png"]["sha256"] = hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    marker_path = request_path.parent / "publication-marker.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["request_sha256"] = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    marker["hmac_sha256"] = "0" * 64
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="signature"):
+        load_component_agent_request(request_path)
+
+
+def test_marker_write_failure_does_not_publish_round_and_can_retry(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_write = component_repair._write_exclusive
+    failed = False
+
+    def fail_marker(path: Path, payload: bytes, reconstruction: Path) -> None:
+        nonlocal failed
+        if path.name == "publication-marker.json" and not failed:
+            failed = True
+            raise OSError("simulated marker failure")
+        real_write(path, payload, reconstruction)
+
+    monkeypatch.setattr(component_repair, "_write_exclusive", fail_marker)
+    with pytest.raises(OSError, match="marker failure"):
+        build_component_agent_request(page_session, repair_round=1)
+
+    round_dir = Path(page_session["reconstruction_dir"]) / "agent" / "round-01"
+    assert not round_dir.exists()
+    monkeypatch.setattr(component_repair, "_write_exclusive", real_write)
+    assert build_component_agent_request(page_session, repair_round=1).is_file()
+
+
+def test_round_rename_failure_leaves_no_publication_and_can_retry(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    component_repair._load_or_create_integrity_key(reconstruction)
+    real_rename = Path.rename
+    failed = False
+
+    def fail_round_rename(path: Path, target: Path) -> Path:
+        nonlocal failed
+        if path.name.startswith(".round-01.tmp-") and not failed:
+            failed = True
+            raise OSError("simulated pre-publication crash")
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_round_rename)
+    with pytest.raises(RuntimeError, match="already published"):
+        build_component_agent_request(page_session, repair_round=1)
+
+    round_dir = reconstruction / "agent" / "round-01"
+    assert not round_dir.exists()
+    monkeypatch.setattr(Path, "rename", real_rename)
+    assert build_component_agent_request(page_session, repair_round=1).is_file()
+
+
+def test_damaged_integrity_key_fails_closed_without_rotation(page_session: dict) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    key_path = request_path.parents[5] / ".component-agent-integrity" / "key.bin"
+    key_path.write_bytes(b"damaged")
+
+    with pytest.raises(RuntimeError, match="integrity key"):
+        load_component_agent_request(request_path)
+
+    assert key_path.read_bytes() == b"damaged"
+
+
+def test_two_pages_concurrently_reuse_one_complete_integrity_key(
+    tmp_path: Path,
+) -> None:
+    first = _make_page_session(tmp_path, "page_001")
+    second = _make_page_session(tmp_path, "page_002")
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    result = context.Queue()
+    processes = [
+        context.Process(target=_publish, args=(session, ready, result))
+        for session in (first, second)
+    ]
+    for process in processes:
+        process.start()
+    ready.set()
+    for process in processes:
+        process.join(15)
+        assert process.exitcode == 0
+
+    assert sorted(result.get(timeout=2) for _ in processes) == [
+        "published",
+        "published",
+    ]
+    key_path = tmp_path / ".component-agent-integrity" / "key.bin"
+    assert len(key_path.read_bytes()) == 32
+    assert key_path.stat().st_nlink == 1
+    assert load_component_agent_request(
+        tmp_path / "pages/page_001/reconstruction/agent/round-01/component_agent_request.json"
+    )["page_id"] == "page_001"
+    assert load_component_agent_request(
+        tmp_path / "pages/page_002/reconstruction/agent/round-01/component_agent_request.json"
+    )["page_id"] == "page_002"
+
+
+def test_integrity_key_hard_link_fails_closed(page_session: dict, tmp_path: Path) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    key_path = request_path.parents[5] / ".component-agent-integrity" / "key.bin"
+    outside = tmp_path / "stolen-key"
+    key_path.replace(outside)
+    try:
+        os.link(outside, key_path)
+    except OSError as error:
+        pytest.skip(f"hard links are unavailable: {error}")
+
+    with pytest.raises(RuntimeError, match="integrity key|hard link"):
+        load_component_agent_request(request_path)
+
+
+def test_integrity_key_directory_symlink_fails_closed(
+    page_session: dict,
+    tmp_path: Path,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    anchor = request_path.parents[5] / ".component-agent-integrity"
+    outside = tmp_path / "outside-key-anchor"
+    anchor.rename(outside)
+    try:
+        anchor.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        outside.rename(anchor)
+        pytest.skip(f"directory symbolic links are unavailable: {error}")
+
+    with pytest.raises(RuntimeError, match="integrity key|link|reparse"):
         load_component_agent_request(request_path)
 
 
@@ -364,7 +532,7 @@ def test_marker_write_detects_agent_directory_replacement(
 
     def replace_agent_before_marker(path: object, flags: int, *args: object, **kwargs: object) -> int:
         nonlocal replaced
-        if not replaced and Path(path).name == "round-01.request.json":
+        if not replaced and Path(path).name == "publication-marker.json":
             agent_dir.rename(original_agent)
             attacker_agent.mkdir()
             attacker_agent.rename(agent_dir)
