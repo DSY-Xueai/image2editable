@@ -102,6 +102,20 @@ def record_decision(
     return record(run_dir, **kwargs)
 
 
+def next_host_agent_item(run_dir: str | Path) -> dict[str, object]:
+    from image2editable.host_agent import next_host_agent_item as find_next
+
+    return find_next(run_dir)
+
+
+def record_host_agent_plan(
+    run_dir: str | Path, plan_path: str | Path
+) -> dict[str, object]:
+    from image2editable.host_agent import record_host_plan
+
+    return record_host_plan(run_dir, plan_path)
+
+
 def validate_pptx_inventories(
     store: RunStore, manifest: dict[str, Any]
 ) -> tuple[int, int]:

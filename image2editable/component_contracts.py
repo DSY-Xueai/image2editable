@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+import math
 
 
 AGENT_PROVIDERS = frozenset({"host", "local"})
@@ -84,6 +85,109 @@ def validate_repair_round(value: object) -> int:
             f"repair_round must be between 1 and {MAX_REPAIR_ROUNDS}"
         )
     return value
+
+
+_COMPONENT_PLAN_FIELDS = frozenset(
+    {"schema_version", "kind", "page_id", "provider", "repair_round", "request_sha256", "actions"}
+)
+_COMPONENT_ACTION_FIELDS = frozenset(
+    {"action", "object_ids", "parameters", "confidence", "evidence"}
+)
+_ACTION_PARAMETERS = {
+    "accept": frozenset(),
+    "merge": frozenset(),
+    "split": frozenset({"parts"}),
+    "expand": frozenset({"margin_ratio"}),
+    "shrink": frozenset({"margin_ratio"}),
+    "retry_with_box": frozenset({"box"}),
+    "retry_with_points": frozenset({"positive", "negative"}),
+    "attach_text": frozenset(),
+    "collapse_to_parent": frozenset(),
+}
+
+
+def _validate_normalized_point(value: object, field: str) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(type(item) not in {int, float} or not math.isfinite(item) or not 0 <= item <= 1 for item in value)
+    ):
+        raise ValueError(f"component action {field} coordinates are invalid")
+
+
+def validate_component_plan(plan: object, *, request: dict) -> dict:
+    validate_component_agent_request(request)
+    if not isinstance(plan, dict) or set(plan) != _COMPONENT_PLAN_FIELDS:
+        raise ValueError("component plan fields are invalid")
+    if plan["schema_version"] != 1 or type(plan["schema_version"]) is not int:
+        raise ValueError("component plan schema_version is invalid")
+    if plan["kind"] != "component_plan":
+        raise ValueError("component plan kind is invalid")
+    for field in ("page_id", "provider", "repair_round"):
+        if plan[field] != request[field]:
+            raise ValueError(f"component plan {field} does not match current request")
+    validate_agent_provider(plan["provider"])
+    validate_repair_round(plan["repair_round"])
+    _validate_sha256(plan["request_sha256"], "request_sha256")
+    actions = plan["actions"]
+    if not isinstance(actions, list):
+        raise ValueError("component plan actions must be a list")
+    known_ids = set(request["candidate_ids"]) | set(request["frozen_ids"])
+    touched = set()
+    for action in actions:
+        if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
+            raise ValueError("component action fields are invalid")
+        name = action["action"]
+        if type(name) is not str or name not in _ACTION_PARAMETERS:
+            raise ValueError("component action is invalid")
+        object_ids = action["object_ids"]
+        if (
+            not isinstance(object_ids, list) or not object_ids
+            or any(type(value) is not str for value in object_ids)
+            or len(object_ids) != len(set(object_ids))
+            or any(value not in known_ids for value in object_ids)
+        ):
+            raise ValueError("component action object_ids are invalid")
+        if set(object_ids) & set(request["frozen_ids"]):
+            raise ValueError("component action object is frozen")
+        if touched & set(object_ids):
+            raise ValueError("component plan has conflicting object actions")
+        touched.update(object_ids)
+        parameters = action["parameters"]
+        if not isinstance(parameters, dict) or set(parameters) != _ACTION_PARAMETERS[name]:
+            raise ValueError("component action parameters are invalid")
+        confidence = action["confidence"]
+        if type(confidence) not in {int, float} or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("component action confidence is invalid")
+        evidence = action["evidence"]
+        if not isinstance(evidence, list) or not evidence or any(type(item) is not str or not item.strip() for item in evidence):
+            raise ValueError("component action evidence is invalid")
+        if name == "split" and (type(parameters["parts"]) is not int or parameters["parts"] < 2):
+            raise ValueError("component action split parts are invalid")
+        if name in {"expand", "shrink"} and (
+            type(parameters["margin_ratio"]) not in {int, float}
+            or not math.isfinite(parameters["margin_ratio"])
+            or not 0 < parameters["margin_ratio"] <= 1
+        ):
+            raise ValueError("component action margin_ratio is invalid")
+        if name == "retry_with_box":
+            box = parameters["box"]
+            if not isinstance(box, list) or len(box) != 4:
+                raise ValueError("component action box coordinates are invalid")
+            _validate_normalized_point(box[:2], "box")
+            _validate_normalized_point(box[2:], "box")
+            if box[0] >= box[2] or box[1] >= box[3]:
+                raise ValueError("component action box coordinates are invalid")
+        if name == "retry_with_points":
+            for field in ("positive", "negative"):
+                points = parameters[field]
+                if not isinstance(points, list):
+                    raise ValueError(f"component action {field} coordinates are invalid")
+                for point in points:
+                    _validate_normalized_point(point, field)
+            if not parameters["positive"]:
+                raise ValueError("component action positive coordinates are invalid")
+    return plan
 
 
 def validate_component_agent_request(request: object) -> dict:

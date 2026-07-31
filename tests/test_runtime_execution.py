@@ -22,6 +22,19 @@ from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
 
 
+def test_host_agent_next_respects_run_execution_lease(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    store.transition_run(RunStatus.RUNNING)
+    store.transition_run(RunStatus.AWAITING_AGENT)
+
+    with ExecutionLease(run_dir / "execution.lock", run_root=run_dir):
+        with pytest.raises(RuntimeError, match="already executing"):
+            runtime.next_host_agent_item(run_dir)
+
+
 def _image(path: Path, color: tuple[int, int, int] = (1, 2, 3)) -> None:
     Image.new("RGB", (12, 8), color).save(path)
 

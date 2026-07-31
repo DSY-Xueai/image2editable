@@ -473,3 +473,16 @@ def test_public_api_is_importable() -> None:
     assert callable(retry_page)
     assert callable(rerender_pdf_page)
     assert callable(run_job)
+
+
+def test_cli_agent_next_and_record_emit_only_json_to_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli.runtime, "next_host_agent_item", lambda run: {"kind": "x"})
+    monkeypatch.setattr(cli.runtime, "record_host_agent_plan", lambda run, value: {"status": "recorded"})
+    assert cli.main(["agent", "next", "run"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"kind": "x"}
+    assert cli.main(["agent", "record", "run", "--plan", str(plan)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "recorded"}

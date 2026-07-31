@@ -96,6 +96,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     record_parser.add_argument("--evidence", action="append", required=True)
 
+    agent_parser = subparsers.add_parser("agent")
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
+    agent_next_parser = agent_subparsers.add_parser("next")
+    agent_next_parser.add_argument("run_dir")
+    agent_record_parser = agent_subparsers.add_parser("record")
+    agent_record_parser.add_argument("run_dir")
+    agent_record_parser.add_argument("--plan", required=True)
+
     subparsers.add_parser("doctor")
     return parser
 
@@ -149,6 +157,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 category=args.category,
                 evidence=args.evidence,
             )
+        _print_json(result)
+        return 0
+
+    if args.command == "agent" and args.agent_command == "next":
+        with redirect_stdout(sys.stderr):
+            item = runtime.next_host_agent_item(args.run_dir)
+        _print_json(item)
+        return 0
+    if args.command == "agent" and args.agent_command == "record":
+        with redirect_stdout(sys.stderr):
+            result = runtime.record_host_agent_plan(args.run_dir, args.plan)
         _print_json(result)
         return 0
 

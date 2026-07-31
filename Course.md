@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 4 已完成：每页最多五轮的 Agent 输入已具备不可变、哈希绑定的八项证据包；组件动作与 Agent 状态机尚未接入。
+- P2.3 Task 5 已完成：Host 视觉能力握手、可信请求读取和严格计划记录已接通；组件动作执行器尚未接入。
 
 ## P2.2 既有行为
 
@@ -62,9 +62,17 @@
 - 同一 Run 的证据发布由安全的跨进程 OS lease 串行化，锁覆盖 key 生命周期、签名和 round 最终确认；这是控制资源峰值并防止在途发布与 key 恢复交错的既定策略。
 - 失败 staging 或身份不匹配的 round 先原子移入唯一 quarantine 释放固定名称；可证明属于本次 staging 的已知平面文件逐项校验清理，未知替代目录不递归删除并保留隔离，后续轮次仍可安全重试。
 
+## P2.3 Task 5 本轮变更
+
+- `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge，固定验证视觉、本地文件读取、工具调用和结构化 JSON 四项能力；Host 路径不导入本地模型模块、不下载模型。
+- capability response 必须严格匹配三个蓝色三角形，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
+- 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
+- `image2editable agent record RUN_DIR --plan PLAN.json` 严格校验计划字段、动作对象、归一化坐标、置信度和非空证据；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、冲突动作均拒绝。
+- Agent next/record 与执行、恢复共用 Run 的非阻塞 OS lease；计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖，只有成功记录才执行 `awaiting_agent → prepared`。
+
 ## 关键修改文件
 
-- Agent 契约、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
+- Agent 契约、Host 握手、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/host_agent.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
 - PPTX 扫描与执行：`image2editable/pptx_input.py`
 - CV 重建：`image2editable/pptx_reconstruct.py`
 - OOXML 替换：`image2editable/pptx_shadow.py`
@@ -80,6 +88,8 @@ image2editable doctor
 image2editable convert input.pdf -o output.pptx --slide-size original --agent-provider host
 image2editable convert images/ -o output.pptx --slide-size 16:9
 image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable agent next runs/pptx-job
+image2editable agent record runs/pptx-job --plan plan.json
 image2editable run next runs/pptx-job
 image2editable decision record runs/pptx-job --page page_001 --object background --decision replace --confidence 0.99 --category full_slide_screenshot --evidence "complete slide layout"
 image2editable run execute runs/pptx-job
