@@ -20,8 +20,13 @@ from __future__ import annotations
 import argparse
 import base64
 import gc
+import hashlib
 import json
 import logging
+import math
+import os
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -670,6 +675,7 @@ def _finalize_slide_quality(
     slide_data: dict,
     lang: str,
     _resource_isolation: bool = False,
+    _allow_text_only_fallback: bool = True,
 ) -> dict:
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
@@ -799,6 +805,10 @@ def _finalize_slide_quality(
         elif needs_text_only_fallback(quality):
             fallback_reason = "visible_visual_artifacts"
         if fallback_reason is not None:
+            if not _allow_text_only_fallback:
+                raise VisualSegmentationError(
+                    f"agent-managed quality failed: {fallback_reason}"
+                )
             if text_clean_path_value is None:
                 text_clean = img.copy()
             else:
@@ -1483,6 +1493,656 @@ def _process_image(
     if defer_quality:
         return slide_data
     return _finalize_slide_quality(slide_data, lang)
+
+
+_PREPARED_PAGE_SCHEMA_VERSION = 1
+_PREPARED_PAGE_NAME = "prepared_page.json"
+_PREPARED_PAGE_FIELDS = {
+    "schema_version",
+    "phase",
+    "resource_isolation",
+    "initial_component_count",
+    "components",
+    "text_items",
+    "dimensions",
+    "assets",
+}
+_PREPARED_DIMENSION_FIELDS = {
+    "img_width",
+    "img_height",
+    "canvas_width",
+    "canvas_height",
+    "content_offset_x",
+    "content_offset_y",
+    "widescreen_background_method",
+}
+_PREPARED_ASSET_FIELDS = {
+    "source_image",
+    "ocr_mask",
+    "text_clean",
+    "element_masks",
+    "background_original",
+    "background_widescreen",
+    "background_removal_mask",
+    "background_difference",
+}
+_PREPARED_COMPONENT_FIELDS = {"x", "y", "w", "h", "area", "z_index"}
+_PREPARED_TEXT_FIELDS = {
+    "box",
+    "text",
+    "font_size",
+    "color",
+    "bold",
+    "font",
+    "align",
+    "confidence",
+}
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _validate_prepared_work_dir(work_dir: str | Path) -> Path:
+    lexical = Path(os.path.abspath(work_dir))
+    if lexical.resolve(strict=False) != lexical:
+        raise ValueError(f"work directory resolves through a link: {lexical}")
+    if lexical.exists() or lexical.is_symlink():
+        status = os.lstat(lexical)
+        if _is_link_or_reparse(status):
+            raise ValueError(f"work directory is a link or reparse point: {lexical}")
+        if not lexical.is_dir():
+            raise ValueError(f"work directory is not a directory: {lexical}")
+    else:
+        lexical.mkdir(parents=True)
+    resolved = lexical.resolve(strict=True)
+    if resolved != lexical:
+        raise ValueError(f"work directory resolves through a link: {lexical}")
+    return resolved
+
+
+def _reject_prepared_links(work_dir: Path) -> None:
+    for path in work_dir.rglob("*"):
+        if _is_link_or_reparse(os.lstat(path)):
+            raise ValueError(
+                f"prepared asset is a link or reparse point: {path}"
+            )
+
+
+def _prepared_owned_file(
+    work_dir: Path,
+    value: str | Path,
+    label: str,
+    *,
+    relative_only: bool = False,
+) -> Path:
+    supplied = Path(value)
+    if relative_only and supplied.is_absolute():
+        raise ValueError(f"{label} asset path must be relative")
+    if ".." in supplied.parts:
+        raise ValueError(f"{label} asset path must not contain '..'")
+    lexical = supplied if supplied.is_absolute() else work_dir / supplied
+    lexical = Path(os.path.abspath(lexical))
+    if not lexical.is_relative_to(work_dir):
+        raise ValueError(f"{label} asset path is outside the work directory")
+
+    current = lexical
+    while True:
+        try:
+            status = os.lstat(current)
+        except FileNotFoundError as exc:
+            raise ValueError(f"{label} asset file is missing: {lexical}") from exc
+        if _is_link_or_reparse(status):
+            raise ValueError(f"{label} asset is a link or reparse point: {current}")
+        if current == work_dir:
+            break
+        current = current.parent
+        if not current.is_relative_to(work_dir):
+            raise ValueError(f"{label} asset path is outside the work directory")
+
+    resolved = lexical.resolve(strict=True)
+    if resolved != lexical or not resolved.is_relative_to(work_dir):
+        raise ValueError(f"{label} asset path escapes the work directory")
+    if not resolved.is_file():
+        raise ValueError(f"{label} asset is not a file: {resolved}")
+    return resolved
+
+
+def _prepared_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prepared_asset_record(work_dir: Path, path: str | Path, label: str) -> dict:
+    owned = _prepared_owned_file(work_dir, path, label)
+    return {
+        "path": owned.relative_to(work_dir).as_posix(),
+        "sha256": _prepared_sha256(owned),
+    }
+
+
+def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
+    if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+        raise ValueError(f"{label} asset record is invalid")
+    relative = record["path"]
+    expected = record["sha256"]
+    if not isinstance(relative, str):
+        raise ValueError(f"{label} asset path is invalid")
+    if (
+        not isinstance(expected, str)
+        or len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise ValueError(f"{label} asset sha256 is invalid")
+    owned = _prepared_owned_file(
+        work_dir,
+        relative,
+        label,
+        relative_only=True,
+    )
+    if _prepared_sha256(owned) != expected:
+        raise ValueError(f"{label} asset sha256 mismatch")
+    return str(owned)
+
+
+def _is_prepared_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_prepared_box(box: object, width: int, height: int, label: str) -> None:
+    if (
+        not isinstance(box, list)
+        or len(box) != 4
+        or not all(_is_prepared_int(value) for value in box)
+    ):
+        raise ValueError(f"prepared page {label} box is invalid")
+    x, y, box_width, box_height = box
+    if (
+        x < 0
+        or y < 0
+        or box_width <= 0
+        or box_height <= 0
+        or x + box_width > width
+        or y + box_height > height
+    ):
+        raise ValueError(f"prepared page {label} box is out of bounds")
+
+
+def _validate_prepared_payload(manifest: dict) -> None:
+    dimensions = manifest["dimensions"]
+    if not isinstance(dimensions, dict) or set(dimensions) != _PREPARED_DIMENSION_FIELDS:
+        raise ValueError("prepared page dimensions are invalid")
+    integer_fields = _PREPARED_DIMENSION_FIELDS - {"widescreen_background_method"}
+    if any(not _is_prepared_int(dimensions[field]) for field in integer_fields):
+        raise ValueError("prepared page dimension values are invalid")
+    image_width = dimensions["img_width"]
+    image_height = dimensions["img_height"]
+    canvas_width = dimensions["canvas_width"]
+    canvas_height = dimensions["canvas_height"]
+    offset_x = dimensions["content_offset_x"]
+    offset_y = dimensions["content_offset_y"]
+    if (
+        min(image_width, image_height, canvas_width, canvas_height) <= 0
+        or min(offset_x, offset_y) < 0
+        or offset_x + image_width > canvas_width
+        or offset_y + image_height > canvas_height
+        or dimensions["widescreen_background_method"]
+        not in {"identity", "ambient", "outpaint"}
+    ):
+        raise ValueError("prepared page dimension values are invalid")
+
+    text_items = manifest["text_items"]
+    if not isinstance(text_items, list):
+        raise ValueError("prepared page text_items are invalid")
+    for item in text_items:
+        if not isinstance(item, dict) or set(item) != _PREPARED_TEXT_FIELDS:
+            raise ValueError("prepared page text item fields are invalid")
+        _validate_prepared_box(item["box"], image_width, image_height, "text item")
+        font_size = item["font_size"]
+        confidence = item["confidence"]
+        color = item["color"]
+        if (
+            not isinstance(item["text"], str)
+            or not item["text"]
+            or not isinstance(item["font"], str)
+            or not item["font"]
+            or not isinstance(font_size, (int, float))
+            or isinstance(font_size, bool)
+            or not math.isfinite(font_size)
+            or font_size <= 0
+            or not isinstance(color, str)
+            or len(color) != 7
+            or not color.startswith("#")
+            or any(character not in "0123456789abcdefABCDEF" for character in color[1:])
+            or not isinstance(item["bold"], bool)
+            or not _is_prepared_int(item["align"])
+            or item["align"] not in {0, 1, 2}
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise ValueError("prepared page text item values are invalid")
+
+    components = manifest["components"]
+    if not isinstance(components, list):
+        raise ValueError("prepared page components are invalid")
+    for component in components:
+        if not isinstance(component, dict) or set(component) != {"asset", "metadata"}:
+            raise ValueError("prepared page component record is invalid")
+        metadata = component["metadata"]
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != _PREPARED_COMPONENT_FIELDS
+            or not all(_is_prepared_int(value) for value in metadata.values())
+        ):
+            raise ValueError("prepared page component metadata is invalid")
+        if (
+            metadata["x"] < 0
+            or metadata["y"] < 0
+            or metadata["w"] <= 0
+            or metadata["h"] <= 0
+            or metadata["area"] <= 0
+            or metadata["area"] > metadata["w"] * metadata["h"]
+            or metadata["z_index"] < 0
+            or metadata["x"] + metadata["w"] > image_width
+            or metadata["y"] + metadata["h"] > image_height
+        ):
+            raise ValueError("prepared page component metadata is invalid")
+
+
+def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
+    dimensions = {
+        field: slide_data[field]
+        for field in _PREPARED_DIMENSION_FIELDS
+    }
+    assets = {
+        "source_image": _prepared_asset_record(
+            work_dir, slide_data["original_image_path"], "source image"
+        ),
+        "ocr_mask": _prepared_asset_record(
+            work_dir, slide_data["_text_mask_path"], "OCR mask"
+        ),
+        "text_clean": (
+            _prepared_asset_record(
+                work_dir, slide_data["_text_clean_path"], "text-clean image"
+            )
+            if slide_data.get("_text_clean_path") is not None
+            else None
+        ),
+        "element_masks": [
+            _prepared_asset_record(work_dir, path, "element mask")
+            for path in slide_data["_element_mask_paths"]
+        ],
+        "background_original": _prepared_asset_record(
+            work_dir,
+            slide_data["background_original_path"],
+            "original background",
+        ),
+        "background_widescreen": _prepared_asset_record(
+            work_dir,
+            slide_data["background_widescreen_path"],
+            "widescreen background",
+        ),
+        "background_removal_mask": _prepared_asset_record(
+            work_dir,
+            slide_data.get(
+                "background_removal_mask_path",
+                work_dir / "background-removal-mask.png",
+            ),
+            "background removal mask",
+        ),
+        "background_difference": _prepared_asset_record(
+            work_dir,
+            slide_data.get(
+                "background_difference_path",
+                work_dir / "background-difference.png",
+            ),
+            "background difference",
+        ),
+    }
+    components = []
+    for component in slide_data["components"]:
+        metadata = {key: value for key, value in component.items() if key != "path"}
+        components.append({
+            "asset": _prepared_asset_record(
+                work_dir, component["path"], "component RGBA"
+            ),
+            "metadata": metadata,
+        })
+    manifest = {
+        "schema_version": _PREPARED_PAGE_SCHEMA_VERSION,
+        "phase": "initial_layers",
+        "resource_isolation": slide_data["_resource_isolation"],
+        "initial_component_count": len(components),
+        "components": components,
+        "text_items": slide_data["text_items"],
+        "dimensions": dimensions,
+        "assets": assets,
+    }
+    _validate_prepared_payload(manifest)
+    state_path = work_dir / _PREPARED_PAGE_NAME
+    if state_path.exists() or state_path.is_symlink():
+        if _is_link_or_reparse(os.lstat(state_path)):
+            raise ValueError("prepared_page.json is a link or reparse point")
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=work_dir,
+            prefix=".prepared_page.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(manifest, temporary, ensure_ascii=False, indent=2)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, state_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+    return state_path.resolve()
+
+
+def load_component_layers(state_path: str | Path) -> dict:
+    lexical_state = Path(os.path.abspath(state_path))
+    if lexical_state.name != _PREPARED_PAGE_NAME:
+        raise ValueError(f"state path must name {_PREPARED_PAGE_NAME}")
+    work_dir = _validate_prepared_work_dir(lexical_state.parent)
+    state_file = _prepared_owned_file(work_dir, lexical_state, "prepared state")
+    try:
+        manifest = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("prepared page state is invalid JSON") from exc
+    if not isinstance(manifest, dict) or set(manifest) != _PREPARED_PAGE_FIELDS:
+        raise ValueError("prepared page state fields are invalid")
+    if manifest["schema_version"] != _PREPARED_PAGE_SCHEMA_VERSION:
+        raise ValueError("prepared page schema_version is invalid")
+    if manifest["phase"] != "initial_layers":
+        raise ValueError("prepared page phase is invalid")
+    if not isinstance(manifest["resource_isolation"], bool):
+        raise ValueError("prepared page resource_isolation is invalid")
+    _validate_prepared_payload(manifest)
+    initial_count = manifest["initial_component_count"]
+    if (
+        not isinstance(initial_count, int)
+        or isinstance(initial_count, bool)
+        or initial_count < 0
+        or initial_count != len(manifest["components"])
+    ):
+        raise ValueError("prepared page initial_component_count is invalid")
+    dimensions = manifest["dimensions"]
+    assets = manifest["assets"]
+    if not isinstance(assets, dict) or set(assets) != _PREPARED_ASSET_FIELDS:
+        raise ValueError("prepared page assets are invalid")
+    if not isinstance(assets["element_masks"], list):
+        raise ValueError("prepared page element masks are invalid")
+
+    loaded_assets = {
+        key: _load_prepared_asset(work_dir, assets[key], key)
+        for key in (
+            "source_image",
+            "ocr_mask",
+            "background_original",
+            "background_widescreen",
+            "background_removal_mask",
+            "background_difference",
+        )
+    }
+    text_clean = assets["text_clean"]
+    if text_clean is not None:
+        loaded_assets["text_clean"] = _load_prepared_asset(
+            work_dir, text_clean, "text_clean"
+        )
+    element_mask_paths = [
+        _load_prepared_asset(work_dir, record, "element mask")
+        for record in assets["element_masks"]
+    ]
+    components = []
+    for record in manifest["components"]:
+        components.append({
+            **record["metadata"],
+            "path": _load_prepared_asset(
+                work_dir, record["asset"], "component RGBA"
+            ),
+        })
+
+    return {
+        "phase": "initial_layers",
+        "initial_component_count": initial_count,
+        "state_path": str(state_file),
+        "_resource_isolation": manifest["resource_isolation"],
+        **dimensions,
+        "components": components,
+        "text_items": manifest["text_items"],
+        "original_image_path": loaded_assets["source_image"],
+        "background_path": loaded_assets["background_widescreen"],
+        "background_original_path": loaded_assets["background_original"],
+        "background_widescreen_path": loaded_assets["background_widescreen"],
+        "background_removal_mask_path": loaded_assets[
+            "background_removal_mask"
+        ],
+        "background_difference_path": loaded_assets["background_difference"],
+        "_work_dir": str(work_dir),
+        "_text_mask_path": loaded_assets["ocr_mask"],
+        "_element_mask_paths": element_mask_paths,
+        **(
+            {"_text_clean_path": loaded_assets["text_clean"]}
+            if text_clean is not None
+            else {}
+        ),
+    }
+
+
+def prepare_component_layers(
+    image_path: str | Path,
+    work_dir: str | Path,
+    *,
+    lang: str,
+    resource_isolation: bool,
+) -> dict:
+    source = _resolve_image_path(image_path)
+    owned_work_dir = _validate_prepared_work_dir(work_dir)
+    _reject_prepared_links(owned_work_dir)
+    owned_source = owned_work_dir / f"source-image{source.suffix.lower()}"
+    if source != owned_source:
+        shutil.copyfile(source, owned_source)
+
+    text_mask = None
+    try:
+        ocr_kwargs = (
+            {"isolated": True, "worker_root": owned_work_dir}
+            if resource_isolation
+            else {}
+        )
+        text_items, text_mask = detect_text(owned_source, lang=lang, **ocr_kwargs)
+        text_items, text_mask = _filter_probable_icon_text_analysis(
+            text_items,
+            text_mask,
+        )
+        text_mask_path = (owned_work_dir / "source-text-mask.png").resolve()
+        Image.fromarray(text_mask, mode="L").save(text_mask_path)
+        text_analysis = {
+            "items": text_items,
+            "mask_path": str(text_mask_path),
+        }
+    finally:
+        text_mask = None
+        close_ocr_engines()
+
+    if resource_isolation and text_items and all("box" in item for item in text_items):
+        source_image = _load_rgb(owned_source)
+        with Image.open(text_analysis["mask_path"]) as stored_text_mask:
+            stored_mask = np.asarray(stored_text_mask.convert("L")).copy()
+        removal_mask = _build_text_cleanup_mask(
+            source_image,
+            stored_mask,
+            text_items,
+        )
+        removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
+        Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+        text_clean_path = owned_work_dir / "text-clean.png"
+        text_clean = _repair_text_background(
+            source_image,
+            removal_mask,
+            text_items=text_items,
+            large_inpainter=_isolated_large_inpainter(owned_work_dir),
+        )
+        _save_rgb(text_clean_path, text_clean)
+        text_analysis["text_clean_path"] = str(text_clean_path)
+
+    object_detector = None
+    mask_generator = None
+    try:
+        if resource_isolation:
+            slide_data = _process_image_isolated(
+                owned_source,
+                owned_work_dir,
+                lang,
+                text_analysis,
+            )
+        else:
+            object_detector = create_object_detector()
+            mask_generator = create_sam_generator(resolve_sam_checkpoint())
+            slide_data = _process_image(
+                owned_source,
+                owned_work_dir,
+                object_detector,
+                mask_generator,
+                lang,
+                text_analysis=text_analysis,
+                defer_quality=True,
+            )
+    finally:
+        mask_generator = None
+        object_detector = None
+        _release_visual_resources()
+
+    slide_data["original_image_path"] = str(owned_source)
+    slide_data["_resource_isolation"] = resource_isolation
+    state_path = _write_prepared_page(slide_data, owned_work_dir)
+    return load_component_layers(state_path)
+
+
+def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
+    if prepared.get("phase") != "initial_layers":
+        raise ValueError("prepared layers must be in initial_layers phase")
+    work_dir = _validate_prepared_work_dir(prepared["_work_dir"])
+    if isinstance(accepted, dict):
+        components = accepted.get("components", prepared["components"])
+        element_mask_paths = accepted.get(
+            "_element_mask_paths",
+            accepted.get("element_mask_paths", prepared["_element_mask_paths"]),
+        )
+    elif isinstance(accepted, list):
+        components = accepted
+        element_mask_paths = prepared["_element_mask_paths"]
+    elif accepted is None:
+        components = prepared["components"]
+        element_mask_paths = prepared["_element_mask_paths"]
+    else:
+        raise ValueError("accepted layers must be a dict, component list, or None")
+    if not isinstance(components, list) or not isinstance(element_mask_paths, list):
+        raise ValueError("accepted components and element masks must be lists")
+    initial_count = prepared.get("initial_component_count")
+    if initial_count and not components:
+        raise VisualSegmentationError(
+            "agent-managed quality failed: initial components cannot be empty"
+        )
+
+    original = _load_rgb(
+        _prepared_owned_file(
+            work_dir, prepared["original_image_path"], "source image"
+        )
+    )
+    with Image.open(
+        _prepared_owned_file(work_dir, prepared["_text_mask_path"], "OCR mask")
+    ) as stored_text_mask:
+        text_mask = np.asarray(stored_text_mask.convert("L")).copy()
+    masks = []
+    for mask_path in element_mask_paths:
+        with Image.open(
+            _prepared_owned_file(work_dir, mask_path, "element mask")
+        ) as stored_mask:
+            masks.append(np.asarray(stored_mask).copy())
+    quality_text_items = prepared.get("text_items") or []
+    quality_text_mask = _build_text_cleanup_mask(
+        original,
+        text_mask,
+        quality_text_items,
+    )
+    if quality_text_items and _has_component_text_overlap(masks, quality_text_mask):
+        raise VisualSegmentationError(
+            "agent-managed quality failed: component_text_overlap"
+        )
+
+    staged_dir = Path(tempfile.mkdtemp(prefix="quality-components-", dir=work_dir))
+    try:
+        staged_components = []
+        for index, component in enumerate(components):
+            source_component = _prepared_owned_file(
+                work_dir, component["path"], "component RGBA"
+            )
+            staged_path = staged_dir / f"component_{index:04d}.png"
+            shutil.copyfile(source_component, staged_path)
+            staged_components.append({
+                **component,
+                "path": str(staged_path.resolve()),
+            })
+        slide_data = {
+            key: value
+            for key, value in prepared.items()
+            if key not in {"phase", "initial_component_count", "state_path"}
+        }
+        slide_data["components"] = staged_components
+        slide_data["_element_mask_paths"] = [
+            str(_prepared_owned_file(work_dir, path, "element mask"))
+            for path in element_mask_paths
+        ]
+    except BaseException:
+        shutil.rmtree(staged_dir, ignore_errors=True)
+        raise
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        result = _finalize_slide_quality(
+            slide_data,
+            lang,
+            _resource_isolation=bool(prepared.get("_resource_isolation")),
+            _allow_text_only_fallback=False,
+        )
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        shutil.rmtree(staged_dir, ignore_errors=True)
+        raise
+    finally:
+        _run_cleanup_preserving_exception(
+            close_ocr_engines,
+            "OCR",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
+    if initial_count and not result["components"]:
+        raise VisualSegmentationError(
+            "agent-managed quality failed: initial components became empty"
+        )
+    result.update({
+        "phase": "quality_accepted",
+        "initial_component_count": initial_count,
+        "state_path": prepared.get("state_path"),
+    })
+    return result
 
 
 def _resolve_image_path(image_path: str | Path) -> Path:

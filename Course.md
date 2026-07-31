@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 1 已完成：Run 清单冻结 `host`/`local` Agent Provider，所有读取 Run 清单的运行时入口（包括状态查询）均拒绝缺失或非法 Provider；后续组件动作尚未实现。
+- P2.3 Task 2 已完成：初始 OCR/CV/SAM 分层可持久化并跨进程恢复，Agent 管理路径拥有禁止整页 text-only fallback 的最终质量入口；组件动作与 Agent 状态机尚未接入。
 
 ## P2.2 既有行为
 
@@ -29,6 +29,12 @@
 
 - `convert` 与 `prepare` 支持 `--agent-provider host|local`，默认 `host`；Provider 在创建 Run 时写入清单，后续 CLI 子命令不能覆盖。
 - Run/Page 状态机增加 `awaiting_agent` 暂停状态，仅允许 `running → awaiting_agent → prepared` 和 `processing → awaiting_agent → processing` 的新增路径。
+
+## P2.3 Task 2 本轮变更
+
+- `prepare_component_layers` 将源图、OCR mask、text-clean、element masks、component RGBA 与背景/差异资产写入页面工作目录，并原子生成带相对路径和逐文件 SHA-256 的 `prepared_page.json`。
+- `load_component_layers` 严格校验 schema、phase、路径所有权、链接/reparse、文件存在性与哈希后恢复绝对路径；`finalize_component_layers` 在页级质量要求 fallback 时明确失败且不清空初始组件。
+- 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
 
 ## 关键修改文件
 
@@ -67,7 +73,7 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1 已完成 Provider 冻结、暂停状态机和每页最多 5 轮重修的契约常量，尚未接入组件决策、修复或 Host/Local 调用。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1/2 已完成 Provider 契约与可恢复初始视觉资产，尚未把这些资产接入组件决策、修复、五轮循环或 Host/Local 调用。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 当前优先保证视觉稳定和文字可编辑；与文字冲突的独立视觉组件会保留在净化底图中，不强行拆成透明对象。
