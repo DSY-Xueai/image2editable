@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 5 已完成：Host 视觉能力握手、可信请求读取和严格计划记录已接通；组件动作执行器尚未接入。
+- P2.3 Task 6 已完成：Host 计划可由确定性 CV/SAM 动作执行器生成新的组件图与掩码轮次；质量门禁仍留给后续 Task 7。
 
 ## P2.2 既有行为
 
@@ -71,6 +71,13 @@
 - `image2editable agent record RUN_DIR --plan PLAN.json` 在首次写入和半提交恢复前均先校验当前请求 SHA；同时读取 Task 4 已认证组件图，严格校验动作对象数量与真实 kind/parent 角色。`attach_text` 只接受 visual→text，`collapse_to_parent` 只接受 parent，child merge 只能同父级；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、跨角色/跨父级及冲突动作均拒绝。
 - Agent next/record 与执行、恢复共用同一把 Run OS lease；`next` 最多有界等待 30 秒并在单一临界区内读取或发布 challenge，跨平台并发调用只会加载同一个完整结果，超时明确失败；`record` 仍非阻塞拒绝并发。计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
 
+## P2.3 Task 6 本轮变更
+
+- 新增九类严格组件动作执行：接受、合并、真实连通域拆分、按页面短边比例扩张/收缩、SAM 框/点提示重试、文字归属以及折叠到父组件；执行器只做确定性变换，不自行通过质量门禁。
+- `accept` 只把 `pending` 转为仍参与渲染的 `pending_gate`；后续质量门禁决定 `frozen/failed`。冻结节点的结构与掩码保持不变，合并源和折叠后的后代转为 `inactive`。
+- 每轮写入新的组件图与逐文件哈希掩码目录，以原子 no-replace 方式发布，已存在输出不覆盖；失败不发布正式轮次，异常 staging 不再按可替换路径移动或递归删除。SAM 提示通过最长 600 秒的独立 worker 子进程执行，并校验返回掩码尺寸与非空性。
+- 主脚本与 Skill 镜像已同步 `component_contracts.py`、`visual_segment.py`、`fg_extract.py` 和 `sam_worker.py`。
+
 ## 关键修改文件
 
 - Agent 契约、Host 握手、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/host_agent.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
@@ -110,7 +117,7 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–4 已完成 Provider、可恢复初始视觉资产、组件树、所有权和五轮证据包基础，尚未接入组件决策、修复循环或 Host/Local 调用。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–6 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划和确定性动作执行，Task 7 尚需接入逐轮质量门禁与修复循环。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通非 Agent `convert` 仍保留旧的保守 fallback；P2.3 Agent 路径将通过组件级清字、重修和父组件折叠提取完整组件，不再以整页清空组件作为成功结果。

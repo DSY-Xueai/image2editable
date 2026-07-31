@@ -5,7 +5,9 @@ import base64
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 
 import numpy as np
 from PIL import Image
@@ -73,17 +75,75 @@ def _candidate_record(candidate) -> dict:
     }
 
 
+def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndarray:
+    """Run one box/point prompt inside the isolated SAM worker process."""
+
+    predictor = generator.predictor
+    predictor.set_image(image)
+    positive = prompt.get("positive", [])
+    negative = prompt.get("negative", [])
+    points = np.asarray(positive + negative, dtype=np.float32)
+    labels = np.asarray([1] * len(positive) + [0] * len(negative), dtype=np.int32)
+    box = prompt.get("box")
+    masks, scores, _ = predictor.predict(
+        point_coords=points if len(points) else None,
+        point_labels=labels if len(points) else None,
+        box=np.asarray(box, dtype=np.float32) if box is not None else None,
+        multimask_output=True,
+    )
+    return np.asarray(masks[int(np.argmax(scores))], dtype=bool)
+
+
+def run_component_prompt_worker(
+    image: np.ndarray,
+    *,
+    box,
+    positive,
+    negative,
+    work_dir: str | Path,
+) -> np.ndarray:
+    """Run one component prompt in a disposable SAM subprocess."""
+
+    with tempfile.TemporaryDirectory(prefix="component-sam-", dir=work_dir) as temporary:
+        root = Path(temporary)
+        image_path = root / "image.png"
+        prompt_path = root / "prompt.json"
+        result_path = root / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8)).save(image_path)
+        prompt_path.write_text(
+            json.dumps({"box": box, "positive": positive, "negative": negative}),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--mode", "component",
+                "--image", str(image_path),
+                "--prompt", str(prompt_path),
+                "--result", str(result_path),
+            ],
+            check=True,
+            timeout=600,
+        )
+        records = json.loads(result_path.read_text(encoding="utf-8"))
+        if not isinstance(records, list) or len(records) != 1:
+            raise RuntimeError("SAM component worker returned an invalid result")
+        return _decode_mask(records[0]).copy()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("prompted", "automatic", "recheck"),
+        choices=("prompted", "automatic", "recheck", "component"),
         required=True,
     )
     parser.add_argument("--image", required=True)
     parser.add_argument("--text-mask")
     parser.add_argument("--proposals")
     parser.add_argument("--elements")
+    parser.add_argument("--prompt")
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
 
@@ -152,7 +212,7 @@ def main() -> int:
             text_mask,
         )
         output_records = [_candidate_record(candidate) for candidate in candidates]
-    else:
+    elif args.mode == "automatic":
         candidates = generate_automatic(
             image,
             generator,
@@ -161,6 +221,11 @@ def main() -> int:
             min_score=0.90,
         )
         output_records = [_candidate_record(candidate) for candidate in candidates]
+    else:
+        if not args.prompt:
+            raise ValueError("component mode requires prompt")
+        prompt = json.loads(Path(args.prompt).read_text(encoding="utf-8"))
+        output_records = [_mask_record(component_prompt_mask(generator, image, prompt))]
 
     result_path = Path(args.result)
     temporary_path = result_path.with_name(f".{result_path.name}.tmp")

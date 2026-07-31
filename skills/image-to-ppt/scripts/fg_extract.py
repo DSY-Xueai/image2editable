@@ -1347,3 +1347,17 @@ def _remove_noise(
         clean[labels == i] = 255
 
     return clean
+
+
+def connected_mask_proposals(mask: np.ndarray, count: int) -> list[np.ndarray]:
+    """Return largest real connected regions; never synthesize rectangular splits."""
+
+    labels_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        np.asarray(mask, dtype=np.uint8), 8
+    )
+    ordered = sorted(
+        range(1, labels_count),
+        key=lambda value: int(stats[value, cv2.CC_STAT_AREA]),
+        reverse=True,
+    )
+    return [labels == value for value in ordered]

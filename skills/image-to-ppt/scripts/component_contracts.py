@@ -1,12 +1,41 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
+import math
 
 
 AGENT_PROVIDERS = frozenset({"host", "local"})
 MAX_REPAIR_ROUNDS = 5
-COMPONENT_STATES = frozenset({"pending", "failed", "frozen", "inactive"})
+COMPONENT_STATES = frozenset(
+    {"pending", "pending_gate", "failed", "frozen", "inactive"}
+)
 COMPONENT_KINDS = frozenset({"parent", "child", "text"})
+COMPONENT_EVIDENCE_NAMES = frozenset(
+    {
+        "source.png",
+        "numbered-masks.png",
+        "ocr-overlay.png",
+        "ownership.png",
+        "reconstructed.png",
+        "difference.png",
+        "component-graph.json",
+        "quality-report.json",
+    }
+)
+
+_COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "page_id",
+        "provider",
+        "repair_round",
+        "source_sha256",
+        "graph_sha256",
+        "candidate_ids",
+        "frozen_ids",
+        "evidence",
+    }
+)
 
 _COMPONENT_NODE_FIELDS = frozenset(
     {
@@ -31,7 +60,7 @@ _FROZEN_FIELDS = (
     "parent_id",
     "text_ids",
 )
-_RENDER_STATES = frozenset({"pending", "frozen"})
+_RENDER_STATES = frozenset({"pending", "pending_gate", "frozen"})
 
 
 def validate_agent_provider(value: object) -> str:
@@ -40,6 +69,262 @@ def validate_agent_provider(value: object) -> str:
             "Invalid agent_provider; expected one of: host, local"
         )
     return value
+
+
+def _validate_sha256(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} is invalid")
+    return value
+
+
+def validate_repair_round(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_REPAIR_ROUNDS:
+        raise ValueError(
+            f"repair_round must be between 1 and {MAX_REPAIR_ROUNDS}"
+        )
+    return value
+
+
+_COMPONENT_PLAN_FIELDS = frozenset(
+    {"schema_version", "kind", "page_id", "provider", "repair_round", "request_sha256", "actions"}
+)
+_COMPONENT_ACTION_FIELDS = frozenset(
+    {"action", "object_ids", "parameters", "confidence", "evidence"}
+)
+_ACTION_PARAMETERS = {
+    "accept": frozenset(),
+    "merge": frozenset(),
+    "split": frozenset({"parts"}),
+    "expand": frozenset({"margin_ratio"}),
+    "shrink": frozenset({"margin_ratio"}),
+    "retry_with_box": frozenset({"box"}),
+    "retry_with_points": frozenset({"positive", "negative"}),
+    "attach_text": frozenset(),
+    "collapse_to_parent": frozenset(),
+}
+_SINGLE_OBJECT_ACTIONS = frozenset(
+    {"accept", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
+)
+
+
+def _validate_normalized_point(value: object, field: str) -> None:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(type(item) not in {int, float} or not math.isfinite(item) or not 0 <= item <= 1 for item in value)
+    ):
+        raise ValueError(f"component action {field} coordinates are invalid")
+
+
+def validate_component_action(action: object, *, graph: dict | None = None) -> dict:
+    object_ids = action.get("object_ids", []) if isinstance(action, dict) else []
+    if (
+        not isinstance(object_ids, list)
+        or not object_ids
+        or any(type(value) is not str for value in object_ids)
+    ):
+        raise ValueError("component action object_ids are invalid")
+    validated_graph = validate_component_graph(graph) if graph is not None else None
+    graph_nodes = validated_graph["nodes"] if validated_graph is not None else []
+    frozen_ids = sorted(
+        node["id"] for node in graph_nodes
+        if isinstance(node, dict) and node.get("state") == "frozen"
+    )
+    candidate_ids = sorted(
+        (set(object_ids) | {
+            node["id"] for node in graph_nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }) - set(frozen_ids)
+    )
+    request = {
+        "schema_version": 1,
+        "page_id": "action_validation",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "0" * 64,
+        "graph_sha256": "0" * 64,
+        "candidate_ids": candidate_ids,
+        "frozen_ids": frozen_ids,
+        "evidence": {
+            name: {"path": name, "sha256": "0" * 64}
+            for name in COMPONENT_EVIDENCE_NAMES
+        },
+    }
+    validate_component_plan(
+        {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": "action_validation",
+            "provider": "host",
+            "repair_round": 1,
+            "request_sha256": "0" * 64,
+            "actions": [action],
+        },
+        request=request,
+        graph=validated_graph,
+    )
+    return action
+
+
+def validate_component_plan(plan: object, *, request: dict, graph: dict | None = None) -> dict:
+    validate_component_agent_request(request)
+    if not isinstance(plan, dict) or set(plan) != _COMPONENT_PLAN_FIELDS:
+        raise ValueError("component plan fields are invalid")
+    if plan["schema_version"] != 1 or type(plan["schema_version"]) is not int:
+        raise ValueError("component plan schema_version is invalid")
+    if plan["kind"] != "component_plan":
+        raise ValueError("component plan kind is invalid")
+    for field in ("page_id", "provider", "repair_round"):
+        if plan[field] != request[field]:
+            raise ValueError(f"component plan {field} does not match current request")
+    validate_agent_provider(plan["provider"])
+    validate_repair_round(plan["repair_round"])
+    _validate_sha256(plan["request_sha256"], "request_sha256")
+    actions = plan["actions"]
+    if not isinstance(actions, list):
+        raise ValueError("component plan actions must be a list")
+    known_ids = set(request["candidate_ids"]) | set(request["frozen_ids"])
+    touched = set()
+    for action in actions:
+        if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
+            raise ValueError("component action fields are invalid")
+        name = action["action"]
+        if type(name) is not str or name not in _ACTION_PARAMETERS:
+            raise ValueError("component action is invalid")
+        object_ids = action["object_ids"]
+        if (
+            not isinstance(object_ids, list) or not object_ids
+            or any(type(value) is not str for value in object_ids)
+            or len(object_ids) != len(set(object_ids))
+            or any(value not in known_ids for value in object_ids)
+        ):
+            raise ValueError("component action object_ids are invalid")
+        if (
+            (name in _SINGLE_OBJECT_ACTIONS and len(object_ids) != 1)
+            or (name == "merge" and len(object_ids) < 2)
+            or (name == "attach_text" and len(object_ids) != 2)
+        ):
+            raise ValueError("component action object count is invalid")
+        if set(object_ids) & set(request["frozen_ids"]):
+            raise ValueError("component action object is frozen")
+        if touched & set(object_ids):
+            raise ValueError("component plan has conflicting object actions")
+        touched.update(object_ids)
+        parameters = action["parameters"]
+        if not isinstance(parameters, dict) or set(parameters) != _ACTION_PARAMETERS[name]:
+            raise ValueError("component action parameters are invalid")
+        confidence = action["confidence"]
+        if type(confidence) not in {int, float} or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+            raise ValueError("component action confidence is invalid")
+        evidence = action["evidence"]
+        if not isinstance(evidence, list) or not evidence or any(type(item) is not str or not item.strip() for item in evidence):
+            raise ValueError("component action evidence is invalid")
+        if name == "split" and (type(parameters["parts"]) is not int or parameters["parts"] < 2):
+            raise ValueError("component action split parts are invalid")
+        if name in {"expand", "shrink"} and (
+            type(parameters["margin_ratio"]) not in {int, float}
+            or not math.isfinite(parameters["margin_ratio"])
+            or not 0 < parameters["margin_ratio"] <= 1
+        ):
+            raise ValueError("component action margin_ratio is invalid")
+        if name == "retry_with_box":
+            box = parameters["box"]
+            if not isinstance(box, list) or len(box) != 4:
+                raise ValueError("component action box coordinates are invalid")
+            _validate_normalized_point(box[:2], "box")
+            _validate_normalized_point(box[2:], "box")
+            if box[0] >= box[2] or box[1] >= box[3]:
+                raise ValueError("component action box coordinates are invalid")
+        if name == "retry_with_points":
+            for field in ("positive", "negative"):
+                points = parameters[field]
+                if not isinstance(points, list):
+                    raise ValueError(f"component action {field} coordinates are invalid")
+                for point in points:
+                    _validate_normalized_point(point, field)
+            if not parameters["positive"]:
+                raise ValueError("component action positive coordinates are invalid")
+        if graph is not None:
+            _validate_action_graph_roles(name, object_ids, graph)
+    return plan
+
+
+def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict) -> None:
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        raise ValueError("component plan graph is invalid")
+    nodes = {node.get("id"): node for node in graph["nodes"] if isinstance(node, dict)}
+    try:
+        selected = [nodes[object_id] for object_id in object_ids]
+    except KeyError as error:
+        raise ValueError("component action object is missing from graph") from error
+    if action == "attach_text":
+        if selected[0].get("kind") == "text" or selected[1].get("kind") != "text":
+            raise ValueError("attach_text requires visual then text roles")
+        return
+    if action == "collapse_to_parent":
+        if selected[0].get("kind") != "parent":
+            raise ValueError("collapse_to_parent requires parent kind")
+        return
+    if any(node.get("kind") == "text" for node in selected):
+        raise ValueError("component action cannot target text kind")
+    if action == "merge":
+        kinds = {node.get("kind") for node in selected}
+        if len(kinds) != 1:
+            raise ValueError("merge requires the same component kind")
+        if kinds == {"child"} and len({node.get("parent_id") for node in selected}) != 1:
+            raise ValueError("merge child components must share one parent")
+
+
+def validate_component_agent_request(request: object) -> dict:
+    if not isinstance(request, dict) or set(request) != _COMPONENT_AGENT_REQUEST_FIELDS:
+        raise ValueError("component agent request fields are invalid")
+    if type(request["schema_version"]) is not int or request["schema_version"] != 1:
+        raise ValueError("component agent request schema_version is invalid")
+    page_id = request["page_id"]
+    if (
+        type(page_id) is not str
+        or not page_id
+        or "/" in page_id
+        or "\\" in page_id
+        or page_id in {".", ".."}
+    ):
+        raise ValueError("component agent request page_id is invalid")
+    validate_agent_provider(request["provider"])
+    validate_repair_round(request["repair_round"])
+    _validate_sha256(request["source_sha256"], "source_sha256")
+    _validate_sha256(request["graph_sha256"], "graph_sha256")
+    for field in ("candidate_ids", "frozen_ids"):
+        values = request[field]
+        if (
+            not isinstance(values, list)
+            or any(type(value) is not str or not value for value in values)
+            or values != sorted(set(values))
+        ):
+            raise ValueError(f"component agent request {field} is invalid")
+    if set(request["candidate_ids"]) & set(request["frozen_ids"]):
+        raise ValueError("candidate_ids and frozen_ids must be disjoint")
+    evidence = request["evidence"]
+    if not isinstance(evidence, dict) or set(evidence) != COMPONENT_EVIDENCE_NAMES:
+        raise ValueError("component agent request evidence fields are invalid")
+    for name, record in evidence.items():
+        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+            raise ValueError(f"component evidence record is invalid: {name}")
+        path = record["path"]
+        if type(path) is not str or not path or "\\" in path or ":" in path:
+            raise ValueError(f"component evidence path is invalid: {name}")
+        pure_path = PurePosixPath(path)
+        if (
+            pure_path.is_absolute()
+            or ".." in pure_path.parts
+            or pure_path != PurePosixPath(name)
+        ):
+            raise ValueError(f"component evidence path is invalid: {name}")
+        _validate_sha256(record["sha256"], f"component evidence sha256: {name}")
+    return request
 
 
 def _validate_component_node(node: object) -> dict:

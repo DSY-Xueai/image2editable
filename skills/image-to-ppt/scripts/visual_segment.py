@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import importlib
+import io
 import json
 import os
+import copy
+import ctypes
+import errno
+import hashlib
+import stat
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +18,6 @@ from urllib.request import urlretrieve
 import cv2
 import numpy as np
 from PIL import Image
-
 
 SAM21_LARGE_URL = (
     "https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
@@ -22,6 +28,247 @@ SAM21_LARGE_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 class VisualSegmentationError(RuntimeError):
     pass
+
+
+def execute_component_actions(
+    image: np.ndarray,
+    graph: dict,
+    actions: list[dict],
+    *,
+    sam_runner,
+    input_dir: str | Path,
+    output_dir: str | Path,
+) -> dict:
+    """Execute requested mask edits; never decide quality-gate outcomes."""
+
+    try:
+        from image2editable.component_contracts import (
+            validate_component_action,
+            validate_component_graph,
+            validate_graph_transition,
+        )
+    except ModuleNotFoundError:
+        from component_contracts import (  # type: ignore[no-redef]
+            validate_component_action,
+            validate_component_graph,
+            validate_graph_transition,
+        )
+
+    source = Path(input_dir)
+    target = Path(output_dir)
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"Component action output already exists: {target}")
+    validated = validate_component_graph(graph)
+    result = copy.deepcopy(validated)
+    nodes = {node["id"]: node for node in result["nodes"]}
+    loaded_masks = {
+        component_id: _read_action_mask(source / node["mask"], image.shape[:2], node["mask_sha256"])
+        for component_id, node in nodes.items()
+    }
+    masks = {component_id: loaded[0] for component_id, loaded in loaded_masks.items()}
+    mask_payloads = {component_id: loaded[1] for component_id, loaded in loaded_masks.items()}
+    touched = set()
+    for action in actions:
+        validate_component_action(action, graph=validated)
+        object_ids = action["object_ids"]
+        name = action["action"]
+        if name == "collapse_to_parent":
+            allowed_states = {"inactive", "pending"}
+        else:
+            allowed_states = {"pending"}
+        if any(nodes[value]["state"] not in allowed_states for value in object_ids):
+            raise ValueError(f"{name} requires a pending component")
+        if touched & set(object_ids):
+            raise ValueError("component plan has conflicting object actions")
+        touched.update(object_ids)
+    for action in actions:
+        object_ids = action["object_ids"]
+        name = action["action"]
+        if name == "accept":
+            if nodes[object_ids[0]]["state"] != "pending":
+                raise ValueError("accept requires a pending component")
+            nodes[object_ids[0]]["state"] = "pending_gate"
+        elif name == "attach_text":
+            visual, text = object_ids
+            nodes[visual]["text_ids"] = sorted(set(nodes[visual]["text_ids"] + [text]))
+        elif name == "collapse_to_parent":
+            parent = object_ids[0]
+            nodes[parent]["state"] = "pending"
+            _deactivate_descendants(nodes, parent)
+        elif name == "merge":
+            selected = [nodes[value] for value in object_ids]
+            merged = np.logical_or.reduce([masks[value] for value in object_ids])
+            for node in selected:
+                node["state"] = "inactive"
+            new_id = _new_action_id(nodes, "merge")
+            merged_kind = selected[0]["kind"]
+            merged_parent = selected[0]["parent_id"]
+            nodes[new_id] = {
+                "id": new_id, "kind": merged_kind, "parent_id": merged_parent,
+                "state": "pending", "mask": f"masks/{new_id}.png",
+                "mask_sha256": "", "bbox": [0, 0, 1, 1],
+                "z_index": min(node["z_index"] for node in selected),
+                "text_ids": sorted({value for node in selected for value in node["text_ids"]}),
+            }
+            masks[new_id] = merged
+        elif name == "split":
+            component_id = object_ids[0]
+            parts = _connected_action_parts(masks[component_id], action["parameters"]["parts"])
+            nodes[component_id]["state"] = "inactive"
+            next_z = max(node["z_index"] for node in nodes.values()) + 1
+            for index, part in enumerate(parts, start=1):
+                new_id = _new_action_id(nodes, "split")
+                original = nodes[component_id]
+                kind = "child" if original["kind"] == "parent" else original["kind"]
+                parent_id = component_id if original["kind"] == "parent" else original["parent_id"]
+                nodes[new_id] = {
+                    "id": new_id, "kind": kind, "parent_id": parent_id,
+                    "state": "pending", "mask": f"masks/{new_id}.png",
+                    "mask_sha256": "", "bbox": [0, 0, 1, 1],
+                    "z_index": next_z + index - 1, "text_ids": [],
+                }
+                masks[new_id] = part
+        elif name in {"expand", "shrink"}:
+            component_id = object_ids[0]
+            radius = max(1, round(min(image.shape[:2]) * action["parameters"]["margin_ratio"]))
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+            current = masks[component_id].astype(np.uint8)
+            changed = cv2.dilate(current, kernel) if name == "expand" else cv2.erode(current, kernel)
+            parent_id = nodes[component_id]["parent_id"]
+            if name == "expand":
+                support = masks[parent_id] if parent_id is not None else cv2.dilate(current, kernel)
+                changed = np.asarray(changed, dtype=bool) & np.asarray(support, dtype=bool)
+            masks[component_id] = np.asarray(changed, dtype=bool)
+        elif name in {"retry_with_box", "retry_with_points"}:
+            component_id = object_ids[0]
+            parameters = action["parameters"]
+            height, width = image.shape[:2]
+            box = parameters.get("box")
+            mapped_box = None if box is None else [box[0] * width, box[1] * height, box[2] * width, box[3] * height]
+            map_points = lambda values: [[point[0] * (width - 1), point[1] * (height - 1)] for point in values]
+            runner = sam_runner
+            if runner is None:
+                from scripts.sam_worker import run_component_prompt_worker
+
+                runner = lambda **values: run_component_prompt_worker(
+                    values["image"],
+                    box=values["box"],
+                    positive=values["positive"],
+                    negative=values["negative"],
+                    work_dir=target.parent,
+                )
+            proposed = runner(
+                image=image,
+                box=mapped_box,
+                positive=map_points(parameters.get("positive", [])),
+                negative=map_points(parameters.get("negative", [])),
+            )
+            proposed = np.asarray(proposed, dtype=bool)
+            if proposed.shape != image.shape[:2] or not proposed.any():
+                raise VisualSegmentationError("SAM component retry returned an invalid mask")
+            masks[component_id] = proposed
+        else:
+            raise AssertionError(f"Unsupported component action: {name}")
+    result["nodes"] = list(nodes.values())
+    staging = target.with_name(f".{target.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        staging.mkdir(parents=False)
+        mask_dir = staging / "masks"
+        mask_dir.mkdir()
+        for node in result["nodes"]:
+            mask = masks[node["id"]]
+            if not mask.any():
+                raise VisualSegmentationError(f"Component action produced an empty mask: {node['id']}")
+            if node["state"] == "frozen":
+                path = staging / node["mask"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(mask_payloads[node["id"]])
+                continue
+            path = mask_dir / f"{node['id']}.png"
+            Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+            node["mask"] = f"masks/{node['id']}.png"
+            node["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+            ys, xs = np.where(mask)
+            node["bbox"] = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+        validate_graph_transition(before=validated, after=result)
+        (staging / "component-graph.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _publish_action_directory(staging, target)
+    except BaseException:
+        raise
+    return result
+
+
+def _publish_action_directory(staging: Path, target: Path) -> None:
+    """Atomically publish a directory without replacing an existing target."""
+
+    if os.name == "nt":
+        try:
+            staging.rename(target)
+        except FileExistsError:
+            raise
+        except OSError as error:
+            if target.exists() or target.is_symlink():
+                raise FileExistsError(f"Component action output already exists: {target}") from error
+            raise
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("Atomic no-replace directory publication is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(staging), -100, os.fsencode(target), 1) == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(f"Component action output already exists: {target}")
+    raise OSError(error_number, os.strerror(error_number), str(target))
+
+
+def _read_action_mask(path: Path, shape: tuple[int, int], digest: str) -> tuple[np.ndarray, bytes]:
+    status = path.lstat()
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or bool(getattr(status, "st_file_attributes", 0) & reparse)
+        or not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+    ):
+        raise VisualSegmentationError(f"Component action mask path is unsafe: {path}")
+    payload = path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != digest:
+        raise VisualSegmentationError(f"Component action mask hash mismatch: {path}")
+    with Image.open(io.BytesIO(payload)) as stored:
+        mask = np.asarray(stored.convert("L")) > 0
+    if mask.shape != shape:
+        raise VisualSegmentationError(f"Component action mask shape mismatch: {path}")
+    return mask, payload
+
+
+def _new_action_id(nodes: dict[str, dict], prefix: str) -> str:
+    index = 1
+    while f"{prefix}_{index:04d}" in nodes:
+        index += 1
+    return f"{prefix}_{index:04d}"
+
+
+def _connected_action_parts(mask: np.ndarray, expected: int) -> list[np.ndarray]:
+    from scripts.fg_extract import connected_mask_proposals
+
+    parts = connected_mask_proposals(mask, expected)
+    if len(parts) != expected:
+        raise VisualSegmentationError("split did not find exact connected proposals")
+    return parts
+
+
+def _deactivate_descendants(nodes: dict[str, dict], parent_id: str) -> None:
+    children = [node for node in nodes.values() if node["parent_id"] == parent_id]
+    for child in children:
+        child["state"] = "inactive"
+        _deactivate_descendants(nodes, child["id"])
 
 
 @contextmanager

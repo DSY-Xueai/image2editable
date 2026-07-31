@@ -34,6 +34,27 @@ REQUEST_JSON_LIMIT = 4 * 1024 * 1024
 MARKER_JSON_LIMIT = 64 * 1024
 
 
+def execute_component_action_round(
+    image,
+    graph: dict,
+    actions: list[dict],
+    *,
+    sam_runner,
+    input_dir: str | Path,
+    output_dir: str | Path,
+) -> dict:
+    from scripts.visual_segment import execute_component_actions
+
+    return execute_component_actions(
+        image,
+        graph,
+        actions,
+        sam_runner=sam_runner,
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
+
+
 def build_component_agent_request(
     page_session: dict,
     *,

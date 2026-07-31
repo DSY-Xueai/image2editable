@@ -13,6 +13,48 @@ validate_agent_provider = component_contracts.validate_agent_provider
 def test_component_agent_provider_contract_is_frozen() -> None:
     assert AGENT_PROVIDERS == frozenset({"host", "local"})
     assert MAX_REPAIR_ROUNDS == 5
+    assert "pending_gate" in component_contracts.COMPONENT_STATES
+
+
+@pytest.mark.parametrize(
+    ("action", "object_ids", "parameters"),
+    [
+        ("accept", ["component_0001"], {}),
+        ("merge", ["component_0001", "component_0002"], {}),
+        ("split", ["component_0001"], {"parts": 2}),
+        ("expand", ["component_0001"], {"margin_ratio": 0.01}),
+        ("shrink", ["component_0001"], {"margin_ratio": 0.01}),
+        ("retry_with_box", ["component_0001"], {"box": [0.1, 0.1, 0.5, 0.5]}),
+        ("retry_with_points", ["component_0001"], {"positive": [[0.2, 0.2]], "negative": []}),
+        ("attach_text", ["component_0001", "text_0001"], {}),
+        ("collapse_to_parent", ["parent_0001"], {}),
+    ],
+)
+def test_component_actions_have_strict_shapes(action: str, object_ids: list[str], parameters: dict) -> None:
+    value = {"action": action, "object_ids": object_ids, "parameters": parameters,
+             "confidence": 0.95, "evidence": ["visible relationship"]}
+    assert component_contracts.validate_component_action(value) is value
+
+
+def test_component_action_rejects_non_string_object_id_with_value_error() -> None:
+    value = {"action": "accept", "object_ids": [{}], "parameters": {},
+             "confidence": 0.95, "evidence": ["visible relationship"]}
+    with pytest.raises(ValueError, match="object_ids"):
+        component_contracts.validate_component_action(value)
+
+
+@pytest.mark.parametrize(
+    "graph",
+    [
+        {"nodes": [{"state": "frozen"}]},
+        {"nodes": [{"id": [], "state": "pending"}]},
+    ],
+)
+def test_component_action_rejects_malformed_graph_with_value_error(graph: dict) -> None:
+    value = {"action": "accept", "object_ids": ["component_0001"], "parameters": {},
+             "confidence": 0.95, "evidence": ["visible relationship"]}
+    with pytest.raises(ValueError):
+        component_contracts.validate_component_action(value, graph=graph)
 
 
 def test_component_agent_request_contract_is_strict() -> None:
@@ -173,7 +215,7 @@ def _node(
 
 def test_component_graph_contract_is_category_independent_and_strict() -> None:
     assert component_contracts.COMPONENT_STATES == frozenset(
-        {"pending", "failed", "frozen", "inactive"}
+        {"pending", "pending_gate", "failed", "frozen", "inactive"}
     )
     assert component_contracts.COMPONENT_KINDS == frozenset(
         {"parent", "child", "text"}

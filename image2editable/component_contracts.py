@@ -6,7 +6,9 @@ import math
 
 AGENT_PROVIDERS = frozenset({"host", "local"})
 MAX_REPAIR_ROUNDS = 5
-COMPONENT_STATES = frozenset({"pending", "failed", "frozen", "inactive"})
+COMPONENT_STATES = frozenset(
+    {"pending", "pending_gate", "failed", "frozen", "inactive"}
+)
 COMPONENT_KINDS = frozenset({"parent", "child", "text"})
 COMPONENT_EVIDENCE_NAMES = frozenset(
     {
@@ -58,7 +60,7 @@ _FROZEN_FIELDS = (
     "parent_id",
     "text_ids",
 )
-_RENDER_STATES = frozenset({"pending", "frozen"})
+_RENDER_STATES = frozenset({"pending", "pending_gate", "frozen"})
 
 
 def validate_agent_provider(value: object) -> str:
@@ -116,6 +118,56 @@ def _validate_normalized_point(value: object, field: str) -> None:
         or any(type(item) not in {int, float} or not math.isfinite(item) or not 0 <= item <= 1 for item in value)
     ):
         raise ValueError(f"component action {field} coordinates are invalid")
+
+
+def validate_component_action(action: object, *, graph: dict | None = None) -> dict:
+    object_ids = action.get("object_ids", []) if isinstance(action, dict) else []
+    if (
+        not isinstance(object_ids, list)
+        or not object_ids
+        or any(type(value) is not str for value in object_ids)
+    ):
+        raise ValueError("component action object_ids are invalid")
+    validated_graph = validate_component_graph(graph) if graph is not None else None
+    graph_nodes = validated_graph["nodes"] if validated_graph is not None else []
+    frozen_ids = sorted(
+        node["id"] for node in graph_nodes
+        if isinstance(node, dict) and node.get("state") == "frozen"
+    )
+    candidate_ids = sorted(
+        (set(object_ids) | {
+            node["id"] for node in graph_nodes
+            if isinstance(node, dict) and isinstance(node.get("id"), str)
+        }) - set(frozen_ids)
+    )
+    request = {
+        "schema_version": 1,
+        "page_id": "action_validation",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "0" * 64,
+        "graph_sha256": "0" * 64,
+        "candidate_ids": candidate_ids,
+        "frozen_ids": frozen_ids,
+        "evidence": {
+            name: {"path": name, "sha256": "0" * 64}
+            for name in COMPONENT_EVIDENCE_NAMES
+        },
+    }
+    validate_component_plan(
+        {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": "action_validation",
+            "provider": "host",
+            "repair_round": 1,
+            "request_sha256": "0" * 64,
+            "actions": [action],
+        },
+        request=request,
+        graph=validated_graph,
+    )
+    return action
 
 
 def validate_component_plan(plan: object, *, request: dict, graph: dict | None = None) -> dict:

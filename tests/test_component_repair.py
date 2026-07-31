@@ -11,6 +11,7 @@ import shutil
 import stat
 
 import pytest
+import cv2
 
 from image2editable.component_repair import (
     EVIDENCE_NAMES,
@@ -18,6 +19,10 @@ from image2editable.component_repair import (
     load_component_agent_request,
 )
 import image2editable.component_repair as component_repair
+from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
+from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
+from PIL import Image
+import numpy as np
 
 
 def _node(component_id: str, state: str, z_index: int) -> dict:
@@ -32,6 +37,368 @@ def _node(component_id: str, state: str, z_index: int) -> dict:
         "z_index": z_index,
         "text_ids": [],
     }
+
+
+def _action(action: str, object_ids: list[str], parameters: dict | None = None) -> dict:
+    return {"action": action, "object_ids": object_ids, "parameters": parameters or {},
+            "confidence": 0.95, "evidence": ["visible relationship"]}
+
+
+def _action_case(tmp_path: Path) -> tuple[np.ndarray, dict, Path]:
+    root = tmp_path / "round-01"
+    masks = root / "masks"
+    masks.mkdir(parents=True)
+    values = {
+        "parent": np.ones((12, 16), dtype=bool),
+        "left": np.pad(np.ones((4, 4), dtype=bool), ((2, 6), (2, 10))),
+        "right": np.pad(np.ones((4, 4), dtype=bool), ((2, 6), (10, 2))),
+        "frozen": np.pad(np.ones((2, 2), dtype=bool), ((9, 1), (7, 7))),
+        "text": np.pad(np.ones((1, 1), dtype=bool), ((0, 11), (0, 15))),
+    }
+    nodes = []
+    specs = [
+        ("parent", "parent", None, "inactive", 0),
+        ("left", "child", "parent", "pending", 1),
+        ("right", "child", "parent", "pending", 2),
+        ("frozen", "parent", None, "frozen", 3),
+        ("text", "text", None, "pending", 4),
+    ]
+    for component_id, kind, parent_id, state, z_index in specs:
+        path = masks / f"{component_id}.png"
+        Image.fromarray(values[component_id].astype(np.uint8) * 255).save(path)
+        ys, xs = np.where(values[component_id])
+        nodes.append({"id": component_id, "kind": kind, "parent_id": parent_id,
+                      "state": state, "mask": f"masks/{component_id}.png",
+                      "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+                      "z_index": z_index, "text_ids": []})
+    return np.zeros((12, 16, 3), dtype=np.uint8), {"nodes": nodes}, root
+
+
+def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    output = tmp_path / "round-02"
+    result = execute_component_actions(
+        image, graph, [_action("accept", ["left"])], sam_runner=None,
+        input_dir=input_dir, output_dir=output,
+    )
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["left"]["state"] == "pending_gate"
+    assert by_id["frozen"] == next(node for node in graph["nodes"] if node["id"] == "frozen")
+    assert (output / "component-graph.json").is_file()
+
+
+def test_frozen_mask_keeps_nonstandard_relative_path(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    frozen = next(node for node in graph["nodes"] if node["id"] == "frozen")
+    custom = input_dir / "masks/archive/frozen-original.png"
+    custom.parent.mkdir()
+    (input_dir / frozen["mask"]).replace(custom)
+    frozen["mask"] = "masks/archive/frozen-original.png"
+    output = tmp_path / "round-custom"
+    result = execute_component_actions(
+        image, graph, [_action("accept", ["left"])], sam_runner=None,
+        input_dir=input_dir, output_dir=output,
+    )
+    published = next(node for node in result["nodes"] if node["id"] == "frozen")
+    assert published == frozen
+    assert (output / frozen["mask"]).read_bytes() == custom.read_bytes()
+
+
+def test_execute_merge_unions_masks_and_inactivates_sources(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    output = tmp_path / "round-02"
+    result = execute_component_actions(
+        image, graph, [_action("merge", ["left", "right"])], sam_runner=None,
+        input_dir=input_dir, output_dir=output,
+    )
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["left"]["state"] == by_id["right"]["state"] == "inactive"
+    merged = np.asarray(Image.open(output / by_id["merge_0001"]["mask"])) > 0
+    assert int(merged.sum()) == 32
+    assert by_id["merge_0001"]["kind"] == "child"
+    assert by_id["merge_0001"]["parent_id"] == "parent"
+
+
+def test_split_without_connected_proposals_fails_without_output(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    output = tmp_path / "round-02"
+    with pytest.raises(VisualSegmentationError, match="connected proposals"):
+        execute_component_actions(
+            image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
+            input_dir=input_dir, output_dir=output,
+        )
+    assert not output.exists()
+
+
+def test_split_rejects_extra_connected_proposals_instead_of_losing_pixels(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[1:3, 1:3] = mask[5:7, 5:7] = mask[9:11, 9:11] = 255
+    path = input_dir / left["mask"]
+    Image.fromarray(mask).save(path)
+    left["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    left["bbox"] = [1, 1, 11, 11]
+    output = tmp_path / "round-extra-parts"
+    with pytest.raises(VisualSegmentationError, match="exact connected proposals"):
+        execute_component_actions(
+            image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
+            input_dir=input_dir, output_dir=output,
+        )
+    assert not output.exists()
+
+
+def test_split_two_connected_proposals_preserves_pixels_and_layer(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[1:3, 1:3] = mask[7:10, 8:11] = 255
+    path = input_dir / left["mask"]
+    Image.fromarray(mask).save(path)
+    left["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    left["bbox"] = [1, 1, 11, 10]
+    output = tmp_path / "round-split"
+    result = execute_component_actions(
+        image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
+        input_dir=input_dir, output_dir=output,
+    )
+    by_id = {node["id"]: node for node in result["nodes"]}
+    children = [node for node in result["nodes"] if node["id"].startswith("split_")]
+    union = np.zeros(image.shape[:2], dtype=bool)
+    for child in children:
+        payload = (output / child["mask"]).read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == child["mask_sha256"]
+        union |= np.asarray(Image.open(output / child["mask"])) > 0
+        assert child["kind"] == "child" and child["parent_id"] == "parent"
+    assert by_id["left"]["state"] == "inactive"
+    assert len(children) == 2
+    assert np.array_equal(union, mask > 0)
+
+
+def test_action_failure_does_not_delete_replacement_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    output = tmp_path / "round-replaced"
+    real_save = Image.Image.save
+    replacement = None
+
+    def replace_staging_then_fail(self: Image.Image, path: object, *args: object, **kwargs: object) -> None:
+        nonlocal replacement
+        staging = Path(path).parent.parent
+        owned = staging.with_name(staging.name + "-owned")
+        staging.rename(owned)
+        staging.mkdir()
+        replacement = staging / "attacker.txt"
+        replacement.write_text("keep", encoding="utf-8")
+        raise OSError("simulated save failure")
+
+    monkeypatch.setattr(Image.Image, "save", replace_staging_then_fail)
+    with pytest.raises(OSError, match="save failure"):
+        execute_component_actions(
+            image, graph, [_action("accept", ["left"])], sam_runner=None,
+            input_dir=input_dir, output_dir=output,
+        )
+    assert replacement is not None and replacement.read_text(encoding="utf-8") == "keep"
+    monkeypatch.setattr(Image.Image, "save", real_save)
+
+
+def test_sam_prompt_coordinates_and_attach_text_do_not_merge_pixels(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    calls = []
+    def runner(**kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        return np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    output = tmp_path / "round-02"
+    result = execute_component_actions(
+        image, graph,
+        [_action("retry_with_points", ["left"], {"positive": [[1.0, 1.0]], "negative": [[0.0, 0.0]]}),
+         _action("attach_text", ["right", "text"])],
+        sam_runner=runner, input_dir=input_dir, output_dir=output,
+    )
+    assert calls[0]["positive"] == [[15.0, 11.0]]
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["right"]["text_ids"] == ["text"]
+    assert int((np.asarray(Image.open(output / by_id["right"]["mask"])) > 0).sum()) == 16
+
+
+def test_expand_stays_inside_parent_and_collapse_activates_parent(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    expanded_dir = tmp_path / "round-02"
+    expanded = execute_component_actions(
+        image, graph, [_action("expand", ["left"], {"margin_ratio": 0.2})],
+        sam_runner=None, input_dir=input_dir, output_dir=expanded_dir,
+    )
+    by_id = {node["id"]: node for node in expanded["nodes"]}
+    expanded_mask = np.asarray(Image.open(expanded_dir / by_id["left"]["mask"])) > 0
+    parent_mask = np.asarray(Image.open(input_dir / "masks/parent.png")) > 0
+    assert not np.any(expanded_mask & ~parent_mask)
+    collapsed_dir = tmp_path / "round-03"
+    collapsed = execute_component_actions(
+        image, expanded, [_action("collapse_to_parent", ["parent"])],
+        sam_runner=None, input_dir=expanded_dir, output_dir=collapsed_dir,
+    )
+    states = {node["id"]: node["state"] for node in collapsed["nodes"]}
+    assert states["parent"] == "pending"
+    assert states["left"] == states["right"] == "inactive"
+
+
+def test_action_margin_uses_page_short_edge_for_different_component_sizes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    right = next(node for node in graph["nodes"] if node["id"] == "right")
+    right_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    right_mask[1:9, 7:15] = 255
+    right_path = input_dir / right["mask"]
+    Image.fromarray(right_mask).save(right_path)
+    right["mask_sha256"] = hashlib.sha256(right_path.read_bytes()).hexdigest()
+    right["bbox"] = [7, 1, 15, 9]
+    kernel_sizes = []
+    real_kernel = cv2.getStructuringElement
+
+    def record_kernel(shape: int, size: tuple[int, int]) -> np.ndarray:
+        kernel_sizes.append(size)
+        return real_kernel(shape, size)
+
+    monkeypatch.setattr(cv2, "getStructuringElement", record_kernel)
+    execute_component_actions(
+        image, graph, [_action("expand", ["left"], {"margin_ratio": 0.25})],
+        sam_runner=None, input_dir=input_dir, output_dir=tmp_path / "round-margin-left",
+    )
+    execute_component_actions(
+        image, graph, [_action("expand", ["right"], {"margin_ratio": 0.25})],
+        sam_runner=None, input_dir=input_dir, output_dir=tmp_path / "round-margin-right",
+    )
+    assert kernel_sizes == [(7, 7), (7, 7)]
+
+
+def test_shrink_uses_page_margin_and_publishes_nonempty_mask(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    result = execute_component_actions(
+        image, graph, [_action("shrink", ["left"], {"margin_ratio": 0.1})],
+        sam_runner=None, input_dir=input_dir, output_dir=tmp_path / "round-shrink",
+    )
+    left = next(node for node in result["nodes"] if node["id"] == "left")
+    mask = np.asarray(Image.open(tmp_path / "round-shrink" / left["mask"])) > 0
+    assert 0 < int(mask.sum()) < 16
+
+
+def test_publish_action_directory_never_replaces_existing_empty_target(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    target = tmp_path / "target"
+    staging.mkdir()
+    (staging / "component-graph.json").write_text("new", encoding="utf-8")
+    target.mkdir()
+    with pytest.raises(FileExistsError):
+        _publish_action_directory(staging, target)
+    assert target.is_dir() and not list(target.iterdir())
+    assert (staging / "component-graph.json").read_text(encoding="utf-8") == "new"
+
+
+def test_multi_action_round_is_validated_before_mutation(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("merge", ["left", "right"]), _action("collapse_to_parent", ["parent"])],
+        sam_runner=None,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-batch",
+    )
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["parent"]["state"] == "pending"
+
+
+def test_invalid_later_action_is_rejected_before_sam_side_effect(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    calls = []
+
+    def runner(**kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        return np.ones(image.shape[:2], dtype=bool)
+
+    invalid = _action("accept", ["text"])
+    with pytest.raises(ValueError, match="text kind"):
+        execute_component_actions(
+            image, graph,
+            [_action("retry_with_box", ["left"], {"box": [0.1, 0.1, 0.9, 0.9]}), invalid],
+            sam_runner=runner, input_dir=input_dir, output_dir=tmp_path / "round-invalid",
+        )
+    assert calls == []
+
+
+def test_retry_rejects_inactive_non_candidate(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    with pytest.raises(ValueError, match="pending component"):
+        execute_component_actions(
+            image, graph,
+            [_action("retry_with_box", ["parent"], {"box": [0.1, 0.1, 0.9, 0.9]})],
+            sam_runner=lambda **_: np.ones(image.shape[:2], dtype=bool),
+            input_dir=input_dir, output_dir=tmp_path / "round-inactive",
+        )
+
+
+def test_retry_box_maps_normalized_page_coordinates(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    calls = []
+    def runner(**kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        return np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    execute_component_actions(
+        image, graph,
+        [_action("retry_with_box", ["left"], {"box": [0.25, 0.25, 0.75, 0.75]})],
+        sam_runner=runner, input_dir=input_dir, output_dir=tmp_path / "round-02",
+    )
+    assert calls[0]["box"] == [4.0, 3.0, 12.0, 9.0]
+
+
+def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> None:
+    class Predictor:
+        def set_image(self, image: np.ndarray) -> None:
+            self.image = image
+        def predict(self, **kwargs: object) -> tuple[np.ndarray, np.ndarray, None]:
+            masks = np.zeros((2, 4, 5), dtype=bool)
+            masks[1, 1:3, 1:4] = True
+            return masks, np.asarray([0.1, 0.9]), None
+    generator = type("Generator", (), {"predictor": Predictor()})()
+    prompt = {"box": [1, 1, 4, 3], "positive": [], "negative": []}
+    first = component_prompt_mask(generator, np.zeros((4, 5, 3), dtype=np.uint8), prompt)
+    second = component_prompt_mask(generator, np.zeros((4, 5, 3), dtype=np.uint8), prompt)
+    assert np.array_equal(first, second)
+    assert int(first.sum()) == 6
+
+
+def test_component_sam_subprocess_runner_reads_result_and_cleans_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def run(command: list[str], **kwargs: object) -> None:
+        calls.append((command, kwargs))
+        result = Path(command[command.index("--result") + 1])
+        mask = np.zeros((4, 5), dtype=bool)
+        mask[1:3, 1:4] = True
+        packed = np.packbits(mask, axis=None).tobytes()
+        import base64
+        result.write_text(json.dumps([{
+            "mask": base64.b64encode(packed).decode("ascii"),
+            "mask_shape": [4, 5],
+        }]), encoding="utf-8")
+
+    monkeypatch.setattr("scripts.sam_worker.subprocess.run", run)
+    mask = run_component_prompt_worker(
+        np.zeros((4, 5, 3), dtype=np.uint8),
+        box=[1, 1, 4, 3], positive=[], negative=[], work_dir=tmp_path,
+    )
+    assert int(mask.sum()) == 6
+    assert calls[0][1]["check"] is True
+    assert calls[0][1]["timeout"] == 600
+    assert not list(tmp_path.glob("component-sam-*"))
 
 
 @pytest.fixture
