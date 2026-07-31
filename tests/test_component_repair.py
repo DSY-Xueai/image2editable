@@ -7,6 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import stat
 
 import pytest
 
@@ -450,6 +451,181 @@ def test_integrity_key_directory_symlink_fails_closed(
 
     with pytest.raises(RuntimeError, match="integrity key|link|reparse"):
         load_component_agent_request(request_path)
+
+
+def test_missing_key_after_published_round_is_not_rotated(page_session: dict) -> None:
+    first = build_component_agent_request(page_session, repair_round=1)
+    anchor = first.parents[5] / ".component-agent-integrity"
+    shutil.rmtree(anchor)
+
+    with pytest.raises(RuntimeError, match="published.+integrity key"):
+        build_component_agent_request(page_session, repair_round=2)
+
+    assert not anchor.exists()
+
+
+def test_build_streams_large_evidence_in_bounded_reads(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    large = Path(page_session["evidence"]["source.png"])
+    large.write_bytes(b"x" * (3 * 1024 * 1024 + 17))
+    real_fdopen = os.fdopen
+    read_sizes: list[int] = []
+
+    class TrackingFile:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> object:
+            return self._wrapped.__exit__(exc_type, exc, traceback)
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return self._wrapped.read(size)
+
+    def tracking_fdopen(descriptor: int, mode: str) -> object:
+        wrapped = real_fdopen(descriptor, mode)
+        return TrackingFile(wrapped) if "r" in mode else wrapped
+
+    monkeypatch.setattr(component_repair.os, "fdopen", tracking_fdopen)
+    build_component_agent_request(page_session, repair_round=1)
+
+    assert read_sizes
+    assert -1 not in read_sizes
+    assert max(read_sizes) <= 1024 * 1024
+
+
+def test_build_rejects_component_graph_over_json_limit(page_session: dict) -> None:
+    graph = Path(page_session["evidence"]["component-graph.json"])
+    graph.write_bytes(b" " * (16 * 1024 * 1024 + 1))
+
+    with pytest.raises(RuntimeError, match="JSON size limit"):
+        build_component_agent_request(page_session, repair_round=1)
+
+
+def test_load_rejects_marker_over_json_limit(page_session: dict) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    marker = request_path.parent / "publication-marker.json"
+    marker.write_bytes(marker.read_bytes() + b" " * (64 * 1024))
+
+    with pytest.raises(RuntimeError, match="JSON size limit"):
+        load_component_agent_request(request_path)
+
+
+def test_load_rejects_request_over_json_limit(page_session: dict) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    request_path.write_bytes(request_path.read_bytes() + b" " * (4 * 1024 * 1024))
+
+    with pytest.raises(RuntimeError, match="JSON size limit"):
+        load_component_agent_request(request_path)
+
+
+def test_load_rejects_component_graph_over_json_limit(page_session: dict) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    graph = request_path.parent / "component-graph.json"
+    graph.write_bytes(b" " * (16 * 1024 * 1024 + 1))
+
+    with pytest.raises(RuntimeError, match="JSON size limit"):
+        load_component_agent_request(request_path)
+
+
+def test_staging_replacement_before_rename_is_removed_and_retryable(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    component_repair._load_or_create_integrity_key(reconstruction)
+    real_rename = Path.rename
+    replaced = False
+
+    def replace_staging(path: Path, target: Path) -> Path:
+        nonlocal replaced
+        if path.name.startswith(".round-01.tmp-") and not replaced:
+            original = path.with_name(path.name + ".original")
+            attacker = path.with_name(path.name + ".attacker")
+            real_rename(path, original)
+            attacker.mkdir()
+            (attacker / "forged").write_bytes(b"forged")
+            real_rename(attacker, path)
+            replaced = True
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", replace_staging)
+    with pytest.raises(RuntimeError, match="staging identity"):
+        build_component_agent_request(page_session, repair_round=1)
+
+    round_dir = reconstruction / "agent" / "round-01"
+    assert not round_dir.exists()
+    monkeypatch.setattr(Path, "rename", real_rename)
+    assert build_component_agent_request(page_session, repair_round=1).is_file()
+
+
+def test_simulated_windows_reparse_flag_on_key_anchor_fails_closed(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    anchor = request_path.parents[5] / ".component-agent-integrity"
+    real_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    class ReparseStatus:
+        def __init__(self, wrapped: os.stat_result) -> None:
+            self._wrapped = wrapped
+            self.st_file_attributes = (
+                getattr(wrapped, "st_file_attributes", 0) | reparse_flag
+            )
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    def flagged_lstat(path: Path) -> object:
+        status = real_lstat(path)
+        return ReparseStatus(status) if path == anchor else status
+
+    monkeypatch.setattr(Path, "lstat", flagged_lstat)
+
+    with pytest.raises(RuntimeError, match="reparse"):
+        load_component_agent_request(request_path)
+
+
+def test_missing_key_scan_rejects_simulated_reparse_agent_directory(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    anchor = request_path.parents[5] / ".component-agent-integrity"
+    shutil.rmtree(anchor)
+    agent = request_path.parent.parent
+    real_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    class ReparseStatus:
+        def __init__(self, wrapped: os.stat_result) -> None:
+            self._wrapped = wrapped
+            self.st_file_attributes = (
+                getattr(wrapped, "st_file_attributes", 0) | reparse_flag
+            )
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    def flagged_lstat(path: Path) -> object:
+        status = real_lstat(path)
+        return ReparseStatus(status) if path == agent else status
+
+    monkeypatch.setattr(Path, "lstat", flagged_lstat)
+
+    with pytest.raises(RuntimeError, match="agent.+reparse"):
+        build_component_agent_request(page_session, repair_round=2)
+    assert not anchor.exists()
 
 
 def test_build_detects_parent_replaced_between_check_and_open(

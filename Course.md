@@ -57,6 +57,8 @@
 - Run 根目录原子创建并复用单一 32 字节 integrity key；marker 以 HMAC-SHA256 绑定请求原始 bytes、Provider、页面和轮次，key 缺失、损坏、链接或验签失败均 fail closed，不自动轮换。
 - 文件读写会在打开前快照从 `pages` 到目标父目录的完整身份，并在打开后及 I/O 后复核；父目录在检查与打开之间被替换时拒绝结果，marker 写入也使用相同保护。
 - 威胁边界：防止 Run/reconstruction 内请求、证据和 marker 被同步改写后伪装为合法发布；若同一 OS 账户已失陷并主动读取 integrity key，则不属于 Task 4 的防护范围。
+- 证据构建和复核使用 1 MiB 分块复制/增量 SHA-256，普通图片不设内容大小上限且不会八项同时常驻；仅结构化 JSON 限制为组件图 16 MiB、请求 4 MiB、marker 64 KiB，超限在解析前失败。
+- Run 已有任意发布轮次时，integrity key 缺失或损坏会拒绝继续构建，禁止自动生成新 key 使旧轮失效；固定 `pages/<page>/reconstruction/agent/round-*` 扫描同样拒绝链接与重解析点。
 
 ## 关键修改文件
 

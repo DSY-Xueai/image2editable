@@ -9,7 +9,6 @@ import secrets
 import shutil
 import stat
 import uuid
-from typing import BinaryIO
 
 from image2editable.component_contracts import (
     COMPONENT_EVIDENCE_NAMES,
@@ -25,6 +24,10 @@ REQUEST_NAME = "component_agent_request.json"
 MARKER_NAME = "publication-marker.json"
 INTEGRITY_DIRECTORY = ".component-agent-integrity"
 INTEGRITY_KEY_NAME = "key.bin"
+IO_CHUNK_SIZE = 1024 * 1024
+GRAPH_JSON_LIMIT = 16 * 1024 * 1024
+REQUEST_JSON_LIMIT = 4 * 1024 * 1024
+MARKER_JSON_LIMIT = 64 * 1024
 
 
 def build_component_agent_request(
@@ -42,18 +45,29 @@ def build_component_agent_request(
         raise RuntimeError(f"Agent evidence round is already published: {round_dir}")
     staging = agent_dir / f".{round_dir.name}.tmp-{uuid.uuid4().hex}"
     staging.mkdir()
+    staging_identity = _directory_identity(staging.lstat())
     try:
         records: dict[str, dict[str, str]] = {}
-        payloads: dict[str, bytes] = {}
+        graph_payload = b""
         for name in EVIDENCE_NAMES:
+            _require_single_directory_identity(staging, staging_identity)
             source = _contained_path(Path(sources[name]), reconstruction)
-            payload = _read_bound_file(source, reconstruction)
-            payloads[name] = payload
+            digest, captured = _copy_bound_file(
+                source,
+                staging / name,
+                reconstruction,
+                capture_limit=(
+                    GRAPH_JSON_LIMIT if name == "component-graph.json" else None
+                ),
+            )
             records[name] = {
                 "path": name,
-                "sha256": hashlib.sha256(payload).hexdigest(),
+                "sha256": digest,
             }
-        graph = json.loads(payloads["component-graph.json"].decode("utf-8"))
+            if captured is not None:
+                graph_payload = captured
+            _require_single_directory_identity(staging, staging_identity)
+        graph = json.loads(graph_payload.decode("utf-8"))
         validate_component_graph(graph)
         request = {
             "schema_version": 1,
@@ -71,15 +85,17 @@ def build_component_agent_request(
             "evidence": records,
         }
         validate_component_agent_request(request)
-        for name, payload in payloads.items():
-            _write_exclusive(staging / name, payload, reconstruction)
         request_bytes = json.dumps(
             request,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
+        if len(request_bytes) > REQUEST_JSON_LIMIT:
+            raise RuntimeError("Component agent request JSON size limit exceeded")
+        _require_single_directory_identity(staging, staging_identity)
         _write_exclusive(staging / REQUEST_NAME, request_bytes, reconstruction)
+        _require_single_directory_identity(staging, staging_identity)
         marker_fields = {
             "schema_version": 1,
             "page_id": page_id,
@@ -102,8 +118,20 @@ def build_component_agent_request(
             indent=2,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
+        if len(marker_bytes) > MARKER_JSON_LIMIT:
+            raise RuntimeError("Component agent marker JSON size limit exceeded")
         _write_exclusive(staging / MARKER_NAME, marker_bytes, reconstruction)
+        _require_single_directory_identity(staging, staging_identity)
+        _verify_staged_bundle(
+            staging,
+            reconstruction,
+            staging_identity,
+            records,
+            request_bytes,
+            marker_bytes,
+        )
         agent_identity = _snapshot_directory_chain(agent_dir, reconstruction)
+        _require_single_directory_identity(staging, staging_identity)
         try:
             staging.rename(round_dir)
         except OSError as error:
@@ -111,9 +139,19 @@ def build_component_agent_request(
                 f"Agent evidence round is already published: {round_dir}"
             ) from error
         _require_directory_chain_identity(agent_identity)
+        try:
+            round_status = round_dir.lstat()
+        except FileNotFoundError as error:
+            raise RuntimeError("Agent evidence staging identity changed") from error
+        if (
+            _is_link_or_reparse(round_status)
+            or not stat.S_ISDIR(round_status.st_mode)
+            or _directory_identity(round_status) != staging_identity
+        ):
+            _remove_rejected_round(round_dir, agent_dir)
+            raise RuntimeError("Agent evidence staging identity changed")
     except BaseException:
-        if staging.exists():
-            shutil.rmtree(staging)
+        _cleanup_owned_staging(staging, staging_identity)
         raise
     return round_dir / REQUEST_NAME
 
@@ -138,8 +176,19 @@ def load_component_agent_request(request_path: str | Path) -> dict:
     integrity_key = _load_integrity_key(reconstruction)
     marker_path = round_dir / MARKER_NAME
     try:
-        marker = json.loads(_read_bound_file(marker_path, reconstruction).decode("utf-8"))
-    except (FileNotFoundError, RuntimeError, ValueError, json.JSONDecodeError) as error:
+        marker_bytes = _read_bound_file(
+            marker_path,
+            reconstruction,
+            max_bytes=MARKER_JSON_LIMIT,
+            label="marker JSON",
+        )
+    except RuntimeError as error:
+        if "size limit" in str(error):
+            raise
+        raise RuntimeError("Component agent request marker is missing or invalid") from error
+    try:
+        marker = json.loads(marker_bytes.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError) as error:
         raise RuntimeError("Component agent request marker is missing or invalid") from error
     _validate_request_marker(marker)
     marker_fields = {
@@ -152,7 +201,12 @@ def load_component_agent_request(request_path: str | Path) -> dict:
     ).hexdigest()
     if not hmac.compare_digest(marker["hmac_sha256"], expected_signature):
         raise RuntimeError("Component agent publication signature mismatch")
-    request_bytes = _read_bound_file(request_path, reconstruction)
+    request_bytes = _read_bound_file(
+        request_path,
+        reconstruction,
+        max_bytes=REQUEST_JSON_LIMIT,
+        label="request JSON",
+    )
     if hashlib.sha256(request_bytes).hexdigest() != marker["request_sha256"]:
         raise RuntimeError("Component agent request hash mismatch")
     request = json.loads(request_bytes.decode("utf-8"))
@@ -170,12 +224,18 @@ def load_component_agent_request(request_path: str | Path) -> dict:
     graph_payload = b""
     for name, record in request["evidence"].items():
         evidence_path = _resolve_evidence_path(record["path"], round_dir, reconstruction)
-        payload = _read_bound_file(evidence_path, reconstruction)
-        digest = hashlib.sha256(payload).hexdigest()
+        if name == "component-graph.json":
+            graph_payload = _read_bound_file(
+                evidence_path,
+                reconstruction,
+                max_bytes=GRAPH_JSON_LIMIT,
+                label="component graph JSON",
+            )
+            digest = hashlib.sha256(graph_payload).hexdigest()
+        else:
+            digest = _hash_bound_file(evidence_path, reconstruction)
         if digest != record["sha256"]:
             raise RuntimeError(f"Component evidence hash mismatch: {name}")
-        if name == "component-graph.json":
-            graph_payload = payload
     if request["source_sha256"] != request["evidence"]["source.png"]["sha256"]:
         raise RuntimeError("Component source evidence hash mismatch")
     if request["graph_sha256"] != request["evidence"]["component-graph.json"]["sha256"]:
@@ -287,6 +347,87 @@ def _directory_identity(status: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
+def _require_single_directory_identity(
+    directory: Path,
+    expected: tuple[int, int, int, int],
+) -> None:
+    try:
+        status = directory.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError("Agent evidence staging identity changed") from error
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or _directory_identity(status) != expected
+    ):
+        raise RuntimeError("Agent evidence staging identity changed")
+
+
+def _cleanup_owned_staging(
+    staging: Path,
+    expected: tuple[int, int, int, int],
+) -> None:
+    try:
+        status = staging.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or _directory_identity(status) != expected
+    ):
+        return
+    shutil.rmtree(staging)
+
+
+def _remove_rejected_round(round_dir: Path, agent_dir: Path) -> None:
+    if round_dir.parent != agent_dir or not _is_round_name(round_dir.name):
+        raise RuntimeError("Refusing to clean an invalid Agent round path")
+    status = round_dir.lstat()
+    if _is_link_or_reparse(status):
+        if stat.S_ISLNK(status.st_mode):
+            round_dir.unlink()
+        else:
+            round_dir.rmdir()
+        return
+    if not stat.S_ISDIR(status.st_mode):
+        raise RuntimeError("Refusing to clean an unsafe Agent round")
+    expected = _directory_identity(status)
+    if _directory_identity(round_dir.lstat()) != expected:
+        raise RuntimeError("Refusing to clean a replaced Agent round")
+    shutil.rmtree(round_dir)
+
+
+def _verify_staged_bundle(
+    staging: Path,
+    reconstruction: Path,
+    staging_identity: tuple[int, int, int, int],
+    records: dict[str, dict[str, str]],
+    request_bytes: bytes,
+    marker_bytes: bytes,
+) -> None:
+    _require_single_directory_identity(staging, staging_identity)
+    for name, record in records.items():
+        if _hash_bound_file(staging / name, reconstruction) != record["sha256"]:
+            raise RuntimeError(f"Staged component evidence hash mismatch: {name}")
+        _require_single_directory_identity(staging, staging_identity)
+    if _read_bound_file(
+        staging / REQUEST_NAME,
+        reconstruction,
+        max_bytes=REQUEST_JSON_LIMIT,
+        label="request JSON",
+    ) != request_bytes:
+        raise RuntimeError("Staged component request changed before publication")
+    if _read_bound_file(
+        staging / MARKER_NAME,
+        reconstruction,
+        max_bytes=MARKER_JSON_LIMIT,
+        label="marker JSON",
+    ) != marker_bytes:
+        raise RuntimeError("Staged component marker changed before publication")
+    _require_single_directory_identity(staging, staging_identity)
+
+
 def _ensure_owned_directory(directory: Path, root: Path) -> None:
     try:
         directory.mkdir()
@@ -295,7 +436,13 @@ def _ensure_owned_directory(directory: Path, root: Path) -> None:
     _validate_directory_chain(directory, root)
 
 
-def _read_bound_file(path: Path, reconstruction: Path) -> bytes:
+def _read_bound_file(
+    path: Path,
+    reconstruction: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> bytes:
     _contained_path(path, reconstruction)
     directory_identity = _snapshot_directory_chain(path.parent, reconstruction)
     flags = os.O_RDONLY
@@ -317,7 +464,16 @@ def _read_bound_file(path: Path, reconstruction: Path) -> bytes:
             raise RuntimeError(f"Evidence file is an unsafe hard link: {path}")
         if (opened.st_dev, opened.st_ino) != (path_status.st_dev, path_status.st_ino):
             raise RuntimeError(f"Evidence file identity changed: {path}")
-        payload = source.read()
+        chunks = []
+        total = 0
+        while True:
+            chunk = source.read(IO_CHUNK_SIZE)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError(f"Component agent {label} size limit exceeded")
+            chunks.append(chunk)
         stable = os.fstat(source.fileno())
         if (opened.st_dev, opened.st_ino, opened.st_size) != (
             stable.st_dev,
@@ -326,7 +482,129 @@ def _read_bound_file(path: Path, reconstruction: Path) -> bytes:
         ):
             raise RuntimeError(f"Evidence file changed while reading: {path}")
         _require_directory_chain_identity(directory_identity)
-        return payload
+        return b"".join(chunks)
+
+
+def _hash_bound_file(path: Path, reconstruction: Path) -> str:
+    _contained_path(path, reconstruction)
+    directory_identity = _snapshot_directory_chain(path.parent, reconstruction)
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RuntimeError(f"Evidence file cannot be opened safely: {path}") from error
+    with os.fdopen(descriptor, "rb") as source:
+        opened = _validate_open_regular_file(path, source.fileno(), directory_identity)
+        digest = hashlib.sha256()
+        while True:
+            chunk = source.read(IO_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+        _validate_stable_open_file(path, source.fileno(), opened, directory_identity)
+        return digest.hexdigest()
+
+
+def _copy_bound_file(
+    source_path: Path,
+    target_path: Path,
+    reconstruction: Path,
+    *,
+    capture_limit: int | None,
+) -> tuple[str, bytes | None]:
+    _contained_path(source_path, reconstruction)
+    _contained_path(target_path, reconstruction)
+    source_directories = _snapshot_directory_chain(
+        source_path.parent, reconstruction
+    )
+    target_directories = _snapshot_directory_chain(
+        target_path.parent, reconstruction
+    )
+    read_flags = os.O_RDONLY
+    write_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        read_flags |= getattr(os, name, 0)
+        write_flags |= getattr(os, name, 0)
+    source_descriptor = os.open(source_path, read_flags)
+    try:
+        target_descriptor = os.open(target_path, write_flags, 0o600)
+    except BaseException:
+        os.close(source_descriptor)
+        raise
+    with os.fdopen(source_descriptor, "rb") as source, os.fdopen(
+        target_descriptor, "wb"
+    ) as target:
+        source_status = _validate_open_regular_file(
+            source_path, source.fileno(), source_directories
+        )
+        target_status = _validate_open_regular_file(
+            target_path, target.fileno(), target_directories
+        )
+        digest = hashlib.sha256()
+        captured = bytearray() if capture_limit is not None else None
+        while True:
+            chunk = source.read(IO_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+            target.write(chunk)
+            if captured is not None:
+                if len(captured) + len(chunk) > capture_limit:
+                    raise RuntimeError(
+                        "Component agent component graph JSON size limit exceeded"
+                    )
+                captured.extend(chunk)
+        target.flush()
+        os.fsync(target.fileno())
+        _validate_stable_open_file(
+            source_path, source.fileno(), source_status, source_directories
+        )
+        _validate_stable_open_file(
+            target_path,
+            target.fileno(),
+            target_status,
+            target_directories,
+            allow_size_change=True,
+        )
+        return digest.hexdigest(), None if captured is None else bytes(captured)
+
+
+def _validate_open_regular_file(
+    path: Path,
+    descriptor: int,
+    directory_identity: list[tuple[Path, tuple[int, int, int, int]]],
+) -> os.stat_result:
+    _require_directory_chain_identity(directory_identity)
+    opened = os.fstat(descriptor)
+    path_status = path.lstat()
+    if _is_link_or_reparse(path_status):
+        raise RuntimeError(f"Evidence file is a link or reparse point: {path}")
+    if not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(path_status.st_mode):
+        raise RuntimeError(f"Evidence is not a regular file: {path}")
+    if opened.st_nlink != 1 or path_status.st_nlink != 1:
+        raise RuntimeError(f"Evidence file is an unsafe hard link: {path}")
+    if (opened.st_dev, opened.st_ino) != (path_status.st_dev, path_status.st_ino):
+        raise RuntimeError(f"Evidence file identity changed: {path}")
+    return opened
+
+
+def _validate_stable_open_file(
+    path: Path,
+    descriptor: int,
+    opened: os.stat_result,
+    directory_identity: list[tuple[Path, tuple[int, int, int, int]]],
+    *,
+    allow_size_change: bool = False,
+) -> None:
+    stable = os.fstat(descriptor)
+    if (
+        (opened.st_dev, opened.st_ino) != (stable.st_dev, stable.st_ino)
+        or (not allow_size_change and opened.st_size != stable.st_size)
+    ):
+        raise RuntimeError(f"Evidence file changed while reading: {path}")
+    _require_directory_chain_identity(directory_identity)
 
 
 def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
@@ -353,6 +631,10 @@ def _load_or_create_integrity_key(reconstruction: Path) -> bytes:
     anchor = run_root / INTEGRITY_DIRECTORY
     if anchor.exists() or anchor.is_symlink():
         return _read_integrity_key(anchor, run_root)
+    if _run_has_published_rounds(run_root):
+        raise RuntimeError(
+            "Run has published Agent rounds but its integrity key is missing"
+        )
     staging = run_root / f".{INTEGRITY_DIRECTORY}.tmp-{uuid.uuid4().hex}"
     try:
         staging.mkdir(mode=0o700)
@@ -379,6 +661,58 @@ def _load_integrity_key(reconstruction: Path) -> bytes:
     if not anchor.exists() and not anchor.is_symlink():
         raise RuntimeError("Component agent integrity key is missing")
     return _read_integrity_key(anchor, run_root)
+
+
+def _run_has_published_rounds(run_root: Path) -> bool:
+    pages = run_root / "pages"
+    if not pages.exists() and not pages.is_symlink():
+        return False
+    _require_safe_directory(pages, "pages")
+    found = False
+    for page in pages.iterdir():
+        page_status = page.lstat()
+        if _is_link_or_reparse(page_status):
+            raise RuntimeError(f"Run pages entry is a link or reparse point: {page}")
+        if not stat.S_ISDIR(page_status.st_mode):
+            continue
+        reconstruction = page / "reconstruction"
+        if not reconstruction.exists() and not reconstruction.is_symlink():
+            continue
+        _require_safe_directory(reconstruction, "reconstruction")
+        agent = reconstruction / "agent"
+        if not agent.exists() and not agent.is_symlink():
+            continue
+        _require_safe_directory(agent, "agent")
+        for child in agent.iterdir():
+            if not _is_round_name(child.name):
+                continue
+            status = child.lstat()
+            if _is_link_or_reparse(status):
+                raise RuntimeError(
+                    f"Published Agent round is a link or reparse point: {child}"
+                )
+            if not stat.S_ISDIR(status.st_mode):
+                raise RuntimeError(f"Published Agent round is not a directory: {child}")
+            found = True
+    return found
+
+
+def _require_safe_directory(path: Path, label: str) -> None:
+    status = path.lstat()
+    if _is_link_or_reparse(status):
+        raise RuntimeError(f"Run {label} is a link or reparse point: {path}")
+    if not stat.S_ISDIR(status.st_mode):
+        raise RuntimeError(f"Run {label} is not a directory: {path}")
+
+
+def _is_round_name(name: str) -> bool:
+    return len(name) == 8 and name.startswith("round-") and name[6:] in {
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+    }
 
 
 def _write_new_integrity_key(
@@ -426,7 +760,7 @@ def _read_integrity_key(anchor: Path, run_root: Path) -> bytes:
             raise RuntimeError("Component agent integrity key is an unsafe hard link")
         if (opened.st_dev, opened.st_ino) != (path_status.st_dev, path_status.st_ino):
             raise RuntimeError("Component agent integrity key identity changed")
-        key = source.read()
+        key = source.read(33)
         stable = os.fstat(source.fileno())
         if (
             len(key) != 32
