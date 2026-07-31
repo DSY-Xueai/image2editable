@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 1 已完成：Run 清单冻结 `host`/`local` Agent Provider，运行时拒绝缺失或非法 Provider；后续组件动作尚未实现。
+- P2.3 Task 1 已完成：Run 清单冻结 `host`/`local` Agent Provider，所有读取 Run 清单的运行时入口（包括状态查询）均拒绝缺失或非法 Provider；后续组件动作尚未实现。
 
 ## 本轮新增或变更
 

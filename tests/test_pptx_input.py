@@ -791,6 +791,18 @@ def test_prepare_pptx_job_freezes_agent_provider(tmp_path, agent_provider):
     ] == agent_provider
 
 
+@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+def test_prepare_pptx_job_rejects_invalid_agent_provider(
+    tmp_path, agent_provider
+):
+    with pytest.raises(ValueError, match="agent_provider"):
+        pptx_input.prepare_pptx_job(
+            tmp_path / "source.pptx",
+            run_dir=tmp_path / "run",
+            agent_provider=agent_provider,
+        )
+
+
 def test_prepare_pptx_job_cleans_failed_run(tmp_path):
     source = tmp_path / "broken.pptx"
     source.write_bytes(b"not a zip")

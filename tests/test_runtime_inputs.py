@@ -196,6 +196,22 @@ def test_prepare_image_job_freezes_agent_provider(
     ] == agent_provider
 
 
+@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+def test_public_image_prepare_apis_reject_invalid_agent_provider(
+    tmp_path: Path, agent_provider: object
+) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, (1, 2, 3))
+
+    for prepare in (prepare_image_job, runtime.prepare_job):
+        with pytest.raises(ValueError, match="agent_provider"):
+            prepare(
+                source,
+                run_dir=tmp_path / f"run-{id(prepare)}",
+                agent_provider=agent_provider,
+            )
+
+
 @pytest.mark.parametrize("as_string", [False, True])
 def test_prepare_apis_accept_one_path_directly(
     tmp_path: Path, as_string: bool

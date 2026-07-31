@@ -14,6 +14,7 @@ import pytest
 
 from image2editable import cli
 from image2editable import doctor
+from image2editable.inputs import prepare_image_job
 
 
 def test_pyproject_exposes_complete_package_metadata() -> None:
@@ -410,6 +411,25 @@ def test_cli_doctor_exit_code_follows_ready(
 
     assert cli.main(["doctor"]) == expected_exit
     assert json.loads(capsys.readouterr().out) == report
+
+
+@pytest.mark.parametrize("provider", [None, "remote"])
+def test_cli_status_rejects_missing_or_invalid_manifest_agent_provider(
+    tmp_path: Path, provider: object
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    manifest_path = run_dir / "job_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if provider is None:
+        del manifest["options"]["agent_provider"]
+    else:
+        manifest["options"]["agent_provider"] = provider
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="manifest.*agent_provider"):
+        cli.main(["run", "status", str(run_dir)])
 
 
 def test_module_help_starts() -> None:

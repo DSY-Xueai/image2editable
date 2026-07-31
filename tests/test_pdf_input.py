@@ -245,6 +245,18 @@ def test_prepare_pdf_job_freezes_agent_provider(
     assert RunStore.open(run).read_json("page_jobs.json")["pages"]["page_001"]["status"] == "pending"
 
 
+@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+def test_prepare_pdf_job_rejects_invalid_agent_provider(
+    tmp_path: Path, agent_provider: object
+) -> None:
+    with pytest.raises(ValueError, match="agent_provider"):
+        _pdf_input().prepare_pdf_job(
+            tmp_path / "source.pdf",
+            run_dir=tmp_path / "run",
+            agent_provider=agent_provider,
+        )
+
+
 def test_rerender_pdf_page_activates_one_higher_detail_render(tmp_path: Path) -> None:
     source = tmp_path / "source.pdf"
     _write_two_page_pdf(source)

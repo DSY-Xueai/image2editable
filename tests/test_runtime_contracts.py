@@ -90,6 +90,25 @@ def test_runtime_rejects_invalid_provider_before_agent_delegation(
         runtime.next_candidate(run_dir)
 
 
+@pytest.mark.parametrize("provider", [None, "remote"])
+def test_get_status_rejects_missing_or_invalid_manifest_agent_provider(
+    tmp_path, provider: object
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    manifest_path = run_dir / "job_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if provider is None:
+        del manifest["options"]["agent_provider"]
+    else:
+        manifest["options"]["agent_provider"] = provider
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="manifest.*agent_provider"):
+        runtime.get_status(run_dir)
+
+
 def test_run_state_rejects_skipped_transition() -> None:
     state = {
         "schema_version": SCHEMA_VERSION,

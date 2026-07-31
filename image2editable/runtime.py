@@ -138,6 +138,7 @@ def prepare_job(
 
 def get_status(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
+    _manifest_input(store)
     return {
         "run": store.read_json("run_state.json"),
         "pages": store.read_json("page_jobs.json"),
