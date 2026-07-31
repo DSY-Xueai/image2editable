@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import stat
 
 import pytest
 
@@ -56,11 +58,27 @@ def _publish_request(run_dir: Path) -> Path:
 
 
 def _capability_response(item: dict) -> dict:
-    challenge_dir = Path(item["image_path"]).parent
-    expected = json.loads((challenge_dir / "metadata.json").read_text(encoding="utf-8"))["expected"]
     return {"schema_version": 1, "kind": "host_capability_response",
             "challenge_id": item["challenge_id"],
-            "observed": expected}
+            "observed": _observe_challenge(Path(item["image_path"]))}
+
+
+def _observe_challenge(path: Path) -> dict:
+    from PIL import Image
+    image = Image.open(path).convert("RGB")
+    for color_name in host_agent.CHALLENGE_COLORS:
+        color = tuple(bytes.fromhex(color_name[1:]))
+        components = _color_components(image, color)
+        if components:
+            first = components[0]
+            if first["top_width"] == first["middle_width"] == first["bottom_width"]:
+                shape = "square"
+            elif first["top_width"] < first["middle_width"] < first["bottom_width"]:
+                shape = "triangle"
+            else:
+                shape = "circle"
+            return {"shape": shape, "color": color_name, "count": len(components)}
+    raise AssertionError("challenge shape not found")
 
 
 def _write_json(path: Path, value: dict) -> Path:
@@ -76,6 +94,7 @@ def test_host_next_returns_random_hash_bound_visual_handshake_before_page(host_r
     assert item["required_capabilities"] == [
         "vision", "local_file_read", "tool_use", "structured_json"]
     assert metadata["challenge_id"] == item["challenge_id"]
+    assert "expected" not in metadata
     assert metadata["image_sha256"] == hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest()
 
 
@@ -96,9 +115,11 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
     metadata = json.loads((run_dir / "host-challenge/metadata.json").read_text(encoding="utf-8"))
     from PIL import Image
     image = Image.open(item["image_path"]).convert("RGB")
-    color = tuple(bytes.fromhex(metadata["expected"]["color"][1:]))
+    observed = _observe_challenge(Path(item["image_path"]))
+    color = tuple(bytes.fromhex(observed["color"][1:]))
     components = _color_components(image, color)
-    assert metadata["expected"] == {"shape": shape, "color": "#d9485f", "count": 4}
+    assert "expected" not in metadata
+    assert observed == {"shape": shape, "color": "#d9485f", "count": 4}
     assert len(components) == 4
     assert all(component["width"] == component["height"] for component in components)
     if shape == "triangle":
@@ -112,7 +133,9 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
 def _nonce_for(*, shape: str, color: str, count: int) -> bytes:
     for value in range(100000):
         nonce = value.to_bytes(32, "big")
-        digest = hashlib.sha256(nonce).digest()
+        digest = hmac.new(
+            nonce, b"image2editable-host-challenge\0" + nonce, hashlib.sha256
+        ).digest()
         if (host_agent.CHALLENGE_SHAPES[digest[0] % len(host_agent.CHALLENGE_SHAPES)] == shape
                 and host_agent.CHALLENGE_COLORS[digest[1] % len(host_agent.CHALLENGE_COLORS)] == color
                 and host_agent.CHALLENGE_COUNTS[digest[2] % len(host_agent.CHALLENGE_COUNTS)] == count):
@@ -153,6 +176,30 @@ def test_host_module_does_not_import_or_download_local_models() -> None:
         assert forbidden not in source
 
 
+def test_host_document_reader_rejects_windows_reparse_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = _write_json(tmp_path / "plan.json", {})
+    real_lstat = Path.lstat
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    class ReparseStatus:
+        def __init__(self, wrapped: object) -> None:
+            self._wrapped = wrapped
+            self.st_file_attributes = getattr(wrapped, "st_file_attributes", 0) | flag
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    def fake_lstat(path: Path) -> object:
+        status = real_lstat(path)
+        return ReparseStatus(status) if path == document else status
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    with pytest.raises(ValueError, match="unsafe"):
+        host_agent._read_json_file(document)
+
+
 def test_capability_must_match_exact_visual_answer(host_run: Path, tmp_path: Path) -> None:
     item = next_host_agent_item(host_run)
     response = _capability_response(item)
@@ -181,12 +228,22 @@ def test_metadata_expected_tampering_fails_even_when_value_is_whitelisted(
     next_host_agent_item(host_run)
     metadata_path = host_run / "host-challenge/metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["expected"]["shape"] = next(
-        value for value in host_agent.CHALLENGE_SHAPES
-        if value != metadata["expected"]["shape"]
-    )
+    metadata["nonce"] = ("00" if not metadata["nonce"].startswith("00") else "01") + metadata["nonce"][2:]
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     with pytest.raises(RuntimeError, match="metadata|expected|challenge"):
+        next_host_agent_item(host_run)
+
+
+def test_missing_or_changed_integrity_key_rejects_published_challenge(host_run: Path) -> None:
+    next_host_agent_item(host_run)
+    key = host_run / ".component-agent-integrity/key.bin"
+    original = key.read_bytes()
+    key.unlink()
+    with pytest.raises(RuntimeError, match="integrity key"):
+        next_host_agent_item(host_run)
+    key.write_bytes(original)
+    key.write_bytes(b"x" * 32)
+    with pytest.raises(RuntimeError, match="challenge"):
         next_host_agent_item(host_run)
 
 
@@ -414,4 +471,22 @@ def test_different_plan_cannot_recover_half_committed_record(
                                      "evidence": ["visible boundary"]}]}
     with pytest.raises(RuntimeError, match="different|already recorded"):
         record_host_plan(host_run, _write_json(tmp_path / "changed.json", changed))
+    assert RunStore.open(host_run).read_json("run_state.json")["status"] == "awaiting_agent"
+
+
+def test_wrong_sha_preexisting_plan_cannot_recover_run(
+    host_run: Path, tmp_path: Path
+) -> None:
+    _publish_request(host_run)
+    handshake = next_host_agent_item(host_run)
+    record_host_plan(host_run, _write_json(tmp_path / "capability.json", _capability_response(handshake)))
+    request = next_host_agent_item(host_run)
+    bad = {"schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+           "provider": "host", "repair_round": 1, "request_sha256": "0" * 64,
+           "actions": []}
+    destination = host_run / f"host-component-plan-page_001-01-{request['request_sha256']}.json"
+    destination.write_text(json.dumps(bad), encoding="utf-8")
+    plan_path = _write_json(tmp_path / "bad-plan.json", bad)
+    with pytest.raises(ValueError, match="request_sha256"):
+        record_host_plan(host_run, plan_path)
     assert RunStore.open(host_run).read_json("run_state.json")["status"] == "awaiting_agent"

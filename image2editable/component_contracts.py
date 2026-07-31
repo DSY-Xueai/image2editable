@@ -104,6 +104,9 @@ _ACTION_PARAMETERS = {
     "attach_text": frozenset(),
     "collapse_to_parent": frozenset(),
 }
+_SINGLE_OBJECT_ACTIONS = frozenset(
+    {"accept", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
+)
 
 
 def _validate_normalized_point(value: object, field: str) -> None:
@@ -115,7 +118,7 @@ def _validate_normalized_point(value: object, field: str) -> None:
         raise ValueError(f"component action {field} coordinates are invalid")
 
 
-def validate_component_plan(plan: object, *, request: dict) -> dict:
+def validate_component_plan(plan: object, *, request: dict, graph: dict | None = None) -> dict:
     validate_component_agent_request(request)
     if not isinstance(plan, dict) or set(plan) != _COMPONENT_PLAN_FIELDS:
         raise ValueError("component plan fields are invalid")
@@ -148,6 +151,12 @@ def validate_component_plan(plan: object, *, request: dict) -> dict:
             or any(value not in known_ids for value in object_ids)
         ):
             raise ValueError("component action object_ids are invalid")
+        if (
+            (name in _SINGLE_OBJECT_ACTIONS and len(object_ids) != 1)
+            or (name == "merge" and len(object_ids) < 2)
+            or (name == "attach_text" and len(object_ids) != 2)
+        ):
+            raise ValueError("component action object count is invalid")
         if set(object_ids) & set(request["frozen_ids"]):
             raise ValueError("component action object is frozen")
         if touched & set(object_ids):
@@ -187,7 +196,35 @@ def validate_component_plan(plan: object, *, request: dict) -> dict:
                     _validate_normalized_point(point, field)
             if not parameters["positive"]:
                 raise ValueError("component action positive coordinates are invalid")
+        if graph is not None:
+            _validate_action_graph_roles(name, object_ids, graph)
     return plan
+
+
+def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict) -> None:
+    if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list):
+        raise ValueError("component plan graph is invalid")
+    nodes = {node.get("id"): node for node in graph["nodes"] if isinstance(node, dict)}
+    try:
+        selected = [nodes[object_id] for object_id in object_ids]
+    except KeyError as error:
+        raise ValueError("component action object is missing from graph") from error
+    if action == "attach_text":
+        if selected[0].get("kind") == "text" or selected[1].get("kind") != "text":
+            raise ValueError("attach_text requires visual then text roles")
+        return
+    if action == "collapse_to_parent":
+        if selected[0].get("kind") != "parent":
+            raise ValueError("collapse_to_parent requires parent kind")
+        return
+    if any(node.get("kind") == "text" for node in selected):
+        raise ValueError("component action cannot target text kind")
+    if action == "merge":
+        kinds = {node.get("kind") for node in selected}
+        if len(kinds) != 1:
+            raise ValueError("merge requires the same component kind")
+        if kinds == {"child"} and len({node.get("parent_id") for node in selected}) != 1:
+            raise ValueError("merge child components must share one parent")
 
 
 def validate_component_agent_request(request: object) -> dict:

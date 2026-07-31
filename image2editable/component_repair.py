@@ -267,6 +267,23 @@ def load_component_agent_request(request_path: str | Path) -> dict:
     return request
 
 
+def load_component_agent_graph(request_path: str | Path) -> dict:
+    request_path = Path(request_path)
+    request = load_component_agent_request(request_path)
+    reconstruction = request_path.parent.parent.parent
+    graph_path = request_path.parent / request["evidence"]["component-graph.json"]["path"]
+    payload = _read_bound_file(
+        graph_path,
+        reconstruction,
+        max_bytes=GRAPH_JSON_LIMIT,
+        label="component graph JSON",
+    )
+    if hashlib.sha256(payload).hexdigest() != request["graph_sha256"]:
+        raise RuntimeError("Component graph evidence hash mismatch")
+    graph = json.loads(payload.decode("utf-8"))
+    return validate_component_graph(graph)
+
+
 def _validate_page_session(session: object) -> tuple[str, str, Path, dict]:
     fields = {"page_id", "provider", "reconstruction_dir", "evidence"}
     if not isinstance(session, dict) or set(session) != fields:
@@ -720,10 +737,16 @@ def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
 
 def _load_or_create_integrity_key(reconstruction: Path) -> bytes:
     run_root = reconstruction.parent.parent.parent
+    return load_or_create_run_integrity_key(run_root)
+
+
+def load_or_create_run_integrity_key(run_root: str | Path) -> bytes:
+    run_root = Path(run_root).resolve()
     anchor = run_root / INTEGRITY_DIRECTORY
     if anchor.exists() or anchor.is_symlink():
         return _read_integrity_key(anchor, run_root)
-    if _run_has_published_rounds(run_root):
+    host_challenge = run_root / "host-challenge"
+    if _run_has_published_rounds(run_root) or host_challenge.exists() or host_challenge.is_symlink():
         raise RuntimeError(
             "Run has published Agent rounds but its integrity key is missing"
         )
@@ -749,6 +772,11 @@ def _load_or_create_integrity_key(reconstruction: Path) -> bytes:
 
 def _load_integrity_key(reconstruction: Path) -> bytes:
     run_root = reconstruction.parent.parent.parent
+    return load_run_integrity_key(run_root)
+
+
+def load_run_integrity_key(run_root: str | Path) -> bytes:
+    run_root = Path(run_root).resolve()
     anchor = run_root / INTEGRITY_DIRECTORY
     if not anchor.exists() and not anchor.is_symlink():
         raise RuntimeError("Component agent integrity key is missing")

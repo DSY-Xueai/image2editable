@@ -65,10 +65,10 @@
 ## P2.3 Task 5 本轮变更
 
 - `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge；随机 nonce 确定性派生严格白名单内的形状、颜色和数量，三角、圆和方形均使用等宽高边界。Host 路径不导入本地模型模块、不下载模型。
-- challenge ID 规范绑定 nonce、派生答案和 PNG 哈希；loader 会从 nonce 重算答案并复核图片，不能信任 metadata 自报值。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
+- challenge metadata 不保存答案；受信任端使用 Task 4 Run integrity key 对 nonce 做 HMAC 派生，再以 challenge ID 绑定派生答案和 PNG 哈希。loader 会重新读取安全 key、重算答案并复核图片；已有 challenge 时 key 缺失、损坏或被替换均 fail closed，不静默轮换。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
 - capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
-- `image2editable agent record RUN_DIR --plan PLAN.json` 严格校验计划字段、动作对象、归一化坐标、置信度和非空证据；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、冲突动作均拒绝。
+- `image2editable agent record RUN_DIR --plan PLAN.json` 在首次写入和半提交恢复前均先校验当前请求 SHA；同时读取 Task 4 已认证组件图，严格校验动作对象数量与真实 kind/parent 角色。`attach_text` 只接受 visual→text，`collapse_to_parent` 只接受 parent，child merge 只能同父级；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、跨角色/跨父级及冲突动作均拒绝。
 - Agent next/record 与执行、恢复共用同一把 Run OS lease；`next` 最多有界等待 30 秒并在单一临界区内读取或发布 challenge，跨平台并发调用只会加载同一个完整结果，超时明确失败；`record` 仍非阻塞拒绝并发。计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
 
 ## 关键修改文件

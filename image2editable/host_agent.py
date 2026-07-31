@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from contextlib import contextmanager
@@ -12,7 +13,12 @@ import time
 import uuid
 
 from image2editable.component_contracts import validate_component_plan
-from image2editable.component_repair import load_component_agent_request
+from image2editable.component_repair import (
+    load_component_agent_request,
+    load_component_agent_graph,
+    load_or_create_run_integrity_key,
+    load_run_integrity_key,
+)
 from image2editable.contracts import RunStatus, SCHEMA_VERSION
 from image2editable.execution import ExecutionLease
 from image2editable.store import RunStore
@@ -110,9 +116,12 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
             f"host-component-plan-{request['page_id']}-"
             f"{request['repair_round']:02d}-{request_sha256}.json"
         )
+        if document.get("request_sha256") != request_sha256:
+            raise ValueError("component plan request_sha256 does not match current request")
+        graph = load_component_agent_graph(request_path)
         if destination.exists() or destination.is_symlink():
             existing = _read_json_file(destination)
-            validate_component_plan(existing, request=request)
+            validate_component_plan(existing, request=request, graph=graph)
             status = store.read_json("run_state.json")["status"]
             if existing != document:
                 raise RuntimeError("A different component plan is already recorded")
@@ -126,9 +135,7 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
             }
         if store.read_json("run_state.json")["status"] != RunStatus.AWAITING_AGENT.value:
             raise RuntimeError("Run must be awaiting_agent")
-        if document.get("request_sha256") != request_sha256:
-            raise ValueError("component plan request_sha256 does not match current request")
-        validate_component_plan(document, request=request)
+        validate_component_plan(document, request=request, graph=graph)
         _write_json_exclusive(destination, document)
         store.transition_run(RunStatus.PREPARED)
         return {
@@ -200,8 +207,9 @@ def _create_challenge(store: RunStore) -> dict:
     staging = store.root / f".host-challenge.tmp-{uuid.uuid4().hex}"
     staging.mkdir()
     staging_identity = _directory_identity(staging)
+    integrity_key = load_or_create_run_integrity_key(store.root)
     nonce = secrets.token_bytes(32)
-    expected = _expected_from_nonce(nonce)
+    expected = _expected_from_nonce(integrity_key, nonce)
     image = Image.new("RGB", (240, 120), "white")
     draw = ImageDraw.Draw(image)
     spacing = 220 // expected["count"]
@@ -222,14 +230,13 @@ def _create_challenge(store: RunStore) -> dict:
         image_sha256 = hashlib.sha256(
             _read_regular_file(image_path, 1024 * 1024)
         ).hexdigest()
-        challenge_id = _challenge_id(nonce, expected, image_sha256)
+        challenge_id = _challenge_id(integrity_key, nonce, expected, image_sha256)
         challenge = {
             "schema_version": SCHEMA_VERSION,
             "challenge_id": challenge_id,
             "nonce": nonce.hex(),
             "image_path": "challenge.png",
             "image_sha256": image_sha256,
-            "expected": expected,
         }
         _write_challenge_metadata(staging / "metadata.json", challenge)
         _load_challenge_directory(staging)
@@ -261,7 +268,7 @@ def _load_challenge_directory(directory: Path) -> dict:
     _require_directory_identity(directory, identity)
     fields = {
         "schema_version", "challenge_id", "nonce", "image_path",
-        "image_sha256", "expected",
+        "image_sha256",
     }
     if set(metadata) != fields or metadata["schema_version"] != SCHEMA_VERSION:
         raise RuntimeError("Host capability challenge metadata is invalid")
@@ -269,8 +276,10 @@ def _load_challenge_directory(directory: Path) -> dict:
         nonce = bytes.fromhex(metadata["nonce"])
     except (TypeError, ValueError) as error:
         raise RuntimeError("Host capability challenge nonce is invalid") from error
-    if len(nonce) != 32 or metadata["expected"] != _expected_from_nonce(nonce):
-        raise RuntimeError("Host capability challenge expected value is invalid")
+    if len(nonce) != 32:
+        raise RuntimeError("Host capability challenge nonce is invalid")
+    integrity_key = load_run_integrity_key(directory.parent)
+    expected = _expected_from_nonce(integrity_key, nonce)
     if metadata["image_path"] != "challenge.png":
         raise RuntimeError("Host capability challenge image path is invalid")
     image_sha256 = hashlib.sha256(
@@ -280,10 +289,10 @@ def _load_challenge_directory(directory: Path) -> dict:
     if image_sha256 != metadata["image_sha256"]:
         raise RuntimeError("Host capability challenge hash mismatch")
     if metadata["challenge_id"] != _challenge_id(
-        nonce, metadata["expected"], image_sha256
+        integrity_key, nonce, expected, image_sha256
     ):
         raise RuntimeError("Host capability challenge ID is invalid")
-    return metadata
+    return {**metadata, "expected": expected}
 
 
 def _require_directory_identity(directory: Path, identity: tuple[int, int]) -> None:
@@ -299,8 +308,10 @@ def _require_directory_identity(directory: Path, identity: tuple[int, int]) -> N
         raise RuntimeError("Host capability challenge directory changed")
 
 
-def _expected_from_nonce(nonce: bytes) -> dict:
-    digest = hashlib.sha256(nonce).digest()
+def _expected_from_nonce(integrity_key: bytes, nonce: bytes) -> dict:
+    digest = hmac.new(
+        integrity_key, b"image2editable-host-challenge\0" + nonce, hashlib.sha256
+    ).digest()
     return {
         "shape": CHALLENGE_SHAPES[digest[0] % len(CHALLENGE_SHAPES)],
         "color": CHALLENGE_COLORS[digest[1] % len(CHALLENGE_COLORS)],
@@ -308,11 +319,22 @@ def _expected_from_nonce(nonce: bytes) -> dict:
     }
 
 
-def _challenge_id(nonce: bytes, expected: dict, image_sha256: str) -> str:
+def _challenge_id(
+    integrity_key: bytes, nonce: bytes, expected: dict, image_sha256: str
+) -> str:
     canonical = json.dumps(
         expected, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
-    return hashlib.sha256(nonce + b"\0" + canonical + b"\0" + image_sha256.encode("ascii")).hexdigest()
+    return hmac.new(
+        integrity_key,
+        b"image2editable-host-challenge-id\0"
+        + nonce
+        + b"\0"
+        + canonical
+        + b"\0"
+        + image_sha256.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _write_challenge_metadata(path: Path, metadata: dict) -> None:
@@ -418,7 +440,7 @@ def _read_json_file(path: str | Path) -> dict:
 
 def _read_regular_file(path: Path, limit: int) -> bytes:
     status = path.lstat()
-    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+    if _is_link_or_reparse(status) or not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
         raise ValueError("Host Agent document path is unsafe")
     with path.open("rb") as file:
         opened = os.fstat(file.fileno())
