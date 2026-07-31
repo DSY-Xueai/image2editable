@@ -522,7 +522,22 @@ def needs_large_mask_inpaint(mask: np.ndarray) -> bool:
     mask_ratio = np.count_nonzero(binary) / binary.size
     depth = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
     max_depth_ratio = float(depth.max()) / np.hypot(h, w)
-    return mask_ratio > 0.08 or max_depth_ratio > 0.015
+    count, _, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+    largest_component_ratio = (
+        int(np.max(stats[1:, cv2.CC_STAT_AREA])) / binary.size
+        if count > 1
+        else 0.0
+    )
+    return (
+        max_depth_ratio > 0.015
+        or (
+            mask_ratio > 0.08
+            and largest_component_ratio > 0.04
+        )
+    )
 
 
 def repair_masked_background(

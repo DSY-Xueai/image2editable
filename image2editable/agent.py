@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import math
+import os
 from pathlib import Path
+import stat
 from typing import Sequence
 
 from image2editable.contracts import (
@@ -85,6 +87,95 @@ def record_decision(
         )
 
 
+def shadow_replacement_plans(
+    store: RunStore,
+    manifest: dict[str, object],
+) -> list[dict[str, object]]:
+    plans = []
+    for page_id in manifest["pages"]:
+        request, candidates = _page_candidates(store, page_id)
+        decisions = _decision_document(store, page_id, candidates)["decisions"]
+        by_shape = {
+            candidate["source_shape_id"]: candidate
+            for candidate in candidates
+        }
+        shadow_decisions = [
+            decision for decision in decisions
+            if decision["runtime_action"] == "shadow_run"
+        ]
+        if not shadow_decisions:
+            continue
+        decision = shadow_decisions[0]
+        candidate = by_shape[decision["source_shape_id"]]
+        work_root = _owned_reconstruction_root(store, page_id)
+        plan = {
+            "page_id": page_id,
+            "slide_part": request["slide_part"],
+            "image_path": str(
+                _candidate_image_path(
+                    store,
+                    page_id,
+                    candidate,
+                )
+            ),
+            "work_root": str(work_root),
+            "decision": decision,
+        }
+        if len(shadow_decisions) > 1:
+            plan["conflict_warning"] = (
+                "multiple Agent-approved screenshots on one page"
+            )
+        plans.append(plan)
+    return plans
+
+
+def _owned_reconstruction_root(store: RunStore, page_id: str) -> Path:
+    current = store.root
+    for name in ("pages", page_id):
+        current /= name
+        try:
+            status = current.lstat()
+        except FileNotFoundError as error:
+            raise RuntimeError(
+                f"PPTX page directory is missing: {current}"
+            ) from error
+        if _is_link_or_reparse(status):
+            raise RuntimeError(
+                f"PPTX page directory is a link or reparse point: {current}"
+            )
+        if not stat.S_ISDIR(status.st_mode):
+            raise RuntimeError(f"PPTX page path is not a directory: {current}")
+
+    reconstruction = current / "reconstruction"
+    try:
+        status = reconstruction.lstat()
+    except FileNotFoundError:
+        return reconstruction
+    if _is_link_or_reparse(status):
+        raise RuntimeError(
+            "PPTX reconstruction directory is a link or reparse point: "
+            f"{reconstruction}"
+        )
+    if not stat.S_ISDIR(status.st_mode):
+        raise RuntimeError(
+            f"PPTX reconstruction path is not a directory: {reconstruction}"
+        )
+    resolved = reconstruction.resolve()
+    if not resolved.is_relative_to(current):
+        raise RuntimeError(
+            "PPTX reconstruction directory is outside its page directory: "
+            f"{reconstruction}"
+        )
+    return resolved
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse_flag
+    )
+
+
 def _record_decision(
     run_dir: str | Path,
     *,
@@ -140,6 +231,13 @@ def _record_decision(
         and category == "full_slide_screenshot"
         and confidence >= REPLACE_CONFIDENCE
     )
+    if eligible and any(
+        item["runtime_action"] == "shadow_run"
+        for item in document["decisions"]
+    ):
+        raise ValueError(
+            f"Only one shadow replacement is allowed per page: {page_id}"
+        )
     record = {
         "source_shape_id": object_id,
         "source_object_sha256": candidate["source_object_sha256"],

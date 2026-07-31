@@ -36,6 +36,7 @@ from scripts.bg_model import (
     build_clean_background,
     build_removal_mask,
     build_widescreen_background,
+    repair_masked_background,
 )
 from scripts.fg_extract import (
     _build_text_ink_mask,
@@ -58,6 +59,7 @@ from scripts.text_detect import close_ocr_engines, detect_text
 from scripts.visual_segment import (
     MaskCandidate,
     VisualSegmentationError,
+    background_residual_metrics,
     create_sam_generator,
     filter_prompt_free_candidates,
     filter_unchanged_residual_candidates,
@@ -65,6 +67,7 @@ from scripts.visual_segment import (
     generate_prompted_mask_candidates,
     reconcile_residual_candidates,
     recheck_visual_element_holes,
+    has_background_residual,
     needs_text_only_fallback,
     require_visual_quality,
     resolve_sam_checkpoint,
@@ -84,21 +87,444 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 # ---------------------------------------------------------------------------
 
 
-def _build_text_item_removal_mask(
-    shape: tuple[int, int],
+def _filter_probable_icon_text_items(items: list[dict]) -> list[dict]:
+    """Keep ambiguous compact OCR glyphs in the raster layer as icons."""
+    return [
+        item for item in items
+        if not _is_probable_icon_text_item(item)
+    ]
+
+
+def _is_probable_icon_text_item(item: dict) -> bool:
+    box = item.get("box")
+    text = "".join(str(item.get("text", "")).split())
+    confidence = item.get("confidence")
+    if (
+        not isinstance(box, (list, tuple))
+        or len(box) != 4
+        or not isinstance(confidence, (int, float))
+        or confidence >= 0.9
+        or len(text) > 2
+    ):
+        return False
+    width = max(1, int(box[2]))
+    height = max(1, int(box[3]))
+    return 0.65 <= width / height <= 1.5
+
+
+def _filter_probable_icon_text_analysis(
+    items: list[dict],
+    text_mask: np.ndarray,
+) -> tuple[list[dict], np.ndarray]:
+    detected = np.asarray(text_mask, dtype=np.uint8)
+    filtered = _filter_probable_icon_text_items(items)
+    if len(filtered) == len(items):
+        return filtered, detected.copy()
+
+    result = detected.copy()
+    height, width = result.shape
+    for item in items:
+        if not _is_probable_icon_text_item(item):
+            continue
+        x, y, box_width, box_height = (
+            int(value) for value in item["box"]
+        )
+        result[
+            max(0, y):min(height, y + box_height),
+            max(0, x):min(width, x + box_width),
+        ] = 0
+    for item in filtered:
+        box = item.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x, y, box_width, box_height = (int(value) for value in box)
+        y1, y2 = max(0, y), min(height, y + box_height)
+        x1, x2 = max(0, x), min(width, x + box_width)
+        result[y1:y2, x1:x2] = detected[y1:y2, x1:x2]
+    return filtered, result
+
+
+def _build_text_cleanup_mask(
+    image: np.ndarray,
+    text_mask: np.ndarray,
     text_items: list[dict],
-    padding: int = 2,
 ) -> np.ndarray:
-    height, width = shape
-    mask = np.zeros((height, width), dtype=np.uint8)
+    """Cover raster glyphs and antialiasing without replacing whole OCR boxes."""
+    source = np.asarray(image, dtype=np.uint8)
+    detected = np.asarray(text_mask, dtype=np.uint8)
+    if detected.shape != source.shape[:2]:
+        raise ValueError("text mask must match image")
+    ink = _build_text_ink_mask(
+        source,
+        detected,
+        text_items=text_items or None,
+    )
+    extended_ink = ink.copy()
     for item in text_items:
+        box = item.get("box")
+        color = item.get("color")
+        if (
+            not isinstance(box, (list, tuple))
+            or len(box) != 4
+            or not isinstance(color, str)
+            or len(color) != 7
+            or not color.startswith("#")
+        ):
+            continue
+        x, y, box_width, box_height = (int(value) for value in box)
+        search_pad = max(
+            4,
+            min(12, int(round(max(box_height, 1) * 0.15))),
+        )
+        x1 = max(0, x - search_pad)
+        y1 = max(0, y - search_pad)
+        x2 = min(source.shape[1], x + box_width + search_pad)
+        y2 = min(source.shape[0], y + box_height + search_pad)
+        target = np.asarray(
+            [int(color[index:index + 2], 16) for index in (1, 3, 5)],
+            dtype=np.float32,
+        )
+        region = source[y1:y2, x1:x2].astype(np.float32)
+        matching = (
+            np.linalg.norm(region - target, axis=2) <= 120.0
+        ).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            matching,
+            connectivity=8,
+        )
+        join_radius = max(3, min(4, search_pad // 2))
+        seed = cv2.dilate(
+            (ink[y1:y2, x1:x2] > 0).astype(np.uint8),
+            np.ones(
+                (join_radius * 2 + 1, join_radius * 2 + 1),
+                dtype=np.uint8,
+            ),
+            iterations=1,
+        ) > 0
+        box_support = np.zeros(matching.shape, dtype=bool)
+        box_support[
+            max(0, y - y1):min(y2 - y1, y + box_height - y1),
+            max(0, x - x1):min(x2 - x1, x + box_width - x1),
+        ] = True
+        for label in range(1, count):
+            component = labels == label
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            inside_ratio = (
+                np.count_nonzero(component & box_support) / area
+                if area
+                else 0.0
+            )
+            boundary_glyph = (
+                inside_ratio >= 0.35
+                and stats[label, cv2.CC_STAT_WIDTH]
+                <= max(8, box_width // 2)
+                and stats[label, cv2.CC_STAT_HEIGHT]
+                <= max(8, int(box_height * 1.5))
+            )
+            if np.any(component & seed) or boundary_glyph:
+                local_extended = extended_ink[y1:y2, x1:x2]
+                local_extended[component] = 255
+    ink = extended_ink
+    cleanup = np.zeros_like(detected)
+    if not np.any(ink):
+        return cleanup
+    if not text_items:
+        return cv2.dilate(
+            ink,
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        )
+
+    height, width = detected.shape
+    for item in text_items:
+        if "box" not in item:
+            continue
         x, y, box_width, box_height = (int(value) for value in item["box"])
+        font_size = item.get("font_size")
+        if isinstance(font_size, (int, float)) and font_size > 0:
+            radius = max(3, min(6, int(round(font_size * 0.5))))
+        else:
+            radius = max(
+                2,
+                min(4, int(round(max(box_height, 1) * 0.02))),
+            )
+        search_pad = max(
+            radius,
+            max(4, min(12, int(round(max(box_height, 1) * 0.15)))),
+        )
+        x1 = max(0, x - search_pad)
+        y1 = max(0, y - search_pad)
+        x2 = min(width, x + box_width + search_pad)
+        y2 = min(height, y + box_height + search_pad)
+        local = ink[y1:y2, x1:x2]
+        if not np.any(local):
+            continue
+        local_cleanup = cv2.dilate(
+            local,
+            np.ones((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8),
+            iterations=1,
+        )
+        local_gray = cv2.cvtColor(
+            source[y1:y2, x1:x2],
+            cv2.COLOR_RGB2GRAY,
+        )
+        edge_map = cv2.Canny(local_gray, 24, 72)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            (edge_map > 0).astype(np.uint8),
+            connectivity=8,
+        )
+        protected = np.zeros_like(edge_map)
+        box_support = np.zeros_like(edge_map, dtype=bool)
+        box_support[
+            max(0, y - y1):min(y2 - y1, y + box_height - y1),
+            max(0, x - x1):min(x2 - x1, x + box_width - x1),
+        ] = True
+        for label in range(1, count):
+            component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            component = labels == label
+            component_area = int(stats[label, cv2.CC_STAT_AREA])
+            inside_ratio = (
+                np.count_nonzero(component & box_support) / component_area
+                if component_area
+                else 0.0
+            )
+            if (
+                (
+                    component_width >= max(12, int(box_width * 0.65))
+                    or component_height >= max(12, int(box_height * 0.8))
+                )
+                and (
+                    min(component_width, component_height) <= 3
+                    or inside_ratio < 0.25
+                )
+            ):
+                protected[component] = 255
+        if np.any(protected):
+            protected = cv2.dilate(
+                protected,
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=1,
+            )
+            local_cleanup[protected > 0] = 0
+        cleanup[y1:y2, x1:x2] |= local_cleanup
+    return cleanup
+
+
+def _repair_text_background(
+    image: np.ndarray,
+    cleanup_mask: np.ndarray,
+    text_items: list[dict] | None = None,
+    large_inpainter=None,
+) -> np.ndarray:
+    source = np.asarray(image, dtype=np.uint8)
+    if text_items:
+        modeled = _repair_text_with_local_planes(
+            source,
+            cleanup_mask,
+            text_items,
+        )
+        modeled_residual = background_residual_metrics(
+            source,
+            modeled,
+            cleanup_mask,
+        )
+        if not has_background_residual(modeled_residual):
+            return modeled
+
+    repaired = repair_masked_background(
+        image,
+        cleanup_mask,
+        large_inpainter=large_inpainter,
+    )
+    residual = background_residual_metrics(
+        source,
+        repaired,
+        cleanup_mask,
+    )
+    if not has_background_residual(residual):
+        return repaired
+
+    escalated_inpainter = large_inpainter or inpaint_large_mask
+    escalated = np.asarray(
+        escalated_inpainter(source, cleanup_mask),
+        dtype=np.uint8,
+    )
+    if escalated.shape != source.shape:
+        raise ValueError(
+            "escalated text inpaint output must match the source image"
+        )
+    result = escalated.copy()
+    result[np.asarray(cleanup_mask) == 0] = source[
+        np.asarray(cleanup_mask) == 0
+    ]
+    return result
+
+
+def _repair_text_with_local_planes(
+    image: np.ndarray,
+    cleanup_mask: np.ndarray,
+    text_items: list[dict],
+) -> np.ndarray:
+    source = np.asarray(image, dtype=np.uint8)
+    cleanup = np.asarray(cleanup_mask) > 0
+    output = source.astype(np.float32).copy()
+    height, width = cleanup.shape
+    for item in text_items:
+        box = item.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x, y, box_width, box_height = (int(value) for value in box)
+        padding = max(8, min(24, int(round(box_height * 0.4))))
         x1 = max(0, x - padding)
         y1 = max(0, y - padding)
         x2 = min(width, x + box_width + padding)
         y2 = min(height, y + box_height + padding)
-        mask[y1:y2, x1:x2] = 255
-    return mask
+        target = cleanup[y1:y2, x1:x2]
+        if not np.any(target):
+            continue
+
+        region = source[y1:y2, x1:x2].astype(np.float32)
+        gray = cv2.cvtColor(
+            region.astype(np.uint8),
+            cv2.COLOR_RGB2GRAY,
+        )
+        edges = cv2.dilate(
+            cv2.Canny(gray, 24, 72),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ) > 0
+        valid = ~target & ~edges
+        colors = region[valid]
+        if len(colors) < 20:
+            continue
+        color_median = np.median(colors, axis=0)
+        color_spread = float(
+            np.percentile(
+                np.linalg.norm(colors - color_median, axis=1),
+                90,
+            )
+        )
+        distance = cv2.distanceTransform(
+            (~target).astype(np.uint8),
+            cv2.DIST_L2,
+            3,
+        )
+        near_background = valid & (distance <= 8)
+        if np.count_nonzero(near_background) >= 20:
+            background_color = np.median(
+                region[near_background],
+                axis=0,
+            )
+            if (
+                float(np.max(background_color) - np.min(background_color))
+                >= 32
+                or float(np.mean(background_color)) < 210
+                or color_spread >= 8
+            ):
+                interpolated = _interpolate_masked_region(region, target)
+                local_output = output[y1:y2, x1:x2]
+                local_output[target] = interpolated[target]
+                continue
+        median = np.median(colors, axis=0)
+        distances = np.linalg.norm(colors - median, axis=1)
+        color_limit = max(24.0, float(np.percentile(distances, 65)))
+        keep = distances <= color_limit
+        sample_y, sample_x = np.nonzero(valid)
+        sample_y = sample_y[keep]
+        sample_x = sample_x[keep]
+        colors = colors[keep]
+        if len(colors) < 20:
+            continue
+
+        region_height, region_width = target.shape
+        sample_matrix = np.column_stack(
+            (
+                np.ones(len(sample_x)),
+                sample_x / max(1, region_width - 1),
+                sample_y / max(1, region_height - 1),
+            )
+        )
+        coefficients = np.linalg.lstsq(
+            sample_matrix,
+            colors,
+            rcond=None,
+        )[0]
+        grid_y, grid_x = np.indices(target.shape)
+        grid_matrix = np.column_stack(
+            (
+                np.ones(grid_x.size),
+                grid_x.ravel() / max(1, region_width - 1),
+                grid_y.ravel() / max(1, region_height - 1),
+            )
+        )
+        modeled = np.clip(
+            grid_matrix @ coefficients,
+            0,
+            255,
+        ).reshape(region.shape)
+
+        local_output = output[y1:y2, x1:x2]
+        local_output[target] = modeled[target]
+    return np.clip(output, 0, 255).astype(np.uint8)
+
+
+def _interpolate_masked_region(
+    region: np.ndarray,
+    target: np.ndarray,
+) -> np.ndarray:
+    """Interpolate smooth colored backgrounds across glyph-sized holes."""
+    source = np.asarray(region, dtype=np.float32)
+    target = np.asarray(target, dtype=bool)
+    horizontal = np.full_like(source, np.nan)
+    vertical = np.full_like(source, np.nan)
+    for row in range(target.shape[0]):
+        missing = np.flatnonzero(target[row])
+        known = np.flatnonzero(~target[row])
+        if len(missing) and len(known) >= 2:
+            for channel in range(3):
+                horizontal[row, missing, channel] = np.interp(
+                    missing,
+                    known,
+                    source[row, known, channel],
+                )
+    for column in range(target.shape[1]):
+        missing = np.flatnonzero(target[:, column])
+        known = np.flatnonzero(~target[:, column])
+        if len(missing) and len(known) >= 2:
+            for channel in range(3):
+                vertical[missing, column, channel] = np.interp(
+                    missing,
+                    known,
+                    source[known, column, channel],
+                )
+
+    result = source.copy()
+    horizontal_valid = np.isfinite(horizontal[:, :, 0])
+    vertical_valid = np.isfinite(vertical[:, :, 0])
+    target_rows = target[np.any(target, axis=1)]
+    target_columns = target[:, np.any(target, axis=0)]
+    horizontal_occupancy = (
+        float(np.mean(target_rows))
+        if target_rows.size
+        else 1.0
+    )
+    vertical_occupancy = (
+        float(np.mean(target_columns))
+        if target_columns.size
+        else 1.0
+    )
+    if horizontal_occupancy <= vertical_occupancy:
+        primary, primary_valid = horizontal, horizontal_valid
+        fallback, fallback_valid = vertical, vertical_valid
+    else:
+        primary, primary_valid = vertical, vertical_valid
+        fallback, fallback_valid = horizontal, horizontal_valid
+    use_primary = target & primary_valid
+    result[use_primary] = primary[use_primary]
+    use_fallback = target & ~primary_valid & fallback_valid
+    result[use_fallback] = fallback[use_fallback]
+    return result
 
 
 def _interpolate_text_item_boxes(
@@ -264,6 +690,7 @@ def _finalize_slide_quality(
                 element_masks.append(np.asarray(stored_mask).copy())
 
         components = slide_data["components"]
+        forced_fallback_reason = None
         visual_only = _compose_exported_components(clean_background, components)
         visual_only_path = work_dir / "visual-only.png"
         _save_rgb(str(visual_only_path), visual_only)
@@ -273,6 +700,12 @@ def _finalize_slide_quality(
             ocr_kwargs = {"isolated": True, "worker_root": work_dir}
         raster_text_items, raster_text_mask = detect_text(
             visual_only_path, lang=lang, **ocr_kwargs
+        )
+        raster_text_items, raster_text_mask = (
+            _filter_probable_icon_text_analysis(
+                raster_text_items,
+                raster_text_mask,
+            )
         )
         if raster_text_items:
             repair_kwargs = {"text_items": raster_text_items}
@@ -295,6 +728,12 @@ def _finalize_slide_quality(
             raster_text_items, raster_text_mask = detect_text(
                 visual_only_path, lang=lang, **ocr_kwargs
             )
+            raster_text_items, raster_text_mask = (
+                _filter_probable_icon_text_analysis(
+                    raster_text_items,
+                    raster_text_mask,
+                )
+            )
         if raster_text_items:
             repair_exported_component_text(
                 components,
@@ -311,21 +750,39 @@ def _finalize_slide_quality(
             raster_text_items, _ = detect_text(
                 visual_only_path, lang=lang, **ocr_kwargs
             )
+            raster_text_items, _ = _filter_probable_icon_text_analysis(
+                raster_text_items,
+                np.zeros(img.shape[:2], dtype=np.uint8),
+            )
         if raster_text_items:
-            raise VisualSegmentationError(
-                "visual components still contain raster text after cleanup"
-            )
+            forced_fallback_reason = "component_raster_text"
 
-        quality_text_mask = text_mask
         quality_text_items = slide_data.get("text_items") or []
-        if quality_text_items and all(
-            "box" in item for item in quality_text_items
-        ):
-            quality_text_mask = _build_text_item_removal_mask(
-                img.shape[:2],
-                quality_text_items,
+        quality_text_mask = _build_text_cleanup_mask(
+            img,
+            text_mask,
+            quality_text_items,
+        )
+        if (
+            forced_fallback_reason is None
+            and quality_text_items
+            and _has_component_text_overlap(
+                element_masks,
+                quality_text_mask,
             )
+        ):
+            forced_fallback_reason = "component_text_overlap"
         quality = visual_difference(img, visual_only, quality_text_mask)
+        removal_mask = build_removal_mask(
+            element_masks,
+            quality_text_mask,
+        )
+        background_residual = background_residual_metrics(
+            img,
+            clean_background,
+            removal_mask,
+        )
+        slide_data["background_residual"] = background_residual
         diagnostics_dir = (work_dir / "diagnostics").resolve()
         write_segmentation_diagnostics(
             diagnostics_dir,
@@ -334,7 +791,14 @@ def _finalize_slide_quality(
             reconstructed=visual_only,
             metrics=quality,
         )
-        if needs_text_only_fallback(quality):
+        fallback_reason = None
+        if forced_fallback_reason is not None:
+            fallback_reason = forced_fallback_reason
+        elif has_background_residual(background_residual):
+            fallback_reason = "background_residual"
+        elif needs_text_only_fallback(quality):
+            fallback_reason = "visible_visual_artifacts"
+        if fallback_reason is not None:
             if text_clean_path_value is None:
                 text_clean = img.copy()
             else:
@@ -346,12 +810,25 @@ def _finalize_slide_quality(
                 text_clean,
                 resource_isolation=_resource_isolation,
             )
+            fallback_background_residual = background_residual_metrics(
+                img,
+                text_clean,
+                quality_text_mask,
+            )
+            slide_data["background_residual"] = (
+                fallback_background_residual
+            )
+            if has_background_residual(fallback_background_residual):
+                raise VisualSegmentationError(
+                    "text-clean fallback still contains raster residuals"
+                )
             quality = visual_difference(img, text_clean, quality_text_mask)
             require_visual_quality(quality)
             slide_data["quality"] = quality
             slide_data["quality_fallback"] = {
-                "reason": "visible_visual_artifacts",
+                "reason": fallback_reason,
                 "original_metrics": original_quality,
+                "original_background_residual": background_residual,
             }
             return slide_data
         try:
@@ -369,6 +846,24 @@ def _finalize_slide_quality(
         clean_background = None
         text_mask = None
         visual_only = None
+
+
+def _has_component_text_overlap(
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> bool:
+    text = np.asarray(text_mask) > 0
+    if not np.any(text):
+        return False
+    for element_mask in element_masks:
+        component = np.asarray(element_mask) > 0
+        component_pixels = int(np.count_nonzero(component))
+        if component_pixels == 0:
+            continue
+        overlap = int(np.count_nonzero(component & text))
+        if overlap >= 16 and overlap / component_pixels >= 0.02:
+            return True
+    return False
 
 
 def _generate_filtered_object_proposals(
@@ -722,6 +1217,10 @@ def _process_image(
     img_h, img_w = img.shape[:2]
     if text_analysis is None:
         text_items, text_mask = detect_text(image_path, lang=lang)
+        text_items, text_mask = _filter_probable_icon_text_analysis(
+            text_items,
+            text_mask,
+        )
         text_mask_path = (work_dir / "source-text-mask.png").resolve()
         Image.fromarray(text_mask, mode="L").save(text_mask_path)
     else:
@@ -733,6 +1232,11 @@ def _process_image(
     valid_text_items = bool(text_items) and all(
         "box" in item for item in text_items
     )
+    text_cleanup_mask = _build_text_cleanup_mask(
+        img,
+        text_mask,
+        text_items if valid_text_items else [],
+    )
     text_clean_image = None
     text_clean_path = None
     if valid_text_items:
@@ -742,9 +1246,11 @@ def _process_image(
             else None
         )
         if text_clean_path is None:
-            text_clean_image = inpaint_large_mask(
+            text_clean_image = _repair_text_background(
                 img,
-                _build_text_item_removal_mask(img.shape[:2], text_items),
+                text_cleanup_mask,
+                text_items=text_items,
+                **background_kwargs,
             )
             text_clean_path = work_dir / "text-clean.png"
             _save_rgb(str(text_clean_path), text_clean_image)
@@ -813,7 +1319,7 @@ def _process_image(
         clean_background = build_clean_background(
             img,
             element_masks,
-            text_mask,
+            text_cleanup_mask,
             **background_kwargs,
         )
         packed_masks = None
@@ -881,7 +1387,7 @@ def _process_image(
                 clean_background = build_clean_background(
                     img,
                     element_masks,
-                    text_mask,
+                    text_cleanup_mask,
                     **background_kwargs,
                 )
             break
@@ -914,7 +1420,7 @@ def _process_image(
     clean_background = build_clean_background(
         img,
         element_masks,
-        text_mask,
+        text_cleanup_mask,
         **background_kwargs,
     )
     export_kwargs = {"semantic_masks": semantic_masks}
@@ -947,7 +1453,7 @@ def _process_image(
         background_widescreen_path = background_original_path
     else:
         _save_rgb(str(background_widescreen_path), widescreen_background)
-    removal_mask = build_removal_mask(element_masks, text_mask)
+    removal_mask = build_removal_mask(element_masks, text_cleanup_mask)
     Image.fromarray(removal_mask, mode="L").save(background_removal_mask_path)
     _save_rgb(
         str(background_difference_path),
@@ -1101,6 +1607,10 @@ def _prepare_multiple_images(
                     image_path,
                     lang=lang,
                 )
+            text_items, text_mask = _filter_probable_icon_text_analysis(
+                text_items,
+                text_mask,
+            )
             text_mask_path = (work_dir / "source-text-mask.png").resolve()
             Image.fromarray(text_mask, mode="L").save(text_mask_path)
             text_analyses.append({
@@ -1131,10 +1641,14 @@ def _prepare_multiple_images(
                 "box" in item for item in text_items
             ):
                 continue
-            with Image.open(image_path) as source_probe:
-                source_shape = (source_probe.height, source_probe.width)
-            removal_mask = _build_text_item_removal_mask(
-                source_shape,
+            source_image = _load_rgb(image_path)
+            with Image.open(text_analysis["mask_path"]) as stored_text_mask:
+                stored_mask = np.asarray(
+                    stored_text_mask.convert("L")
+                ).copy()
+            removal_mask = _build_text_cleanup_mask(
+                source_image,
+                stored_mask,
                 text_items,
             )
             removal_mask_path = (
@@ -1142,12 +1656,17 @@ def _prepare_multiple_images(
             ).resolve()
             Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
             text_clean_path = (work_dir / "text-clean.png").resolve()
-            inpaint_large_mask_isolated(
-                image_path,
-                removal_mask_path,
-                text_clean_path,
+            text_clean = _repair_text_background(
+                source_image,
+                removal_mask,
+                text_items=text_items,
+                large_inpainter=_isolated_large_inpainter(work_dir),
             )
+            _save_rgb(text_clean_path, text_clean)
             text_analysis["text_clean_path"] = str(text_clean_path)
+            source_image = None
+            stored_mask = None
+            text_clean = None
 
     slides_data = []
     object_detector = None

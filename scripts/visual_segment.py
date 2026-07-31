@@ -91,6 +91,62 @@ def visual_difference(
     }
 
 
+def background_residual_metrics(
+    source: np.ndarray,
+    background: np.ndarray,
+    removal_mask: np.ndarray,
+) -> dict:
+    """Measure source edges that remain visible in the repaired background."""
+    source = np.asarray(source, dtype=np.uint8)
+    background = np.asarray(background, dtype=np.uint8)
+    removal = np.asarray(removal_mask) > 0
+    if source.shape != background.shape or removal.shape != source.shape[:2]:
+        raise ValueError("background residual inputs must have matching shapes")
+    if not np.any(removal):
+        return {
+            "source_edge_pixels": 0,
+            "retained_edge_pixels": 0,
+            "retained_edge_ratio": 0.0,
+        }
+
+    support = cv2.dilate(
+        removal.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ) > 0
+    source_gray = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY)
+    background_gray = cv2.cvtColor(background, cv2.COLOR_RGB2GRAY)
+    source_edges = cv2.Canny(source_gray, 8, 24) > 0
+    background_edges = cv2.Canny(background_gray, 8, 24) > 0
+    background_edges = cv2.dilate(
+        background_edges.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ) > 0
+    relevant = source_edges & support
+    source_edge_pixels = int(np.count_nonzero(relevant))
+    retained_edge_pixels = int(
+        np.count_nonzero(relevant & background_edges)
+    )
+    return {
+        "source_edge_pixels": source_edge_pixels,
+        "retained_edge_pixels": retained_edge_pixels,
+        "retained_edge_ratio": (
+            retained_edge_pixels / source_edge_pixels
+            if source_edge_pixels
+            else 0.0
+        ),
+    }
+
+
+def has_background_residual(metrics: dict) -> bool:
+    """Reject a background that retains a material source-object outline."""
+    return (
+        metrics.get("source_edge_pixels", 0) >= 16
+        and metrics.get("retained_edge_ratio", 0.0) >= 0.45
+    )
+
+
 def needs_text_only_fallback(metrics: dict) -> bool:
     """Prefer the text-clean background when sparse artifacts stay visible."""
     return (

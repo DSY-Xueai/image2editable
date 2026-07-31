@@ -474,6 +474,134 @@ def execute_pptx_preserve(
     }
 
 
+def run_shadow_replacements(*args, **kwargs):
+    from image2editable.pptx_shadow_run import (
+        run_shadow_replacements as run,
+    )
+
+    return run(*args, **kwargs)
+
+
+def execute_pptx_shadow(
+    store: RunStore,
+    plans: list[dict[str, object]],
+    manifest: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if manifest is None:
+        manifest = store.read_json("job_manifest.json")
+    object_count, candidate_count = validate_pptx_inventories(
+        store,
+        manifest,
+    )
+    input_record = manifest["input"]
+    source_value = input_record.get("source")
+    if not isinstance(source_value, str):
+        raise RuntimeError("PPTX manifest source must be a relative path")
+    source_path = (store.root / source_value).resolve()
+    if (
+        Path(source_value).is_absolute()
+        or not source_path.is_relative_to(store.root)
+        or not source_path.is_file()
+        or source_path.suffix.casefold() != ".pptx"
+    ):
+        raise RuntimeError(f"Invalid PPTX manifest source: {source_value}")
+
+    options = manifest.get("options")
+    if not isinstance(options, dict):
+        raise RuntimeError("PPTX manifest options must be an object")
+    output_value = options.get("output_path")
+    if output_value is None:
+        output_path = _path_without_symlinks(
+            store.root / "final" / "output.pptx"
+        )
+    elif isinstance(output_value, str):
+        output_path = validate_pptx_output_path(
+            _path_without_symlinks(output_value),
+            source_paths=[source_path],
+            run_root=store.root,
+        )
+    else:
+        raise RuntimeError("PPTX manifest output_path must be a string or null")
+    if output_path is None:
+        raise RuntimeError("PPTX output path is missing")
+    if _same_file(source_path, output_path):
+        raise ValueError(f"PPTX output must not overwrite source: {output_path}")
+    if output_path.exists() or output_path.is_symlink():
+        raise FileExistsError(f"PPTX output already exists: {output_path}")
+
+    input_sha256 = sha256_file(source_path)
+    if input_record.get("sha256") != input_sha256:
+        raise RuntimeError("PPTX input hash does not match manifest")
+    page_ids = manifest["pages"]
+    plan_page_ids = [plan.get("page_id") for plan in plans]
+    if (
+        not plans
+        or len(plan_page_ids) != len(set(plan_page_ids))
+        or any(page_id not in page_ids for page_id in plan_page_ids)
+    ):
+        raise RuntimeError("PPTX shadow replacement plans are invalid")
+
+    result = run_shadow_replacements(
+        source_path,
+        output_path,
+        plans,
+        run_root=store.root,
+        lang=options.get("lang", "ch"),
+    )
+    replacement_results = result.get("page_results")
+    if not isinstance(replacement_results, list):
+        raise RuntimeError("PPTX shadow page results are invalid")
+    by_page = {
+        item.get("page_id"): item
+        for item in replacement_results
+        if isinstance(item, dict)
+    }
+    if set(by_page) != set(plan_page_ids):
+        raise RuntimeError("PPTX shadow page results do not match plans")
+    page_results = [
+        by_page.get(
+            page_id,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "page_id": page_id,
+                "status": PageStatus.PRESERVED.value,
+            },
+        )
+        for page_id in page_ids
+    ]
+    replaced_pages = sum(
+        item["status"] == PageStatus.REPLACED.value
+        for item in page_results
+    )
+    warning_pages = sum(
+        item["status"] == PageStatus.PRESERVED_WITH_WARNING.value
+        for item in page_results
+    )
+    output_sha256 = result.get("output_sha256")
+    if output_sha256 != sha256_file(output_path):
+        raise RuntimeError("PPTX shadow output hash mismatch")
+    warnings_list = [
+        f"{item['page_id']}: {item['warning']}"
+        for item in page_results
+        if item["status"] == PageStatus.PRESERVED_WITH_WARNING.value
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": RunStatus.COMPLETED.value,
+        "pages": input_record["slide_count"],
+        "preserved_objects": object_count - replaced_pages,
+        "pending_candidates": candidate_count - replaced_pages,
+        "replaced_pages": replaced_pages,
+        "preserved_with_warning_pages": warning_pages,
+        "page_results": page_results,
+        "warnings": warnings_list,
+        "outputs": {"pptx": str(output_path)},
+        "input_sha256": input_sha256,
+        "output_sha256": output_sha256,
+        "_output_identity": result.get("_output_identity"),
+    }
+
+
 def validate_pptx_inventories(
     store: RunStore,
     manifest: dict[str, object] | None = None,

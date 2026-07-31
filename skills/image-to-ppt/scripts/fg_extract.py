@@ -853,7 +853,14 @@ def _build_text_ink_mask(
             color_match = np.linalg.norm(rgb_region - target, axis=2) <= 45.0
             isolated_match = _remove_border_connected(color_match)
             if np.count_nonzero(isolated_match) >= 4:
-                ink = isolated_match
+                border = np.concatenate(
+                    [region[0, :], region[-1, :], region[:, 0], region[:, -1]]
+                ).astype(np.float32)
+                target_gray = float(np.mean(target))
+                if target_gray < float(np.mean(border)):
+                    ink = isolated_match | (region <= thresh)
+                else:
+                    ink = isolated_match | (region > thresh)
         if ink is None:
             ink = _select_text_ink(region, float(thresh))
 

@@ -63,6 +63,24 @@ def execute_pptx_preserve(store: RunStore) -> dict[str, object]:
     return execute(store, _PPTX_EXECUTION_MANIFEST.get())
 
 
+def execute_pptx_shadow(
+    store: RunStore,
+    plans: list[dict[str, object]],
+) -> dict[str, object]:
+    from image2editable.pptx_input import execute_pptx_shadow as execute
+
+    return execute(store, plans, _PPTX_EXECUTION_MANIFEST.get())
+
+
+def shadow_replacement_plans(
+    store: RunStore,
+    manifest: dict[str, object],
+) -> list[dict[str, object]]:
+    from image2editable.agent import shadow_replacement_plans as build
+
+    return build(store, manifest)
+
+
 def next_candidate(run_dir: str | Path) -> dict[str, object]:
     from image2editable.agent import next_candidate as find_next
 
@@ -302,25 +320,48 @@ def _run_work_directory(
 
 def _run_owned_directory(
     store: RunStore,
-    name: str,
+    name: str | Path,
 ) -> tuple[Path, tuple[int, int]] | None:
-    path = store.root / name
-    try:
-        status = path.lstat()
-    except FileNotFoundError:
-        return None
-    if _is_link_or_reparse(status):
-        raise RuntimeError(
-            f"Run {name} directory is a link or reparse point: {path}"
-        )
-    if not stat.S_ISDIR(status.st_mode):
-        raise RuntimeError(f"Run {name} path is not a directory: {path}")
-    resolved = path.resolve()
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"Run directory path is invalid: {name}")
+    current = store.root
+    status = None
+    for part in relative.parts:
+        current /= part
+        try:
+            status = current.lstat()
+        except FileNotFoundError:
+            return None
+        if _is_link_or_reparse(status):
+            raise RuntimeError(
+                f"Run {name} directory is a link or reparse point: {current}"
+            )
+        if not stat.S_ISDIR(status.st_mode):
+            raise RuntimeError(f"Run {name} path is not a directory: {current}")
+    if status is None:
+        raise RuntimeError(f"Run directory path is invalid: {name}")
+    resolved = current.resolve()
     if not resolved.is_relative_to(store.root):
         raise RuntimeError(
-            f"Run {name} directory is outside run directory: {path}"
+            f"Run {name} directory is outside run directory: {current}"
         )
     return resolved, (status.st_dev, status.st_ino)
+
+
+def _pptx_reconstruction_directories(
+    store: RunStore,
+    page_jobs: dict[str, Any],
+) -> list[tuple[Path, tuple[int, int]]]:
+    directories = []
+    for page_id in page_jobs["pages"]:
+        directory = _run_owned_directory(
+            store,
+            Path("pages") / page_id / "reconstruction",
+        )
+        if directory is not None:
+            directories.append(directory)
+    return directories
 
 
 def _pptx_output_identity(path: Path) -> tuple[int, int, int, int, int]:
@@ -506,6 +547,162 @@ def _validate_pptx_execution_summary(
         )
 
 
+def _validate_pptx_shadow_public_summary(
+    summary: object,
+    expected_output: Path,
+    slide_count: int,
+    original_objects: int,
+    original_candidates: int,
+    input_sha256: str,
+    resource_policy: dict[str, object],
+) -> None:
+    if type(summary) is not dict:
+        raise RuntimeError("PPTX shadow summary must be an object")
+    expected_keys = {
+        "schema_version",
+        "status",
+        "pages",
+        "preserved_objects",
+        "pending_candidates",
+        "replaced_pages",
+        "preserved_with_warning_pages",
+        "page_results",
+        "warnings",
+        "outputs",
+        "input_sha256",
+        "output_sha256",
+        "resource_policy",
+    }
+    if set(summary) != expected_keys:
+        raise RuntimeError("PPTX shadow summary fields are invalid")
+    page_results = summary.get("page_results")
+    if (
+        not isinstance(page_results, list)
+        or len(page_results) != slide_count
+    ):
+        raise RuntimeError("PPTX shadow page results are invalid")
+    result_pages = []
+    statuses = []
+    for item in page_results:
+        if (
+            not isinstance(item, dict)
+            or item.get("schema_version") != SCHEMA_VERSION
+            or not isinstance(item.get("page_id"), str)
+            or item.get("status")
+            not in {
+                PageStatus.PRESERVED.value,
+                PageStatus.REPLACED.value,
+                PageStatus.PRESERVED_WITH_WARNING.value,
+            }
+        ):
+            raise RuntimeError("PPTX shadow page result is invalid")
+        result_pages.append(item["page_id"])
+        statuses.append(item["status"])
+    replaced_pages = statuses.count(PageStatus.REPLACED.value)
+    warning_pages = statuses.count(
+        PageStatus.PRESERVED_WITH_WARNING.value
+    )
+    warnings = summary.get("warnings")
+    try:
+        summary_policy = validate_resource_policy(
+            summary.get("resource_policy")
+        )
+    except ValueError as error:
+        raise RuntimeError("PPTX shadow resource policy is invalid") from error
+    if (
+        len(set(result_pages)) != slide_count
+        or summary.get("schema_version") != SCHEMA_VERSION
+        or summary.get("status") != RunStatus.COMPLETED.value
+        or summary.get("pages") != slide_count
+        or summary.get("preserved_objects")
+        != original_objects - replaced_pages
+        or summary.get("pending_candidates")
+        != original_candidates - replaced_pages
+        or summary.get("replaced_pages") != replaced_pages
+        or summary.get("preserved_with_warning_pages") != warning_pages
+        or not isinstance(warnings, list)
+        or any(not isinstance(item, str) for item in warnings)
+        or summary.get("outputs") != {"pptx": str(expected_output)}
+        or summary.get("input_sha256") != input_sha256
+        or not _is_sha256(summary.get("output_sha256"))
+        or summary_policy != resource_policy
+    ):
+        raise RuntimeError("PPTX shadow summary values are invalid")
+
+
+def _validate_pptx_shadow_execution_summary(
+    summary: object,
+    expected_output: Path,
+    slide_count: int,
+    original_objects: int,
+    original_candidates: int,
+    input_sha256: str,
+    resource_policy: dict[str, object],
+) -> None:
+    if type(summary) is not dict:
+        raise RuntimeError("PPTX shadow summary must be an object")
+    public_summary = dict(summary)
+    token = public_summary.pop("_output_identity", None)
+    _validate_pptx_shadow_public_summary(
+        public_summary,
+        expected_output,
+        slide_count,
+        original_objects,
+        original_candidates,
+        input_sha256,
+        resource_policy,
+    )
+    if (
+        not isinstance(token, dict)
+        or token.get("sha256") != public_summary["output_sha256"]
+    ):
+        raise RuntimeError(
+            "PPTX shadow summary identity hash does not match output"
+        )
+
+
+def _validate_completed_shadow_pages(
+    store: RunStore,
+    manifest: dict[str, Any],
+    page_jobs: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    manifest_pages = _pptx_page_ids_manifest(manifest, page_jobs)
+    by_page = {
+        item["page_id"]: item
+        for item in summary["page_results"]
+        if isinstance(item, dict) and isinstance(item.get("page_id"), str)
+    }
+    if set(by_page) != set(manifest_pages):
+        raise RuntimeError("PPTX shadow page results do not match manifest")
+    for page_id in manifest_pages:
+        result = by_page[page_id]
+        if page_jobs["pages"][page_id]["status"] != result.get("status"):
+            raise RuntimeError("PPTX shadow page status does not match result")
+        stored = store.read_json(
+            Path("pages") / page_id / "page_result.json"
+        )
+        if stored != result:
+            raise RuntimeError("PPTX shadow stored page result changed")
+
+
+def _pptx_page_ids_manifest(
+    manifest: dict[str, Any],
+    page_jobs: dict[str, Any],
+) -> list[str]:
+    manifest_pages = manifest.get("pages")
+    pages = page_jobs.get("pages")
+    if (
+        not isinstance(manifest_pages, list)
+        or not isinstance(pages, dict)
+        or any(not isinstance(page_id, str) for page_id in manifest_pages)
+        or len(pages) != len(manifest_pages)
+        or set(pages) != set(manifest_pages)
+    ):
+        raise RuntimeError("PPTX manifest pages do not match page jobs")
+    return manifest_pages
+
+
 def _claim_pptx_output(
     summary: dict[str, Any],
     expected_output: Path,
@@ -629,7 +826,6 @@ def _run_job(
     page_jobs = store.read_json("page_jobs.json")
     if state["status"] == RunStatus.COMPLETED.value:
         if input_type == "pptx":
-            _pptx_page_ids(manifest, page_jobs, PageStatus.PRESERVED)
             (
                 pptx_slide_count,
                 pptx_preserved_objects,
@@ -638,18 +834,42 @@ def _run_job(
             ) = _pptx_manifest_expectations(manifest, page_jobs)
             validate_pptx_inventories(store, manifest)
             summary = store.read_json("run_summary.json")
-            _validate_pptx_public_summary(
-                summary,
-                _pptx_output_path(store, manifest),
-                pptx_slide_count,
-                pptx_preserved_objects,
-                pptx_pending_candidates,
-                pptx_input_sha256,
-                resource_policy,
-            )
+            if "page_results" in summary:
+                _validate_completed_shadow_pages(
+                    store,
+                    manifest,
+                    page_jobs,
+                    summary,
+                )
+                _validate_pptx_shadow_public_summary(
+                    summary,
+                    _pptx_output_path(store, manifest),
+                    pptx_slide_count,
+                    pptx_preserved_objects,
+                    pptx_pending_candidates,
+                    pptx_input_sha256,
+                    resource_policy,
+                )
+                completed_output_sha256 = summary["output_sha256"]
+            else:
+                _pptx_page_ids(
+                    manifest,
+                    page_jobs,
+                    PageStatus.PRESERVED,
+                )
+                _validate_pptx_public_summary(
+                    summary,
+                    _pptx_output_path(store, manifest),
+                    pptx_slide_count,
+                    pptx_preserved_objects,
+                    pptx_pending_candidates,
+                    pptx_input_sha256,
+                    resource_policy,
+                )
+                completed_output_sha256 = pptx_input_sha256
             _validate_completed_pptx_output(
                 _pptx_output_path(store, manifest),
-                pptx_input_sha256,
+                completed_output_sha256,
             )
             return summary
         summary = store.read_json("run_summary.json")
@@ -689,10 +909,12 @@ def _run_job(
             pptx_input_sha256,
         ) = _pptx_manifest_expectations(manifest, page_jobs)
         validate_pptx_inventories(store, manifest)
+        pptx_shadow_plans = shadow_replacement_plans(store, manifest)
         pptx_expected_output = _pptx_output_path(store, manifest)
         pptx_output_existed = _path_entry_exists(pptx_expected_output)
     else:
         page_ids = list(page_jobs["pages"])
+        pptx_shadow_plans = []
         pptx_expected_output = None
         pptx_output_existed = False
     store.transition_run(RunStatus.RUNNING)
@@ -701,9 +923,21 @@ def _run_job(
 
     try:
         if input_type == "pptx":
+            if pptx_shadow_plans:
+                _transition_pages(
+                    store,
+                    [plan["page_id"] for plan in pptx_shadow_plans],
+                    PageStatus.PROCESSING,
+                )
             manifest_token = _PPTX_EXECUTION_MANIFEST.set(manifest)
             try:
-                summary = execute_pptx_preserve(store)
+                if pptx_shadow_plans:
+                    summary = execute_pptx_shadow(
+                        store,
+                        pptx_shadow_plans,
+                    )
+                else:
+                    summary = execute_pptx_preserve(store)
             finally:
                 _PPTX_EXECUTION_MANIFEST.reset(manifest_token)
             pptx_output_published = True
@@ -714,15 +948,26 @@ def _run_job(
                     raise RuntimeError(
                         "PPTX expected output already existed before execution"
                     )
-                _validate_pptx_execution_summary(
-                    summary,
-                    pptx_expected_output,
-                    pptx_slide_count,
-                    pptx_preserved_objects,
-                    pptx_pending_candidates,
-                    pptx_input_sha256,
-                    resource_policy,
-                )
+                if pptx_shadow_plans:
+                    _validate_pptx_shadow_execution_summary(
+                        summary,
+                        pptx_expected_output,
+                        pptx_slide_count,
+                        pptx_preserved_objects,
+                        pptx_pending_candidates,
+                        pptx_input_sha256,
+                        resource_policy,
+                    )
+                else:
+                    _validate_pptx_execution_summary(
+                        summary,
+                        pptx_expected_output,
+                        pptx_slide_count,
+                        pptx_preserved_objects,
+                        pptx_pending_candidates,
+                        pptx_input_sha256,
+                        resource_policy,
+                    )
             except Exception:
                 try:
                     pptx_output_record = _claim_pptx_output(
@@ -742,7 +987,39 @@ def _run_job(
             finally:
                 if isinstance(summary, dict):
                     summary.pop("_output_identity", None)
-            _transition_pages(store, page_ids, PageStatus.PRESERVED)
+            if pptx_shadow_plans:
+                for result in summary["page_results"]:
+                    page_id = result["page_id"]
+                    status = PageStatus(result["status"])
+                    if status is PageStatus.REPLACED:
+                        _transition_pages(
+                            store,
+                            [page_id],
+                            PageStatus.VALIDATED,
+                        )
+                        _transition_pages(
+                            store,
+                            [page_id],
+                            PageStatus.REPLACED,
+                        )
+                    elif status is PageStatus.PRESERVED_WITH_WARNING:
+                        _transition_pages(
+                            store,
+                            [page_id],
+                            PageStatus.PRESERVED_WITH_WARNING,
+                        )
+                    else:
+                        _transition_pages(
+                            store,
+                            [page_id],
+                            PageStatus.PRESERVED,
+                        )
+                    store.write_json(
+                        Path("pages") / page_id / "page_result.json",
+                        result,
+                    )
+            else:
+                _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)
         else:
             _transition_pages(store, page_ids, PageStatus.PROCESSING)
@@ -999,12 +1276,17 @@ def recover_job(run_dir: str | Path) -> dict[str, Any]:
             page_jobs,
             analyzed=input_type == "pptx",
         )
+        cleanup_candidates = [
+            _run_owned_directory(store, "final"),
+            _run_owned_directory(store, "work"),
+        ]
+        if input_type == "pptx":
+            cleanup_candidates.extend(
+                _pptx_reconstruction_directories(store, page_jobs)
+            )
         cleanup = [
             directory
-            for directory in (
-                _run_owned_directory(store, "final"),
-                _run_owned_directory(store, "work"),
-            )
+            for directory in cleanup_candidates
             if directory is not None
         ]
 
@@ -1054,9 +1336,14 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
             f"PPTX retry is blocked while an output entry may be owned "
             f"by another process: {page_id}"
         )
+    cleanup = []
     work = _run_work_directory(store)
     if work is not None:
-        _safe_rmtree(*work)
+        cleanup.append(work)
+    if input_type == "pptx":
+        cleanup.extend(_pptx_reconstruction_directories(store, page_jobs))
+    for directory in cleanup:
+        _safe_rmtree(*directory)
     if orphaned_failed_batch:
         store.transition_run(RunStatus.FAILED)
         run_status = RunStatus.FAILED.value
