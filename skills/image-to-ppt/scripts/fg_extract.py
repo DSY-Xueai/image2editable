@@ -13,6 +13,8 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
@@ -287,6 +289,134 @@ def export_visual_components(
         })
 
     return components
+
+
+def export_component_graph(
+    img: np.ndarray,
+    graph: dict,
+    masks: dict[str, np.ndarray],
+    output_dir: str | Path,
+    *,
+    text_mask: np.ndarray,
+) -> list[dict]:
+    """Export only pending/frozen visual nodes from an already validated graph."""
+
+    from image2editable.component_contracts import (
+        is_render_active_component,
+        validate_component_graph,
+    )
+    from image2editable.component_quality import validate_pixel_ownership
+
+    validate_component_graph(graph)
+    active_nodes = [
+        node for node in graph["nodes"] if is_render_active_component(node)
+    ]
+    active_masks = []
+    semantic_masks = []
+    for node in active_nodes:
+        if node["id"] not in masks:
+            raise ValueError(f"active component mask is missing: {node['id']}")
+        active_masks.append(np.asarray(masks[node["id"]], dtype=bool))
+        semantic_masks.append(active_masks[-1])
+    ownership = validate_pixel_ownership(
+        active_masks,
+        text_mask=text_mask,
+        shape=img.shape[:2],
+    )
+    if not ownership["valid"]:
+        raise ComponentExtractionError(
+            "active component ownership is invalid: "
+            + json.dumps(ownership, sort_keys=True)
+        )
+    components = export_visual_components(
+        img,
+        active_masks,
+        output_dir,
+        text_mask,
+        semantic_masks=semantic_masks,
+    )
+    if len(components) != len(active_nodes):
+        raise ComponentExtractionError(
+            "active component graph nodes must all produce visual components"
+        )
+    for component, node in zip(components, active_nodes):
+        component["component_id"] = node["id"]
+        component["z_index"] = node["z_index"]
+    return components
+
+
+def export_component_tree(
+    img: np.ndarray,
+    layers: list[dict],
+    output_dir: str | Path,
+    *,
+    text_mask: np.ndarray,
+) -> dict:
+    """Persist intact parent masks and export only active child objects."""
+
+    from image2editable.component_contracts import validate_component_graph
+
+    output_dir = Path(output_dir)
+    mask_dir = output_dir / "masks"
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    nodes = []
+    masks = {}
+    for index, layer in enumerate(layers, start=1):
+        if not isinstance(layer, dict) or set(layer) != {
+            "parent_mask",
+            "child_mask",
+            "z_index",
+        }:
+            raise ValueError("component mask layer fields are invalid")
+        parent_id = f"parent_{index:04d}"
+        child_id = f"component_{index:04d}"
+        for component_id, kind, state, parent_id_value, mask in (
+            (parent_id, "parent", "inactive", None, layer["parent_mask"]),
+            (child_id, "child", "pending", parent_id, layer["child_mask"]),
+        ):
+            normalized = np.asarray(mask, dtype=bool)
+            if normalized.shape != img.shape[:2] or not np.any(normalized):
+                raise ValueError("component mask shape must match image")
+            mask_path = mask_dir / f"{component_id}.png"
+            Image.fromarray(normalized.astype(np.uint8) * 255, mode="L").save(
+                mask_path
+            )
+            ys, xs = np.nonzero(normalized)
+            nodes.append(
+                {
+                    "id": component_id,
+                    "kind": kind,
+                    "parent_id": parent_id_value,
+                    "state": state,
+                    "mask": mask_path.relative_to(output_dir).as_posix(),
+                    "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+                    "bbox": [
+                        int(xs.min()),
+                        int(ys.min()),
+                        int(xs.max()) + 1,
+                        int(ys.max()) + 1,
+                    ],
+                    "z_index": layer["z_index"],
+                    "text_ids": [],
+                }
+            )
+            masks[component_id] = normalized
+
+    graph = {"nodes": nodes}
+    validate_component_graph(graph)
+    graph_path = output_dir / "component-graph.json"
+    graph_path.write_text(
+        json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    components = export_component_graph(
+        img,
+        graph,
+        masks,
+        output_dir / "components",
+        text_mask=text_mask,
+    )
+    return {"graph": graph, "components": components}
 
 
 def _restore_supported_holes(

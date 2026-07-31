@@ -6209,3 +6209,181 @@ def test_agent_managed_finalize_does_not_overwrite_hardlink_occupying_snapshot(
     assert external_path.read_bytes() == external_content
     assert exclusive_error is not None
     assert not list(work_dir.glob("quality-components-*"))
+
+
+@pytest.mark.parametrize(
+    "content_kind",
+    ["card", "person_outline", "dense_lines", "gradient_object"],
+)
+def test_component_tree_preserves_intact_parent_and_exports_only_active_child(
+    tmp_path: Path,
+    content_kind: str,
+) -> None:
+    import numpy as np
+
+    parent = np.zeros((24, 32), dtype=bool)
+    if content_kind == "card":
+        parent[3:21, 4:28] = True
+    elif content_kind == "person_outline":
+        parent[3:9, 13:19] = True
+        parent[8:20, 10:22] = True
+    elif content_kind == "dense_lines":
+        parent[4:20:3, 3:29] = True
+        parent[3:21, 5:29:4] = True
+    else:
+        yy, xx = np.ogrid[:24, :32]
+        parent = ((yy - 12) ** 2) / 64 + ((xx - 16) ** 2) / 144 <= 1
+    child = parent.copy()
+    first_y, first_x = np.argwhere(parent)[0]
+    child[first_y, first_x] = False
+    element = visual_segment.VisualElement(
+        mask=child,
+        semantic_mask=parent,
+        z_index=3,
+        score=0.9,
+        source="synthetic",
+    )
+
+    layers = visual_segment.build_component_mask_layers([element])
+    image = np.full((24, 32, 3), 180, dtype=np.uint8)
+    exported = fg_extract.export_component_tree(
+        image,
+        layers,
+        tmp_path / content_kind,
+        text_mask=np.zeros((24, 32), dtype=np.uint8),
+    )
+
+    from image2editable.component_contracts import validate_component_graph
+
+    assert validate_component_graph(exported["graph"]) is exported["graph"]
+    parent_node, child_node = exported["graph"]["nodes"]
+    assert parent_node["kind"] == "parent"
+    assert parent_node["state"] == "inactive"
+    assert child_node["kind"] == "child"
+    assert child_node["state"] == "pending"
+    assert child_node["parent_id"] == parent_node["id"]
+    assert len(exported["components"]) == 1
+    assert Path(exported["components"][0]["path"]).is_file()
+    assert (tmp_path / content_kind / "component-graph.json").is_file()
+    saved_parent = np.asarray(
+        Image.open(tmp_path / content_kind / parent_node["mask"])
+    ) > 0
+    saved_child = np.asarray(
+        Image.open(tmp_path / content_kind / child_node["mask"])
+    ) > 0
+    assert np.array_equal(saved_parent, parent)
+    assert np.array_equal(saved_child, child)
+    assert np.all(~saved_child | saved_parent)
+    assert np.count_nonzero(saved_parent) > np.count_nonzero(saved_child)
+
+
+def test_component_mask_layers_reject_overlapping_active_children() -> None:
+    import numpy as np
+
+    first = np.zeros((10, 10), dtype=bool)
+    first[1:6, 1:6] = True
+    second = np.zeros((10, 10), dtype=bool)
+    second[5:9, 5:9] = True
+    elements = [
+        visual_segment.VisualElement(first, 0, 0.9, "synthetic"),
+        visual_segment.VisualElement(second, 1, 0.9, "synthetic"),
+    ]
+
+    with pytest.raises(
+        visual_segment.VisualSegmentationError,
+        match="overlapping visual ownership",
+    ):
+        visual_segment.build_component_mask_layers(elements)
+
+
+def test_component_graph_export_includes_frozen_but_not_failed_nodes(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    from image2editable.component_contracts import validate_component_graph
+
+    frozen_mask = np.zeros((12, 12), dtype=bool)
+    frozen_mask[1:5, 1:5] = True
+    failed_mask = np.zeros((12, 12), dtype=bool)
+    failed_mask[7:10, 7:10] = True
+    graph = {
+        "nodes": [
+            {
+                "id": "component_frozen",
+                "kind": "parent",
+                "parent_id": None,
+                "state": "frozen",
+                "mask": "masks/component_frozen.png",
+                "mask_sha256": "a" * 64,
+                "bbox": [1, 1, 5, 5],
+                "z_index": 4,
+                "text_ids": [],
+            },
+            {
+                "id": "component_failed",
+                "kind": "parent",
+                "parent_id": None,
+                "state": "failed",
+                "mask": "masks/component_failed.png",
+                "mask_sha256": "b" * 64,
+                "bbox": [7, 7, 10, 10],
+                "z_index": 5,
+                "text_ids": [],
+            },
+        ]
+    }
+    validate_component_graph(graph)
+
+    components = fg_extract.export_component_graph(
+        np.full((12, 12, 3), 180, dtype=np.uint8),
+        graph,
+        {
+            "component_frozen": frozen_mask,
+            "component_failed": failed_mask,
+        },
+        tmp_path / "components",
+        text_mask=np.zeros((12, 12), dtype=np.uint8),
+    )
+
+    assert len(components) == 1
+    assert components[0]["component_id"] == "component_frozen"
+    assert components[0]["z_index"] == 4
+
+
+def test_component_graph_export_rejects_duplicate_active_ownership(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    mask_a = np.zeros((10, 10), dtype=bool)
+    mask_a[1:6, 1:6] = True
+    mask_b = np.zeros((10, 10), dtype=bool)
+    mask_b[5:9, 5:9] = True
+
+    def node(component_id: str, z_index: int) -> dict:
+        return {
+            "id": component_id,
+            "kind": "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": str(z_index + 1) * 64,
+            "bbox": [1, 1, 9, 9],
+            "z_index": z_index,
+            "text_ids": [],
+        }
+
+    graph = {"nodes": [node("component_a", 0), node("component_b", 1)]}
+
+    with pytest.raises(
+        fg_extract.ComponentExtractionError,
+        match="ownership",
+    ):
+        fg_extract.export_component_graph(
+            np.full((10, 10, 3), 180, dtype=np.uint8),
+            graph,
+            {"component_a": mask_a, "component_b": mask_b},
+            tmp_path / "components",
+            text_mask=np.zeros((10, 10), dtype=np.uint8),
+        )

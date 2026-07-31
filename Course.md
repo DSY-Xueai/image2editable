@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 2 已完成：初始 OCR/CV/SAM 分层可持久化并跨进程恢复，Agent 管理路径拥有禁止整页 text-only fallback 的最终质量入口；组件动作与 Agent 状态机尚未接入。
+- P2.3 Task 3 已完成：初始分层具备类别无关的父子组件树、冻结约束和唯一像素所有权报告；组件动作与 Agent 状态机尚未接入。
 
 ## P2.2 既有行为
 
@@ -37,9 +37,16 @@
 - `finalize_component_layers` 只接受与 fresh state 完全一致的 components 与 element masks；quality 单次加载 staging source/masks 并执行严格 overlap 检查，成功返回的组件继续由存活 staging 承载，失败则完整清理。
 - 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
 
+## P2.3 Task 3 本轮变更
+
+- 组件节点固定为 `id/kind/parent_id/state/mask/mask_sha256/bbox/z_index/text_ids`；未知字段拒绝，冻结节点的掩码、位置、层级和文字归属不可修改或删除。
+- `pending/frozen` 是仅有的活动渲染状态，`failed/inactive` 不参与输出；父子节点不能同时渲染。
+- 初始语义实例同时保存完整父掩码和可拆子掩码；常规导出只消费活动节点，完整父资产留作后续折叠回退。
+- 唯一像素所有权分别报告组件重复、显式前景缺失、文字重复和越界像素；半透明、阴影和抗锯齿的任意非零证据也只能归属于一个活动组件，不自动修正。
+
 ## 关键修改文件
 
-- Agent 契约与运行时：`image2editable/component_contracts.py`、`image2editable/agent.py`、`image2editable/runtime.py`
+- Agent 契约、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
 - PPTX 扫描与执行：`image2editable/pptx_input.py`
 - CV 重建：`image2editable/pptx_reconstruct.py`
 - OOXML 替换：`image2editable/pptx_shadow.py`
@@ -74,7 +81,7 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1/2 已完成 Provider 契约与可恢复初始视觉资产，尚未把这些资产接入组件决策、修复、五轮循环或 Host/Local 调用。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–3 已完成 Provider、可恢复初始视觉资产、组件树和所有权基础，尚未接入组件决策、修复、五轮循环或 Host/Local 调用。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 当前优先保证视觉稳定和文字可编辑；与文字冲突的独立视觉组件会保留在净化底图中，不强行拆成透明对象。

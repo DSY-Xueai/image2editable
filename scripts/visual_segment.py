@@ -216,6 +216,34 @@ class VisualElement:
             self.semantic_mask = np.asarray(self.mask, dtype=bool).copy()
 
 
+def build_component_mask_layers(elements: list[VisualElement]) -> list[dict]:
+    """Keep an intact semantic parent beside each detachable visible mask."""
+
+    child_masks = [np.asarray(element.mask, dtype=bool) for element in elements]
+    validate_visual_masks(child_masks)
+    layers = []
+    for element, child_mask in zip(elements, child_masks):
+        parent_mask = np.asarray(element.semantic_mask, dtype=bool)
+        if parent_mask.shape != child_mask.shape:
+            raise VisualSegmentationError(
+                "parent and child component masks must have the same shape"
+            )
+        if np.any(child_mask & ~parent_mask):
+            raise VisualSegmentationError(
+                "child component mask must stay inside its parent"
+            )
+        if not np.any(parent_mask) or not np.any(child_mask):
+            raise VisualSegmentationError("component masks cannot be empty")
+        layers.append(
+            {
+                "parent_mask": parent_mask.copy(),
+                "child_mask": child_mask.copy(),
+                "z_index": element.z_index,
+            }
+        )
+    return layers
+
+
 def resolve_visual_elements(
     candidates: list[MaskCandidate],
     min_area: int = 20,
