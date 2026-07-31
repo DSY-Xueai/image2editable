@@ -65,7 +65,7 @@
 ## P2.3 Task 5 本轮变更
 
 - `image2editable agent next RUN_DIR` 在真实页面前先返回 Run 内随机、SHA-256 绑定的轻量视觉 challenge；随机 nonce 确定性派生严格白名单内的形状、颜色和数量，三角、圆和方形均使用等宽高边界。Host 路径不导入本地模型模块、不下载模型。
-- challenge metadata 不保存答案；受信任端使用 Task 4 Run integrity key 对 nonce 做 HMAC 派生，再以 challenge ID 绑定派生答案和 PNG 哈希。loader 会重新读取安全 key、重算答案并复核图片；已有 challenge 时 key 缺失、损坏或被替换均 fail closed，不静默轮换。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
+- challenge metadata 仅保存 Schema、图片路径、PNG 哈希和 challenge ID，不保存答案、nonce 或可复现布局的随机状态。形状、颜色和数量只在生成时从安全随机源选择；验证端先用 Task 4 Run integrity key 认证 PNG 哈希/ID，再独立解析已绑定 PNG 像素得到答案。即使同权限 Agent 读取 metadata 与 key，也不能脱离视觉图像推导答案；已有 challenge 时 key 缺失、损坏或被替换均 fail closed。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
 - capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
 - `image2editable agent record RUN_DIR --plan PLAN.json` 在首次写入和半提交恢复前均先校验当前请求 SHA；同时读取 Task 4 已认证组件图，严格校验动作对象数量与真实 kind/parent 角色。`attach_text` 只接受 visual→text，`collapse_to_parent` 只接受 parent，child merge 只能同父级；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、跨角色/跨父级及冲突动作均拒绝。

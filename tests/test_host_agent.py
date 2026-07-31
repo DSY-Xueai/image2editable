@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -94,7 +93,9 @@ def test_host_next_returns_random_hash_bound_visual_handshake_before_page(host_r
     assert item["required_capabilities"] == [
         "vision", "local_file_read", "tool_use", "structured_json"]
     assert metadata["challenge_id"] == item["challenge_id"]
-    assert "expected" not in metadata
+    assert set(metadata) == {
+        "schema_version", "challenge_id", "image_path", "image_sha256"
+    }
     assert metadata["image_sha256"] == hashlib.sha256(Path(item["image_path"]).read_bytes()).hexdigest()
 
 
@@ -103,8 +104,8 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
     shape: str,
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    nonce = _nonce_for(shape=shape, color="#d9485f", count=4)
-    monkeypatch.setattr(host_agent.secrets, "token_bytes", lambda size: nonce)
+    choices = iter([shape, "#d9485f", 4])
+    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
     source = tmp_path / "source.png"
     source.write_bytes(b"image")
     run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
@@ -118,7 +119,7 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
     observed = _observe_challenge(Path(item["image_path"]))
     color = tuple(bytes.fromhex(observed["color"][1:]))
     components = _color_components(image, color)
-    assert "expected" not in metadata
+    assert "expected" not in metadata and "nonce" not in metadata
     assert observed == {"shape": shape, "color": "#d9485f", "count": 4}
     assert len(components) == 4
     assert all(component["width"] == component["height"] for component in components)
@@ -128,19 +129,6 @@ def test_every_visual_shape_matches_label_color_count_and_square_bbox(
         assert all(component["top_width"] < component["middle_width"] and component["bottom_width"] < component["middle_width"] for component in components)
     else:
         assert all(component["top_width"] == component["middle_width"] == component["bottom_width"] for component in components)
-
-
-def _nonce_for(*, shape: str, color: str, count: int) -> bytes:
-    for value in range(100000):
-        nonce = value.to_bytes(32, "big")
-        digest = hmac.new(
-            nonce, b"image2editable-host-challenge\0" + nonce, hashlib.sha256
-        ).digest()
-        if (host_agent.CHALLENGE_SHAPES[digest[0] % len(host_agent.CHALLENGE_SHAPES)] == shape
-                and host_agent.CHALLENGE_COLORS[digest[1] % len(host_agent.CHALLENGE_COLORS)] == color
-                and host_agent.CHALLENGE_COUNTS[digest[2] % len(host_agent.CHALLENGE_COUNTS)] == count):
-            return nonce
-    raise AssertionError("nonce not found")
 
 
 def _color_components(image: object, color: tuple[int, int, int]) -> list[dict]:
@@ -212,8 +200,8 @@ def test_capability_must_match_exact_visual_answer(host_run: Path, tmp_path: Pat
 def test_hard_coded_old_capability_answer_is_rejected(
     host_run: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    nonce = _nonce_for(shape="circle", color="#2b8a3e", count=4)
-    monkeypatch.setattr(host_agent.secrets, "token_bytes", lambda size: nonce)
+    choices = iter(["circle", "#2b8a3e", 4])
+    monkeypatch.setattr(host_agent.secrets, "choice", lambda values: next(choices))
     item = next_host_agent_item(host_run)
     response = {"schema_version": 1, "kind": "host_capability_response",
                 "challenge_id": item["challenge_id"],
@@ -222,15 +210,43 @@ def test_hard_coded_old_capability_answer_is_rejected(
         record_host_plan(host_run, _write_json(tmp_path / "old.json", response))
 
 
-def test_metadata_expected_tampering_fails_even_when_value_is_whitelisted(
+def test_metadata_and_run_key_do_not_contain_or_derive_visual_answer(
     host_run: Path
 ) -> None:
+    item = next_host_agent_item(host_run)
+    metadata_path = host_run / "host-challenge/metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    key = (host_run / ".component-agent-integrity/key.bin").read_bytes()
+    assert set(metadata) == {"schema_version", "challenge_id", "image_path", "image_sha256"}
+    assert all(value not in json.dumps(metadata) for value in host_agent.CHALLENGE_SHAPES)
+    assert len(key) == 32
+    assert _observe_challenge(Path(item["image_path"])) not in (metadata, key)
+
+
+def test_bound_metadata_tampering_fails(host_run: Path) -> None:
     next_host_agent_item(host_run)
     metadata_path = host_run / "host-challenge/metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["nonce"] = ("00" if not metadata["nonce"].startswith("00") else "01") + metadata["nonce"][2:]
+    metadata["image_sha256"] = "0" * 64
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     with pytest.raises(RuntimeError, match="metadata|expected|challenge"):
+        next_host_agent_item(host_run)
+
+
+def test_bound_png_and_challenge_id_tampering_fail_closed(host_run: Path) -> None:
+    next_host_agent_item(host_run)
+    image = host_run / "host-challenge/challenge.png"
+    image.write_bytes(image.read_bytes() + b"changed")
+    with pytest.raises(RuntimeError, match="hash"):
+        next_host_agent_item(host_run)
+
+def test_bound_challenge_id_tampering_fails_closed(host_run: Path) -> None:
+    next_host_agent_item(host_run)
+    metadata_path = host_run / "host-challenge/metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["challenge_id"] = "0" * 64
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="ID"):
         next_host_agent_item(host_run)
 
 

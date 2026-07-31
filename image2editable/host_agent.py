@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import os
 from contextlib import contextmanager
@@ -208,8 +209,11 @@ def _create_challenge(store: RunStore) -> dict:
     staging.mkdir()
     staging_identity = _directory_identity(staging)
     integrity_key = load_or_create_run_integrity_key(store.root)
-    nonce = secrets.token_bytes(32)
-    expected = _expected_from_nonce(integrity_key, nonce)
+    expected = {
+        "shape": secrets.choice(CHALLENGE_SHAPES),
+        "color": secrets.choice(CHALLENGE_COLORS),
+        "count": secrets.choice(CHALLENGE_COUNTS),
+    }
     image = Image.new("RGB", (240, 120), "white")
     draw = ImageDraw.Draw(image)
     spacing = 220 // expected["count"]
@@ -222,19 +226,16 @@ def _create_challenge(store: RunStore) -> dict:
             draw.ellipse((left, top, right, bottom), fill=expected["color"])
         else:
             draw.rectangle((left, top, right, bottom), fill=expected["color"])
-    for index, value in enumerate(nonce):
-        image.putpixel((index, 119), (value, value, value))
     try:
         image_path = staging / "challenge.png"
         image.save(image_path, format="PNG")
         image_sha256 = hashlib.sha256(
             _read_regular_file(image_path, 1024 * 1024)
         ).hexdigest()
-        challenge_id = _challenge_id(integrity_key, nonce, expected, image_sha256)
+        challenge_id = _challenge_id(integrity_key, image_sha256)
         challenge = {
             "schema_version": SCHEMA_VERSION,
             "challenge_id": challenge_id,
-            "nonce": nonce.hex(),
             "image_path": "challenge.png",
             "image_sha256": image_sha256,
         }
@@ -267,31 +268,22 @@ def _load_challenge_directory(directory: Path) -> dict:
     metadata = _read_json_file(directory / "metadata.json")
     _require_directory_identity(directory, identity)
     fields = {
-        "schema_version", "challenge_id", "nonce", "image_path",
+        "schema_version", "challenge_id", "image_path",
         "image_sha256",
     }
     if set(metadata) != fields or metadata["schema_version"] != SCHEMA_VERSION:
         raise RuntimeError("Host capability challenge metadata is invalid")
-    try:
-        nonce = bytes.fromhex(metadata["nonce"])
-    except (TypeError, ValueError) as error:
-        raise RuntimeError("Host capability challenge nonce is invalid") from error
-    if len(nonce) != 32:
-        raise RuntimeError("Host capability challenge nonce is invalid")
     integrity_key = load_run_integrity_key(directory.parent)
-    expected = _expected_from_nonce(integrity_key, nonce)
     if metadata["image_path"] != "challenge.png":
         raise RuntimeError("Host capability challenge image path is invalid")
-    image_sha256 = hashlib.sha256(
-        _read_regular_file(directory / "challenge.png", 1024 * 1024)
-    ).hexdigest()
+    image_bytes = _read_regular_file(directory / "challenge.png", 1024 * 1024)
+    image_sha256 = hashlib.sha256(image_bytes).hexdigest()
     _require_directory_identity(directory, identity)
     if image_sha256 != metadata["image_sha256"]:
         raise RuntimeError("Host capability challenge hash mismatch")
-    if metadata["challenge_id"] != _challenge_id(
-        integrity_key, nonce, expected, image_sha256
-    ):
+    if metadata["challenge_id"] != _challenge_id(integrity_key, image_sha256):
         raise RuntimeError("Host capability challenge ID is invalid")
+    expected = _observe_challenge_png(image_bytes)
     return {**metadata, "expected": expected}
 
 
@@ -308,33 +300,65 @@ def _require_directory_identity(directory: Path, identity: tuple[int, int]) -> N
         raise RuntimeError("Host capability challenge directory changed")
 
 
-def _expected_from_nonce(integrity_key: bytes, nonce: bytes) -> dict:
-    digest = hmac.new(
-        integrity_key, b"image2editable-host-challenge\0" + nonce, hashlib.sha256
-    ).digest()
-    return {
-        "shape": CHALLENGE_SHAPES[digest[0] % len(CHALLENGE_SHAPES)],
-        "color": CHALLENGE_COLORS[digest[1] % len(CHALLENGE_COLORS)],
-        "count": CHALLENGE_COUNTS[digest[2] % len(CHALLENGE_COUNTS)],
-    }
-
-
-def _challenge_id(
-    integrity_key: bytes, nonce: bytes, expected: dict, image_sha256: str
-) -> str:
-    canonical = json.dumps(
-        expected, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+def _challenge_id(integrity_key: bytes, image_sha256: str) -> str:
     return hmac.new(
         integrity_key,
         b"image2editable-host-challenge-id\0"
-        + nonce
-        + b"\0"
-        + canonical
-        + b"\0"
         + image_sha256.encode("ascii"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _observe_challenge_png(payload: bytes) -> dict:
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(payload)).convert("RGB")
+    pixels = image.load()
+    width, height = image.size
+    found = []
+    found_color = None
+    for color_name in CHALLENGE_COLORS:
+        color = tuple(bytes.fromhex(color_name[1:]))
+        remaining = {
+            (x, y) for y in range(height) for x in range(width)
+            if pixels[x, y] == color
+        }
+        if not remaining:
+            continue
+        if found_color is not None:
+            raise RuntimeError("Host capability challenge has multiple colors")
+        found_color = color_name
+        while remaining:
+            pending = [remaining.pop()]
+            points = []
+            while pending:
+                x, y = pending.pop()
+                points.append((x, y))
+                for neighbor in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                    if neighbor in remaining:
+                        remaining.remove(neighbor)
+                        pending.append(neighbor)
+            found.append(points)
+    if found_color is None or len(found) not in CHALLENGE_COUNTS:
+        raise RuntimeError("Host capability challenge objects are invalid")
+    shapes = set()
+    for points in found:
+        ys = [point[1] for point in points]
+        top, bottom = min(ys), max(ys)
+        middle = (top + bottom) // 2
+        row = lambda value: sum(point[1] == value for point in points)
+        top_width, middle_width, bottom_width = row(top), row(middle), row(bottom)
+        if top_width == middle_width == bottom_width:
+            shapes.add("square")
+        elif top_width < middle_width < bottom_width:
+            shapes.add("triangle")
+        elif top_width < middle_width and bottom_width < middle_width:
+            shapes.add("circle")
+        else:
+            raise RuntimeError("Host capability challenge shape is invalid")
+    if len(shapes) != 1:
+        raise RuntimeError("Host capability challenge shapes are inconsistent")
+    return {"shape": shapes.pop(), "color": found_color, "count": len(found)}
 
 
 def _write_challenge_metadata(path: Path, metadata: dict) -> None:
