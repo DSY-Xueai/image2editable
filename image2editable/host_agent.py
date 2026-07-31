@@ -6,7 +6,7 @@ import io
 import json
 import os
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import secrets
 import stat
 import tempfile
@@ -128,6 +128,7 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
                 raise RuntimeError("A different component plan is already recorded")
             if status != RunStatus.AWAITING_AGENT.value:
                 raise RuntimeError("Component plan is already recorded")
+            _record_plan_reference(store, request, destination)
             store.transition_run(RunStatus.PREPARED)
             return {
                 "status": "recorded",
@@ -138,12 +139,45 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
             raise RuntimeError("Run must be awaiting_agent")
         validate_component_plan(document, request=request, graph=graph)
         _write_json_exclusive(destination, document)
+        _record_plan_reference(store, request, destination)
         store.transition_run(RunStatus.PREPARED)
         return {
             "status": "recorded",
             "plan_path": str(destination.resolve()),
             "recovered": False,
         }
+
+
+def _record_plan_reference(store: RunStore, request: dict, plan_path: Path) -> None:
+    from image2editable.component_contracts import validate_component_repair_state
+
+    relative = f"pages/{request['page_id']}/reconstruction/component_state.json"
+    state = validate_component_repair_state(store.read_json(relative))
+    if (
+        state["provider"] != request["provider"]
+        or state["repair_round"] != request["repair_round"]
+        or state["phase"] not in {"awaiting_plan", "plan_recorded"}
+    ):
+        raise RuntimeError("Component plan does not match repair state")
+    payload = _read_regular_file(plan_path, _PLAN_LIMIT)
+    reference = {
+        "path": plan_path.resolve().relative_to(store.root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    if state["phase"] == "plan_recorded":
+        if state["current_round"]["plan_ref"] != reference:
+            raise RuntimeError("A different component plan is already recorded")
+        return
+    updated = dict(state)
+    updated["current_round"] = dict(state["current_round"])
+    updated["current_round"]["plan_ref"] = reference
+    updated["phase"] = "plan_recorded"
+    updated["plan_count"] += 1
+    updated["revision"] += 1
+    from image2editable.contracts import utc_now
+    updated["updated_at"] = utc_now()
+    validate_component_repair_state(updated)
+    store.write_json(relative, updated)
 
 
 def _request_item(path: Path, request: dict) -> dict:
@@ -166,19 +200,24 @@ def _current_request(store: RunStore, *, include_recorded: bool = False) -> tupl
     manifest = store.read_json("job_manifest.json")
     candidates = []
     for page_id in manifest.get("pages", []):
-        agent_dir = store.root / "pages" / page_id / "reconstruction" / "agent"
-        if not agent_dir.is_dir():
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        state_path = reconstruction / "component_state.json"
+        if not state_path.is_file():
             continue
-        for request_path in agent_dir.glob("round-*/component_agent_request.json"):
-            request = load_component_agent_request(request_path)
-            if request["provider"] != "host":
-                raise RuntimeError("Current component request provider is not host")
-            plan_path = store.root / (
-                f"host-component-plan-{request['page_id']}-"
-                f"{request['repair_round']:02d}-{_request_sha256(request)}.json"
-            )
-            if include_recorded or not plan_path.exists():
-                candidates.append((request_path, request))
+        state = store.read_json(f"pages/{page_id}/reconstruction/component_state.json")
+        from image2editable.component_contracts import validate_component_repair_state
+        validate_component_repair_state(state)
+        request_ref = state["current_round"]["request_ref"]
+        request_path = store.root / Path(*PurePosixPath(request_ref["path"]).parts)
+        request = load_component_agent_request(request_path)
+        if _request_sha256(request) != request_ref["sha256"]:
+            raise RuntimeError("Current component request hash mismatch")
+        if request["provider"] != "host" or state["provider"] != "host":
+            raise RuntimeError("Current component request provider is not host")
+        if state["phase"] == "awaiting_plan" or (
+            include_recorded and state["current_round"]["plan_ref"] is not None
+        ):
+            candidates.append((request_path, request))
     if not candidates:
         raise RuntimeError("No current component request")
     candidates.sort(key=lambda item: (item[0].parent.name, item[0].parents[3].name))

@@ -28,6 +28,68 @@ class _PageQualityContext:
 
 
 _CHECK_STATES = frozenset({"pass", "fail", "unknown"})
+_METRIC_FIELDS = frozenset({
+    "component_pixels", "missing_pixels", "missing_ratio", "duplicate_pixels",
+    "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio",
+    "alpha_duplicate_ratio", "exterior_shadow_pixels", "exterior_alpha_pixels",
+    "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
+    "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
+    "local_contrast", "edge_width_px", "text_halo_px",
+    "adaptive_pixel_tolerance", "hard_pixel_tolerance",
+})
+
+
+def validate_component_quality_report(
+    report: object,
+    *,
+    expected_component_ids: list[str],
+    initial_component_count: int,
+) -> dict:
+    if not isinstance(report, dict) or set(report) != {
+        "accepted", "violations", "component_reports", "visual_metrics", "checks"
+    }:
+        raise ValueError("component quality report fields are invalid")
+    for component in report["component_reports"]:
+        if not isinstance(component, dict) or set(component) != {
+            "component_id", "accepted", "metrics", "improvement", "violations",
+            "checks", "agent_confidence",
+        }:
+            raise ValueError("component quality report entry fields are invalid")
+        metrics = component["metrics"]
+        if not isinstance(metrics, dict) or set(metrics) != _METRIC_FIELDS:
+            raise ValueError("component quality metrics fields are invalid")
+        for name, value in metrics.items():
+            if name == "parent_child_double":
+                if type(value) is not bool:
+                    raise ValueError("component quality metric type is invalid")
+            elif type(value) not in {int, float} or not np.isfinite(value) or value < 0:
+                raise ValueError("component quality metric value is invalid")
+        improvement = component["improvement"]
+        if not isinstance(improvement, dict) or any(
+            key not in _METRIC_FIELDS
+            or type(value) not in {int, float}
+            or not np.isfinite(value)
+            for key, value in improvement.items()
+        ):
+            raise ValueError("component quality improvement is invalid")
+        if component["checks"].get("protected_native_overlap") not in _CHECK_STATES:
+            raise ValueError("component quality native check is invalid")
+        confidence = component["agent_confidence"]
+        if confidence is not None and (
+            type(confidence) not in {int, float} or not np.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise ValueError("component quality confidence is invalid")
+        if component["accepted"] != (not component["violations"]):
+            raise ValueError("component quality accepted state is inconsistent")
+    rebuilt = evaluate_page_quality(
+        report["component_reports"], visual_metrics=report["visual_metrics"],
+        page_checks=report["checks"], expected_component_ids=expected_component_ids,
+        initial_component_count=initial_component_count,
+    )
+    if rebuilt != report:
+        raise ValueError("component quality page report is inconsistent")
+    return report
 
 
 def calibrate_page(source: np.ndarray, text_mask: np.ndarray) -> PageCalibration:

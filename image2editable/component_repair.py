@@ -17,6 +17,8 @@ from image2editable.component_contracts import (
     validate_agent_provider,
     validate_component_agent_request,
     validate_component_graph,
+    validate_component_plan,
+    validate_component_repair_state,
     validate_repair_round,
 )
 from image2editable.execution import ExecutionLease
@@ -32,6 +34,808 @@ IO_CHUNK_SIZE = 1024 * 1024
 GRAPH_JSON_LIMIT = 16 * 1024 * 1024
 REQUEST_JSON_LIMIT = 4 * 1024 * 1024
 MARKER_JSON_LIMIT = 64 * 1024
+COMPONENT_STATE_NAME = "component_state.json"
+
+
+def advance_component_repair(store, page_id: str) -> dict:
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    state_path = reconstruction / COMPONENT_STATE_NAME
+    if not state_path.is_file():
+        return {"status": "needs_initialization", "page_id": page_id}
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        state = validate_component_repair_state(store.read_json(
+            f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        ))
+        _validate_repair_state_identity(store, state, page_id)
+        _load_state_artifact(store.root, state["current_round"]["request_ref"])
+        if state["phase"] == "request_published":
+            updated = dict(state)
+            updated["phase"] = "awaiting_plan"
+            updated["revision"] += 1
+            updated["updated_at"] = _utc_now()
+            validate_component_repair_state(updated)
+            store.write_json(
+                f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+            )
+            return {"status": "awaiting_agent", "page_id": page_id,
+                    "repair_round": updated["repair_round"]}
+        if state["phase"] == "awaiting_plan":
+            return {"status": "awaiting_agent", "page_id": page_id,
+                    "repair_round": state["repair_round"]}
+        if state["phase"] == "plan_recorded":
+            request_payload = _load_state_artifact(
+                store.root, state["current_round"]["request_ref"]
+            )
+            plan_payload = _load_state_artifact(
+                store.root, state["current_round"]["plan_ref"]
+            )
+            graph_payload = _load_state_artifact(
+                store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+            )
+            request = json.loads(request_payload.decode("utf-8"))
+            plan = json.loads(plan_payload.decode("utf-8"))
+            graph = json.loads(graph_payload.decode("utf-8"))
+            validate_component_plan(plan, request=request, graph=graph)
+            normalized = _normalized_plan_sha256(plan)
+            if not plan["actions"] or normalized == state["last_normalized_plan_sha256"]:
+                updated = dict(state)
+                updated["phase"] = "fallback_required"
+                updated["stop_reason"] = (
+                    "empty_plan" if not plan["actions"] else "repeated_plan"
+                )
+                updated["last_normalized_plan_sha256"] = normalized
+                updated["fallback"] = {
+                    "status": "required", "parent_ids": state["fallback"]["parent_ids"]
+                }
+                updated["revision"] += 1
+                updated["updated_at"] = _utc_now()
+                validate_component_repair_state(updated)
+                store.write_json(
+                    f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+                )
+                return {"status": "fallback_required", "page_id": page_id,
+                        "repair_round": state["repair_round"],
+                        "stop_reason": updated["stop_reason"]}
+            return {"status": "needs_execution", "page_id": page_id,
+                    "repair_round": state["repair_round"]}
+        if state["phase"] == "actions_executed":
+            execution = json.loads(_load_state_artifact(
+                store.root, state["current_round"]["execution_ref"]
+            ).decode("utf-8"))
+            if execution["executable_action_count"] == 0:
+                return _commit_fallback_required(
+                    store, state, page_id, "no_executable_actions"
+                )
+            return {"status": "needs_quality", "page_id": page_id,
+                    "repair_round": state["repair_round"]}
+        if state["phase"] == "quality_recorded":
+            return _commit_component_freeze(store, state, page_id)
+        if state["phase"] == "freeze_committed":
+            if state["failed_ids"]:
+                if state["repair_round"] >= 5:
+                    return _commit_fallback_required(
+                        store, state, page_id, "round_limit"
+                    )
+                return {"status": "needs_next_round", "page_id": page_id,
+                        "repair_round": state["repair_round"] + 1,
+                        "candidate_ids": list(state["failed_ids"])}
+            if state["initial_component_count"] and not state["frozen"]:
+                return _commit_preserved_warning(store, state, page_id)
+            return _commit_ready_result(store, state, page_id)
+        if state["phase"] == "fallback_required":
+            return {"status": "needs_parent_fallback", "page_id": page_id,
+                    "parent_ids": list(state["fallback"]["parent_ids"])}
+        if state["phase"] == "fallback_executed":
+            return {"status": "needs_parent_quality", "page_id": page_id,
+                    "parent_ids": list(state["fallback"]["parent_ids"])}
+        if state["phase"] == "fallback_quality_recorded":
+            return _commit_parent_fallback_result(store, state, page_id)
+        return {"status": state["phase"], "page_id": page_id,
+                "repair_round": state["repair_round"]}
+
+
+def initialize_component_repair_state(
+    store,
+    page_id: str,
+    *,
+    request_path: str | Path,
+    initial_component_count: int,
+) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        return _initialize_component_repair_state_locked(
+            store, page_id, request_path=request_path,
+            initial_component_count=initial_component_count,
+        )
+
+
+def _initialize_component_repair_state_locked(
+    store,
+    page_id: str,
+    *,
+    request_path: str | Path,
+    initial_component_count: int,
+) -> dict:
+    if type(initial_component_count) is not int or initial_component_count < 0:
+        raise ValueError("initial_component_count is invalid")
+    request_path = Path(request_path)
+    request = load_component_agent_request(request_path)
+    graph = load_component_agent_graph(request_path)
+    manifest = store.read_json("job_manifest.json")
+    provider = manifest.get("options", {}).get("agent_provider")
+    if request["page_id"] != page_id or request["provider"] != provider:
+        raise ValueError("component repair initialization identity mismatch")
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    relative_request = request_path.resolve().relative_to(store.root.resolve()).as_posix()
+    graph_path = request_path.parent / request["evidence"]["component-graph.json"]["path"]
+    relative_graph = graph_path.resolve().relative_to(store.root.resolve()).as_posix()
+    frozen = {
+        node["id"]: node["mask_sha256"] for node in graph["nodes"]
+        if node["state"] == "frozen"
+    }
+    parent_assets = {}
+    for node in graph["nodes"]:
+        if node["kind"] != "parent":
+            continue
+        mask_path = request_path.parent / Path(*PurePosixPath(node["mask"]).parts)
+        reference, _ = _artifact_reference(
+            store.root, mask_path, "initial parent mask"
+        )
+        if reference["sha256"] != node["mask_sha256"]:
+            raise RuntimeError("initial parent mask hash mismatch")
+        parent_assets[node["id"]] = reference
+    state = {
+        "schema_version": 1, "page_id": page_id, "provider": provider,
+        "source_sha256": request["source_sha256"],
+        "initial_component_count": initial_component_count,
+        "quality_gate_version": 1, "revision": 1,
+        "phase": "request_published", "status": "active",
+        "repair_round": request["repair_round"], "plan_count": 0,
+        "stop_reason": None,
+        "graph_ref": {"path": relative_graph, "sha256": request["graph_sha256"]},
+        "current_round": {
+            "round": request["repair_round"],
+            "request_ref": {"path": relative_request,
+                            "sha256": hashlib.sha256(request_path.read_bytes()).hexdigest()},
+            "plan_ref": None, "execution_ref": None, "quality_ref": None,
+        },
+        "frozen": frozen,
+        "parent_assets": parent_assets,
+        "round_history": [],
+        "fallback_graph_ref": None, "fallback_quality_ref": None,
+        "fallback_input_refs": None,
+        "candidate_ids": list(request["candidate_ids"]),
+        "failed_ids": list(request["candidate_ids"]),
+        "fallback": {"status": "none", "parent_ids": []},
+        "last_normalized_plan_sha256": None, "result_ref": None,
+        "delivery_checks": {"pptx_reopen": "unknown"},
+        "updated_at": _utc_now(),
+    }
+    validate_component_repair_state(state)
+    relative_state = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+    state_path = reconstruction / COMPONENT_STATE_NAME
+    if state_path.exists() or state_path.is_symlink():
+        existing = validate_component_repair_state(store.read_json(relative_state))
+        if (
+            existing["page_id"] == page_id
+            and existing["provider"] == provider
+            and existing["source_sha256"] == request["source_sha256"]
+            and existing["initial_component_count"] == initial_component_count
+            and existing["current_round"]["request_ref"] == state["current_round"]["request_ref"]
+        ):
+            return existing
+        raise RuntimeError("component repair state already exists with another identity")
+    store.write_json(relative_state, state)
+    return state
+
+
+def record_component_execution(
+    store,
+    page_id: str,
+    *,
+    execution_path: str | Path,
+    output_graph_path: str | Path,
+) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["phase"] != "plan_recorded":
+            raise RuntimeError("component repair is not ready for execution")
+        execution_ref, execution_payload = _artifact_reference(
+            store.root, Path(execution_path), "component execution JSON"
+        )
+        graph_ref, graph_payload = _artifact_reference(
+            store.root, Path(output_graph_path), "component execution graph"
+        )
+        execution = json.loads(execution_payload.decode("utf-8"))
+        if not isinstance(execution, dict) or set(execution) != {
+            "schema_version", "page_id", "provider", "repair_round",
+            "request_sha256", "input_graph_sha256", "output_graph_sha256",
+            "executable_action_count", "quality_input_refs",
+        }:
+            raise ValueError("component execution record fields are invalid")
+        if (
+            execution["schema_version"] != 1
+            or execution["page_id"] != page_id
+            or execution["provider"] != state["provider"]
+            or execution["repair_round"] != state["repair_round"]
+            or execution["request_sha256"] != state["current_round"]["request_ref"]["sha256"]
+            or execution["input_graph_sha256"] != state["graph_ref"]["sha256"]
+            or execution["output_graph_sha256"] != graph_ref["sha256"]
+            or type(execution["executable_action_count"]) is not int
+            or execution["executable_action_count"] < 0
+        ):
+            raise ValueError("component execution record identity is invalid")
+        _verify_quality_input_refs(store, state, execution["quality_input_refs"])
+        before = json.loads(_load_state_artifact(
+            store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+        ).decode("utf-8"))
+        after = json.loads(graph_payload.decode("utf-8"))
+        from image2editable.component_contracts import validate_graph_transition
+        validate_graph_transition(before=before, after=after)
+        for node in after["nodes"]:
+            mask_path = Path(output_graph_path).parent / Path(
+                *PurePosixPath(node["mask"]).parts
+            )
+            if _hash_bound_file(mask_path, store.root) != node["mask_sha256"]:
+                raise ValueError(f"component execution mask hash mismatch: {node['id']}")
+        plan = json.loads(_load_state_artifact(
+            store.root, state["current_round"]["plan_ref"]
+        ).decode("utf-8"))
+        normalized = _normalized_plan_sha256(plan)
+        action_count = len(plan["actions"])
+        if (
+            execution["executable_action_count"] not in {0, action_count}
+            or (execution["executable_action_count"] == 0 and after != before)
+            or (execution["executable_action_count"] > 0 and action_count == 0)
+        ):
+            raise ValueError("component execution count does not match plan and graph")
+        updated = dict(state)
+        updated["current_round"] = dict(state["current_round"])
+        updated["current_round"]["execution_ref"] = execution_ref
+        updated["graph_ref"] = graph_ref
+        updated["phase"] = "actions_executed"
+        updated["last_normalized_plan_sha256"] = normalized
+        updated["round_history"] = list(state["round_history"]) + [{
+            "round": state["repair_round"],
+            "plan_sha256": state["current_round"]["plan_ref"]["sha256"],
+            "normalized_plan_sha256": normalized,
+            "execution_sha256": execution_ref["sha256"],
+            "quality_sha256": None, "frozen_ids": [], "failed_ids": [],
+        }]
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def record_component_quality(store, page_id: str) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["phase"] != "actions_executed":
+            raise RuntimeError("component repair is not ready for quality")
+        execution = json.loads(_load_state_artifact(
+            store.root, state["current_round"]["execution_ref"]
+        ).decode("utf-8"))
+        quality_ref = _recompute_quality_artifact(
+            store, state, expected_component_ids=state["candidate_ids"],
+            quality_input_refs=execution["quality_input_refs"],
+            filename="component-quality.json",
+        )
+        updated = dict(state)
+        updated["current_round"] = dict(state["current_round"])
+        updated["current_round"]["quality_ref"] = quality_ref
+        updated["phase"] = "quality_recorded"
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def record_next_component_request(
+    store,
+    page_id: str,
+    *,
+    request_path: str | Path,
+) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["phase"] != "freeze_committed" or not state["failed_ids"]:
+            raise RuntimeError("component repair is not ready for a next round")
+        if state["repair_round"] >= 5:
+            raise RuntimeError("component repair cannot publish round 6 after five rounds")
+        request_path = Path(request_path)
+        request = load_component_agent_request(request_path)
+        graph = load_component_agent_graph(request_path)
+        if (
+            request["page_id"] != page_id
+            or request["provider"] != state["provider"]
+            or request["repair_round"] != state["repair_round"] + 1
+            or request["source_sha256"] != state["source_sha256"]
+            or request["candidate_ids"] != state["failed_ids"]
+            or request["frozen_ids"] != sorted(state["frozen"])
+        ):
+            raise ValueError("next component request does not match repair state")
+        before = json.loads(_load_state_artifact(
+            store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+        ).decode("utf-8"))
+        from image2editable.component_contracts import validate_graph_transition
+        validate_graph_transition(before=before, after=graph)
+        graph_path = request_path.parent / request["evidence"]["component-graph.json"]["path"]
+        request_ref, _ = _artifact_reference(
+            store.root, request_path, "next component request"
+        )
+        graph_ref, _ = _artifact_reference(
+            store.root, graph_path, "next component graph"
+        )
+        updated = dict(state)
+        updated["repair_round"] = request["repair_round"]
+        updated["phase"] = "request_published"
+        updated["graph_ref"] = graph_ref
+        updated["candidate_ids"] = list(request["candidate_ids"])
+        updated["current_round"] = {
+            "round": request["repair_round"], "request_ref": request_ref,
+            "plan_ref": None, "execution_ref": None, "quality_ref": None,
+        }
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def record_parent_fallback_execution(
+    store, page_id: str, *, graph_path: str | Path, quality_input_refs: dict
+) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["phase"] != "fallback_required":
+            raise RuntimeError("component repair does not require parent fallback")
+        graph_ref, payload = _artifact_reference(
+            store.root, Path(graph_path), "parent fallback graph"
+        )
+        graph = validate_component_graph(json.loads(payload.decode("utf-8")))
+        quality_input_refs = _verify_quality_input_refs(
+            store, state, quality_input_refs
+        )
+        before = json.loads(_load_state_artifact(
+            store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+        ).decode("utf-8"))
+        from image2editable.component_contracts import validate_graph_transition
+        validate_graph_transition(before=before, after=graph)
+        for node in graph["nodes"]:
+            mask_path = Path(graph_path).parent / Path(
+                *PurePosixPath(node["mask"]).parts
+            )
+            if _hash_bound_file(mask_path, store.root) != node["mask_sha256"]:
+                raise ValueError(f"parent fallback mask hash mismatch: {node['id']}")
+        by_id = {node["id"]: node for node in graph["nodes"]}
+        for parent_id in state["fallback"]["parent_ids"]:
+            parent = by_id.get(parent_id)
+            initial_ref = state["parent_assets"][parent_id]
+            if (
+                parent is None or parent["kind"] != "parent"
+                or parent["state"] != "pending_gate"
+                or parent["mask_sha256"] != initial_ref["sha256"]
+            ):
+                raise ValueError("parent fallback did not preserve intact parent")
+            initial_mask = _load_state_artifact(store.root, initial_ref)
+            output_mask_path = Path(graph_path).parent / Path(
+                *PurePosixPath(parent["mask"]).parts
+            )
+            output_ref, output_mask = _artifact_reference(
+                store.root, output_mask_path, "parent fallback mask"
+            )
+            if output_ref["sha256"] != initial_ref["sha256"] or output_mask != initial_mask:
+                raise ValueError("parent fallback mask is not the intact parent asset")
+            if any(
+                node["parent_id"] == parent_id and node["state"] != "inactive"
+                for node in graph["nodes"]
+            ):
+                raise ValueError("parent fallback descendants must be inactive")
+        updated = dict(state)
+        updated["graph_ref"] = graph_ref
+        updated["fallback_graph_ref"] = graph_ref
+        updated["fallback_input_refs"] = quality_input_refs
+        updated["phase"] = "fallback_executed"
+        updated["fallback"] = {
+            "status": "parent_pending",
+            "parent_ids": list(state["fallback"]["parent_ids"]),
+        }
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def record_parent_fallback_quality(store, page_id: str) -> dict:
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["phase"] != "fallback_executed":
+            raise RuntimeError("parent fallback is not ready for quality")
+        quality_ref = _recompute_quality_artifact(
+            store, state, expected_component_ids=state["fallback"]["parent_ids"],
+            quality_input_refs=state["fallback_input_refs"],
+            filename="parent-quality.json",
+        )
+        updated = dict(state)
+        updated["fallback_quality_ref"] = quality_ref
+        updated["phase"] = "fallback_quality_recorded"
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def _validate_repair_state_identity(store, state: dict, page_id: str) -> None:
+    provider = store.read_json("job_manifest.json").get("options", {}).get("agent_provider")
+    if state["page_id"] != page_id or state["provider"] != provider:
+        raise RuntimeError("component repair state identity mismatch")
+
+
+def _artifact_reference(root: Path, path: Path, label: str) -> tuple[dict, bytes]:
+    contained = _contained_path(path, root)
+    payload = _read_bound_file(
+        contained, root, max_bytes=GRAPH_JSON_LIMIT, label=label
+    )
+    return {
+        "path": contained.resolve().relative_to(root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }, payload
+
+
+def _verify_quality_input_refs(store, state: dict, refs: object) -> dict:
+    if not isinstance(refs, dict) or set(refs) != {
+        "background", "reconstructed", "text_mask", "native_check"
+    }:
+        raise ValueError("component quality input refs are invalid")
+    for reference in refs.values():
+        if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+            raise ValueError("component quality input ref is invalid")
+        _load_state_artifact(store.root, reference, max_bytes=GRAPH_JSON_LIMIT)
+    native = json.loads(_load_state_artifact(
+        store.root, refs["native_check"]
+    ).decode("utf-8"))
+    if not isinstance(native, dict) or set(native) != {
+        "schema_version", "page_id", "source_sha256", "protected_native_overlap"
+    } or (
+        native["schema_version"] != 1
+        or native["page_id"] != state["page_id"]
+        or native["source_sha256"] != state["source_sha256"]
+        or native["protected_native_overlap"] not in {"pass", "fail", "unknown"}
+    ):
+        raise ValueError("component native overlap check is invalid")
+    return refs
+
+
+def _recompute_quality_artifact(
+    store, state: dict, *, expected_component_ids: list[str],
+    quality_input_refs: dict, filename: str,
+) -> dict:
+    import cv2
+    import numpy as np
+
+    request_payload = _load_state_artifact(
+        store.root, state["current_round"]["request_ref"]
+    )
+    request = json.loads(request_payload.decode("utf-8"))
+    request_dir = store.root / Path(
+        *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
+    ).parent
+    source_path = request_dir / request["evidence"]["source.png"]["path"]
+    source_ref, source_payload = _artifact_reference(
+        store.root, source_path, "component quality source"
+    )
+    if source_ref["sha256"] != state["source_sha256"]:
+        raise RuntimeError("component quality source hash mismatch")
+    quality_input_refs = _verify_quality_input_refs(
+        store, state, quality_input_refs
+    )
+    input_refs = {"source": source_ref, **quality_input_refs}
+    payloads = {"source": source_payload}
+    for name in ("background", "reconstructed", "text_mask"):
+        payloads[name] = _load_state_artifact(
+            store.root, quality_input_refs[name], max_bytes=GRAPH_JSON_LIMIT
+        )
+
+    def decode(name: str, flags: int):
+        image = cv2.imdecode(np.frombuffer(payloads[name], dtype=np.uint8), flags)
+        if image is None:
+            raise ValueError(f"component quality {name} is not a valid image")
+        return image
+
+    source = cv2.cvtColor(decode("source", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB)
+    background = cv2.cvtColor(
+        decode("background", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
+    )
+    reconstructed = cv2.cvtColor(
+        decode("reconstructed", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
+    )
+    text_mask = decode("text_mask", cv2.IMREAD_GRAYSCALE)
+    graph_payload = _load_state_artifact(
+        store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+    )
+    graph = json.loads(graph_payload.decode("utf-8"))
+    graph_path = store.root / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
+    native = json.loads(_load_state_artifact(
+        store.root, quality_input_refs["native_check"]
+    ).decode("utf-8"))
+    checks = {
+        "protected_native_overlap": native["protected_native_overlap"],
+        "pptx_reopen": "unknown",
+    }
+    from scripts.visual_segment import visual_difference
+    visual_metrics = visual_difference(source, reconstructed, text_mask)
+    report = evaluate_component_quality_round(
+        source, background, reconstructed, graph,
+        graph_dir=graph_path.parent, trusted_root=store.root,
+        text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
+        initial_component_count=state["initial_component_count"],
+        expected_component_ids=expected_component_ids,
+    )
+    quality = {
+        "schema_version": 1, "page_id": state["page_id"],
+        "provider": state["provider"], "repair_round": state["repair_round"],
+        "request_sha256": state["current_round"]["request_ref"]["sha256"],
+        "input_graph_sha256": state["graph_ref"]["sha256"],
+        "quality_gate_version": state["quality_gate_version"],
+        "expected_component_ids": expected_component_ids,
+        "initial_component_count": state["initial_component_count"],
+        "input_refs": input_refs, "report": report,
+    }
+    payload = json.dumps(
+        quality, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n"
+    target = graph_path.parent / filename
+    if target.exists():
+        existing = _read_bound_file(
+            target, store.root, max_bytes=REQUEST_JSON_LIMIT,
+            label="component quality artifact",
+        )
+        if existing != payload:
+            raise RuntimeError("component quality artifact already differs")
+    else:
+        _write_exclusive(target, payload, store.root)
+    return {
+        "path": target.resolve().relative_to(store.root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _commit_fallback_required(store, state: dict, page_id: str, reason: str) -> dict:
+    graph = json.loads(_load_state_artifact(
+        store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+    ).decode("utf-8"))
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    parent_ids = set()
+    for component_id in state["failed_ids"]:
+        node = by_id[component_id]
+        parent_id = component_id if node["kind"] == "parent" else node["parent_id"]
+        if parent_id in state["parent_assets"]:
+            parent_ids.add(parent_id)
+    updated = dict(state)
+    updated["phase"] = "fallback_required"
+    updated["stop_reason"] = reason
+    updated["fallback"] = {
+        "status": "required", "parent_ids": sorted(parent_ids)
+    }
+    updated["revision"] += 1
+    updated["updated_at"] = _utc_now()
+    validate_component_repair_state(updated)
+    store.write_json(
+        f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+    )
+    return {"status": "fallback_required", "page_id": page_id,
+            "repair_round": state["repair_round"], "stop_reason": reason}
+
+
+def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
+    quality = json.loads(_load_state_artifact(
+        store.root, state["current_round"]["quality_ref"]
+    ).decode("utf-8"))
+    report = quality["report"]
+    page_violations = set(report.get("violations", [])) - {"pptx_reopen_unknown"}
+    accepted = {
+        item["component_id"] for item in report["component_reports"]
+        if item.get("accepted") is True and not item.get("violations")
+    }
+    if page_violations:
+        accepted.clear()
+    failed = sorted(set(state["candidate_ids"]) - accepted)
+    graph_payload = _load_state_artifact(
+        store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+    )
+    graph = json.loads(graph_payload.decode("utf-8"))
+    for node in graph["nodes"]:
+        if node["id"] in accepted:
+            node["state"] = "frozen"
+        elif node["id"] in failed and node["state"] in {"pending", "pending_gate"}:
+            node["state"] = "pending"
+    from image2editable.component_contracts import validate_graph_transition
+    validate_graph_transition(before=json.loads(graph_payload.decode("utf-8")), after=graph)
+    frozen_payload = json.dumps(
+        graph, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n"
+    graph_path = store.root / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
+    frozen_path = graph_path.with_name("component-graph-frozen.json")
+    if frozen_path.exists():
+        existing = _read_bound_file(
+            frozen_path, store.root, max_bytes=GRAPH_JSON_LIMIT,
+            label="frozen component graph",
+        )
+        if existing != frozen_payload:
+            raise RuntimeError("frozen component graph already differs")
+    else:
+        _write_exclusive(frozen_path, frozen_payload, store.root)
+    graph_ref = {
+        "path": frozen_path.resolve().relative_to(store.root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(frozen_payload).hexdigest(),
+    }
+    frozen = dict(state["frozen"])
+    for node in graph["nodes"]:
+        if node["state"] == "frozen":
+            frozen[node["id"]] = node["mask_sha256"]
+    history = list(state["round_history"])
+    history[-1] = dict(history[-1])
+    history[-1]["quality_sha256"] = state["current_round"]["quality_ref"]["sha256"]
+    history[-1]["frozen_ids"] = sorted(accepted)
+    history[-1]["failed_ids"] = failed
+    updated = dict(state)
+    updated["graph_ref"] = graph_ref
+    updated["frozen"] = frozen
+    updated["candidate_ids"] = failed
+    updated["failed_ids"] = failed
+    updated["round_history"] = history
+    updated["phase"] = "freeze_committed"
+    updated["revision"] += 1
+    updated["updated_at"] = _utc_now()
+    validate_component_repair_state(updated)
+    store.write_json(
+        f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+    )
+    return {"status": "freeze_committed", "page_id": page_id,
+            "repair_round": state["repair_round"], "frozen_ids": sorted(accepted),
+            "failed_ids": failed}
+
+
+def _commit_ready_result(store, state: dict, page_id: str) -> dict:
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    result = {
+        "schema_version": 1, "page_id": page_id, "status": "ready_for_assembly",
+        "provider": state["provider"], "repair_rounds": state["plan_count"],
+        "initial_component_count": state["initial_component_count"],
+        "final_component_ids": sorted(state["frozen"]),
+        "graph_ref": state["graph_ref"], "round_history": state["round_history"],
+        "fallback": state["fallback"],
+        "delivery_checks": {"pptx_reopen": "unknown"},
+    }
+    payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    path = reconstruction / "component_result.json"
+    if path.exists():
+        if _read_bound_file(path, store.root, max_bytes=GRAPH_JSON_LIMIT,
+                            label="component result") != payload:
+            raise RuntimeError("component result already differs")
+    else:
+        _write_exclusive(path, payload, store.root)
+    updated = dict(state)
+    updated["phase"] = "ready_for_assembly"
+    updated["status"] = "ready_for_assembly"
+    updated["result_ref"] = {
+        "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    updated["revision"] += 1
+    updated["updated_at"] = _utc_now()
+    validate_component_repair_state(updated)
+    store.write_json(
+        f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+    )
+    return {"status": "ready_for_assembly", "page_id": page_id,
+            "result_path": str(path.resolve())}
+
+
+def _commit_parent_fallback_result(store, state: dict, page_id: str) -> dict:
+    quality = json.loads(_load_state_artifact(
+        store.root, state["fallback_quality_ref"]
+    ).decode("utf-8"))
+    report = quality["report"]
+    allowed_page_violations = {"pptx_reopen_unknown"}
+    passed = (
+        set(report.get("violations", [])) <= allowed_page_violations
+        and all(
+            item.get("accepted") is True and not item.get("violations")
+            for item in report["component_reports"]
+        )
+        and len(report["component_reports"]) == len(state["fallback"]["parent_ids"])
+    )
+    if not passed or not state["fallback"]["parent_ids"]:
+        return _commit_preserved_warning(store, state, page_id)
+    graph = json.loads(_load_state_artifact(
+        store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+    ).decode("utf-8"))
+    frozen = dict(state["frozen"])
+    for node in graph["nodes"]:
+        if node["id"] in state["fallback"]["parent_ids"]:
+            node["state"] = "frozen"
+            frozen[node["id"]] = node["mask_sha256"]
+    payload = json.dumps(graph, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    current_graph = store.root / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
+    final_graph = current_graph.with_name("component-graph-parent-preserved.json")
+    if final_graph.exists():
+        if _read_bound_file(final_graph, store.root, max_bytes=GRAPH_JSON_LIMIT,
+                            label="parent preserved graph") != payload:
+            raise RuntimeError("parent preserved graph already differs")
+    else:
+        _write_exclusive(final_graph, payload, store.root)
+    updated = dict(state)
+    updated["graph_ref"] = {
+        "path": final_graph.resolve().relative_to(store.root.resolve()).as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    updated["frozen"] = frozen
+    updated["candidate_ids"] = []
+    updated["failed_ids"] = []
+    updated["fallback"] = {
+        "status": "parent_preserved",
+        "parent_ids": list(state["fallback"]["parent_ids"]),
+    }
+    return _commit_ready_result(store, updated, page_id)
+
+
+def _commit_preserved_warning(store, state: dict, page_id: str) -> dict:
+    updated = dict(state)
+    updated["phase"] = "preserved_with_warning"
+    updated["status"] = "preserved_with_warning"
+    updated["fallback"] = {"status": "warning", "parent_ids": []}
+    updated["revision"] += 1
+    updated["updated_at"] = _utc_now()
+    validate_component_repair_state(updated)
+    store.write_json(
+        f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+    )
+    return {"status": "preserved_with_warning", "page_id": page_id}
+
+
+def _load_state_artifact(
+    root: Path, reference: dict, *, max_bytes: int = REQUEST_JSON_LIMIT
+) -> bytes:
+    path = _contained_path(root / Path(*PurePosixPath(reference["path"]).parts), root)
+    payload = _read_bound_file(path, root, max_bytes=max_bytes,
+                               label="component repair artifact")
+    if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+        raise RuntimeError("component repair artifact hash mismatch")
+    return payload
+
+
+def _utc_now() -> str:
+    from image2editable.contracts import utc_now
+    return utc_now()
+
+
+def _normalized_plan_sha256(plan: dict) -> str:
+    actions = [
+        {
+            "action": action["action"],
+            "object_ids": sorted(action["object_ids"]),
+            "parameters": action["parameters"],
+        }
+        for action in plan["actions"]
+    ]
+    actions.sort(key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")))
+    payload = json.dumps(actions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def execute_component_action_round(
@@ -224,6 +1028,9 @@ def _build_component_agent_request_locked(
             _require_single_directory_identity(staging, staging_identity)
         graph = json.loads(graph_payload.decode("utf-8"))
         validate_component_graph(graph)
+        graph_source = _contained_path(
+            Path(sources["component-graph.json"]), reconstruction
+        )
         request = {
             "schema_version": 1,
             "page_id": page_id,
@@ -277,6 +1084,19 @@ def _build_component_agent_request_locked(
             raise RuntimeError("Component agent marker JSON size limit exceeded")
         _write_exclusive(staging / MARKER_NAME, marker_bytes, reconstruction)
         _require_single_directory_identity(staging, staging_identity)
+        for node in graph["nodes"]:
+            mask_relative = Path(*PurePosixPath(node["mask"]).parts)
+            source_mask = _contained_path(
+                graph_source.parent / mask_relative, reconstruction
+            )
+            destination_mask = staging / mask_relative
+            destination_mask.parent.mkdir(parents=True, exist_ok=True)
+            digest, _ = _copy_bound_file(
+                source_mask, destination_mask, reconstruction,
+                capture_limit=None,
+            )
+            if digest != node["mask_sha256"]:
+                raise RuntimeError("Component graph mask hash mismatch")
         _verify_staged_bundle(
             staging,
             reconstruction,
@@ -397,6 +1217,12 @@ def load_component_agent_request(request_path: str | Path) -> dict:
         raise RuntimeError("Component graph evidence hash mismatch")
     graph = json.loads(graph_payload.decode("utf-8"))
     validate_component_graph(graph)
+    for node in graph["nodes"]:
+        mask_path = round_dir / Path(*PurePosixPath(node["mask"]).parts)
+        if _hash_bound_file(mask_path, reconstruction) != node["mask_sha256"]:
+            raise RuntimeError(
+                f"Component graph mask hash mismatch: {node['id']}"
+            )
     candidate_ids = sorted(
         node["id"] for node in graph["nodes"] if node["state"] == "pending"
     )

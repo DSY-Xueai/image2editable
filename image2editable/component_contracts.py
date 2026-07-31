@@ -61,6 +61,207 @@ _FROZEN_FIELDS = (
     "text_ids",
 )
 _RENDER_STATES = frozenset({"pending", "pending_gate", "frozen"})
+COMPONENT_REPAIR_PHASES = frozenset({
+    "request_published", "awaiting_plan", "plan_recorded", "actions_executed",
+    "quality_recorded", "freeze_committed", "fallback_required",
+    "fallback_executed", "fallback_quality_recorded", "ready_for_assembly",
+    "preserved_with_warning",
+})
+
+
+def validate_component_repair_state(state: object) -> dict:
+    fields = {
+        "schema_version", "page_id", "provider", "source_sha256",
+        "initial_component_count", "quality_gate_version", "revision", "phase",
+        "status", "repair_round", "plan_count", "stop_reason", "graph_ref",
+        "current_round", "frozen", "candidate_ids", "failed_ids", "fallback",
+        "last_normalized_plan_sha256", "result_ref", "delivery_checks", "updated_at",
+        "round_history", "parent_assets", "fallback_graph_ref", "fallback_quality_ref",
+        "fallback_input_refs",
+    }
+    if not isinstance(state, dict) or set(state) != fields:
+        raise ValueError("component repair state fields are invalid")
+    if state["schema_version"] != 1 or type(state["schema_version"]) is not int:
+        raise ValueError("component repair state schema_version is invalid")
+    page_id = state["page_id"]
+    if type(page_id) is not str or not page_id or "/" in page_id or "\\" in page_id:
+        raise ValueError("component repair state page_id is invalid")
+    validate_agent_provider(state["provider"])
+    _validate_sha256(state["source_sha256"], "source_sha256")
+    if type(state["initial_component_count"]) is not int or state["initial_component_count"] < 0:
+        raise ValueError("component repair initial count is invalid")
+    for name in ("quality_gate_version", "revision"):
+        if type(state[name]) is not int or state[name] < 1:
+            raise ValueError(f"component repair {name} is invalid")
+    if state["phase"] not in COMPONENT_REPAIR_PHASES:
+        raise ValueError("component repair phase is invalid")
+    if state["status"] not in {"active", "ready_for_assembly", "preserved_with_warning"}:
+        raise ValueError("component repair status is invalid")
+    validate_repair_round(state["repair_round"])
+    if type(state["plan_count"]) is not int or not 0 <= state["plan_count"] <= MAX_REPAIR_ROUNDS:
+        raise ValueError("component repair plan_count is invalid")
+    if state["stop_reason"] not in {None, "empty_plan", "repeated_plan", "no_executable_actions", "round_limit"}:
+        raise ValueError("component repair stop_reason is invalid")
+    _validate_artifact_ref(state["graph_ref"], "graph_ref")
+    current = state["current_round"]
+    if not isinstance(current, dict) or set(current) != {
+        "round", "request_ref", "plan_ref", "execution_ref", "quality_ref"
+    }:
+        raise ValueError("component repair current_round is invalid")
+    if current["round"] != state["repair_round"]:
+        raise ValueError("component repair current round is inconsistent")
+    _validate_artifact_ref(current["request_ref"], "request_ref")
+    for name in ("plan_ref", "execution_ref", "quality_ref"):
+        if current[name] is not None:
+            _validate_artifact_ref(current[name], name)
+    for name in ("candidate_ids", "failed_ids"):
+        values = state[name]
+        if not isinstance(values, list) or values != sorted(set(values)) or any(type(value) is not str or not value for value in values):
+            raise ValueError(f"component repair {name} is invalid")
+    frozen = state["frozen"]
+    if not isinstance(frozen, dict) or any(type(key) is not str for key in frozen):
+        raise ValueError("component repair frozen map is invalid")
+    for digest in frozen.values():
+        _validate_sha256(digest, "frozen mask sha256")
+    if set(state["candidate_ids"]) & set(frozen):
+        raise ValueError("component repair candidate cannot be frozen")
+    parent_assets = state["parent_assets"]
+    if not isinstance(parent_assets, dict) or any(type(key) is not str for key in parent_assets):
+        raise ValueError("component repair parent assets are invalid")
+    for reference in parent_assets.values():
+        _validate_artifact_ref(reference, "parent asset ref")
+    history = state["round_history"]
+    if not isinstance(history, list) or len(history) > MAX_REPAIR_ROUNDS:
+        raise ValueError("component repair round history is invalid")
+    for entry in history:
+        if not isinstance(entry, dict) or set(entry) != {
+            "round", "plan_sha256", "normalized_plan_sha256", "execution_sha256",
+            "quality_sha256", "frozen_ids", "failed_ids",
+        }:
+            raise ValueError("component repair round history entry is invalid")
+        validate_repair_round(entry["round"])
+        for name in ("plan_sha256", "normalized_plan_sha256", "execution_sha256", "quality_sha256"):
+            if entry[name] is not None:
+                _validate_sha256(entry[name], f"component repair history {name}")
+        for name in ("frozen_ids", "failed_ids"):
+            if not isinstance(entry[name], list) or entry[name] != sorted(set(entry[name])):
+                raise ValueError("component repair history component ids are invalid")
+    fallback = state["fallback"]
+    if not isinstance(fallback, dict) or set(fallback) != {"status", "parent_ids"}:
+        raise ValueError("component repair fallback is invalid")
+    if fallback["status"] not in {"none", "required", "parent_pending", "parent_preserved", "warning"}:
+        raise ValueError("component repair fallback status is invalid")
+    if not isinstance(fallback["parent_ids"], list) or fallback["parent_ids"] != sorted(set(fallback["parent_ids"])):
+        raise ValueError("component repair fallback parents are invalid")
+    if state["last_normalized_plan_sha256"] is not None:
+        _validate_sha256(state["last_normalized_plan_sha256"], "last plan sha256")
+    if state["result_ref"] is not None:
+        _validate_artifact_ref(state["result_ref"], "result_ref")
+    for name in ("fallback_graph_ref", "fallback_quality_ref"):
+        if state[name] is not None:
+            _validate_artifact_ref(state[name], name)
+    if state["fallback_input_refs"] is not None:
+        _validate_quality_input_refs(state["fallback_input_refs"])
+    if state["delivery_checks"] != {"pptx_reopen": "unknown"}:
+        raise ValueError("component repair delivery checks are invalid")
+    if type(state["updated_at"]) is not str or not state["updated_at"]:
+        raise ValueError("component repair updated_at is invalid")
+    if state["candidate_ids"] != state["failed_ids"]:
+        raise ValueError("component repair candidates and failures are inconsistent")
+    plan_ref = current["plan_ref"]
+    execution_ref = current["execution_ref"]
+    quality_ref = current["quality_ref"]
+    phase = state["phase"]
+    if phase in {"request_published", "awaiting_plan"} and any(
+        value is not None for value in (plan_ref, execution_ref, quality_ref)
+    ):
+        raise ValueError("component repair awaiting phase has premature references")
+    if phase == "plan_recorded" and (
+        plan_ref is None or execution_ref is not None or quality_ref is not None
+    ):
+        raise ValueError("component repair plan phase references are invalid")
+    if phase == "actions_executed" and (
+        plan_ref is None or execution_ref is None or quality_ref is not None
+    ):
+        raise ValueError("component repair execution phase references are invalid")
+    if phase in {"quality_recorded", "freeze_committed"} and any(
+        value is None for value in (plan_ref, execution_ref, quality_ref)
+    ):
+        raise ValueError("component repair quality phase references are invalid")
+    terminal = phase in {"ready_for_assembly", "preserved_with_warning"}
+    expected_status = phase if terminal else "active"
+    if state["status"] != expected_status:
+        raise ValueError("component repair status and phase are inconsistent")
+    if (phase == "ready_for_assembly") != (state["result_ref"] is not None):
+        raise ValueError("component repair result reference is inconsistent")
+    if state["plan_count"] > state["repair_round"]:
+        raise ValueError("component repair plan count exceeds page rounds")
+    history_rounds = [entry["round"] for entry in history]
+    if history_rounds != sorted(set(history_rounds)) or any(
+        value > state["repair_round"] for value in history_rounds
+    ):
+        raise ValueError("component repair round history order is invalid")
+    if len(history) > state["plan_count"] or state["plan_count"] - len(history) > 1:
+        raise ValueError("component repair plan count and history are inconsistent")
+    fallback_status = fallback["status"]
+    if phase == "fallback_required" and fallback_status != "required":
+        raise ValueError("component repair fallback requirement is inconsistent")
+    if phase in {"fallback_executed", "fallback_quality_recorded"} and fallback_status != "parent_pending":
+        raise ValueError("component repair parent fallback phase is inconsistent")
+    if phase == "ready_for_assembly" and fallback_status not in {"none", "parent_preserved"}:
+        raise ValueError("component repair ready fallback is inconsistent")
+    if phase == "preserved_with_warning" and fallback_status != "warning":
+        raise ValueError("component repair warning fallback is inconsistent")
+    fallback_phase = phase in {
+        "fallback_required", "fallback_executed", "fallback_quality_recorded",
+        "preserved_with_warning",
+    } or fallback_status == "parent_preserved"
+    if fallback_phase != (state["stop_reason"] is not None):
+        raise ValueError("component repair fallback stop reason is inconsistent")
+    if phase == "fallback_required" and any(
+        state[name] is not None for name in (
+            "fallback_graph_ref", "fallback_quality_ref", "fallback_input_refs"
+        )
+    ):
+        raise ValueError("component repair fallback has premature references")
+    if phase == "fallback_executed" and (
+        state["fallback_graph_ref"] != state["graph_ref"]
+        or state["fallback_quality_ref"] is not None
+        or state["fallback_input_refs"] is None
+    ):
+        raise ValueError("component repair fallback execution references are invalid")
+    if phase == "fallback_quality_recorded" and (
+        state["fallback_graph_ref"] != state["graph_ref"]
+        or state["fallback_quality_ref"] is None
+        or state["fallback_input_refs"] is None
+    ):
+        raise ValueError("component repair fallback quality references are invalid")
+    if phase == "preserved_with_warning" and state["result_ref"] is not None:
+        raise ValueError("component repair warning cannot have a result reference")
+    return state
+
+
+def _validate_quality_input_refs(value: object) -> dict:
+    if not isinstance(value, dict) or set(value) != {
+        "background", "reconstructed", "text_mask", "native_check"
+    }:
+        raise ValueError("component quality input refs are invalid")
+    for reference in value.values():
+        _validate_artifact_ref(reference, "quality input ref")
+    return value
+
+
+def _validate_artifact_ref(value: object, field: str) -> dict:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        raise ValueError(f"component repair {field} is invalid")
+    path = value["path"]
+    if type(path) is not str or not path or "\\" in path or ":" in path:
+        raise ValueError(f"component repair {field} path is invalid")
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ValueError(f"component repair {field} path is invalid")
+    _validate_sha256(value["sha256"], f"component repair {field} sha256")
+    return value
 
 
 def validate_agent_provider(value: object) -> str:

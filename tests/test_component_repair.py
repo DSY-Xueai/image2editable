@@ -15,14 +15,388 @@ import cv2
 
 from image2editable.component_repair import (
     EVIDENCE_NAMES,
+    advance_component_repair,
     build_component_agent_request,
+    initialize_component_repair_state,
+    load_component_agent_graph,
     load_component_agent_request,
+    record_component_execution,
+    record_next_component_request,
+    record_parent_fallback_execution,
+    record_parent_fallback_quality,
+    record_component_quality,
 )
 import image2editable.component_repair as component_repair
 from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
 from PIL import Image
 import numpy as np
+
+
+def test_advance_without_state_only_reports_needs_initialization(tmp_path: Path) -> None:
+    from image2editable.inputs import prepare_image_job
+    from image2editable.store import RunStore
+
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+
+    outcome = advance_component_repair(store, "page_001")
+
+    assert outcome == {"status": "needs_initialization", "page_id": "page_001"}
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    assert not (reconstruction / "component_state.json").exists()
+    assert not (reconstruction / "agent").exists()
+
+
+def test_initialized_state_points_to_hash_bound_current_request(page_session: dict) -> None:
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    run_root = request_path.parents[5]
+    store = RunStore(run_root)
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+
+    assert state["phase"] == "request_published"
+    assert state["repair_round"] == 1
+    assert state["plan_count"] == 0
+    assert state["delivery_checks"] == {"pptx_reopen": "unknown"}
+    assert state["current_round"]["request_ref"]["sha256"] == hashlib.sha256(
+        request_path.read_bytes()
+    ).hexdigest()
+    assert state["current_round"]["request_ref"]["path"] == (
+        "pages/page_001/reconstruction/agent/round-01/component_agent_request.json"
+    )
+    assert advance_component_repair(store, "page_001")["status"] == "awaiting_agent"
+    persisted = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert persisted["phase"] == "awaiting_plan"
+
+
+def test_execution_quality_freeze_reaches_ready_for_assembly(
+    page_session: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from image2editable.host_agent import record_host_plan
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {
+        "schema_version": 1, "status": "awaiting_agent", "updated_at": "now"
+    })
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "awaiting_agent", "updated_at": "now"}
+    }})
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    request = load_component_agent_request(request_path)
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "host", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("accept", ["candidate_b"])],
+    }
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    record_host_plan(store.root, plan_path)
+    assert advance_component_repair(store, "page_001")["status"] == "needs_execution"
+
+    graph = json.loads((request_path.parent / "component-graph.json").read_text(encoding="utf-8"))
+    next_graph = json.loads(json.dumps(graph))
+    next(node for node in next_graph["nodes"] if node["id"] == "candidate_b")["state"] = "pending_gate"
+    execution_dir = request_path.parents[2] / "execution-01"
+    execution_dir.mkdir()
+    shutil.copytree(request_path.parent / "masks", execution_dir / "masks")
+    quality_input_refs = _quality_input_refs(execution_dir, store)
+    graph_path = execution_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(next_graph), encoding="utf-8")
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": request["graph_sha256"],
+        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1,
+        "quality_input_refs": quality_input_refs,
+    }
+    execution_path = execution_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    record_component_execution(
+        store, "page_001", execution_path=execution_path, output_graph_path=graph_path,
+    )
+    assert advance_component_repair(store, "page_001")["status"] == "needs_quality"
+
+    observed_visual = {}
+
+    def quality_evaluator(*args, **kwargs):
+        observed_visual.update(kwargs["visual_metrics"])
+        return _strict_quality_report("candidate_b", True)
+
+    monkeypatch.setattr(
+        component_repair, "evaluate_component_quality_round", quality_evaluator,
+    )
+    record_component_quality(store, "page_001")
+    assert observed_visual["mae"] > 0
+    quality_state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    quality_artifact = json.loads(
+        (store.root / quality_state["current_round"]["quality_ref"]["path"])
+        .read_text(encoding="utf-8")
+    )
+    assert set(quality_artifact["input_refs"]) == {
+        "source", "background", "reconstructed", "text_mask", "native_check"
+    }
+    assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
+    ready = advance_component_repair(store, "page_001")
+    assert ready["status"] == "ready_for_assembly"
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert state["frozen"]["candidate_b"] == state["parent_assets"]["candidate_b"]["sha256"]
+    assert state["delivery_checks"] == {"pptx_reopen": "unknown"}
+    assert state["result_ref"] is not None
+
+
+def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: dict) -> None:
+    from image2editable.store import RunStore
+
+    first = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(first.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=first, initial_component_count=2,
+    )
+    state["phase"] = "freeze_committed"
+    state["candidate_ids"] = state["failed_ids"] = ["candidate_b"]
+    state["current_round"]["plan_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["execution_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["quality_ref"] = state["current_round"]["request_ref"]
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+    updated = state
+    request_path = first
+    for expected_round in range(2, 6):
+        request_path = build_component_agent_request(
+            page_session, repair_round=expected_round
+        )
+        updated = record_next_component_request(
+            store, "page_001", request_path=request_path
+        )
+        assert updated["repair_round"] == expected_round
+        assert updated["candidate_ids"] == ["candidate_b"]
+        assert updated["plan_count"] == 0
+        assert updated["phase"] == "request_published"
+        updated["phase"] = "freeze_committed"
+        updated["current_round"]["plan_ref"] = updated["current_round"]["request_ref"]
+        updated["current_round"]["execution_ref"] = updated["current_round"]["request_ref"]
+        updated["current_round"]["quality_ref"] = updated["current_round"]["request_ref"]
+        store.write_json("pages/page_001/reconstruction/component_state.json", updated)
+    assert not (first.parent.parent / "round-06").exists()
+    with pytest.raises(RuntimeError, match="round 6|five"):
+        record_next_component_request(store, "page_001", request_path=request_path)
+
+
+def test_agent_request_rejects_tampered_component_mask(page_session: dict) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    graph_path = request_path.parent / request["evidence"]["component-graph.json"]["path"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    mask_path = request_path.parent / graph["nodes"][0]["mask"]
+    mask_path.write_bytes(b"tampered")
+
+    with pytest.raises(RuntimeError, match="mask hash mismatch"):
+        load_component_agent_request(request_path)
+
+
+def test_quality_recorder_rejects_external_self_report(page_session: dict) -> None:
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    with pytest.raises(TypeError, match="quality_path"):
+        record_component_quality(
+            store, "page_001", quality_path=request_path.parent / "quality-report.json"
+        )
+
+
+def test_fallback_state_requires_dedicated_refs(page_session: dict) -> None:
+    from image2editable.component_contracts import validate_component_repair_state
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    state["phase"] = "fallback_executed"
+    state["stop_reason"] = "round_limit"
+    state["fallback"] = {"status": "parent_pending", "parent_ids": ["candidate_b"]}
+
+    with pytest.raises(ValueError, match="fallback execution references"):
+        validate_component_repair_state(state)
+
+
+def test_same_normalized_plan_twice_stops_before_execution(page_session: dict) -> None:
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "host", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("accept", ["candidate_b"])],
+    }
+    plan_path = store.root / "same-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    state["phase"] = "plan_recorded"
+    state["plan_count"] = 1
+    state["current_round"]["plan_ref"] = {
+        "path": "same-plan.json",
+        "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+    }
+    state["last_normalized_plan_sha256"] = component_repair._normalized_plan_sha256(plan)
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+
+    outcome = advance_component_repair(store, "page_001")
+
+    assert outcome["status"] == "fallback_required"
+    assert outcome["stop_reason"] == "repeated_plan"
+    assert not (request_path.parents[1] / "execution-01").exists()
+
+
+def test_zero_executable_actions_stops_without_quality(page_session: dict) -> None:
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    execution = {"executable_action_count": 0}
+    execution_path = store.root / "execution-zero.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    state["phase"] = "actions_executed"
+    state["current_round"]["plan_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["execution_ref"] = {
+        "path": "execution-zero.json",
+        "sha256": hashlib.sha256(execution_path.read_bytes()).hexdigest(),
+    }
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+
+    outcome = advance_component_repair(store, "page_001")
+
+    assert outcome["status"] == "fallback_required"
+    assert outcome["stop_reason"] == "no_executable_actions"
+    assert not (request_path.parents[2] / "component_result.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("accepted", "expected"),
+    [(True, "ready_for_assembly"), (False, "preserved_with_warning")],
+)
+def test_intact_parent_gate_controls_fallback_result(
+    page_session: dict, accepted: bool, expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    state["phase"] = "fallback_required"
+    state["stop_reason"] = "round_limit"
+    state["fallback"] = {"status": "required", "parent_ids": ["candidate_b"]}
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+    graph = load_component_agent_graph(request_path)
+    next(node for node in graph["nodes"] if node["id"] == "candidate_b")["state"] = "pending_gate"
+    fallback_dir = request_path.parents[2] / "fallback"
+    fallback_dir.mkdir()
+    (fallback_dir / "masks").mkdir()
+    shutil.copy2(
+        request_path.parent / "masks/candidate_b.png",
+        fallback_dir / "masks/candidate_b.png",
+    )
+    shutil.copy2(
+        request_path.parent / "masks/frozen_a.png",
+        fallback_dir / "masks/frozen_a.png",
+    )
+    graph_path = fallback_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    quality_input_refs = _quality_input_refs(fallback_dir, store)
+    record_parent_fallback_execution(
+        store, "page_001", graph_path=graph_path,
+        quality_input_refs=quality_input_refs,
+    )
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    monkeypatch.setattr(
+        component_repair, "evaluate_component_quality_round",
+        lambda *args, **kwargs: _strict_quality_report("candidate_b", accepted),
+    )
+    record_parent_fallback_quality(store, "page_001")
+
+    result = advance_component_repair(store, "page_001")
+
+    assert result["status"] == expected
+    final_state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    if accepted:
+        assert final_state["fallback"]["status"] == "parent_preserved"
+        assert final_state["frozen"]["candidate_b"] == final_state["parent_assets"]["candidate_b"]["sha256"]
+    else:
+        assert final_state["fallback"]["status"] == "warning"
 
 
 def _node(component_id: str, state: str, z_index: int) -> dict:
@@ -42,6 +416,56 @@ def _node(component_id: str, state: str, z_index: int) -> dict:
 def _action(action: str, object_ids: list[str], parameters: dict | None = None) -> dict:
     return {"action": action, "object_ids": object_ids, "parameters": parameters or {},
             "confidence": 0.95, "evidence": ["visible relationship"]}
+
+
+def _strict_quality_report(component_id: str, accepted: bool) -> dict:
+    metrics = {
+        "component_pixels": 4, "missing_pixels": 0, "missing_ratio": 0.0,
+        "duplicate_pixels": 0, "duplicate_ratio": 0.0, "edge_missing_ratio": 0.0,
+        "shadow_duplicate_ratio": 0.0, "alpha_duplicate_ratio": 0.0,
+        "exterior_shadow_pixels": 0, "exterior_alpha_pixels": 0,
+        "orphan_residual_pixels": 0, "text_support_pixels": 0,
+        "text_duplicate_ratio": 0.0, "ownership_out_of_bounds_pixels": 0,
+        "parent_child_double": False, "noise_l1": 0.0, "local_contrast": 1.0,
+        "edge_width_px": 1, "text_halo_px": 1,
+        "adaptive_pixel_tolerance": 3.0, "hard_pixel_tolerance": 3.0,
+    }
+    component_violations = [] if accepted else ["missing_edge"]
+    page_violations = sorted(component_violations + ["pptx_reopen_unknown"])
+    return {
+        "accepted": False, "violations": page_violations,
+        "component_reports": [{
+            "component_id": component_id, "accepted": accepted, "metrics": metrics,
+            "improvement": {}, "violations": component_violations,
+            "checks": {"protected_native_overlap": "pass"},
+            "agent_confidence": None,
+        }],
+        "visual_metrics": {"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        "checks": {"pptx_reopen": "unknown"},
+    }
+
+
+def _quality_input_refs(directory: Path, store) -> dict:
+    paths = {}
+    for name in ("background", "reconstructed", "text-mask"):
+        path = directory / f"{name}.png"
+        Image.fromarray(np.zeros((2, 2), dtype=np.uint8)).save(path)
+        paths[name] = path
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    native = directory / "native-check.json"
+    native.write_text(json.dumps({
+        "schema_version": 1, "page_id": "page_001",
+        "source_sha256": state["source_sha256"],
+        "protected_native_overlap": "pass",
+    }), encoding="utf-8")
+    paths["native-check"] = native
+    return {
+        name.replace("-", "_"): {
+            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for name, path in paths.items()
+    }
 
 
 def _action_case(tmp_path: Path) -> tuple[np.ndarray, dict, Path]:
@@ -416,6 +840,12 @@ def _make_page_session(run_root: Path, page_id: str) -> dict:
             _node("frozen_a", "frozen", 0),
         ]
     }
+    masks = evidence_root / "masks"
+    masks.mkdir()
+    for index, node in enumerate(graph["nodes"]):
+        mask_path = masks / f"{node['id']}.png"
+        Image.fromarray(np.full((2, 2), 255 - index, dtype=np.uint8)).save(mask_path)
+        node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
     sources = {}
     for name in EVIDENCE_NAMES:
         path = evidence_root / name
@@ -423,6 +853,9 @@ def _make_page_session(run_root: Path, page_id: str) -> dict:
             path.write_text(json.dumps(graph), encoding="utf-8")
         elif name == "quality-report.json":
             path.write_text('{"valid": false}', encoding="utf-8")
+        elif path.suffix == ".png":
+            value = 255 if name == "source.png" else 0
+            Image.fromarray(np.full((2, 2), value, dtype=np.uint8)).save(path)
         else:
             path.write_bytes((name + " data").encode())
         sources[name] = path

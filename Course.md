@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 7 已实现：Host 计划产生的组件轮次进入页面自适应、组件级硬质量门禁；逐轮修复状态机留给后续 Task 8。
+- P2.3 Task 8 已实现：Host 计划进入每页最多五轮的组件重修状态机，通过组件立即冻结；提前停止或五轮仍失败时折叠到完整父组件。
 
 ## P2.2 既有行为
 
@@ -87,6 +87,14 @@
 - `protected_native_overlap` 与 `pptx_reopen` 采用严格 `pass/fail/unknown`，缺失或 `unknown` 均失败；Task 8/最终组装负责接入真实检查事实，本阶段不伪造通过结果。
 - 质量门禁读取组件图声明的掩码并复核哈希、目录身份和链接属性，拒绝越界、`..` 语义路径、链接祖先、读取中替换及组件 ID/数量不一致。
 
+## P2.3 Task 8 本轮变更
+
+- 每页按完整失败候选批次最多重修五轮；空计划、连续相同计划或零个可执行动作会提前停止，绝不创建第六轮。
+- 通过质量门禁的组件立即写入不可变冻结图并从后续候选中移除；执行数量必须与计划动作及组件图实际变化一致。执行产物先绑定背景、重建图、文字掩码和原生对象重叠检查的逐文件哈希，质量阶段只读取这些状态引用并内部重算 Task 7 组件指标与页面视觉差异，不接受 Agent 自报指标。
+- 重修停止后只使用初始请求中逐文件哈希认证的完整父组件资源；父组件通过门禁时状态为 `ready_for_assembly/parent_preserved`，失败时为 `preserved_with_warning`。
+- 每次推进只提交一个持久化边界，先写产物再写带 SHA-256 引用的状态；恢复只读取状态引用，忽略临时目录和未引用轮次，并使用 Run 级执行租约防止重复领取。
+- Task 8 终态保留 `delivery_checks.pptx_reopen=unknown`，真实 PPTX 组装与重新打开检查由后续 Task 9/10 完成；缺少组件状态时只返回 `needs_initialization`。
+
 ## 关键修改文件
 
 - Agent 契约、Host 握手、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/host_agent.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
@@ -126,10 +134,10 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–7 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划、确定性动作执行和组件级质量门禁，Task 8 尚需接入最多五轮的修复状态机。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–8 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划、确定性动作执行、组件级质量门禁和最多五轮的修复状态机。Task 9 尚需把初始分层和逐轮执行接入统一运行时。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
-- 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，后续由 Task 8 执行组件级清字、重修或父组件折叠。
+- 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，由 Task 8 重修或折叠到完整父组件。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
 - 实测单页 PDF 转换的 Python 工作集合计约 2.2 GiB；`test1.pptx` 两页运行目录约 35.6 MiB，未出现内存或磁盘 100%。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

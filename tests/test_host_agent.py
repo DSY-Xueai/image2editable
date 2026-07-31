@@ -11,7 +11,12 @@ import io
 import pytest
 
 from image2editable import host_agent
-from image2editable.component_repair import EVIDENCE_NAMES, build_component_agent_request
+from image2editable.component_repair import (
+    EVIDENCE_NAMES,
+    advance_component_repair,
+    build_component_agent_request,
+    initialize_component_repair_state,
+)
 from image2editable.contracts import RunStatus
 from image2editable.host_agent import next_host_agent_item, record_host_plan
 from image2editable.inputs import prepare_image_job
@@ -41,6 +46,11 @@ def _publish_request(run_dir: Path) -> Path:
     evidence_root = reconstruction / "evidence-source"
     evidence_root.mkdir(parents=True)
     graph = {"nodes": [_node("candidate_1", "pending", 0)]}
+    masks = evidence_root / "masks"
+    masks.mkdir()
+    mask_path = masks / "candidate_1.png"
+    mask_path.write_bytes(b"mask")
+    graph["nodes"][0]["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
     evidence = {}
     for name in EVIDENCE_NAMES:
         path = evidence_root / name
@@ -51,10 +61,38 @@ def _publish_request(run_dir: Path) -> Path:
         else:
             path.write_bytes(name.encode())
         evidence[name] = path
-    return build_component_agent_request({
+    request_path = build_component_agent_request({
         "page_id": "page_001", "provider": "host",
         "reconstruction_dir": reconstruction, "evidence": evidence,
     }, repair_round=1)
+    store = RunStore.open(run_dir)
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=1,
+    )
+    advance_component_repair(store, "page_001")
+    return request_path
+
+
+def test_host_ignores_unreferenced_complete_round(host_run: Path, tmp_path: Path) -> None:
+    request_path = _publish_request(host_run)
+    reconstruction = host_run / "pages/page_001/reconstruction"
+    evidence = {
+        name: reconstruction / "evidence-source" / name for name in EVIDENCE_NAMES
+    }
+    orphan = build_component_agent_request({
+        "page_id": "page_001", "provider": "host",
+        "reconstruction_dir": reconstruction, "evidence": evidence,
+    }, repair_round=2)
+    handshake = next_host_agent_item(host_run)
+    record_host_plan(
+        host_run,
+        _write_json(tmp_path / "capability.json", _capability_response(handshake)),
+    )
+
+    item = next_host_agent_item(host_run)
+
+    assert item["request_path"] == str(request_path.resolve())
+    assert item["request_path"] != str(orphan.resolve())
 
 
 def _capability_response(item: dict) -> dict:
@@ -503,6 +541,20 @@ def test_record_valid_plan_is_atomic_resumable_and_not_repeatable(host_run: Path
     assert result["status"] == "recorded"
     assert RunStore.open(host_run).read_json("run_state.json")["status"] == "prepared"
     assert Path(result["plan_path"]).is_file()
+    state = RunStore.open(host_run).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["phase"] == "plan_recorded"
+    assert state["plan_count"] == 1
+    assert state["current_round"]["plan_ref"]["sha256"] == hashlib.sha256(
+        Path(result["plan_path"]).read_bytes()
+    ).hexdigest()
+    outcome = advance_component_repair(RunStore.open(host_run), "page_001")
+    assert outcome["status"] == "fallback_required"
+    state = RunStore.open(host_run).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["stop_reason"] == "empty_plan"
     with pytest.raises(RuntimeError, match="already recorded"):
         record_host_plan(host_run, plan_path)
 

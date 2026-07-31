@@ -12,6 +12,7 @@ from image2editable.component_quality import (
     calibrate_page,
     evaluate_component,
     evaluate_page_quality,
+    validate_component_quality_report,
 )
 from image2editable.component_repair import evaluate_component_quality_round
 
@@ -27,6 +28,31 @@ def _mask(shape: tuple[int, int], box: tuple[int, int, int, int]) -> np.ndarray:
     y1, x1, y2, x2 = box
     mask[y1:y2, x1:x2] = 255
     return mask
+
+
+def test_strict_quality_report_rejects_empty_metrics() -> None:
+    report = {
+        "accepted": False,
+        "violations": [],
+        "component_reports": [{
+            "component_id": "component_0001",
+            "accepted": False,
+            "metrics": {},
+            "improvement": {},
+            "violations": [],
+            "checks": {"protected_native_overlap": "pass"},
+            "agent_confidence": None,
+        }],
+        "visual_metrics": {},
+        "checks": {"protected_native_overlap": "pass", "pptx_reopen": "unknown"},
+    }
+
+    with pytest.raises(ValueError, match="metrics fields"):
+        validate_component_quality_report(
+            report,
+            expected_component_ids=["component_0001"],
+            initial_component_count=1,
+        )
 
 
 def test_each_foreground_pixel_has_one_active_owner() -> None:
