@@ -1497,6 +1497,7 @@ def _process_image(
 
 _PREPARED_PAGE_SCHEMA_VERSION = 1
 _PREPARED_PAGE_NAME = "prepared_page.json"
+_PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
     "schema_version",
     "phase",
@@ -1566,10 +1567,13 @@ def _validate_prepared_work_dir(work_dir: str | Path) -> Path:
 
 def _reject_prepared_links(work_dir: Path) -> None:
     for path in work_dir.rglob("*"):
-        if _is_link_or_reparse(os.lstat(path)):
+        status = os.lstat(path)
+        if _is_link_or_reparse(status):
             raise ValueError(
                 f"prepared asset is a link or reparse point: {path}"
             )
+        if stat.S_ISREG(status.st_mode) and status.st_nlink != 1:
+            raise ValueError(f"prepared asset must be a single-link file: {path}")
 
 
 def _prepared_owned_file(
@@ -1606,8 +1610,11 @@ def _prepared_owned_file(
     resolved = lexical.resolve(strict=True)
     if resolved != lexical or not resolved.is_relative_to(work_dir):
         raise ValueError(f"{label} asset path escapes the work directory")
-    if not resolved.is_file():
-        raise ValueError(f"{label} asset is not a file: {resolved}")
+    file_status = os.lstat(resolved)
+    if not stat.S_ISREG(file_status.st_mode):
+        raise ValueError(f"{label} asset is not a regular file: {resolved}")
+    if file_status.st_nlink != 1:
+        raise ValueError(f"{label} asset must be a single-link file: {resolved}")
     return resolved
 
 
@@ -1652,7 +1659,7 @@ def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
 
 
 def _is_prepared_int(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    return type(value) is int
 
 
 def _validate_prepared_box(box: object, width: int, height: int, label: str) -> None:
@@ -1757,6 +1764,37 @@ def _validate_prepared_payload(manifest: dict) -> None:
             raise ValueError("prepared page component metadata is invalid")
 
 
+def _atomic_write_prepared_text(
+    work_dir: Path,
+    path: Path,
+    content: str,
+    *,
+    encoding: str,
+    label: str,
+) -> None:
+    if path.exists() or path.is_symlink():
+        _prepared_owned_file(work_dir, path, label)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            newline="\n",
+            dir=work_dir,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
 def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
     dimensions = {
         field: slide_data[field]
@@ -1828,27 +1866,21 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
     }
     _validate_prepared_payload(manifest)
     state_path = work_dir / _PREPARED_PAGE_NAME
-    if state_path.exists() or state_path.is_symlink():
-        if _is_link_or_reparse(os.lstat(state_path)):
-            raise ValueError("prepared_page.json is a link or reparse point")
-    temporary_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=work_dir,
-            prefix=".prepared_page.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary_path = Path(temporary.name)
-            json.dump(manifest, temporary, ensure_ascii=False, indent=2)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_path, state_path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
+    _atomic_write_prepared_text(
+        work_dir,
+        state_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+        label="prepared state",
+    )
+    state_sha256 = _prepared_sha256(state_path)
+    _atomic_write_prepared_text(
+        work_dir,
+        work_dir / _PREPARED_PAGE_SIDECAR_NAME,
+        f"{state_sha256}\n",
+        encoding="ascii",
+        label="prepared state sidecar",
+    )
     return state_path.resolve()
 
 
@@ -1858,23 +1890,39 @@ def load_component_layers(state_path: str | Path) -> dict:
         raise ValueError(f"state path must name {_PREPARED_PAGE_NAME}")
     work_dir = _validate_prepared_work_dir(lexical_state.parent)
     state_file = _prepared_owned_file(work_dir, lexical_state, "prepared state")
+    sidecar_file = _prepared_owned_file(
+        work_dir,
+        work_dir / _PREPARED_PAGE_SIDECAR_NAME,
+        "prepared state sidecar",
+    )
+    sidecar = sidecar_file.read_bytes()
+    if (
+        len(sidecar) != 65
+        or sidecar[-1:] != b"\n"
+        or any(character not in b"0123456789abcdef" for character in sidecar[:64])
+    ):
+        raise ValueError("prepared state sidecar format is invalid")
+    if _prepared_sha256(state_file) != sidecar[:64].decode("ascii"):
+        raise ValueError("prepared state sha256 mismatch")
     try:
         manifest = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("prepared page state is invalid JSON") from exc
     if not isinstance(manifest, dict) or set(manifest) != _PREPARED_PAGE_FIELDS:
         raise ValueError("prepared page state fields are invalid")
-    if manifest["schema_version"] != _PREPARED_PAGE_SCHEMA_VERSION:
+    if (
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != _PREPARED_PAGE_SCHEMA_VERSION
+    ):
         raise ValueError("prepared page schema_version is invalid")
     if manifest["phase"] != "initial_layers":
         raise ValueError("prepared page phase is invalid")
-    if not isinstance(manifest["resource_isolation"], bool):
+    if type(manifest["resource_isolation"]) is not bool:
         raise ValueError("prepared page resource_isolation is invalid")
     _validate_prepared_payload(manifest)
     initial_count = manifest["initial_component_count"]
     if (
-        not isinstance(initial_count, int)
-        or isinstance(initial_count, bool)
+        type(initial_count) is not int
         or initial_count < 0
         or initial_count != len(manifest["components"])
     ):
@@ -2033,26 +2081,30 @@ def prepare_component_layers(
 
 
 def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
-    if prepared.get("phase") != "initial_layers":
-        raise ValueError("prepared layers must be in initial_layers phase")
-    work_dir = _validate_prepared_work_dir(prepared["_work_dir"])
-    if isinstance(accepted, dict):
-        components = accepted.get("components", prepared["components"])
-        element_mask_paths = accepted.get(
-            "_element_mask_paths",
-            accepted.get("element_mask_paths", prepared["_element_mask_paths"]),
+    if type(prepared) is not dict or type(prepared.get("state_path")) is not str:
+        raise ValueError("prepared layers must contain a state_path")
+    fresh = load_component_layers(prepared["state_path"])
+    if prepared != fresh:
+        raise ValueError("prepared layers do not match fresh prepared state")
+    if type(accepted) is not dict or set(accepted) != {
+        "components",
+        "element_masks",
+    }:
+        raise ValueError(
+            "accepted layers must contain only components and element_masks"
         )
-    elif isinstance(accepted, list):
-        components = accepted
-        element_mask_paths = prepared["_element_mask_paths"]
-    elif accepted is None:
-        components = prepared["components"]
-        element_mask_paths = prepared["_element_mask_paths"]
-    else:
-        raise ValueError("accepted layers must be a dict, component list, or None")
-    if not isinstance(components, list) or not isinstance(element_mask_paths, list):
-        raise ValueError("accepted components and element masks must be lists")
-    initial_count = prepared.get("initial_component_count")
+    if (
+        type(accepted["components"]) is not list
+        or type(accepted["element_masks"]) is not list
+        or accepted["components"] != fresh["components"]
+        or accepted["element_masks"] != fresh["_element_mask_paths"]
+    ):
+        raise ValueError("accepted layers must match the current prepared state")
+
+    work_dir = Path(fresh["_work_dir"])
+    components = fresh["components"]
+    element_mask_paths = fresh["_element_mask_paths"]
+    initial_count = fresh["initial_component_count"]
     if initial_count and not components:
         raise VisualSegmentationError(
             "agent-managed quality failed: initial components cannot be empty"
@@ -2060,11 +2112,11 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
 
     original = _load_rgb(
         _prepared_owned_file(
-            work_dir, prepared["original_image_path"], "source image"
+            work_dir, fresh["original_image_path"], "source image"
         )
     )
     with Image.open(
-        _prepared_owned_file(work_dir, prepared["_text_mask_path"], "OCR mask")
+        _prepared_owned_file(work_dir, fresh["_text_mask_path"], "OCR mask")
     ) as stored_text_mask:
         text_mask = np.asarray(stored_text_mask.convert("L")).copy()
     masks = []
@@ -2073,7 +2125,7 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             _prepared_owned_file(work_dir, mask_path, "element mask")
         ) as stored_mask:
             masks.append(np.asarray(stored_mask).copy())
-    quality_text_items = prepared.get("text_items") or []
+    quality_text_items = fresh.get("text_items") or []
     quality_text_mask = _build_text_cleanup_mask(
         original,
         text_mask,
@@ -2084,8 +2136,12 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             "agent-managed quality failed: component_text_overlap"
         )
 
-    staged_dir = Path(tempfile.mkdtemp(prefix="quality-components-", dir=work_dir))
+    staged_dir = None
+    keep_staging = False
     try:
+        staged_dir = Path(
+            tempfile.mkdtemp(prefix="quality-components-", dir=work_dir)
+        )
         staged_components = []
         for index, component in enumerate(components):
             source_component = _prepared_owned_file(
@@ -2099,7 +2155,7 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             })
         slide_data = {
             key: value
-            for key, value in prepared.items()
+            for key, value in fresh.items()
             if key not in {"phase", "initial_component_count", "state_path"}
         }
         slide_data["components"] = staged_components
@@ -2107,42 +2163,42 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             str(_prepared_owned_file(work_dir, path, "element mask"))
             for path in element_mask_paths
         ]
-    except BaseException:
-        shutil.rmtree(staged_dir, ignore_errors=True)
-        raise
-    exception_boundary = sys.exc_info()[1]
-    primary_exception = None
-    primary_traceback = None
-    try:
-        result = _finalize_slide_quality(
-            slide_data,
-            lang,
-            _resource_isolation=bool(prepared.get("_resource_isolation")),
-            _allow_text_only_fallback=False,
-        )
-    except BaseException as exc:
-        primary_exception = exc
-        primary_traceback = exc.__traceback__
-        shutil.rmtree(staged_dir, ignore_errors=True)
-        raise
+        exception_boundary = sys.exc_info()[1]
+        primary_exception = None
+        primary_traceback = None
+        try:
+            result = _finalize_slide_quality(
+                slide_data,
+                lang,
+                _resource_isolation=fresh["_resource_isolation"],
+                _allow_text_only_fallback=False,
+            )
+        except BaseException as exc:
+            primary_exception = exc
+            primary_traceback = exc.__traceback__
+            raise
+        finally:
+            _run_cleanup_preserving_exception(
+                close_ocr_engines,
+                "OCR",
+                primary_exception,
+                primary_traceback,
+                exception_boundary,
+            )
+        if initial_count and not result["components"]:
+            raise VisualSegmentationError(
+                "agent-managed quality failed: initial components became empty"
+            )
+        result.update({
+            "phase": "quality_accepted",
+            "initial_component_count": initial_count,
+            "state_path": fresh["state_path"],
+        })
+        keep_staging = True
+        return result
     finally:
-        _run_cleanup_preserving_exception(
-            close_ocr_engines,
-            "OCR",
-            primary_exception,
-            primary_traceback,
-            exception_boundary,
-        )
-    if initial_count and not result["components"]:
-        raise VisualSegmentationError(
-            "agent-managed quality failed: initial components became empty"
-        )
-    result.update({
-        "phase": "quality_accepted",
-        "initial_component_count": initial_count,
-        "state_path": prepared.get("state_path"),
-    })
-    return result
+        if staged_dir is not None and not keep_staging:
+            shutil.rmtree(staged_dir, ignore_errors=True)
 
 
 def _resolve_image_path(image_path: str | Path) -> Path:

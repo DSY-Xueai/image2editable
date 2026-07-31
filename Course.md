@@ -32,8 +32,9 @@
 
 ## P2.3 Task 2 本轮变更
 
-- `prepare_component_layers` 将源图、OCR mask、text-clean、element masks、component RGBA 与背景/差异资产写入页面工作目录，并原子生成带相对路径和逐文件 SHA-256 的 `prepared_page.json`。
-- `load_component_layers` 严格校验 schema、phase、路径所有权、链接/reparse、文件存在性与哈希后恢复绝对路径；`finalize_component_layers` 在页级质量要求 fallback 时明确失败且不清空初始组件。
+- `prepare_component_layers` 将源图、OCR mask、text-clean、element masks、component RGBA 与背景/差异资产写入页面工作目录，并原子生成带相对路径和逐文件 SHA-256 的 `prepared_page.json` 及其 SHA-256 sidecar。
+- `load_component_layers` 严格校验 state sidecar、schema、phase、路径所有权、链接/reparse/hardlink、文件存在性与哈希后恢复绝对路径。
+- `finalize_component_layers` 只接受与 fresh prepared state 完全一致的当前 components 与 element masks；开始质量检查前重新加载 state 和资产，页级质量要求 fallback 时明确失败且不清空初始组件。
 - 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
 
 ## 关键修改文件

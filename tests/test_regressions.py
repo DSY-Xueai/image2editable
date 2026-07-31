@@ -5082,6 +5082,21 @@ def _prepare_component_layers_fixture(
     return prepared, work_dir
 
 
+def _accepted_component_layers(prepared: dict) -> dict:
+    return {
+        "components": prepared["components"],
+        "element_masks": prepared["_element_mask_paths"],
+    }
+
+
+def _write_prepared_manifest(state_path: Path, manifest: dict) -> None:
+    state_path.write_text(json.dumps(manifest), encoding="utf-8")
+    state_hash = hashlib.sha256(state_path.read_bytes()).hexdigest()
+    state_path.with_name("prepared_page.sha256").write_bytes(
+        f"{state_hash}\n".encode("ascii"),
+    )
+
+
 def test_prepare_component_layers_persists_initial_components_without_quality(
     tmp_path: Path,
     monkeypatch,
@@ -5095,6 +5110,11 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
     assert manifest["schema_version"] == 1
     assert manifest["phase"] == "initial_layers"
+    sidecar_path = work_dir / "prepared_page.sha256"
+    assert sidecar_path.read_text(encoding="ascii") == (
+        hashlib.sha256(Path(prepared["state_path"]).read_bytes()).hexdigest()
+        + "\n"
+    )
     assert not (work_dir / ".prepared_page.json.tmp").exists()
 
     def assert_asset(record: dict) -> None:
@@ -5160,6 +5180,35 @@ def test_prepare_component_layers_rejects_preexisting_asset_reparse_point(
     assert prepared_target.read_bytes() == original_target
 
 
+def test_prepare_component_layers_rejects_preexisting_source_hardlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    external_path = tmp_path / "external.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    Image.new("RGB", (4, 4), "blue").save(external_path)
+    original_external = external_path.read_bytes()
+    work_dir = tmp_path / "prepared"
+    work_dir.mkdir()
+    os.link(external_path, work_dir / "source-image.png")
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: pytest.fail("OCR must not run"),
+    )
+
+    with pytest.raises(ValueError, match="hardlink|single-link"):
+        image_to_ppt.prepare_component_layers(
+            source_path,
+            work_dir,
+            lang="en",
+            resource_isolation=False,
+        )
+
+    assert external_path.read_bytes() == original_external
+
+
 def test_prepare_component_layers_does_not_create_through_linked_parent(
     tmp_path: Path,
 ) -> None:
@@ -5220,6 +5269,76 @@ def test_load_component_layers_recovers_absolute_owned_paths(
     assert all(Path(value).is_relative_to(work_dir.resolve()) for value in path_values)
 
 
+def test_load_component_layers_rejects_json_changed_without_sidecar_update(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    manifest["phase"] = "changed"
+    state_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="state sha256"):
+        image_to_ppt.load_component_layers(state_path)
+
+
+@pytest.mark.parametrize("sidecar", ["", "0" * 64, "A" * 64 + "\n"])
+def test_load_component_layers_rejects_invalid_state_sidecar(
+    tmp_path: Path,
+    monkeypatch,
+    sidecar: str,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    (work_dir / "prepared_page.sha256").write_text(sidecar, encoding="ascii")
+
+    with pytest.raises(ValueError, match="sidecar"):
+        image_to_ppt.load_component_layers(prepared["state_path"])
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda manifest: manifest.update({"schema_version": True}),
+        lambda manifest: manifest["dimensions"].update({"img_width": True}),
+        lambda manifest: manifest["components"][0]["metadata"].update({"x": True}),
+    ],
+)
+def test_load_component_layers_rejects_bool_for_integer_fields(
+    tmp_path: Path,
+    monkeypatch,
+    tamper,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    tamper(manifest)
+    _write_prepared_manifest(state_path, manifest)
+
+    with pytest.raises(ValueError, match="schema_version|dimension|metadata"):
+        image_to_ppt.load_component_layers(state_path)
+
+
+@pytest.mark.parametrize("target_name", ["state", "sidecar", "source"])
+def test_load_component_layers_rejects_hardlinked_owned_file(
+    tmp_path: Path,
+    monkeypatch,
+    target_name: str,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    target = (
+        Path(prepared["state_path"])
+        if target_name == "state"
+        else work_dir / "prepared_page.sha256"
+        if target_name == "sidecar"
+        else Path(prepared["original_image_path"])
+    )
+    os.link(target, work_dir / f"{target_name}-hardlink")
+
+    with pytest.raises(ValueError, match="hardlink|single-link"):
+        image_to_ppt.load_component_layers(prepared["state_path"])
+
+
 @pytest.mark.parametrize(
     "asset_name,index",
     [
@@ -5271,7 +5390,7 @@ def test_load_component_layers_rejects_json_asset_path_escape(
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
     manifest["assets"]["source_image"]["path"] = malicious_path
-    state_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _write_prepared_manifest(state_path, manifest)
 
     with pytest.raises(ValueError, match="asset path"):
         image_to_ppt.load_component_layers(state_path)
@@ -5308,7 +5427,7 @@ def test_load_component_layers_rejects_invalid_recovery_fields(
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
     tamper(manifest)
-    state_path.write_text(json.dumps(manifest), encoding="utf-8")
+    _write_prepared_manifest(state_path, manifest)
 
     with pytest.raises(ValueError, match=match):
         image_to_ppt.load_component_layers(state_path)
@@ -5334,7 +5453,11 @@ def test_agent_managed_finalize_rejects_component_text_overlap_without_mutation(
         image_to_ppt.VisualSegmentationError,
         match="component_text_overlap",
     ):
-        image_to_ppt.finalize_component_layers(prepared, prepared, lang="en")
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
 
     assert prepared["components"] == component_records
     assert [
@@ -5380,7 +5503,11 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
         image_to_ppt.VisualSegmentationError,
         match="background_residual",
     ):
-        image_to_ppt.finalize_component_layers(prepared, prepared, lang="en")
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
 
     assert prepared["initial_component_count"] == 2
     assert len(prepared["components"]) == 2
@@ -5389,24 +5516,156 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
 
 
-def test_agent_managed_finalize_cleans_staging_when_component_copy_fails(
+@pytest.mark.parametrize(
+    "accepted_factory",
+    [
+        lambda prepared: None,
+        lambda prepared: prepared["components"],
+        lambda prepared: {
+            "components": prepared["components"],
+            "_element_mask_paths": prepared["_element_mask_paths"],
+        },
+        lambda prepared: {"components": prepared["components"]},
+    ],
+)
+def test_agent_managed_finalize_rejects_legacy_accepted_shapes(
     tmp_path: Path,
     monkeypatch,
+    accepted_factory,
 ) -> None:
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
-    outside_component = tmp_path / "outside-component.png"
-    Image.new("RGBA", (4, 4), "green").save(outside_component)
-    accepted = [
-        prepared["components"][0],
-        {**prepared["components"][1], "path": str(outside_component)},
-    ]
     monkeypatch.setattr(
         image_to_ppt,
         "_has_component_text_overlap",
         lambda masks, text_mask: False,
     )
 
-    with pytest.raises(ValueError, match="outside the work directory"):
+    with pytest.raises(ValueError, match="accepted"):
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            accepted_factory(prepared),
+            lang="en",
+        )
+
+
+def test_agent_managed_finalize_rejects_noncurrent_owned_component(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    replacement = work_dir / "replacement.png"
+    replacement.write_bytes(Path(prepared["components"][0]["path"]).read_bytes())
+    accepted = _accepted_component_layers(prepared)
+    accepted["components"] = [
+        {**accepted["components"][0], "path": str(replacement)},
+        accepted["components"][1],
+    ]
+
+    with pytest.raises(ValueError, match="current prepared state"):
         image_to_ppt.finalize_component_layers(prepared, accepted, lang="en")
 
+
+def test_agent_managed_finalize_rejects_noncurrent_owned_element_mask(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    replacement = work_dir / "replacement-mask.png"
+    replacement.write_bytes(Path(prepared["_element_mask_paths"][0]).read_bytes())
+    accepted = _accepted_component_layers(prepared)
+    accepted["element_masks"] = [
+        str(replacement),
+        *accepted["element_masks"][1:],
+    ]
+
+    with pytest.raises(ValueError, match="current prepared state"):
+        image_to_ppt.finalize_component_layers(prepared, accepted, lang="en")
+
+
+def test_agent_managed_finalize_reloads_state_before_consuming_assets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    accepted = _accepted_component_layers(prepared)
+    Path(prepared["components"][0]["path"]).write_bytes(b"replaced")
+
+    with pytest.raises(ValueError, match="sha256"):
+        image_to_ppt.finalize_component_layers(prepared, accepted, lang="en")
+
+
+def test_agent_managed_finalize_rejects_tampered_prepared_dict(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    accepted = _accepted_component_layers(prepared)
+    prepared["img_width"] += 1
+
+    with pytest.raises(ValueError, match="fresh prepared state"):
+        image_to_ppt.finalize_component_layers(prepared, accepted, lang="en")
+
+
+def test_agent_managed_finalize_cleans_staging_when_result_becomes_empty(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_has_component_text_overlap",
+        lambda masks, text_mask: False,
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    def fake_finalize(slide_data, lang, **kwargs):
+        slide_data["components"] = []
+        return slide_data
+
+    monkeypatch.setattr(image_to_ppt, "_finalize_slide_quality", fake_finalize)
+
+    with pytest.raises(
+        image_to_ppt.VisualSegmentationError,
+        match="became empty",
+    ):
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
+
+    assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
+
+
+def test_agent_managed_finalize_cleans_staging_when_component_copy_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_has_component_text_overlap",
+        lambda masks, text_mask: False,
+    )
+    original_copyfile = image_to_ppt.shutil.copyfile
+    staged_copy_count = 0
+
+    def fail_second_staged_copy(source, destination):
+        nonlocal staged_copy_count
+        if Path(destination).parent.name.startswith("quality-components-"):
+            staged_copy_count += 1
+            if staged_copy_count == 2:
+                raise OSError("staged copy failed")
+        return original_copyfile(source, destination)
+
+    monkeypatch.setattr(image_to_ppt.shutil, "copyfile", fail_second_staged_copy)
+
+    with pytest.raises(OSError, match="staged copy failed"):
+        image_to_ppt.finalize_component_layers(
+            prepared,
+            _accepted_component_layers(prepared),
+            lang="en",
+        )
+
+    assert staged_copy_count == 2
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
