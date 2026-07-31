@@ -153,7 +153,7 @@ def test_frozen_component_cannot_change(field: str, value: object) -> None:
         "text_0001",
         kind="text",
         parent_id=None,
-        state="inactive",
+        state="frozen",
     )
     before = {"nodes": [parent, frozen, text]}
     mutated = [dict(node) for node in before["nodes"]]
@@ -236,3 +236,129 @@ def test_component_mask_path_must_be_relative_to_graph_directory() -> None:
 
     with pytest.raises(ValueError, match="mask path"):
         component_contracts.validate_component_graph({"nodes": [node]})
+
+
+def test_active_component_z_indexes_must_be_unique() -> None:
+    first = _node(
+        "component_0001",
+        kind="parent",
+        parent_id=None,
+        state="pending",
+    )
+    second = _node(
+        "component_0002",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+    )
+
+    with pytest.raises(ValueError, match="z_index"):
+        component_contracts.validate_component_graph({"nodes": [first, second]})
+
+
+def test_frozen_visual_component_requires_frozen_linked_text() -> None:
+    visual = _node(
+        "component_0001",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+        text_ids=["text_0001"],
+    )
+    text = _node(
+        "text_0001",
+        kind="text",
+        parent_id=None,
+        state="pending",
+    )
+
+    with pytest.raises(ValueError, match="frozen.*text"):
+        component_contracts.validate_component_graph({"nodes": [visual, text]})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mask", "masks/replaced-text.png"),
+        ("mask_sha256", "b" * 64),
+        ("bbox", [1, 2, 8, 10]),
+        ("z_index", 1),
+        ("state", "inactive"),
+    ],
+)
+def test_text_linked_to_frozen_component_cannot_change(
+    field: str,
+    value: object,
+) -> None:
+    visual = _node(
+        "component_0001",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+        text_ids=["text_0001"],
+    )
+    text = _node(
+        "text_0001",
+        kind="text",
+        parent_id=None,
+        state="frozen",
+    )
+    before = {"nodes": [visual, text]}
+    replacement = dict(text)
+    replacement[field] = value
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before=before,
+            after={"nodes": [visual, replacement]},
+        )
+
+
+def test_text_linked_to_frozen_component_cannot_be_deleted() -> None:
+    visual = _node(
+        "component_0001",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+        text_ids=["text_0001"],
+    )
+    text = _node(
+        "text_0001",
+        kind="text",
+        parent_id=None,
+        state="frozen",
+    )
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before={"nodes": [visual, text]},
+            after={"nodes": [visual]},
+        )
+
+
+def test_frozen_text_cannot_have_two_active_visual_owners() -> None:
+    first = _node(
+        "component_0001",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+        text_ids=["text_0001"],
+    )
+    second = _node(
+        "component_0002",
+        kind="parent",
+        parent_id=None,
+        state="frozen",
+        text_ids=["text_0001"],
+    )
+    second["z_index"] = 1
+    text = _node(
+        "text_0001",
+        kind="text",
+        parent_id=None,
+        state="frozen",
+    )
+
+    with pytest.raises(ValueError, match="multiple active owners"):
+        component_contracts.validate_component_graph(
+            {"nodes": [first, second, text]}
+        )

@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 
 import numpy as np
+import pytest
 
 
 def _validate_pixel_ownership(*args, **kwargs):
@@ -127,3 +128,60 @@ def test_ownership_validation_does_not_modify_masks() -> None:
     assert np.array_equal(component, originals[0])
     assert np.array_equal(text, originals[1])
     assert np.array_equal(foreground, originals[2])
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        np.array([[object()]], dtype=object),
+        np.array([["mask"]]),
+        np.array([[np.nan]], dtype=np.float32),
+        np.array([[-1]], dtype=np.int16),
+    ],
+)
+def test_ownership_rejects_invalid_mask_values(invalid: np.ndarray) -> None:
+    with pytest.raises(ValueError, match="mask"):
+        _validate_pixel_ownership(
+            [invalid],
+            text_mask=np.zeros((1, 1), dtype=np.uint8),
+            shape=(1, 1),
+        )
+
+
+def test_exact_bool_mask_projection_reuses_input_memory() -> None:
+    assert importlib.util.find_spec("image2editable.component_quality") is not None
+    module = importlib.import_module("image2editable.component_quality")
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[2:6, 2:6] = True
+
+    projected, outside = module._project_component_mask(mask, mask.shape)
+
+    assert np.shares_memory(projected, mask)
+    assert outside == 0
+
+
+def test_ownership_accumulator_uses_only_boolean_page_buffers(monkeypatch) -> None:
+    assert importlib.util.find_spec("image2editable.component_quality") is not None
+    module = importlib.import_module("image2editable.component_quality")
+    real_zeros = module.np.zeros
+    allocated_dtypes = []
+
+    def recording_zeros(*args, **kwargs):
+        allocated_dtypes.append(kwargs.get("dtype"))
+        return real_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(module.np, "zeros", recording_zeros)
+    first = np.zeros((8, 8), dtype=bool)
+    first[1:4, 1:4] = True
+    second = np.zeros((8, 8), dtype=bool)
+    second[5:7, 5:7] = True
+
+    report = module.validate_pixel_ownership(
+        [first, second],
+        text_mask=np.zeros((8, 8), dtype=bool),
+        shape=(8, 8),
+    )
+
+    assert report["valid"] is True
+    assert allocated_dtypes
+    assert set(allocated_dtypes) <= {bool, np.bool_}

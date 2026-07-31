@@ -14,9 +14,13 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import os
+import shutil
+import stat
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -217,16 +221,15 @@ def export_visual_components(
         raise ValueError("semantic mask count must match element mask count")
     if any(mask.shape != (img_h, img_w) for mask in semantic_masks):
         raise ValueError("semantic mask shape must match image")
-    owned_union = (
-        np.logical_or.reduce(ownership_masks)
-        if ownership_masks
-        else np.zeros((img_h, img_w), dtype=bool)
-    )
-    assigned_hole_repairs = _assign_text_hole_repairs(
+    owned_union = np.zeros((img_h, img_w), dtype=bool)
+    for ownership_mask in ownership_masks:
+        owned_union |= ownership_mask
+    repair_owners = _assign_text_hole_repairs(
         ownership_masks,
         text_ink,
         text_mask,
         semantic_masks=semantic_masks,
+        owned_union=owned_union,
     )
 
     components: list[dict] = []
@@ -249,11 +252,9 @@ def export_visual_components(
             _remove_border_connected(~ownership_mask)
             & semantic_masks[position]
         )
-        alpha_mask = (
-            refined
-            | assigned_hole_repairs[position]
-            | semantic_underlay
-        )
+        alpha_mask = refined | semantic_underlay
+        if repair_owners is not None:
+            alpha_mask |= repair_owners == position + 1
         area = int(np.count_nonzero(alpha_mask))
         if area == 0:
             continue
@@ -291,57 +292,252 @@ def export_visual_components(
     return components
 
 
+def _component_graph_api():
+    try:
+        from image2editable.component_contracts import (
+            is_render_active_component,
+            validate_component_graph,
+        )
+        from image2editable.component_quality import validate_pixel_ownership
+    except ModuleNotFoundError as error:
+        if error.name not in {
+            "image2editable",
+            "image2editable.component_contracts",
+            "image2editable.component_quality",
+        }:
+            raise
+        try:
+            from .component_contracts import (  # type: ignore[no-redef]
+                is_render_active_component,
+                validate_component_graph,
+            )
+            from .component_quality import (  # type: ignore[no-redef]
+                validate_pixel_ownership,
+            )
+        except ImportError as relative_error:
+            if relative_error.name is not None:
+                raise
+            from component_contracts import (  # type: ignore[no-redef]
+                is_render_active_component,
+                validate_component_graph,
+            )
+            from component_quality import (  # type: ignore[no-redef]
+                validate_pixel_ownership,
+            )
+    return (
+        is_render_active_component,
+        validate_component_graph,
+        validate_pixel_ownership,
+    )
+
+
+def _is_link_or_reparse(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _plain_directory(path: Path, label: str) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or _is_link_or_reparse(info):
+        raise ValueError(f"{label} must be a plain directory")
+
+
+def _read_bound_mask(graph_root: Path, node: dict, shape: tuple[int, int]) -> np.ndarray:
+    relative = Path(*node["mask"].split("/"))
+    candidate = graph_root / relative
+    current = graph_root
+    _plain_directory(current, "graph root")
+    for part in relative.parts[:-1]:
+        current = current / part
+        _plain_directory(current, "mask parent")
+    before = candidate.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _is_link_or_reparse(before)
+        or before.st_nlink != 1
+    ):
+        raise ValueError("component mask must be a plain single-link file")
+    with candidate.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_nlink != 1
+        ):
+            raise ValueError("component mask changed while opening")
+        payload = stream.read()
+    after = candidate.lstat()
+    if (
+        after.st_dev != opened.st_dev
+        or after.st_ino != opened.st_ino
+        or after.st_size != opened.st_size
+        or _is_link_or_reparse(after)
+    ):
+        raise ValueError("component mask changed while reading")
+    if hashlib.sha256(payload).hexdigest() != node["mask_sha256"]:
+        raise ValueError("component mask hash does not match graph")
+    with Image.open(io.BytesIO(payload)) as image:
+        mask = np.asarray(image.convert("L")) > 0
+    if mask.shape != shape or not np.any(mask):
+        raise ValueError("component mask shape must match image and be non-empty")
+    ys, xs = np.nonzero(mask)
+    bbox = [
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    ]
+    if bbox != node["bbox"]:
+        raise ValueError("component mask bbox does not match graph")
+    return mask
+
+
+def _load_bound_graph_masks(
+    graph_root: Path,
+    graph: dict,
+    shape: tuple[int, int],
+    active_ids: set[str],
+) -> dict[str, np.ndarray]:
+    declared = {node["mask"] for node in graph["nodes"]}
+    if len(declared) != len(graph["nodes"]):
+        raise ValueError("component graph mask paths must be unique")
+    if any(not path.startswith("masks/") for path in declared):
+        raise ValueError("component graph masks must stay in masks directory")
+    mask_dir = graph_root / "masks"
+    _plain_directory(mask_dir, "mask directory")
+    actual = set()
+    for directory, directories, files in os.walk(mask_dir, followlinks=False):
+        directory_path = Path(directory)
+        for name in directories:
+            _plain_directory(directory_path / name, "mask directory")
+        for name in files:
+            path = directory_path / name
+            relative = path.relative_to(graph_root).as_posix()
+            actual.add(relative)
+    if actual != declared:
+        raise ValueError("undeclared or missing component mask asset")
+    loaded = {}
+    for node in graph["nodes"]:
+        mask = _read_bound_mask(graph_root, node, shape)
+        if node["id"] in active_ids:
+            loaded[node["id"]] = mask
+    return loaded
+
+
+def _new_staging_directory(output_dir: Path) -> Path:
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    _plain_directory(output_dir.parent, "output parent")
+    if os.path.lexists(output_dir):
+        raise FileExistsError(str(output_dir))
+    return Path(
+        tempfile.mkdtemp(
+            prefix=f".{output_dir.name}-staging-",
+            dir=output_dir.parent,
+        )
+    )
+
+
+def _publish_directory(staging: Path, output_dir: Path) -> None:
+    if os.path.lexists(output_dir):
+        raise FileExistsError(str(output_dir))
+    staging.rename(output_dir)
+
+
 def export_component_graph(
     img: np.ndarray,
     graph: dict,
-    masks: dict[str, np.ndarray],
+    graph_root: str | Path,
     output_dir: str | Path,
     *,
     text_mask: np.ndarray,
+    foreground_mask: np.ndarray,
+    text_items: list[dict] | None = None,
+    text_clean_image: np.ndarray | None = None,
 ) -> list[dict]:
-    """Export only pending/frozen visual nodes from an already validated graph."""
+    """Export hash-bound active nodes into a newly published directory."""
 
-    from image2editable.component_contracts import (
+    (
         is_render_active_component,
         validate_component_graph,
-    )
-    from image2editable.component_quality import validate_pixel_ownership
-
+        validate_pixel_ownership,
+    ) = _component_graph_api()
     validate_component_graph(graph)
-    active_nodes = [
-        node for node in graph["nodes"] if is_render_active_component(node)
-    ]
-    active_masks = []
-    semantic_masks = []
-    for node in active_nodes:
-        if node["id"] not in masks:
-            raise ValueError(f"active component mask is missing: {node['id']}")
-        active_masks.append(np.asarray(masks[node["id"]], dtype=bool))
-        semantic_masks.append(active_masks[-1])
+    graph_root = Path(graph_root)
+    output_dir = Path(output_dir)
+    mask_root = (graph_root / "masks").resolve(strict=True)
+    resolved_output = output_dir.resolve(strict=False)
+    if resolved_output == mask_root or mask_root in resolved_output.parents:
+        raise ValueError("component output cannot be inside graph masks")
+    active_nodes = sorted(
+        (
+            node
+            for node in graph["nodes"]
+            if is_render_active_component(node)
+        ),
+        key=lambda node: node["z_index"],
+    )
+    masks = _load_bound_graph_masks(
+        graph_root,
+        graph,
+        img.shape[:2],
+        {node["id"] for node in active_nodes},
+    )
+    active_masks = [masks[node["id"]] for node in active_nodes]
     ownership = validate_pixel_ownership(
         active_masks,
         text_mask=text_mask,
         shape=img.shape[:2],
+        foreground_mask=foreground_mask,
     )
-    if not ownership["valid"]:
+    blocking = {
+        key: ownership[key]
+        for key in (
+            "duplicate_pixels",
+            "missing_pixels",
+            "out_of_bounds_pixels",
+        )
+        if ownership[key]
+    }
+    if blocking:
         raise ComponentExtractionError(
             "active component ownership is invalid: "
-            + json.dumps(ownership, sort_keys=True)
+            + json.dumps(blocking, sort_keys=True)
         )
-    components = export_visual_components(
-        img,
-        active_masks,
-        output_dir,
-        text_mask,
-        semantic_masks=semantic_masks,
-    )
-    if len(components) != len(active_nodes):
+    if ownership["text_duplicate_pixels"] and (
+        text_clean_image is None
+        or not text_items
+        or any("box" not in item for item in text_items)
+    ):
         raise ComponentExtractionError(
-            "active component graph nodes must all produce visual components"
+            "text overlap requires text_items and text_clean_image"
         )
-    for component, node in zip(components, active_nodes):
-        component["component_id"] = node["id"]
-        component["z_index"] = node["z_index"]
+    staging = _new_staging_directory(output_dir)
+    try:
+        components = export_visual_components(
+            img,
+            active_masks,
+            staging,
+            text_mask,
+            semantic_masks=active_masks,
+            text_items=text_items,
+            text_clean_image=text_clean_image,
+        )
+        if len(components) != len(active_nodes):
+            raise ComponentExtractionError(
+                "active component graph nodes must all produce visual components"
+            )
+        for component, node in zip(components, active_nodes):
+            component["component_id"] = node["id"]
+            component["z_index"] = node["z_index"]
+        _publish_directory(staging, output_dir)
+        for component in components:
+            component["path"] = str(output_dir / Path(component["path"]).name)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
     return components
 
 
@@ -351,72 +547,100 @@ def export_component_tree(
     output_dir: str | Path,
     *,
     text_mask: np.ndarray,
+    text_items: list[dict] | None = None,
+    text_clean_image: np.ndarray | None = None,
 ) -> dict:
     """Persist intact parent masks and export only active child objects."""
 
-    from image2editable.component_contracts import validate_component_graph
-
+    _, validate_component_graph, _ = _component_graph_api()
     output_dir = Path(output_dir)
-    mask_dir = output_dir / "masks"
-    mask_dir.mkdir(parents=True, exist_ok=True)
-    nodes = []
-    masks = {}
-    for index, layer in enumerate(layers, start=1):
-        if not isinstance(layer, dict) or set(layer) != {
-            "parent_mask",
-            "child_mask",
-            "z_index",
-        }:
-            raise ValueError("component mask layer fields are invalid")
-        parent_id = f"parent_{index:04d}"
-        child_id = f"component_{index:04d}"
-        for component_id, kind, state, parent_id_value, mask in (
-            (parent_id, "parent", "inactive", None, layer["parent_mask"]),
-            (child_id, "child", "pending", parent_id, layer["child_mask"]),
-        ):
-            normalized = np.asarray(mask, dtype=bool)
-            if normalized.shape != img.shape[:2] or not np.any(normalized):
-                raise ValueError("component mask shape must match image")
-            mask_path = mask_dir / f"{component_id}.png"
-            Image.fromarray(normalized.astype(np.uint8) * 255, mode="L").save(
-                mask_path
-            )
-            ys, xs = np.nonzero(normalized)
-            nodes.append(
-                {
+    staging = _new_staging_directory(output_dir)
+    try:
+        mask_dir = staging / "masks"
+        mask_dir.mkdir()
+        nodes = []
+        foreground = np.zeros(img.shape[:2], dtype=bool)
+        for index, layer in enumerate(layers, start=1):
+            if not isinstance(layer, dict) or set(layer) != {
+                "parent_mask",
+                "child_mask",
+                "z_index",
+            }:
+                raise ValueError("component mask layer fields are invalid")
+            parent_id = f"parent_{index:04d}"
+            child_id = f"component_{index:04d}"
+            for component_id, kind, state, parent_id_value, mask in (
+                (parent_id, "parent", "inactive", None, layer["parent_mask"]),
+                (child_id, "child", "pending", parent_id, layer["child_mask"]),
+            ):
+                source_mask = np.asarray(mask)
+                if (
+                    source_mask.ndim != 2
+                    or source_mask.dtype.kind not in "biuf"
+                    or (
+                        source_mask.dtype.kind == "f"
+                        and not np.all(np.isfinite(source_mask))
+                    )
+                    or (
+                        source_mask.dtype.kind in "if"
+                        and np.any(source_mask < 0)
+                    )
+                ):
+                    raise ValueError("component mask must be finite and non-negative")
+                normalized = (
+                    source_mask
+                    if source_mask.dtype == np.bool_
+                    else source_mask > 0
+                )
+                if normalized.shape != img.shape[:2] or not np.any(normalized):
+                    raise ValueError("component mask shape must match image")
+                mask_path = mask_dir / f"{component_id}.png"
+                Image.fromarray(normalized.astype(np.uint8) * 255, mode="L").save(
+                    mask_path
+                )
+                ys, xs = np.nonzero(normalized)
+                nodes.append({
                     "id": component_id,
                     "kind": kind,
                     "parent_id": parent_id_value,
                     "state": state,
-                    "mask": mask_path.relative_to(output_dir).as_posix(),
+                    "mask": mask_path.relative_to(staging).as_posix(),
                     "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
                     "bbox": [
-                        int(xs.min()),
-                        int(ys.min()),
-                        int(xs.max()) + 1,
-                        int(ys.max()) + 1,
+                        int(xs.min()), int(ys.min()),
+                        int(xs.max()) + 1, int(ys.max()) + 1,
                     ],
                     "z_index": layer["z_index"],
                     "text_ids": [],
-                }
+                })
+                if state == "pending":
+                    foreground |= normalized
+        graph = {"nodes": nodes}
+        validate_component_graph(graph)
+        (staging / "component-graph.json").write_text(
+            json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        components = export_component_graph(
+            img,
+            graph,
+            staging,
+            staging / "components",
+            text_mask=text_mask,
+            foreground_mask=foreground,
+            text_items=text_items,
+            text_clean_image=text_clean_image,
+        )
+        _publish_directory(staging, output_dir)
+        for component in components:
+            component["path"] = str(
+                output_dir / "components" / Path(component["path"]).name
             )
-            masks[component_id] = normalized
-
-    graph = {"nodes": nodes}
-    validate_component_graph(graph)
-    graph_path = output_dir / "component-graph.json"
-    graph_path.write_text(
-        json.dumps(graph, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    components = export_component_graph(
-        img,
-        graph,
-        masks,
-        output_dir / "components",
-        text_mask=text_mask,
-    )
-    return {"graph": graph, "components": components}
+        return {"graph": graph, "components": components}
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
 
 
 def _restore_supported_holes(
@@ -451,16 +675,22 @@ def _assign_text_hole_repairs(
     text_ink: np.ndarray,
     text_mask: np.ndarray,
     semantic_masks: list[np.ndarray] | None = None,
-) -> list[np.ndarray]:
+    owned_union: np.ndarray | None = None,
+) -> np.ndarray | None:
     """Assign each removed glyph hole to the nearest underlying visual element."""
     if not ownership_masks:
-        return []
+        return None
+    if not np.any(text_ink) and not np.any(text_mask):
+        return None
     semantic_masks = ownership_masks if semantic_masks is None else semantic_masks
-    owned_union = np.logical_or.reduce(ownership_masks)
+    if owned_union is None:
+        owned_union = np.zeros(text_mask.shape, dtype=bool)
+        for ownership_mask in ownership_masks:
+            owned_union |= ownership_mask
     unowned_text_ink = (text_ink > 0) & ~owned_union
     unowned_text_region = (text_mask > 0) & ~owned_union
     claimed_holes = np.zeros(text_mask.shape, dtype=bool)
-    repairs = [np.zeros(text_mask.shape, dtype=bool) for _ in ownership_masks]
+    repair_owners = np.zeros(text_mask.shape, dtype=np.uint32)
     for position in reversed(range(len(ownership_masks))):
         ownership_mask = ownership_masks[position]
         relevant_text = _filter_text_ink_over_components(
@@ -492,9 +722,9 @@ def _assign_text_hole_repairs(
             )
             | supported_region
         ) & ~claimed_holes
-        repairs[position] = repair
+        repair_owners[repair] = position + 1
         claimed_holes |= repair
-    return repairs
+    return repair_owners
 
 
 def _solidify_text_repairs(

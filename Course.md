@@ -40,9 +40,13 @@
 ## P2.3 Task 3 本轮变更
 
 - 组件节点固定为 `id/kind/parent_id/state/mask/mask_sha256/bbox/z_index/text_ids`；未知字段拒绝，冻结节点的掩码、位置、层级和文字归属不可修改或删除。
-- `pending/frozen` 是仅有的活动渲染状态，`failed/inactive` 不参与输出；父子节点不能同时渲染。
+- `pending/frozen` 是仅有的活动渲染状态，`failed/inactive` 不参与输出；父子节点不能同时渲染；活动节点 `z_index` 唯一并按其确定导出顺序。
 - 初始语义实例同时保存完整父掩码和可拆子掩码；常规导出只消费活动节点，完整父资产留作后续折叠回退。
 - 唯一像素所有权分别报告组件重复、显式前景缺失、文字重复和越界像素；半透明、阴影和抗锯齿的任意非零证据也只能归属于一个活动组件，不自动修正。
+- graph 声明的每个 mask 都会以同一文件句柄校验 SHA-256，并重算 bbox；缺失、额外、符号链接、重解析点和硬链接资产都会拒绝。
+- 组件树与组件 PNG 先写入同级 staging，全部通过后整目录发布；失败完整清理，已有输出目录不会被逐文件覆盖。
+- 原始组件与文字交叠不再提前误杀；只有显式提供可靠 `text_items` 和已验证 `text_clean_image` 才进入清字导出，避免整块 OCR 框擦断线条；missing 仅依据显式非文字前景证据判定。
+- mask 校验、union 和像素所有权改为流式 bool 累计，文字洞修复只保留一张 owner map，无文字时不分配 repair map；不再构造随组件数增长的 `N×H×W` 堆叠或全页 repair 列表。Skill 同步携带组件契约与质量模块，可脱离仓库导入。
 
 ## 关键修改文件
 
@@ -84,7 +88,7 @@ image2editable run execute runs/pptx-job
 - P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–3 已完成 Provider、可恢复初始视觉资产、组件树和所有权基础，尚未接入组件决策、修复、五轮循环或 Host/Local 调用。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
-- 当前优先保证视觉稳定和文字可编辑；与文字冲突的独立视觉组件会保留在净化底图中，不强行拆成透明对象。
+- 普通非 Agent `convert` 仍保留旧的保守 fallback；P2.3 Agent 路径将通过组件级清字、重修和父组件折叠提取完整组件，不再以整页清空组件作为成功结果。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
 - 实测单页 PDF 转换的 Python 工作集合计约 2.2 GiB；`test1.pptx` 两页运行目录约 35.6 MiB，未出现内存或磁盘 100%。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

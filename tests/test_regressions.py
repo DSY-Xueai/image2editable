@@ -6296,6 +6296,81 @@ def test_component_mask_layers_reject_overlapping_active_children() -> None:
         visual_segment.build_component_mask_layers(elements)
 
 
+def test_visual_mask_validation_streams_without_numpy_sum(monkeypatch) -> None:
+    import numpy as np
+
+    first = np.zeros((20, 20), dtype=bool)
+    first[1:5, 1:5] = True
+    second = np.zeros((20, 20), dtype=bool)
+    second[10:15, 10:15] = True
+    monkeypatch.setattr(
+        visual_segment.np,
+        "sum",
+        lambda *args, **kwargs: pytest.fail("mask stack sum is not allowed"),
+    )
+
+    visual_segment.validate_visual_masks([first, second])
+
+
+def test_component_mask_layers_share_valid_bool_inputs_without_mutation() -> None:
+    import numpy as np
+
+    child = np.zeros((12, 12), dtype=bool)
+    child[3:9, 3:9] = True
+    parent = child.copy()
+    parent[2, 5] = True
+    originals = child.copy(), parent.copy()
+    element = visual_segment.VisualElement(
+        child,
+        0,
+        0.9,
+        "synthetic",
+        semantic_mask=parent,
+    )
+
+    layer = visual_segment.build_component_mask_layers([element])[0]
+
+    assert np.shares_memory(layer["child_mask"], child)
+    assert np.shares_memory(layer["parent_mask"], parent)
+    assert np.array_equal(child, originals[0])
+    assert np.array_equal(parent, originals[1])
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        [["mask"]],
+        [[float("nan")]],
+        [[-1]],
+    ],
+)
+def test_visual_mask_validation_rejects_invalid_values(invalid) -> None:
+    with pytest.raises(ValueError, match="mask"):
+        visual_segment.validate_visual_masks([invalid])
+
+
+def _persist_component_graph_masks(
+    graph_root: Path,
+    graph: dict,
+    masks: dict[str, object],
+) -> None:
+    import numpy as np
+
+    for node in graph["nodes"]:
+        mask = np.asarray(masks[node["id"]], dtype=bool)
+        mask_path = graph_root / node["mask"]
+        mask_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(mask_path)
+        node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+        ys, xs = np.nonzero(mask)
+        node["bbox"] = [
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        ]
+
+
 def test_component_graph_export_includes_frozen_but_not_failed_nodes(
     tmp_path: Path,
 ) -> None:
@@ -6333,17 +6408,24 @@ def test_component_graph_export_includes_frozen_but_not_failed_nodes(
             },
         ]
     }
-    validate_component_graph(graph)
-
-    components = fg_extract.export_component_graph(
-        np.full((12, 12, 3), 180, dtype=np.uint8),
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
         graph,
         {
             "component_frozen": frozen_mask,
             "component_failed": failed_mask,
         },
+    )
+    validate_component_graph(graph)
+
+    components = fg_extract.export_component_graph(
+        np.full((12, 12, 3), 180, dtype=np.uint8),
+        graph,
+        graph_root,
         tmp_path / "components",
         text_mask=np.zeros((12, 12), dtype=np.uint8),
+        foreground_mask=frozen_mask,
     )
 
     assert len(components) == 1
@@ -6375,6 +6457,12 @@ def test_component_graph_export_rejects_duplicate_active_ownership(
         }
 
     graph = {"nodes": [node("component_a", 0), node("component_b", 1)]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_a": mask_a, "component_b": mask_b},
+    )
 
     with pytest.raises(
         fg_extract.ComponentExtractionError,
@@ -6383,7 +6471,398 @@ def test_component_graph_export_rejects_duplicate_active_ownership(
         fg_extract.export_component_graph(
             np.full((10, 10, 3), 180, dtype=np.uint8),
             graph,
-            {"component_a": mask_a, "component_b": mask_b},
+            graph_root,
             tmp_path / "components",
             text_mask=np.zeros((10, 10), dtype=np.uint8),
+            foreground_mask=mask_a | mask_b,
         )
+
+
+@pytest.mark.parametrize("corruption", ["hash", "bbox", "extra"])
+def test_component_graph_export_rejects_unbound_mask_assets(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    import numpy as np
+
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:7, 3:8] = True
+    graph = {
+        "nodes": [{
+            "id": "component_0001",
+            "kind": "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": "masks/component_0001.png",
+            "mask_sha256": "0" * 64,
+            "bbox": [3, 2, 8, 7],
+            "z_index": 0,
+            "text_ids": [],
+        }]
+    }
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_0001": mask},
+    )
+    if corruption == "hash":
+        graph["nodes"][0]["mask_sha256"] = "f" * 64
+    elif corruption == "bbox":
+        graph["nodes"][0]["bbox"] = [2, 2, 8, 7]
+    else:
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(
+            graph_root / "masks" / "undeclared.png"
+        )
+
+    with pytest.raises(ValueError, match="mask|bbox|undeclared"):
+        fg_extract.export_component_graph(
+            np.full((10, 10, 3), 180, dtype=np.uint8),
+            graph,
+            graph_root,
+            tmp_path / "components",
+            text_mask=np.zeros((10, 10), dtype=np.uint8),
+            foreground_mask=mask,
+        )
+    assert not (tmp_path / "components").exists()
+
+
+def test_component_graph_export_sorts_by_z_index_and_cleans_embedded_text(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    low = np.zeros((16, 20), dtype=bool)
+    low[2:7, 2:8] = True
+    high = np.zeros_like(low)
+    high[9:14, 11:18] = True
+    text_mask = np.zeros_like(low, dtype=np.uint8)
+    text_mask[3:5, 4:6] = 255
+    image = np.full((16, 20, 3), 240, dtype=np.uint8)
+    image[4, 2:8] = 0
+    image[3:5, 4:6] = [220, 20, 20]
+    text_clean = image.copy()
+    text_clean[3:5, 4:6] = 240
+    text_clean[4, 2:8] = 0
+    text_items = [{"box": [4, 3, 2, 2], "color": "#DC1414"}]
+
+    def node(component_id: str, z_index: int) -> dict:
+        return {
+            "id": component_id,
+            "kind": "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": "0" * 64,
+            "bbox": [1, 1, 2, 2],
+            "z_index": z_index,
+            "text_ids": [],
+        }
+
+    graph = {"nodes": [node("high", 9), node("low", 1)]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"high": high, "low": low},
+    )
+    components = fg_extract.export_component_graph(
+        image,
+        graph,
+        graph_root,
+        tmp_path / "components",
+        text_mask=text_mask,
+        foreground_mask=low | high,
+        text_items=text_items,
+        text_clean_image=text_clean,
+    )
+
+    assert [item["component_id"] for item in components] == ["low", "high"]
+    assert [item["z_index"] for item in components] == [1, 9]
+    low_component = components[0]
+    with Image.open(low_component["path"]) as exported:
+        rgba = np.asarray(exported.convert("RGBA"))
+    local_y = 4 - low_component["y"]
+    local_x = 3 - low_component["x"]
+    assert np.all(rgba[local_y, local_x, :3] < 20)
+    assert rgba[local_y, local_x, 3] > 0
+
+
+def test_component_graph_export_requires_reliable_text_clean_assets(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[1:7, 1:7] = True
+    text_mask = np.zeros((8, 8), dtype=np.uint8)
+    text_mask[3:5, 3:5] = 255
+    graph = {"nodes": [{
+        "id": "component_0001",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "frozen",
+        "mask": "masks/component_0001.png",
+        "mask_sha256": "0" * 64,
+        "bbox": [1, 1, 7, 7],
+        "z_index": 0,
+        "text_ids": [],
+    }]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_0001": mask},
+    )
+
+    with pytest.raises(
+        fg_extract.ComponentExtractionError,
+        match="text_items.*text_clean_image",
+    ):
+        fg_extract.export_component_graph(
+            np.full((8, 8, 3), 180, dtype=np.uint8),
+            graph,
+            graph_root,
+            tmp_path / "components",
+            text_mask=text_mask,
+            foreground_mask=mask,
+        )
+    assert not (tmp_path / "components").exists()
+
+
+def test_component_graph_export_rejects_missing_foreground(tmp_path: Path) -> None:
+    import numpy as np
+
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+    foreground = mask.copy()
+    foreground[7, 7] = True
+    graph = {"nodes": [{
+        "id": "component_0001",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "frozen",
+        "mask": "masks/component_0001.png",
+        "mask_sha256": "0" * 64,
+        "bbox": [2, 2, 5, 5],
+        "z_index": 0,
+        "text_ids": [],
+    }]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_0001": mask},
+    )
+
+    with pytest.raises(fg_extract.ComponentExtractionError, match="missing"):
+        fg_extract.export_component_graph(
+            np.full((10, 10, 3), 180, dtype=np.uint8),
+            graph,
+            graph_root,
+            tmp_path / "components",
+            text_mask=np.zeros((10, 10), dtype=np.uint8),
+            foreground_mask=foreground,
+        )
+    assert not (tmp_path / "components").exists()
+
+
+def test_component_tree_failure_leaves_no_partial_or_old_assets(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    output_dir = tmp_path / "tree"
+    output_dir.mkdir()
+    (output_dir / "old.png").write_bytes(b"old")
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[2:6, 2:6] = True
+    layers = [{"parent_mask": mask, "child_mask": mask, "z_index": 0}]
+
+    with pytest.raises(FileExistsError):
+        fg_extract.export_component_tree(
+            np.full((8, 8, 3), 180, dtype=np.uint8),
+            layers,
+            output_dir,
+            text_mask=np.zeros((8, 8), dtype=np.uint8),
+        )
+    assert (output_dir / "old.png").read_bytes() == b"old"
+    assert not list(tmp_path.glob(".tree-staging-*"))
+
+
+def test_component_tree_cleans_staging_when_component_export_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import numpy as np
+
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[2:6, 2:6] = True
+    layers = [{"parent_mask": mask, "child_mask": mask, "z_index": 0}]
+
+    def fail_after_partial_write(*args, **kwargs):
+        output_dir = Path(args[2])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "partial.png").write_bytes(b"partial")
+        raise RuntimeError("forced component failure")
+
+    monkeypatch.setattr(
+        fg_extract,
+        "export_visual_components",
+        fail_after_partial_write,
+    )
+    with pytest.raises(RuntimeError, match="forced component failure"):
+        fg_extract.export_component_tree(
+            np.full((8, 8, 3), 180, dtype=np.uint8),
+            layers,
+            tmp_path / "tree",
+            text_mask=np.zeros((8, 8), dtype=np.uint8),
+        )
+    assert not (tmp_path / "tree").exists()
+    assert not list(tmp_path.glob(".tree-staging-*"))
+
+
+@pytest.mark.parametrize("invalid", [[[-1]], [[float("nan")]], [["mask"]]])
+def test_component_tree_rejects_invalid_mask_values(
+    tmp_path: Path,
+    invalid,
+) -> None:
+    import numpy as np
+
+    with pytest.raises(ValueError, match="mask"):
+        fg_extract.export_component_tree(
+            np.full((1, 1, 3), 180, dtype=np.uint8),
+            [{"parent_mask": invalid, "child_mask": [[1]], "z_index": 0}],
+            tmp_path / "tree",
+            text_mask=np.zeros((1, 1), dtype=np.uint8),
+        )
+    assert not (tmp_path / "tree").exists()
+    assert not list(tmp_path.glob(".tree-staging-*"))
+
+
+def test_text_hole_repairs_use_one_owner_map_and_skip_empty_text() -> None:
+    import numpy as np
+
+    first = np.zeros((12, 12), dtype=bool)
+    first[1:5, 1:5] = True
+    second = np.zeros((12, 12), dtype=bool)
+    second[7:11, 7:11] = True
+    empty = np.zeros((12, 12), dtype=np.uint8)
+
+    assert fg_extract._assign_text_hole_repairs(
+        [first, second],
+        empty,
+        empty,
+    ) is None
+
+    text = empty.copy()
+    text[4:8, 4:8] = 255
+    owners = fg_extract._assign_text_hole_repairs(
+        [first, second],
+        text,
+        text,
+    )
+    assert isinstance(owners, np.ndarray)
+    assert owners.shape == text.shape
+    assert owners.dtype == np.uint32
+
+
+def test_component_graph_export_rejects_hardlinked_mask(tmp_path: Path) -> None:
+    import numpy as np
+
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[2:6, 2:6] = True
+    graph = {"nodes": [{
+        "id": "component_0001",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "frozen",
+        "mask": "masks/component_0001.png",
+        "mask_sha256": "0" * 64,
+        "bbox": [2, 2, 6, 6],
+        "z_index": 0,
+        "text_ids": [],
+    }]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_0001": mask},
+    )
+    mask_path = graph_root / graph["nodes"][0]["mask"]
+    external = tmp_path / "external.png"
+    mask_path.replace(external)
+    try:
+        os.link(external, mask_path)
+    except OSError as error:
+        pytest.skip(f"hardlink is unavailable: {error}")
+
+    with pytest.raises(ValueError, match="single-link"):
+        fg_extract.export_component_graph(
+            np.full((8, 8, 3), 180, dtype=np.uint8),
+            graph,
+            graph_root,
+            tmp_path / "components",
+            text_mask=np.zeros((8, 8), dtype=np.uint8),
+            foreground_mask=mask,
+        )
+    assert external.is_file()
+    assert not (tmp_path / "components").exists()
+
+
+def test_component_graph_export_rejects_output_inside_mask_evidence(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    mask = np.zeros((8, 8), dtype=bool)
+    mask[2:6, 2:6] = True
+    graph = {"nodes": [{
+        "id": "component_0001",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "frozen",
+        "mask": "masks/component_0001.png",
+        "mask_sha256": "0" * 64,
+        "bbox": [2, 2, 6, 6],
+        "z_index": 0,
+        "text_ids": [],
+    }]}
+    graph_root = tmp_path / "graph"
+    _persist_component_graph_masks(
+        graph_root,
+        graph,
+        {"component_0001": mask},
+    )
+
+    with pytest.raises(ValueError, match="graph masks"):
+        fg_extract.export_component_graph(
+            np.full((8, 8, 3), 180, dtype=np.uint8),
+            graph,
+            graph_root,
+            graph_root / "masks" / "generated",
+            text_mask=np.zeros((8, 8), dtype=np.uint8),
+            foreground_mask=mask,
+        )
+    assert not (graph_root / "masks" / "generated").exists()
+
+
+def test_skill_component_graph_modules_run_outside_repository(tmp_path: Path) -> None:
+    skill_root = Path(__file__).parents[1] / "skills" / "image-to-ppt"
+    command = (
+        "from scripts import fg_extract, component_contracts, component_quality; "
+        "api = fg_extract._component_graph_api(); "
+        "assert component_contracts.COMPONENT_KINDS; "
+        "assert api[1] is component_contracts.validate_component_graph; "
+        "assert api[2] is component_quality.validate_pixel_ownership"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(skill_root)
+    completed = subprocess.run(
+        [sys.executable, "-c", command],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr

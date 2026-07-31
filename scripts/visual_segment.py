@@ -40,15 +40,33 @@ def _sam_inference_context(generator):
             yield
 
 
+def _binary_visual_mask(mask: object) -> np.ndarray:
+    array = np.asarray(mask)
+    if array.ndim != 2 or array.dtype.kind not in "biuf":
+        raise ValueError("visual mask must be two-dimensional and numeric")
+    if array.dtype.kind == "f" and not np.all(np.isfinite(array)):
+        raise ValueError("visual mask contains non-finite values")
+    if array.dtype.kind in "if" and np.any(array < 0):
+        raise ValueError("visual mask contains negative values")
+    return array if array.dtype == np.bool_ else array > 0
+
+
 def validate_visual_masks(element_masks: list[np.ndarray]) -> None:
     if not element_masks:
         return
-    ownership = np.sum(
-        [np.asarray(mask, dtype=np.uint8) for mask in element_masks],
-        axis=0,
-    )
-    if np.max(ownership) > 1:
-        raise VisualSegmentationError("overlapping visual ownership detected")
+    first = _binary_visual_mask(element_masks[0])
+    claimed = np.zeros(first.shape, dtype=bool)
+    duplicate = np.zeros(first.shape, dtype=bool)
+    for mask in element_masks:
+        active = _binary_visual_mask(mask)
+        if active.shape != claimed.shape:
+            raise ValueError("visual mask shapes must match")
+        np.logical_and(claimed, active, out=duplicate)
+        if np.any(duplicate):
+            raise VisualSegmentationError(
+                "overlapping visual ownership detected"
+            )
+        np.logical_or(claimed, active, out=claimed)
 
 
 def visual_difference(
@@ -219,11 +237,11 @@ class VisualElement:
 def build_component_mask_layers(elements: list[VisualElement]) -> list[dict]:
     """Keep an intact semantic parent beside each detachable visible mask."""
 
-    child_masks = [np.asarray(element.mask, dtype=bool) for element in elements]
+    child_masks = [_binary_visual_mask(element.mask) for element in elements]
     validate_visual_masks(child_masks)
     layers = []
     for element, child_mask in zip(elements, child_masks):
-        parent_mask = np.asarray(element.semantic_mask, dtype=bool)
+        parent_mask = _binary_visual_mask(element.semantic_mask)
         if parent_mask.shape != child_mask.shape:
             raise VisualSegmentationError(
                 "parent and child component masks must have the same shape"
@@ -236,8 +254,8 @@ def build_component_mask_layers(elements: list[VisualElement]) -> list[dict]:
             raise VisualSegmentationError("component masks cannot be empty")
         layers.append(
             {
-                "parent_mask": parent_mask.copy(),
-                "child_mask": child_mask.copy(),
+                "parent_mask": parent_mask,
+                "child_mask": child_mask,
                 "z_index": element.z_index,
             }
         )
