@@ -7,7 +7,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 6 已完成：Host 计划可由确定性 CV/SAM 动作执行器生成新的组件图与掩码轮次；质量门禁仍留给后续 Task 7。
+- P2.3 Task 7 已实现：Host 计划产生的组件轮次进入页面自适应、组件级硬质量门禁；逐轮修复状态机留给后续 Task 8。
 
 ## P2.2 既有行为
 
@@ -22,7 +22,7 @@
 - 多色 OCR 文本框可同时清理彩色前缀和黑色正文；低置信、短小、近方形 OCR 候选按图标保留。
 - 图标候选被过滤时会同步从 OCR 掩码中扣除，避免图标仍被文字清理流程擦除。
 - 低对比度浅灰源对象使用更敏感的残影检测阈值，不再只检测深色文字或组件。
-- 组件掩码与可编辑文字区域发生实质重叠时，自动降级为“干净底图 + 可编辑文字”，避免透明组件和底图留下浅灰栅格残影。
+- 组件掩码与可编辑文字区域发生实质重叠时按组件报告失败，不再清空整页组件或把 text-only fallback 当作成功结果。
 - 资源策略保持 `safe-default`：重型页面串行、数值线程最多 8、SAM `points_per_batch=1`。
 
 ## P2.3 Task 1 本轮变更
@@ -35,7 +35,7 @@
 - `prepare_component_layers` 原子生成带逐文件 SHA-256 的可恢复资产；isolated text-clean 写盘后会在启动 visual worker 前释放大数组，OCR/visual/gc cleanup 不遮蔽主异常。
 - `load_component_layers` 只读校验已存在的工作目录，不会为缺失 state 创建目录；state 与资产继续使用单句柄 bytes、sidecar/hash、路径身份和链接属性校验。
 - `finalize_component_layers` 只接受与 fresh state 完全一致的 components 与 element masks；quality 单次加载 staging source/masks 并执行严格 overlap 检查，成功返回的组件继续由存活 staging 承载，失败则完整清理。
-- 普通 `convert`/`convert_batch`/variants 入口仍沿用既有最终质量与 text-only fallback 行为。
+- 普通 `convert`/`convert_batch`/variants 入口继续沿用最终质量检查，但不再以 text-only fallback 清空整页组件作为成功结果。
 
 ## P2.3 Task 3 本轮变更
 
@@ -78,6 +78,15 @@
 - 每轮写入新的组件图与逐文件哈希掩码目录，以原子 no-replace 方式发布，已存在输出不覆盖；失败不发布正式轮次，异常 staging 不再按可替换路径移动或递归删除。SAM 提示通过最长 600 秒的独立 worker 子进程执行，并校验返回掩码尺寸与非空性。
 - 主脚本与 Skill 镜像已同步 `component_contracts.py`、`visual_segment.py`、`fg_extract.py` 和 `sam_worker.py`。
 
+## P2.3 Task 7 本轮变更
+
+- 新增页面自适应校准与组件级质量报告，按源图、清理背景、重建图、已认证组件掩码和文字掩码检测缺失、重复、边缘、阴影、透明边缘、文字重影、像素归属及相对上轮改进；噪声和 Agent 置信度不能放宽硬缺陷。
+- 文字重影只归因到与组件及其 halo 相交的文字区域；掩码外残留只有与组件边界直接连通且归属唯一时才归入该组件，多组件歧义证据作为页面级 `orphan_residual` 硬失败。
+- 每轮只计算一次全页 RGB、差异图、亮度图和外环归属计数，逐组件评估复用只读上下文，避免组件数增加时重复分配整页中间数组。
+- 页面视觉差异只作为总门禁，不能触发 `components=[]` 或 text-only 成功；组件/文字重叠改为组件级失败报告，组件继续保留给后续重修。
+- `protected_native_overlap` 与 `pptx_reopen` 采用严格 `pass/fail/unknown`，缺失或 `unknown` 均失败；Task 8/最终组装负责接入真实检查事实，本阶段不伪造通过结果。
+- 质量门禁读取组件图声明的掩码并复核哈希、目录身份和链接属性，拒绝越界、`..` 语义路径、链接祖先、读取中替换及组件 ID/数量不一致。
+
 ## 关键修改文件
 
 - Agent 契约、Host 握手、证据、组件质量与运行时：`image2editable/component_contracts.py`、`image2editable/host_agent.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`、`image2editable/agent.py`、`image2editable/runtime.py`
@@ -117,10 +126,10 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–6 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划和确定性动作执行，Task 7 尚需接入逐轮质量门禁与修复循环。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–7 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划、确定性动作执行和组件级质量门禁，Task 8 尚需接入最多五轮的修复状态机。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
-- 普通非 Agent `convert` 仍保留旧的保守 fallback；P2.3 Agent 路径将通过组件级清字、重修和父组件折叠提取完整组件，不再以整页清空组件作为成功结果。
+- 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，后续由 Task 8 执行组件级清字、重修或父组件折叠。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
 - 实测单页 PDF 转换的 Python 工作集合计约 2.2 GiB；`test1.pptx` 两页运行目录约 35.6 MiB，未出现内存或磁盘 100%。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

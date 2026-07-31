@@ -55,6 +55,126 @@ def execute_component_action_round(
     )
 
 
+def evaluate_component_quality_round(
+    source,
+    background,
+    reconstructed,
+    graph: dict,
+    *,
+    graph_dir: str | Path,
+    trusted_root: str | Path,
+    text_mask,
+    visual_metrics: dict,
+    page_checks: dict,
+    initial_component_count: int,
+    expected_component_ids: list[str],
+    previous_reports: dict | None = None,
+    agent_confidence_by_id: dict | None = None,
+) -> dict:
+    from image2editable.component_quality import (
+        calibrate_page,
+        evaluate_component,
+        evaluate_page_quality,
+        _prepare_page_quality_context,
+    )
+    from scripts.visual_segment import _read_action_mask
+
+    validated = validate_component_graph(graph)
+    calibration = calibrate_page(source, text_mask)
+    previous_reports = previous_reports or {}
+    agent_confidence_by_id = agent_confidence_by_id or {}
+    reports = []
+    active_visual = [
+        node for node in validated["nodes"]
+        if node["kind"] != "text"
+        and node["state"] in {"pending", "pending_gate", "frozen"}
+    ]
+    candidates = [
+        node for node in active_visual
+        if node["state"] in {"pending", "pending_gate"}
+    ]
+    candidate_ids = [node["id"] for node in candidates]
+    if sorted(candidate_ids) != sorted(expected_component_ids):
+        raise ValueError("component quality graph IDs do not match expected IDs")
+    graph_root = Path(graph_dir)
+    directory_chain = _snapshot_quality_directory_chain(
+        graph_root,
+        Path(trusted_root),
+    )
+    masks = {}
+    for node in active_visual:
+        component_id = node["id"]
+        mask_path = graph_root / node["mask"]
+        current = graph_root
+        mask_parent_chain = []
+        for part in PurePosixPath(node["mask"]).parts[:-1]:
+            current = current / part
+            parent_status = current.lstat()
+            if _is_link_or_reparse(parent_status) or not stat.S_ISDIR(parent_status.st_mode):
+                raise ValueError("component quality mask parent must be a plain directory")
+            mask_parent_chain.append((current, _directory_identity(parent_status)))
+        component_mask, _ = _read_action_mask(
+            mask_path,
+            source.shape[:2],
+            node["mask_sha256"],
+        )
+        _require_directory_chain_identity(directory_chain + mask_parent_chain)
+        masks[node["id"]] = component_mask
+    page_context = _prepare_page_quality_context(
+        source, background, reconstructed, text_mask,
+        component_masks=list(masks.values()),
+    )
+    for node in candidates:
+        component_id = node["id"]
+        component_mask = masks[component_id]
+        previous = previous_reports.get(component_id, {})
+        reports.append(evaluate_component(
+            source,
+            background,
+            reconstructed,
+            node,
+            validated,
+            calibration,
+            component_mask=component_mask,
+            text_mask=text_mask,
+            page_checks=page_checks,
+            agent_confidence=agent_confidence_by_id.get(component_id),
+            previous_metrics=previous.get("metrics"),
+            _page_context=page_context,
+        ))
+    return evaluate_page_quality(
+        reports,
+        visual_metrics=visual_metrics,
+        page_checks=page_checks,
+        expected_component_ids=expected_component_ids,
+        initial_component_count=initial_component_count,
+    )
+
+
+def _snapshot_quality_directory_chain(
+    directory: Path,
+    trusted_root: Path,
+) -> list[tuple[Path, tuple[int, int, int, int]]]:
+    if ".." in directory.parts or ".." in trusted_root.parts:
+        raise ValueError("component quality paths contain unsafe semantic path segments")
+    root = trusted_root if trusted_root.is_absolute() else Path.cwd() / trusted_root
+    target = directory if directory.is_absolute() else Path.cwd() / directory
+    try:
+        relative = target.relative_to(root)
+    except ValueError as error:
+        raise ValueError("component quality graph_dir is outside trusted root") from error
+    current = root
+    identities = []
+    for part in (None, *relative.parts):
+        if part is not None:
+            current /= part
+        status = current.lstat()
+        if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+            raise ValueError("component quality directory chain is unsafe")
+        identities.append((current, _directory_identity(status)))
+    return identities
+
+
 def build_component_agent_request(
     page_session: dict,
     *,

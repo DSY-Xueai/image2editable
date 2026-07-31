@@ -626,56 +626,10 @@ def _isolated_large_inpainter(work_dir: Path):
     return isolated_inpainter
 
 
-def _apply_text_only_fallback(
-    slide_data: dict,
-    work_dir: Path,
-    text_clean: np.ndarray,
-    resource_isolation: bool = False,
-) -> None:
-    background_original_path = work_dir / "background-text-only-fallback.png"
-    background_widescreen_path = (
-        work_dir / "background-text-only-fallback-16x9.png"
-    )
-    _save_rgb(str(background_original_path), text_clean)
-    background_kwargs = (
-        {"large_inpainter": _isolated_large_inpainter(work_dir)}
-        if resource_isolation
-        else {}
-    )
-    widescreen_result = build_widescreen_background(
-        text_clean,
-        **background_kwargs,
-    )
-    (
-        widescreen_background,
-        content_offset_x,
-        content_offset_y,
-        widescreen_background_method,
-    ) = widescreen_result
-    canvas_height, canvas_width = widescreen_background.shape[:2]
-    if widescreen_background_method == "identity":
-        background_widescreen_path = background_original_path
-    else:
-        _save_rgb(str(background_widescreen_path), widescreen_background)
-    slide_data.update({
-        "background_path": str(background_widescreen_path),
-        "background_original_path": str(background_original_path),
-        "background_widescreen_path": str(background_widescreen_path),
-        "components": [],
-        "canvas_width": canvas_width,
-        "canvas_height": canvas_height,
-        "content_offset_x": content_offset_x,
-        "content_offset_y": content_offset_y,
-        "widescreen_background_method": widescreen_background_method,
-        "conversion_mode": "text_editable_visual_fallback",
-    })
-
-
 def _finalize_slide_quality(
     slide_data: dict,
     lang: str,
     _resource_isolation: bool = False,
-    _allow_text_only_fallback: bool = True,
 ) -> dict:
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
@@ -702,15 +656,27 @@ def _finalize_slide_quality(
             quality_text_items,
         )
         forced_fallback_reason = None
-        if quality_text_items and _has_component_text_overlap(
+        has_component_text_overlap = quality_text_items and _has_component_text_overlap(
             element_masks,
             quality_text_mask,
-        ):
-            if not _allow_text_only_fallback:
-                raise VisualSegmentationError(
-                    "agent-managed quality failed: component_text_overlap"
-                )
-            forced_fallback_reason = "component_text_overlap"
+        )
+        overlap_reports = _component_text_overlap_reports(
+            element_masks,
+            quality_text_mask,
+        ) if has_component_text_overlap else []
+        if has_component_text_overlap:
+            if not overlap_reports:
+                overlap_reports = [{
+                    "component_id": f"component_{index:04d}",
+                    "accepted": False,
+                    "metrics": {},
+                    "violations": ["component_text_overlap"],
+                } for index in range(1, len(element_masks) + 1)]
+            slide_data["component_quality_reports"] = overlap_reports
+            failed_ids = ",".join(report["component_id"] for report in overlap_reports)
+            raise VisualSegmentationError(
+                f"component quality failed: component_text_overlap:{failed_ids}"
+            )
 
         components = slide_data["components"]
         visual_only = _compose_exported_components(clean_background, components)
@@ -806,42 +772,9 @@ def _finalize_slide_quality(
         elif needs_text_only_fallback(quality):
             fallback_reason = "visible_visual_artifacts"
         if fallback_reason is not None:
-            if not _allow_text_only_fallback:
-                raise VisualSegmentationError(
-                    f"agent-managed quality failed: {fallback_reason}"
-                )
-            if text_clean_path_value is None:
-                text_clean = img.copy()
-            else:
-                text_clean = _load_rgb(text_clean_path_value)
-            original_quality = dict(quality)
-            _apply_text_only_fallback(
-                slide_data,
-                work_dir,
-                text_clean,
-                resource_isolation=_resource_isolation,
+            raise VisualSegmentationError(
+                f"component/page quality failed: {fallback_reason}"
             )
-            fallback_background_residual = background_residual_metrics(
-                img,
-                text_clean,
-                quality_text_mask,
-            )
-            slide_data["background_residual"] = (
-                fallback_background_residual
-            )
-            if has_background_residual(fallback_background_residual):
-                raise VisualSegmentationError(
-                    "text-clean fallback still contains raster residuals"
-                )
-            quality = visual_difference(img, text_clean, quality_text_mask)
-            require_visual_quality(quality)
-            slide_data["quality"] = quality
-            slide_data["quality_fallback"] = {
-                "reason": fallback_reason,
-                "original_metrics": original_quality,
-                "original_background_residual": background_residual,
-            }
-            return slide_data
         try:
             require_visual_quality(quality)
         except VisualSegmentationError as exc:
@@ -863,18 +796,35 @@ def _has_component_text_overlap(
     element_masks: list[np.ndarray],
     text_mask: np.ndarray,
 ) -> bool:
+    return bool(_component_text_overlap_reports(element_masks, text_mask))
+
+
+def _component_text_overlap_reports(
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> list[dict]:
     text = np.asarray(text_mask) > 0
     if not np.any(text):
-        return False
-    for element_mask in element_masks:
+        return []
+    reports = []
+    for index, element_mask in enumerate(element_masks, start=1):
         component = np.asarray(element_mask) > 0
         component_pixels = int(np.count_nonzero(component))
         if component_pixels == 0:
             continue
         overlap = int(np.count_nonzero(component & text))
         if overlap >= 16 and overlap / component_pixels >= 0.02:
-            return True
-    return False
+            reports.append({
+                "component_id": f"component_{index:04d}",
+                "accepted": False,
+                "metrics": {
+                    "component_pixels": component_pixels,
+                    "text_duplicate_pixels": overlap,
+                    "text_duplicate_ratio": overlap / component_pixels,
+                },
+                "violations": ["component_text_overlap"],
+            })
+    return reports
 
 
 def _generate_filtered_object_proposals(
@@ -2386,7 +2336,6 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
                 slide_data,
                 lang,
                 _resource_isolation=fresh["_resource_isolation"],
-                _allow_text_only_fallback=False,
             )
         except BaseException as exc:
             primary_exception = exc

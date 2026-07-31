@@ -238,7 +238,31 @@ def _read_action_mask(path: Path, shape: tuple[int, int], digest: str) -> tuple[
         or status.st_nlink != 1
     ):
         raise VisualSegmentationError(f"Component action mask path is unsafe: {path}")
-    payload = path.read_bytes()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino)
+        ):
+            raise VisualSegmentationError(f"Component action mask identity changed: {path}")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            opened.st_dev, opened.st_ino, opened.st_size
+        ):
+            raise VisualSegmentationError(f"Component action mask changed while reading: {path}")
+        payload = b"".join(chunks)
+    finally:
+        os.close(descriptor)
     if hashlib.sha256(payload).hexdigest() != digest:
         raise VisualSegmentationError(f"Component action mask hash mismatch: {path}")
     with Image.open(io.BytesIO(payload)) as stored:

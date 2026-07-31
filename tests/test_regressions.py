@@ -4578,7 +4578,16 @@ def test_bold_estimation_handles_light_text_on_dark_background() -> None:
     assert text_detect._estimate_bold(bold)
 
 
-def test_final_quality_falls_back_to_text_clean_background(
+def test_text_only_fallback_api_is_removed():
+    import inspect
+
+    assert not hasattr(image_to_ppt, "_apply_text_only_fallback")
+    assert "_allow_text_only_fallback" not in inspect.signature(
+        image_to_ppt._finalize_slide_quality
+    ).parameters
+
+
+def test_final_visual_difference_is_total_gate_not_text_only_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4661,21 +4670,22 @@ def test_final_quality_falls_back_to_text_clean_background(
         "_element_mask_paths": [],
     }
 
-    result = image_to_ppt._finalize_slide_quality(
-        slide_data,
-        "en",
-        _resource_isolation=True,
-    )
+    with pytest.raises(
+        image_to_ppt.VisualSegmentationError,
+        match="visible_visual_artifacts",
+    ):
+        image_to_ppt._finalize_slide_quality(
+            slide_data,
+            "en",
+            _resource_isolation=True,
+        )
+    assert slide_data["components"]
+    assert "quality_fallback" not in slide_data
+    assert checked == []
+    assert widescreen_kwargs == []
 
-    assert result["components"] == []
-    assert result["conversion_mode"] == "text_editable_visual_fallback"
-    assert result["quality_fallback"]["reason"] == "visible_visual_artifacts"
-    assert result["quality"]["mae"] == 0.0
-    assert checked == [result["quality"]]
-    assert callable(widescreen_kwargs[0]["large_inpainter"])
 
-
-def test_final_quality_falls_back_when_component_raster_text_remains(
+def test_final_quality_rejects_when_component_raster_text_remains(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4739,14 +4749,16 @@ def test_final_quality_falls_back_when_component_raster_text_remains(
         "_element_mask_paths": [],
     }
 
-    result = image_to_ppt._finalize_slide_quality(slide_data, "en")
+    with pytest.raises(
+        image_to_ppt.VisualSegmentationError,
+        match="component_raster_text",
+    ):
+        image_to_ppt._finalize_slide_quality(slide_data, "en")
+    assert slide_data["components"]
+    assert "quality_fallback" not in slide_data
 
-    assert result["components"] == []
-    assert result["conversion_mode"] == "text_editable_visual_fallback"
-    assert result["quality_fallback"]["reason"] == "component_raster_text"
 
-
-def test_final_quality_falls_back_when_component_overlaps_editable_text(
+def test_final_quality_reports_component_text_overlap_without_text_only_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4816,14 +4828,16 @@ def test_final_quality_falls_back_when_component_overlaps_editable_text(
         "_element_mask_paths": [str(element_mask_path)],
     }
 
-    result = image_to_ppt._finalize_slide_quality(slide_data, "en")
+    with pytest.raises(
+        image_to_ppt.VisualSegmentationError,
+        match="component_text_overlap:component_0001",
+    ):
+        image_to_ppt._finalize_slide_quality(slide_data, "en")
+    assert slide_data["components"]
+    assert "quality_fallback" not in slide_data
 
-    assert result["components"] == []
-    assert result["conversion_mode"] == "text_editable_visual_fallback"
-    assert result["quality_fallback"]["reason"] == "component_text_overlap"
 
-
-def test_final_quality_falls_back_when_clean_background_keeps_component_imprint(
+def test_final_quality_rejects_when_clean_background_keeps_component_imprint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -4880,18 +4894,14 @@ def test_final_quality_falls_back_when_clean_background_keeps_component_imprint(
         "_element_mask_paths": [str(element_mask_path)],
     }
 
-    result = image_to_ppt._finalize_slide_quality(slide_data, "en")
-
-    assert result["components"] == []
-    assert result["conversion_mode"] == "text_editable_visual_fallback"
-    assert result["quality_fallback"]["reason"] == "background_residual"
-    assert (
-        result["quality_fallback"]["original_background_residual"][
-            "retained_edge_ratio"
-        ]
-        > 0.8
-    )
-    assert result["background_residual"]["source_edge_pixels"] == 0
+    with pytest.raises(
+        image_to_ppt.VisualSegmentationError,
+        match="background_residual",
+    ):
+        image_to_ppt._finalize_slide_quality(slide_data, "en")
+    assert slide_data["components"]
+    assert slide_data["background_residual"]["retained_edge_ratio"] > 0.8
+    assert "quality_fallback" not in slide_data
 
 
 def test_final_quality_rejects_text_fallback_that_keeps_glyph_imprint(
@@ -4946,7 +4956,7 @@ def test_final_quality_rejects_text_fallback_that_keeps_glyph_imprint(
 
     with pytest.raises(
         image_to_ppt.VisualSegmentationError,
-        match="text-clean fallback",
+        match="background_residual",
     ):
         image_to_ppt._finalize_slide_quality(slide_data, "en")
 
@@ -5070,12 +5080,6 @@ def _prepare_component_layers_fixture(
         "_finalize_slide_quality",
         lambda *args, **kwargs: pytest.fail("prepare must not finalize quality"),
     )
-    monkeypatch.setattr(
-        image_to_ppt,
-        "_apply_text_only_fallback",
-        lambda *args, **kwargs: pytest.fail("prepare must not apply fallback"),
-    )
-
     prepared = image_to_ppt.prepare_component_layers(
         source_path,
         work_dir,
@@ -5733,7 +5737,6 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
     def fake_finalize(slide_data, lang, **kwargs):
         assert kwargs == {
             "_resource_isolation": False,
-            "_allow_text_only_fallback": False,
         }
         staged_path = Path(slide_data["components"][0]["path"])
         assert staged_path != original_path
