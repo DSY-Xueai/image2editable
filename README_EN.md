@@ -21,7 +21,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 > Input image | Multiple images are also supported
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
-> In the PPTX output, foreground elements can be moved and text boxes can be edited.
+> High-confidence PPTX layers keep foreground elements movable and text boxes editable. When layer quality is uncertain, the visual background is preserved while text remains editable.
 >
 > For the best visual results in a 16:9 PPT, using a 16:9 input image is recommended.
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
@@ -35,7 +35,8 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 | Background repair | PPTX uses OpenCV for small or narrow masks and LaMa for large or deep masks; PSD uses two-pass background modeling and inpainting |
 | Foreground separation | PPTX uses Grounding DINO semantic proposals and SAM 2.1 segmentation; PSD uses differences, edges, and connected components |
 | OCR text reconstruction | Detects text and estimates font size, color, weight, and alignment |
-| PPTX export | Generates a background, independent transparent components, and editable text boxes; outputs both original-aspect-ratio and 16:9 versions by default |
+| PPTX export | High-confidence pages use independent transparent components and editable text boxes; uncertain pages use a text-clean fidelity background with editable text; outputs original-aspect-ratio and 16:9 versions by default |
+| Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
 | PSD export | Generates a layered PSD with a background layer, foreground pixel layers, and Photoshop text layers |
 | Batch processing | Accepts multiple images or a directory; PPTX files are combined into multiple slides, while PSD exports one file per image |
 
@@ -46,7 +47,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 ### Requirements
 
 - Python 3.10–3.12 (the upper limit comes from the NumPy/Pillow constraints of `simple-lama-inpainting 0.1.2`)
-- `torch>=2.5.1`, `torchvision>=0.20.1`, `transformers>=4.40.0`, and `simple-lama-inpainting==0.1.2`
+- `torch>=2.5.1`, `torchvision>=0.20.1`, `transformers>=4.40.0`, `accelerate>=0.26.0`, and `simple-lama-inpainting==0.1.2`
 - SAM officially recommends Linux/WSL; WSL is recommended on Windows
 - OCR requires at least one complete route: `paddleocr` + `paddlepaddle`, or `pytesseract` + a system Tesseract executable; `doctor` uses this requirement when deciding whether the environment is ready
 - PSD export additionally requires the Aspose.PSD package and license, plus the `ASPOSE_PSD_LICENSE` environment variable
@@ -65,6 +66,12 @@ pip install .[psd]
 ### Models and First Run
 
 PPTX conversion depends on Grounding DINO, SAM 2.1, and LaMa. The required models are downloaded to the local cache on first run; model weights are not included in this repository. The pipeline uses CUDA when available and also supports CPU execution, although CPU mode is significantly slower. If you already have a local LaMa TorchScript model, set `LAMA_MODEL` to its path.
+
+### Resource and Quality Policy
+
+The default policy limits heavy-page concurrency to one, numerical threads to at most eight, and SAM `points_per_batch` to one. OCR detection/recognition, LaMa, DINO, SAM prompted/automatic/final hole recheck, and full-page visual processing run in sequential subprocess phases, so process exit becomes the resource-release boundary. This still uses SAM2.1 Large and does not reduce the 200 DPI PDF baseline, SAM sampling points, or candidate thresholds; conversion takes longer as a tradeoff.
+
+The final quality gate checks non-text P99 error, changed-pixel ratio, and the largest contiguous artifact. If layered reconstruction has visible risk, the page falls back to the existing text-clean fidelity background while keeping OCR text boxes editable. Visual objects are not independently layered on fallback pages.
 
 ### OCR Engines
 
@@ -153,6 +160,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9
 image2editable prepare input.pdf --run-dir runs/pdf-job
 image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
+image2editable run recover runs/pdf-job
 
 # P1 preserves PPTX inputs losslessly
 image2editable convert input.pptx -o preserved.pptx
@@ -162,6 +170,8 @@ image2editable doctor
 ```
 
 The Unified CLI calls its positional inputs `sources`. It accepts image files/directories, one PDF, or one PPTX. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
+
+`run recover` only resumes an orphaned task whose execution lock is gone; it does not terminate an active conversion process.
 
 PDF pages are rendered adaptively and then reuse the existing image-to-editable-PPTX pipeline. The standard target is 200 DPI. Small pages are raised to a 1200 px short-edge floor without exceeding 300 DPI; every render is capped at a 6000 px long edge and 24 MP. An Agent or user may call `render-detail` once per page to rerender it with a 300 DPI target. PDF pages with the same physical aspect ratio can be combined into a ratio-preserving multi-slide PPTX. With mixed aspect ratios, `original` produces one output per page while a uniform 16:9 version remains available. Layout is always scaled uniformly, with no non-uniform stretching.
 

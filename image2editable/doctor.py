@@ -57,6 +57,7 @@ def check_environment() -> dict[str, Any]:
         "numpy": _module_check("numpy"),
         "pdfium": _module_check("pypdfium2"),
         "transformers": _module_check("transformers"),
+        "accelerate": _module_check("accelerate"),
         "sam2": _module_check("sam2"),
         "lama": _module_check("simple_lama_inpainting"),
         "ocr": _ocr_check(),

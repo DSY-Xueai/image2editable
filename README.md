@@ -21,7 +21,7 @@
 > 输入图片 | 也可输入多张
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
-> PPTX 输出中，前景元素可移动，文本框可编辑。
+> 高置信分层的 PPTX 输出中，前景元素可移动，文本框可编辑；质量不足时自动保留视觉底图，文字仍可编辑。
 >
 > 为获得最佳的 16:9 PPT 视觉效果，建议输入图片采用 16:9 比例。
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
@@ -35,7 +35,8 @@
 | 背景修复 | PPTX 对小/窄遮罩使用 OpenCV、对大/深遮罩使用 LaMa；PSD 使用两轮背景建模与 inpainting 修复 |
 | 前景拆分 | PPTX 使用 Grounding DINO 语义候选与 SAM 2.1 分割；PSD 使用差分、边缘和连通域 |
 | OCR 文本重建 | 识别文本并估计字号、颜色、粗体、对齐方式 |
-| PPTX 导出 | 生成背景、独立透明组件和可编辑文本框，默认同时输出原图比例与 16:9 版本 |
+| PPTX 导出 | 高置信时生成背景、独立透明组件和可编辑文本框；质量不足时使用去文字保真底图并保留可编辑文字；默认同时输出原图比例与 16:9 版本 |
+| 资源保护 | 重型页面串行，OCR、LaMa、DINO、SAM 和整页视觉阶段使用顺序子进程；SAM2.1 Large 默认单批推理 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
 | 批量处理 | 多张图片或目录输入；PPTX 合并为多页，PSD 每图一个文件 |
 
@@ -46,7 +47,7 @@
 ### 环境要求
 
 - Python 3.10–3.12（上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束）
-- `torch>=2.5.1`、`torchvision>=0.20.1`、`transformers>=4.40.0`、`simple-lama-inpainting==0.1.2`
+- `torch>=2.5.1`、`torchvision>=0.20.1`、`transformers>=4.40.0`、`accelerate>=0.26.0`、`simple-lama-inpainting==0.1.2`
 - SAM 官方推荐 Linux/WSL；Windows 建议使用 WSL
 - OCR 至少配置一条完整路径：`paddleocr` + `paddlepaddle`，或 `pytesseract` + 系统 Tesseract 可执行文件；`doctor` 以此判断环境是否 ready
 - PSD 导出额外需要 Aspose.PSD 包及授权，并设置 `ASPOSE_PSD_LICENSE`
@@ -65,6 +66,12 @@ pip install .[psd]
 ### 模型与首次运行
 
 PPTX 转换依赖 Grounding DINO、SAM 2.1 和 LaMa。首次运行会自动下载所需模型到本地缓存，本仓库不包含模型权重。运行时会优先使用 CUDA，也支持 CPU；CPU 模式速度会明显慢一些。已有本地 LaMa TorchScript 模型时，可通过 `LAMA_MODEL` 指定模型路径。
+
+### 资源与质量策略
+
+默认策略限制重型页面并发为 1、数值计算线程最多为 8、SAM `points_per_batch=1`。OCR 检测/识别、LaMa、DINO、SAM prompted/automatic/最终孔洞复检和整页视觉处理按阶段运行在顺序子进程中，以进程退出作为资源释放边界。该策略仍使用 SAM2.1 Large，不降低 PDF 的 200 DPI 基线、SAM 采样点或候选阈值；代价是转换时间会增加。
+
+最终质量门禁检查非文字区域的 P99、异常像素比例和最大连续伪影区域。分层重建有可见风险时，页面自动改用已生成的去文字保真底图并保留 OCR 文字框；此时文字可编辑，但视觉对象不再独立拆层。
 
 ### OCR 引擎
 
@@ -152,6 +159,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9
 image2editable prepare input.pdf --run-dir runs/pdf-job
 image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
+image2editable run recover runs/pdf-job
 
 # PPTX 在 P1 中无损保留
 image2editable convert input.pptx -o preserved.pptx
@@ -161,6 +169,8 @@ image2editable doctor
 ```
 
 Unified CLI 的位置参数概念为 `sources`：可输入图片文件/目录、单个 PDF 或单个 PPTX。文档输入不能与其他来源混用，也不能重复传入；原有 `python image_to_ppt.py` 和 `python image_to_psd.py` 图片入口继续兼容。
+
+`run recover` 只恢复执行锁已经消失的孤儿任务，不会终止仍在运行的转换进程。
 
 PDF 会先自适应渲染，再复用现有“图像转可编辑 PPTX”管线。标准目标为 200 DPI；小页会提高到短边至少 1200 px，但不超过 300 DPI；所有渲染均限制长边不超过 6000 px、总像素不超过 24 MP。Agent 或用户可对每页调用一次 `render-detail`，以 300 DPI 目标重新渲染。物理宽高比相同的 PDF 页面可合并为保持该比例的多页 PPTX；混合宽高比时，`original` 输出为逐页文件，同时仍可生成统一 16:9 版本。所有布局均等比放置，不做非均匀拉伸。
 

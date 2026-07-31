@@ -422,6 +422,7 @@ def repair_exported_component_text(
     source_rgb: np.ndarray,
     text_items: list[dict] | None = None,
     cleaned_rgb: np.ndarray | None = None,
+    clear_alpha: bool = False,
 ) -> None:
     """Inpaint OCR-detected raster text that remains in exported RGBA layers."""
     if cleaned_rgb is not None and text_items:
@@ -484,12 +485,16 @@ def repair_exported_component_text(
         "box" in item for item in text_items
     )
     text_ink = (
-        _build_text_ink_mask(source_rgb, text_mask)
-        if not has_text_item_boxes
-        else _build_text_ink_mask(
-            source_rgb,
-            text_mask,
-            text_items=text_items,
+        (text_mask > 0).astype(np.uint8) * 255
+        if clear_alpha
+        else (
+            _build_text_ink_mask(source_rgb, text_mask)
+            if not has_text_item_boxes
+            else _build_text_ink_mask(
+                source_rgb,
+                text_mask,
+                text_items=text_items,
+            )
         )
     )
     text_ink = cv2.dilate(
@@ -513,6 +518,8 @@ def repair_exported_component_text(
         if not np.any(repair):
             continue
         rgba[:, :, :3] = _repair_component_rgb(rgba[:, :, :3], repair)
+        if clear_alpha:
+            rgba[:, :, 3][repair > 0] = 0
         Image.fromarray(rgba, "RGBA").save(path)
 
 

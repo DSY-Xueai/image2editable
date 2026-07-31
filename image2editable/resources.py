@@ -30,7 +30,7 @@ def safe_default_policy(cpu_count: int | None = None) -> dict[str, object]:
         "name": "safe-default",
         "cpu_threads": min(8, max(1, logical_cpu_count // 2)),
         "heavy_page_concurrency": 1,
-        "sam_points_per_batch": 4,
+        "sam_points_per_batch": 1,
     }
 
 
@@ -53,7 +53,7 @@ def validate_resource_policy(policy: object) -> dict[str, object]:
         )
     if (
         type(policy["sam_points_per_batch"]) is not int
-        or policy["sam_points_per_batch"] != 4
+        or policy["sam_points_per_batch"] not in (1, 4)
     ):
         raise ValueError(
             "Run manifest resource policy sam_points_per_batch is invalid"

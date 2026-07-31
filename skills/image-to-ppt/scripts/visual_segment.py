@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -23,6 +24,22 @@ class VisualSegmentationError(RuntimeError):
     pass
 
 
+@contextmanager
+def _sam_inference_context(generator):
+    if not str(
+        getattr(generator, "_image2editable_device", "")
+    ).startswith("cuda"):
+        yield
+        return
+    torch = importlib.import_module("torch")
+    with torch.inference_mode():
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.bfloat16,
+        ):
+            yield
+
+
 def validate_visual_masks(element_masks: list[np.ndarray]) -> None:
     if not element_masks:
         return
@@ -41,15 +58,48 @@ def visual_difference(
 ) -> dict:
     valid = text_mask == 0
     if not np.any(valid):
-        return {"mae": 0.0, "p95": 0.0}
-    pixel_difference = np.mean(
+        return {
+            "mae": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "changed_ratio": 0.0,
+            "largest_artifact_ratio": 0.0,
+        }
+    difference = np.mean(
         np.abs(source.astype(np.float32) - reconstructed.astype(np.float32)),
         axis=2,
-    )[valid]
+    )
+    pixel_difference = difference[valid]
+    artifact_mask = ((difference > 8.0) & valid).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(
+        artifact_mask,
+        connectivity=8,
+    )
+    largest_artifact = (
+        int(np.max(stats[1:, cv2.CC_STAT_AREA]))
+        if count > 1
+        else 0
+    )
     return {
         "mae": float(np.mean(pixel_difference)),
         "p95": float(np.percentile(pixel_difference, 95)),
+        "p99": float(np.percentile(pixel_difference, 99)),
+        "changed_ratio": float(np.mean(pixel_difference > 3.0)),
+        "largest_artifact_ratio": (
+            largest_artifact / int(np.count_nonzero(valid))
+        ),
     }
+
+
+def needs_text_only_fallback(metrics: dict) -> bool:
+    """Prefer the text-clean background when sparse artifacts stay visible."""
+    return (
+        (
+            metrics.get("p99", 0.0) > 5.0
+            and metrics.get("changed_ratio", 0.0) > 0.01
+        )
+        or metrics.get("largest_artifact_ratio", 0.0) > 0.001
+    )
 
 
 def require_visual_quality(metrics: dict) -> None:
@@ -130,7 +180,7 @@ def resolve_visual_elements(
             int(xs.min()),
             int(xs.max()) + 1,
         )
-        valid.append((candidate, area, bbox, candidate.mask.copy()))
+        valid.append((candidate, area, bbox, candidate.mask))
 
     unique = []
     for candidate_stats in sorted(
@@ -267,7 +317,8 @@ def recheck_visual_element_holes(
         return
 
     predictor = generator.predictor
-    predictor.set_image(image)
+    with _sam_inference_context(generator):
+        predictor.set_image(image)
     owned = np.logical_or.reduce([element.mask for element in elements])
     height, width = image.shape[:2]
 
@@ -307,12 +358,13 @@ def recheck_visual_element_holes(
                 ],
                 dtype=np.float32,
             )
-            masks, scores, _ = predictor.predict(
-                point_coords=point_coords,
-                point_labels=np.asarray([1, 0, 0, 0, 0], dtype=np.int32),
-                box=np.asarray(element.object_box, dtype=np.float32),
-                multimask_output=True,
-            )
+            with _sam_inference_context(generator):
+                masks, scores, _ = predictor.predict(
+                    point_coords=point_coords,
+                    point_labels=np.asarray([1, 0, 0, 0, 0], dtype=np.int32),
+                    box=np.asarray(element.object_box, dtype=np.float32),
+                    multimask_output=True,
+                )
             candidate = np.asarray(masks[int(np.argmax(scores))], dtype=bool)
             element_area = int(np.count_nonzero(element.mask))
             if (
@@ -454,6 +506,7 @@ def generate_mask_candidates(
     crop_size: int = 768,
     overlap: int = 128,
     include_geometry: bool = True,
+    min_score: float = 0.0,
 ) -> list[MaskCandidate]:
     if crop_size <= 0 or overlap < 0 or overlap >= crop_size:
         raise ValueError(
@@ -479,14 +532,28 @@ def generate_mask_candidates(
             continue
         seen_boxes.add(box)
         crop = image[y1:y2, x1:x2]
-        for record in generator.generate(crop):
-            mask = np.asarray(record["segmentation"], dtype=bool)
-            full_mask = np.zeros((height, width), dtype=bool)
-            full_mask[y1:y2, x1:x2] = mask
+        with _sam_inference_context(generator):
+            records = generator.generate(crop)
+        for record in records:
             score = min(
                 float(record.get("predicted_iou", 0.0)),
                 float(record.get("stability_score", 0.0)),
             )
+            if score < min_score:
+                continue
+            segmentation = record.pop("segmentation")
+            if isinstance(segmentation, dict):
+                rle_to_mask = importlib.import_module(
+                    "sam2.utils.amg"
+                ).rle_to_mask
+                mask = np.asarray(rle_to_mask(segmentation), dtype=bool)
+            else:
+                mask = np.asarray(segmentation, dtype=bool)
+            if (x1, y1, x2, y2) == (0, 0, width, height):
+                full_mask = mask
+            else:
+                full_mask = np.zeros((height, width), dtype=bool)
+                full_mask[y1:y2, x1:x2] = mask
             touches_crop_edge = bool(
                 (x1 > 0 and np.any(mask[:, 0]))
                 or (x2 < width and np.any(mask[:, -1]))
@@ -542,6 +609,7 @@ def _drop_small_mask_islands(
 
 
 def _select_person_mask(
+    generator,
     predictor,
     box: np.ndarray,
     a_mask: np.ndarray,
@@ -569,12 +637,15 @@ def _select_person_mask(
         ],
         dtype=np.float32,
     )
-    masks, scores, _ = predictor.predict(
-        point_coords=np.vstack((positive, negative)),
-        point_labels=np.asarray([1, 1, 1, 0, 0, 0, 0], dtype=np.int32),
-        box=box,
-        multimask_output=True,
-    )
+    with _sam_inference_context(generator):
+        masks, scores, _ = predictor.predict(
+            point_coords=np.vstack((positive, negative)),
+            point_labels=np.asarray(
+                [1, 1, 1, 0, 0, 0, 0], dtype=np.int32
+            ),
+            box=box,
+            multimask_output=True,
+        )
     eligible = [
         (np.asarray(mask, dtype=bool), float(score))
         for mask, score in zip(masks, scores, strict=True)
@@ -602,12 +673,17 @@ def generate_prompted_mask_candidates(
 ) -> list[MaskCandidate]:
     predictor = generator.predictor
     if set_image:
-        predictor.set_image(image)
+        with _sam_inference_context(generator):
+            predictor.set_image(image)
 
     candidates = []
     for proposal in proposals:
         box = np.asarray(proposal.box_xyxy, dtype=np.float32)
-        masks, scores, _ = predictor.predict(box=box, multimask_output=True)
+        with _sam_inference_context(generator):
+            masks, scores, _ = predictor.predict(
+                box=box,
+                multimask_output=True,
+            )
         best_index = int(np.argmax(scores))
         a_mask = _drop_small_mask_islands(masks[best_index])
         a_score = float(scores[best_index])
@@ -618,7 +694,13 @@ def generate_prompted_mask_candidates(
         )
         for role in requested_roles:
             mask, sam_score = (
-                _select_person_mask(predictor, box, a_mask, a_score)
+                _select_person_mask(
+                    generator,
+                    predictor,
+                    box,
+                    a_mask,
+                    a_score,
+                )
                 if role == "person"
                 else (a_mask, a_score)
             )
@@ -679,18 +761,8 @@ def filter_prompt_free_candidates(
             continue
         if max_containment >= nested_containment:
             continue
-        retained.append(
-            MaskCandidate(
-                mask=visible,
-                score=candidate.score,
-                source=candidate.source,
-                crop_box=candidate.crop_box,
-                touches_crop_edge=candidate.touches_crop_edge,
-                label=candidate.label,
-                role=candidate.role,
-                object_box=candidate.object_box,
-            )
-        )
+        candidate.mask = visible
+        retained.append(candidate)
     return retained
 
 
@@ -854,7 +926,44 @@ def resolve_sam_checkpoint(cache_dir=None, downloader=urlretrieve) -> Path:
     return checkpoint_path
 
 
-def create_sam_generator(checkpoint_path, device=None):
+def _build_resource_safe_sam_model(
+    build_sam,
+    torch,
+    checkpoint_path,
+    selected_device,
+):
+    init_empty_weights = importlib.import_module(
+        "accelerate"
+    ).init_empty_weights
+    config = build_sam.compose(config_name=SAM21_LARGE_CONFIG)
+    build_sam.OmegaConf.resolve(config)
+    with init_empty_weights():
+        model = build_sam.instantiate(
+            config["model"],
+            _recursive_=True,
+        )
+    state = torch.load(
+        checkpoint_path,
+        map_location=selected_device,
+        weights_only=True,
+        mmap=True,
+    )["model"]
+    missing_keys, unexpected_keys = model.load_state_dict(
+        state,
+        assign=True,
+    )
+    if missing_keys or unexpected_keys:
+        raise VisualSegmentationError(
+            "SAM 2.1 checkpoint does not match the Large model"
+        )
+    return model.eval()
+
+
+def create_sam_generator(
+    checkpoint_path,
+    device=None,
+    resource_safe=False,
+):
     try:
         torch = importlib.import_module("torch")
         build_sam = importlib.import_module("sam2.build_sam")
@@ -865,19 +974,33 @@ def create_sam_generator(checkpoint_path, device=None):
         ) from exc
 
     selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_sam.build_sam2(
-        SAM21_LARGE_CONFIG,
-        str(checkpoint_path),
-        device=selected_device,
-        apply_postprocessing=False,
+    model = (
+        _build_resource_safe_sam_model(
+            build_sam,
+            torch,
+            checkpoint_path,
+            selected_device,
+        )
+        if resource_safe
+        else build_sam.build_sam2(
+            SAM21_LARGE_CONFIG,
+            str(checkpoint_path),
+            device=selected_device,
+            apply_postprocessing=False,
+        )
     )
-    return mask_generator.SAM2AutomaticMaskGenerator(
+    generator = mask_generator.SAM2AutomaticMaskGenerator(
         model,
         points_per_side=16,
-        points_per_batch=4,
+        points_per_batch=1 if resource_safe else 4,
         pred_iou_thresh=0.86,
         stability_score_thresh=0.92,
         crop_n_layers=0,
         crop_n_points_downscale_factor=2,
         min_mask_region_area=20,
+        output_mode=(
+            "uncompressed_rle" if resource_safe else "binary_mask"
+        ),
     )
+    generator._image2editable_device = selected_device
+    return generator

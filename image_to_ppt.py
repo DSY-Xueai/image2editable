@@ -18,8 +18,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import gc
+import json
 import logging
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -39,8 +42,13 @@ from scripts.fg_extract import (
     export_visual_components,
     repair_exported_component_text,
 )
-from scripts.lama_inpaint import inpaint_large_mask, release_model
+from scripts.lama_inpaint import (
+    inpaint_large_mask,
+    inpaint_large_mask_isolated,
+    release_model,
+)
 from scripts.object_detect import (
+    ObjectProposal,
     create_object_detector,
     filter_text_overlapping_proposals,
     generate_object_proposals,
@@ -48,6 +56,7 @@ from scripts.object_detect import (
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import close_ocr_engines, detect_text
 from scripts.visual_segment import (
+    MaskCandidate,
     VisualSegmentationError,
     create_sam_generator,
     filter_prompt_free_candidates,
@@ -56,6 +65,7 @@ from scripts.visual_segment import (
     generate_prompted_mask_candidates,
     reconcile_residual_candidates,
     recheck_visual_element_holes,
+    needs_text_only_fallback,
     require_visual_quality,
     resolve_sam_checkpoint,
     resolve_visual_elements,
@@ -157,6 +167,79 @@ def _persist_element_masks(
     return paths
 
 
+def _isolated_large_inpainter(work_dir: Path):
+    def isolated_inpainter(
+        image: np.ndarray,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        with tempfile.TemporaryDirectory(
+            prefix="lama-",
+            dir=work_dir,
+        ) as temporary_dir:
+            temporary_path = Path(temporary_dir)
+            input_path = temporary_path / "input.png"
+            mask_path = temporary_path / "mask.png"
+            output_path = temporary_path / "output.png"
+            _save_rgb(str(input_path), image)
+            Image.fromarray(
+                (np.asarray(mask) > 0).astype(np.uint8) * 255,
+                mode="L",
+            ).save(mask_path)
+            inpaint_large_mask_isolated(
+                input_path,
+                mask_path,
+                output_path,
+            )
+            return _load_rgb(output_path)
+
+    return isolated_inpainter
+
+
+def _apply_text_only_fallback(
+    slide_data: dict,
+    work_dir: Path,
+    text_clean: np.ndarray,
+    resource_isolation: bool = False,
+) -> None:
+    background_original_path = work_dir / "background-text-only-fallback.png"
+    background_widescreen_path = (
+        work_dir / "background-text-only-fallback-16x9.png"
+    )
+    _save_rgb(str(background_original_path), text_clean)
+    background_kwargs = (
+        {"large_inpainter": _isolated_large_inpainter(work_dir)}
+        if resource_isolation
+        else {}
+    )
+    widescreen_result = build_widescreen_background(
+        text_clean,
+        **background_kwargs,
+    )
+    (
+        widescreen_background,
+        content_offset_x,
+        content_offset_y,
+        widescreen_background_method,
+    ) = widescreen_result
+    canvas_height, canvas_width = widescreen_background.shape[:2]
+    if widescreen_background_method == "identity":
+        background_widescreen_path = background_original_path
+    else:
+        _save_rgb(str(background_widescreen_path), widescreen_background)
+    slide_data.update({
+        "background_path": str(background_widescreen_path),
+        "background_original_path": str(background_original_path),
+        "background_widescreen_path": str(background_widescreen_path),
+        "components": [],
+        "canvas_width": canvas_width,
+        "canvas_height": canvas_height,
+        "content_offset_x": content_offset_x,
+        "content_offset_y": content_offset_y,
+        "widescreen_background_method": widescreen_background_method,
+        "conversion_mode": "text_editable_visual_fallback",
+    })
+
+
 def _finalize_slide_quality(
     slide_data: dict,
     lang: str,
@@ -164,6 +247,7 @@ def _finalize_slide_quality(
 ) -> dict:
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
+    text_clean_path_value = slide_data.pop("_text_clean_path", None)
     element_mask_paths = slide_data.pop("_element_mask_paths")
     element_masks = []
     img = None
@@ -208,6 +292,22 @@ def _finalize_slide_quality(
                 components,
             )
             _save_rgb(str(visual_only_path), visual_only)
+            raster_text_items, raster_text_mask = detect_text(
+                visual_only_path, lang=lang, **ocr_kwargs
+            )
+        if raster_text_items:
+            repair_exported_component_text(
+                components,
+                raster_text_mask,
+                visual_only,
+                text_items=raster_text_items,
+                clear_alpha=True,
+            )
+            visual_only = _compose_exported_components(
+                clean_background,
+                components,
+            )
+            _save_rgb(str(visual_only_path), visual_only)
             raster_text_items, _ = detect_text(
                 visual_only_path, lang=lang, **ocr_kwargs
             )
@@ -216,7 +316,16 @@ def _finalize_slide_quality(
                 "visual components still contain raster text after cleanup"
             )
 
-        quality = visual_difference(img, visual_only, text_mask)
+        quality_text_mask = text_mask
+        quality_text_items = slide_data.get("text_items") or []
+        if quality_text_items and all(
+            "box" in item for item in quality_text_items
+        ):
+            quality_text_mask = _build_text_item_removal_mask(
+                img.shape[:2],
+                quality_text_items,
+            )
+        quality = visual_difference(img, visual_only, quality_text_mask)
         diagnostics_dir = (work_dir / "diagnostics").resolve()
         write_segmentation_diagnostics(
             diagnostics_dir,
@@ -225,6 +334,26 @@ def _finalize_slide_quality(
             reconstructed=visual_only,
             metrics=quality,
         )
+        if needs_text_only_fallback(quality):
+            if text_clean_path_value is None:
+                text_clean = img.copy()
+            else:
+                text_clean = _load_rgb(text_clean_path_value)
+            original_quality = dict(quality)
+            _apply_text_only_fallback(
+                slide_data,
+                work_dir,
+                text_clean,
+                resource_isolation=_resource_isolation,
+            )
+            quality = visual_difference(img, text_clean, quality_text_mask)
+            require_visual_quality(quality)
+            slide_data["quality"] = quality
+            slide_data["quality_fallback"] = {
+                "reason": "visible_visual_artifacts",
+                "original_metrics": original_quality,
+            }
+            return slide_data
         try:
             require_visual_quality(quality)
         except VisualSegmentationError as exc:
@@ -242,6 +371,337 @@ def _finalize_slide_quality(
         visual_only = None
 
 
+def _generate_filtered_object_proposals(
+    image: np.ndarray,
+    text_mask: np.ndarray,
+    detector,
+):
+    owns_detector = detector is None
+    if owns_detector:
+        detector = create_object_detector()
+    try:
+        return filter_text_overlapping_proposals(
+            generate_object_proposals(image, detector),
+            text_mask,
+        )
+    finally:
+        if owns_detector:
+            detector = None
+            _release_visual_resources()
+
+
+def _generate_filtered_object_proposals_isolated(
+    image: np.ndarray,
+    text_mask: np.ndarray,
+    work_dir: Path,
+) -> list[ObjectProposal]:
+    with tempfile.TemporaryDirectory(
+        prefix="object-",
+        dir=work_dir,
+    ) as temporary_dir:
+        temporary_dir = Path(temporary_dir)
+        image_path = temporary_dir / "image.png"
+        mask_path = temporary_dir / "text-mask.png"
+        result_path = temporary_dir / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGB").save(
+            image_path
+        )
+        Image.fromarray(
+            np.asarray(text_mask, dtype=np.uint8),
+            mode="L",
+        ).save(mask_path)
+        module_dir = Path(__file__).resolve().parent
+        worker_path = module_dir / "scripts" / "object_worker.py"
+        if not worker_path.is_file():
+            worker_path = module_dir / "object_worker.py"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(worker_path),
+                "--image",
+                str(image_path),
+                "--text-mask",
+                str(mask_path),
+                "--result",
+                str(result_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"Isolated object worker failed: {detail}")
+        if not result_path.is_file():
+            raise RuntimeError(
+                "Isolated object worker did not create its result"
+            )
+        records = json.loads(result_path.read_text(encoding="utf-8"))
+    return [
+        ObjectProposal(
+            **{
+                **record,
+                "box_xyxy": tuple(record["box_xyxy"]),
+                "crop_box": tuple(record["crop_box"]),
+            }
+        )
+        for record in records
+    ]
+
+
+def _generate_sam_candidates_isolated(
+    image: np.ndarray,
+    text_mask: np.ndarray | None,
+    proposals: list[ObjectProposal] | None,
+    work_dir: Path,
+    *,
+    mode: str,
+) -> list[MaskCandidate]:
+    with tempfile.TemporaryDirectory(
+        prefix="sam-",
+        dir=work_dir,
+    ) as temporary_dir:
+        temporary_dir = Path(temporary_dir)
+        image_path = temporary_dir / "image.png"
+        result_path = temporary_dir / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGB").save(
+            image_path
+        )
+        command = [
+            sys.executable,
+            str(
+                (
+                    Path(__file__).resolve().parent
+                    / "scripts"
+                    / "sam_worker.py"
+                )
+                if (
+                    Path(__file__).resolve().parent
+                    / "scripts"
+                    / "sam_worker.py"
+                ).is_file()
+                else Path(__file__).resolve().with_name("sam_worker.py")
+            ),
+            "--mode",
+            mode,
+            "--image",
+            str(image_path),
+            "--result",
+            str(result_path),
+        ]
+        if text_mask is not None:
+            text_mask_path = temporary_dir / "text-mask.png"
+            Image.fromarray(
+                np.asarray(text_mask, dtype=np.uint8),
+                mode="L",
+            ).save(text_mask_path)
+            command.extend(["--text-mask", str(text_mask_path)])
+        if proposals is not None:
+            proposals_path = temporary_dir / "proposals.json"
+            proposals_path.write_text(
+                json.dumps(
+                    [proposal.__dict__ for proposal in proposals],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            command.extend(["--proposals", str(proposals_path)])
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"Isolated SAM worker failed: {detail}")
+        if not result_path.is_file():
+            raise RuntimeError("Isolated SAM worker did not create its result")
+        records = json.loads(result_path.read_text(encoding="utf-8"))
+
+    candidates = []
+    for record in records:
+        mask_shape = tuple(record.pop("mask_shape"))
+        packed = np.frombuffer(
+            base64.b64decode(record.pop("mask")),
+            dtype=np.uint8,
+        )
+        mask = np.unpackbits(
+            packed,
+            count=int(np.prod(mask_shape)),
+        ).reshape(mask_shape).astype(bool, copy=False)
+        if record["crop_box"] is not None:
+            record["crop_box"] = tuple(record["crop_box"])
+        if record["object_box"] is not None:
+            record["object_box"] = tuple(record["object_box"])
+        candidates.append(MaskCandidate(mask=mask, **record))
+    return candidates
+
+
+def _packed_mask_fields(mask: np.ndarray, name: str = "mask") -> dict:
+    binary = np.asarray(mask, dtype=bool)
+    return {
+        name: base64.b64encode(
+            np.packbits(binary, axis=None).tobytes()
+        ).decode("ascii"),
+        f"{name}_shape": list(binary.shape),
+    }
+
+
+def _unpack_mask_fields(record: dict, name: str = "mask") -> np.ndarray:
+    shape = tuple(record[f"{name}_shape"])
+    packed = np.frombuffer(
+        base64.b64decode(record[name]),
+        dtype=np.uint8,
+    )
+    return np.unpackbits(
+        packed,
+        count=int(np.prod(shape)),
+    ).reshape(shape).astype(bool, copy=False)
+
+
+def _recheck_visual_element_holes_isolated(
+    image: np.ndarray,
+    elements: list,
+    work_dir: Path,
+) -> None:
+    if not elements or not any(
+        element.object_box is not None for element in elements
+    ):
+        return
+    with tempfile.TemporaryDirectory(
+        prefix="sam-recheck-",
+        dir=work_dir,
+    ) as temporary_dir:
+        temporary_dir = Path(temporary_dir)
+        image_path = temporary_dir / "image.png"
+        elements_path = temporary_dir / "elements.json"
+        result_path = temporary_dir / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGB").save(
+            image_path
+        )
+        elements_path.write_text(
+            json.dumps(
+                [
+                    {
+                        **_packed_mask_fields(element.mask),
+                        **_packed_mask_fields(
+                            element.semantic_mask,
+                            "semantic_mask",
+                        ),
+                        "z_index": element.z_index,
+                        "score": element.score,
+                        "source": element.source,
+                        "object_box": element.object_box,
+                    }
+                    for element in elements
+                ],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        module_dir = Path(__file__).resolve().parent
+        worker_path = module_dir / "scripts" / "sam_worker.py"
+        if not worker_path.is_file():
+            worker_path = module_dir / "sam_worker.py"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(worker_path),
+                "--mode",
+                "recheck",
+                "--image",
+                str(image_path),
+                "--elements",
+                str(elements_path),
+                "--result",
+                str(result_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"Isolated SAM worker failed: {detail}")
+        if not result_path.is_file():
+            raise RuntimeError("Isolated SAM worker did not create its result")
+        records = json.loads(result_path.read_text(encoding="utf-8"))
+
+    if len(records) != len(elements):
+        raise RuntimeError("Isolated SAM recheck returned the wrong mask count")
+    for element, record in zip(elements, records):
+        element.mask = _unpack_mask_fields(record)
+        element.semantic_mask = _unpack_mask_fields(record, "semantic_mask")
+
+
+def _process_image_isolated(
+    image_path: Path,
+    work_dir: Path,
+    lang: str,
+    text_analysis: dict,
+) -> dict:
+    request_path = (work_dir / "visual-worker-request.json").resolve()
+    result_path = (work_dir / "visual-worker-result.json").resolve()
+    request_path.write_text(
+        json.dumps({"text_analysis": text_analysis}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    module_dir = Path(__file__).resolve().parent
+    worker_path = module_dir / "scripts" / "visual_worker.py"
+    if not worker_path.is_file():
+        worker_path = module_dir / "visual_worker.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(worker_path),
+            "--image",
+            str(image_path),
+            "--work-dir",
+            str(work_dir),
+            "--lang",
+            lang,
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"Isolated visual worker failed: {detail}")
+    if not result_path.is_file():
+        raise RuntimeError("Isolated visual worker did not create its result")
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def _pack_mask_references(references):
+    packed_masks = {}
+    bindings = []
+    for owner, attribute in references:
+        mask = getattr(owner, attribute)
+        key = id(mask)
+        if key not in packed_masks:
+            packed_masks[key] = (
+                np.packbits(np.asarray(mask, dtype=bool), axis=None),
+                mask.shape,
+            )
+        bindings.append((owner, attribute, key))
+        setattr(owner, attribute, None)
+    return packed_masks, bindings
+
+
+def _restore_mask_references(state) -> None:
+    packed_masks, bindings = state
+    restored = {}
+    for key, (packed_mask, shape) in packed_masks.items():
+        restored[key] = np.unpackbits(
+            packed_mask,
+            count=shape[0] * shape[1],
+        ).reshape(shape).astype(bool, copy=False)
+    for owner, attribute, key in bindings:
+        setattr(owner, attribute, restored[key])
+
+
 def _process_image(
     image_path: Path,
     work_dir: Path,
@@ -250,8 +710,14 @@ def _process_image(
     lang: str,
     text_analysis: dict | None = None,
     defer_quality: bool = False,
+    _resource_isolation: bool = False,
 ) -> dict:
     work_dir.mkdir(parents=True, exist_ok=True)
+    background_kwargs = (
+        {"large_inpainter": _isolated_large_inpainter(work_dir)}
+        if _resource_isolation
+        else {}
+    )
     img = _load_rgb(str(image_path))
     img_h, img_w = img.shape[:2]
     if text_analysis is None:
@@ -268,28 +734,74 @@ def _process_image(
         "box" in item for item in text_items
     )
     text_clean_image = None
+    text_clean_path = None
     if valid_text_items:
-        text_clean_image = inpaint_large_mask(
-            img,
-            _build_text_item_removal_mask(img.shape[:2], text_items),
+        text_clean_path = (
+            text_analysis.get("text_clean_path")
+            if text_analysis is not None
+            else None
         )
+        if text_clean_path is None:
+            text_clean_image = inpaint_large_mask(
+                img,
+                _build_text_item_removal_mask(img.shape[:2], text_items),
+            )
+            text_clean_path = work_dir / "text-clean.png"
+            _save_rgb(str(text_clean_path), text_clean_image)
+        else:
+            text_clean_path = Path(text_clean_path).resolve()
+            with Image.open(text_clean_path) as stored_text_clean:
+                text_clean_image = np.asarray(
+                    stored_text_clean.convert("RGB")
+                ).copy()
 
-    proposals = filter_text_overlapping_proposals(
-        generate_object_proposals(img, object_detector), text_mask
+    proposal_detector = (
+        None if _resource_isolation else object_detector
     )
-    candidates = generate_prompted_mask_candidates(
-        img,
-        proposals,
-        mask_generator,
-        text_ink_mask,
-    )
+    if _resource_isolation:
+        proposals = _generate_filtered_object_proposals_isolated(
+            img,
+            text_mask,
+            work_dir,
+        )
+    else:
+        proposals = _generate_filtered_object_proposals(
+            img,
+            text_mask,
+            proposal_detector,
+        )
+    if _resource_isolation:
+        candidates = _generate_sam_candidates_isolated(
+            img,
+            text_ink_mask,
+            proposals,
+            work_dir,
+            mode="prompted",
+        )
+        prompt_free_candidates = _generate_sam_candidates_isolated(
+            img,
+            None,
+            None,
+            work_dir,
+            mode="automatic",
+        )
+    else:
+        candidates = generate_prompted_mask_candidates(
+            img,
+            proposals,
+            mask_generator,
+            text_ink_mask,
+        )
+        prompt_free_candidates = generate_mask_candidates(
+            img,
+            mask_generator,
+            crop_size=max(img.shape[:2]),
+            include_geometry=False,
+            min_score=0.90,
+        )
     candidates.extend(
         filter_prompt_free_candidates(
-            generate_mask_candidates(
-                img,
-                mask_generator,
-                crop_size=max(img.shape[:2]),
-            ),
+            prompt_free_candidates,
             candidates,
             text_ink_mask,
         )
@@ -298,17 +810,58 @@ def _process_image(
         elements = resolve_visual_elements(candidates)
         element_masks = [element.mask for element in elements]
         validate_visual_masks(element_masks)
-        clean_background = build_clean_background(img, element_masks, text_mask)
-        residual_proposals = filter_text_overlapping_proposals(
-            generate_object_proposals(clean_background, object_detector),
+        clean_background = build_clean_background(
+            img,
+            element_masks,
             text_mask,
+            **background_kwargs,
         )
-        residual_candidates = generate_prompted_mask_candidates(
-            clean_background,
-            residual_proposals,
-            mask_generator,
-            text_ink_mask,
-        )
+        packed_masks = None
+        if _resource_isolation:
+            references = [
+                *((candidate, "mask") for candidate in candidates),
+                *((element, "mask") for element in elements),
+                *((element, "semantic_mask") for element in elements),
+            ]
+            packed_masks = _pack_mask_references(references)
+            element_masks.clear()
+            mask_generator = None
+            _release_visual_resources()
+            gc.collect()
+        try:
+            if _resource_isolation:
+                residual_proposals = (
+                    _generate_filtered_object_proposals_isolated(
+                        clean_background,
+                        text_mask,
+                        work_dir,
+                    )
+                )
+            else:
+                residual_proposals = _generate_filtered_object_proposals(
+                    clean_background,
+                    text_mask,
+                    proposal_detector,
+                )
+        finally:
+            if packed_masks is not None:
+                _restore_mask_references(packed_masks)
+                element_masks = [element.mask for element in elements]
+        if _resource_isolation:
+            residual_candidates = _generate_sam_candidates_isolated(
+                clean_background,
+                text_ink_mask,
+                residual_proposals,
+                work_dir,
+                mode="prompted",
+            )
+        else:
+            residual_candidates = generate_prompted_mask_candidates(
+                clean_background,
+                residual_proposals,
+                mask_generator,
+                text_ink_mask,
+            )
         residual_candidates = filter_unchanged_residual_candidates(
             img,
             clean_background,
@@ -326,7 +879,10 @@ def _process_image(
                 element_masks = [element.mask for element in elements]
                 validate_visual_masks(element_masks)
                 clean_background = build_clean_background(
-                    img, element_masks, text_mask
+                    img,
+                    element_masks,
+                    text_mask,
+                    **background_kwargs,
                 )
             break
         residual_diagnostics = work_dir / f"residual-round-{round_index + 1}"
@@ -344,11 +900,23 @@ def _process_image(
             )
         candidates.extend(residual_candidates)
 
-    recheck_visual_element_holes(img, elements, mask_generator)
+    if _resource_isolation:
+        _recheck_visual_element_holes_isolated(
+            img,
+            elements,
+            work_dir,
+        )
+    else:
+        recheck_visual_element_holes(img, elements, mask_generator)
     element_masks = [element.mask for element in elements]
     semantic_masks = [element.semantic_mask for element in elements]
     validate_visual_masks(element_masks)
-    clean_background = build_clean_background(img, element_masks, text_mask)
+    clean_background = build_clean_background(
+        img,
+        element_masks,
+        text_mask,
+        **background_kwargs,
+    )
     export_kwargs = {"semantic_masks": semantic_masks}
     if valid_text_items:
         export_kwargs["text_items"] = text_items
@@ -370,7 +938,10 @@ def _process_image(
         content_offset_x,
         content_offset_y,
         widescreen_background_method,
-    ) = build_widescreen_background(clean_background)
+    ) = build_widescreen_background(
+        clean_background,
+        **background_kwargs,
+    )
     canvas_height, canvas_width = widescreen_background.shape[:2]
     if widescreen_background_method == "identity":
         background_widescreen_path = background_original_path
@@ -401,6 +972,8 @@ def _process_image(
         "_text_mask_path": str(text_mask_path),
         "_element_mask_paths": element_mask_paths,
     }
+    if text_clean_path is not None:
+        slide_data["_text_clean_path"] = str(text_clean_path)
     if defer_quality:
         return slide_data
     return _finalize_slide_quality(slide_data, lang)
@@ -549,6 +1122,33 @@ def _prepare_multiple_images(
             exception_boundary,
         )
 
+    if _resource_isolation:
+        for (image_path, work_dir), text_analysis in zip(
+            prepared_pages, text_analyses
+        ):
+            text_items = text_analysis["items"]
+            if not text_items or not all(
+                "box" in item for item in text_items
+            ):
+                continue
+            with Image.open(image_path) as source_probe:
+                source_shape = (source_probe.height, source_probe.width)
+            removal_mask = _build_text_item_removal_mask(
+                source_shape,
+                text_items,
+            )
+            removal_mask_path = (
+                work_dir / "text-clean-removal-mask.png"
+            ).resolve()
+            Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+            text_clean_path = (work_dir / "text-clean.png").resolve()
+            inpaint_large_mask_isolated(
+                image_path,
+                removal_mask_path,
+                text_clean_path,
+            )
+            text_analysis["text_clean_path"] = str(text_clean_path)
+
     slides_data = []
     object_detector = None
     mask_generator = None
@@ -556,23 +1156,41 @@ def _prepare_multiple_images(
     primary_exception = None
     primary_traceback = None
     try:
-        object_detector = create_object_detector()
-        mask_generator = create_sam_generator(resolve_sam_checkpoint())
+        if _resource_isolation:
+            mask_generator = None
+        else:
+            object_detector = create_object_detector()
+            mask_generator = create_sam_generator(resolve_sam_checkpoint())
         for index, ((image_path, work_dir), text_analysis) in enumerate(
             zip(prepared_pages, text_analyses)
         ):
             print(f"=== Image {index + 1}/{total}: {image_path.name} ===")
             print(f"  Assets/diagnostics: {work_dir}")
-            slide_data = _process_image(
-                image_path,
-                work_dir,
-                object_detector,
-                mask_generator,
-                lang,
-                text_analysis=text_analysis,
-                defer_quality=True,
-            )
+            process_kwargs = {
+                "text_analysis": text_analysis,
+                "defer_quality": True,
+            }
+            if _resource_isolation:
+                process_kwargs["_resource_isolation"] = True
+            if _resource_isolation:
+                slide_data = _process_image_isolated(
+                    image_path,
+                    work_dir,
+                    lang,
+                    text_analysis,
+                )
+            else:
+                slide_data = _process_image(
+                    image_path,
+                    work_dir,
+                    object_detector,
+                    mask_generator,
+                    lang,
+                    **process_kwargs,
+                )
             slides_data.append(slide_data)
+            if _resource_isolation and index + 1 < total:
+                _release_visual_resources()
     except BaseException as exc:
         primary_exception = exc
         primary_traceback = exc.__traceback__

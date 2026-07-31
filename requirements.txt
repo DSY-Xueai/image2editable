@@ -34,4 +34,5 @@ pypdfium2>=5.7.1,<6
 # General-purpose visual instance segmentation
 SAM-2 @ git+https://github.com/facebookresearch/sam2.git@main
 transformers>=4.40.0
+accelerate>=0.26.0
 simple-lama-inpainting==0.1.2

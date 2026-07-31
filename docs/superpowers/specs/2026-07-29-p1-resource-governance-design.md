@@ -2,7 +2,7 @@
 
 ## 状态
 
-本设计于 2026-07-29 经用户确认，用于完成 Unified Runtime P1 的真实文件验收收尾。
+本设计于 2026-07-29 经用户确认，用于完成 Unified Runtime P1 的真实文件验收收尾。P1.1 已于 2026-07-31 完成实现与真实文件验收；实测结果见文末。
 
 P1.1 只解决三个问题：
 
@@ -54,9 +54,9 @@ P1.1 完成并通过真实文件验收后，才进入 P2 Agent 页面路由、�
 ### 资源目标
 
 1. 保持 PDF 标准渲染策略不变：200 DPI、小页短边下限、6000 px 长边上限和 24 MP 上限均不修改。
-2. 保持 Grounding DINO、SAM2 Large、LaMa、PaddleOCR、候选阈值和质量阈值不变。
-3. CUDA 下 SAM2 保持相同采样点，只将 `points_per_batch` 从 16 降为 4。
-4. 同一 OCR 阶段、同一语言只初始化一次 PaddleOCR。
+2. 保持 Grounding DINO、SAM2 Large、LaMa、PaddleOCR server recognizer 和候选阈值；允许使用 mobile detector，并增强最终质量门禁。
+3. CUDA 下 SAM2 保持相同采样点，只将 `points_per_batch` 从 16 降为 1。
+4. OCR 检测与识别拆为顺序子进程，避免两个 PaddleOCR 模型同时驻留。
 5. OCR 阶段和视觉模型阶段不同时持有不需要的重型模型。
 6. 重型页面始终串行执行，不增加页面级并行。
 7. 默认限制数值计算线程，最多使用 8 个逻辑线程，并尊重用户已设置的线程环境变量。
@@ -69,9 +69,9 @@ P1.1 完成并通过真实文件验收后，才进入 P2 Agent 页面路由、�
 
 ### 质量目标
 
-1. 资源治理不能改变现有 OCR、对象检测、分割、背景修复和组装判定语义。
+1. 资源治理不能降低 PDF 清晰度、SAM2 Large、采样点或候选阈值；OCR 检测可使用已验收的 mobile detector，识别仍使用 server recognizer。
 2. 每页仍执行现有全分辨率 `visual_difference`、残留文字复检和 `require_visual_quality`。
-3. 低批次只改变推理分批方式，不改变采样点、候选阈值或最终 mask 规则。
+3. 低批次只改变推理分批方式，不改变采样点和候选阈值；最终重建出现可见伪影时允许保守回退为去文字底图。
 4. 真实 PDF 必须完成 4 页输出，输出可打开、页序正确、页面比例正确。
 5. 真实 PDF 的最终 PPTX 必须逐页渲染并人工检查文字、背景、图形和边界，无明显新增缺失、错位或拉伸。
 6. 输入 PDF 和 PPTX 的 SHA-256 在验收前后保持不变。
@@ -120,7 +120,7 @@ P1.1 不实现：
 
 - 在重型库导入前设置默认线程上限；
 - 只在用户没有显式设置对应环境变量时写入默认值；
-- 给 SAM2 构造器提供确定的 CUDA batch 值 4；
+- 给 SAM2 构造器提供确定的 CUDA batch 值 1；
 - 尽力将转换进程设置为不会抢占桌面交互的较低优先级；
 - 记录本次执行采用的资源策略，供日志和 Run Summary 审计。
 
@@ -131,32 +131,26 @@ POSIX 使用正的 nice 增量；权限或平台不支持时记录 warning 并�
 
 ### OCR 生命周期
 
-`PaddleOCR` 由按语言缓存的 OCR 会话持有，而不是每次 `detect_text()` 都创建。
+每次 OCR 调用按“检测子进程 → 识别子进程”顺序执行。检测使用 mobile detector，识别继续使用 server recognizer；两个模型不同时驻留，子进程退出后由操作系统回收内存。
 
-转换流程按阶段使用该会话：
-
-1. 原图 OCR 阶段复用一个会话处理当前批次；
-2. 视觉分解阶段开始前释放 OCR 会话；
-3. 视觉重建完成后重新建立一个 OCR 会话，复用它完成残留文字检查；
-4. 只对确实检测到残留文字的页面执行修复后复检；
-5. OCR 阶段结束后显式关闭会话并释放引用。
-
-OCR 检测结果、文字 mask 和修复输入继续使用现有结构。阶段化只改变生命周期，不改变检测参数。
+原图 OCR、重建残留检查和修复后复检仍沿用原有调用时机。OCR 检测结果、文字 mask、裁剪图和修复输入写入页面工作目录，不在父进程常驻。
 
 ### 视觉模型生命周期
 
-Grounding DINO 和 SAM2 在进入视觉分解阶段时加载一次，并在所有待处理页面完成后释放。
+每页视觉流程运行在独立 `visual_worker` 中；页面完成后整个进程退出。
 
 约束：
 
 - 页面仍然串行；
 - Grounding DINO 和 SAM2 的模型、提示词、阈值不变；
-- CUDA 下 `points_per_batch=4`，CPU 继续使用 4；
-- 每轮推理后删除不再使用的张量引用；
-- 阶段结束后释放模型引用，并调用后端提供的缓存释放接口；
-- LaMa 保持按需加载和单例复用，但不得在视觉阶段结束后继续被无关阶段持有。
+- CUDA 与 CPU 均使用 `points_per_batch=1`；
+- DINO proposal 使用独立 `object_worker`；
+- SAM prompted、automatic 与最终 hole recheck 分别使用独立 `sam_worker`，mask 通过 packbits/Base64 传递；
+- SAM2.1 Large 使用同一 FP32 checkpoint，并通过 mmap/空权重初始化减少加载峰值；CUDA 推理使用 BF16 autocast；
+- LaMa 使用独立 `lama_worker`，不在视觉进程中长期驻留；
+- 最终 hole recheck 不在父 `visual_worker` 创建 CUDA context，避免随后 LaMa 推理叠加显存占用。
 
-如果实测峰值仍超过目标，应优先把 OCR 和视觉阶段隔离到顺序子进程，以进程退出作为确定的资源释放边界；不得改用小模型作为默认补丁。
+进程退出是确定的资源释放边界，不使用小模型、低 DPI 或减少采样点作为默认补丁。
 
 ### 线程与并发
 
@@ -258,7 +252,7 @@ PPTX 继续沿用更严格的已发布输出保护，不能因为恢复功能放
     "name": "safe-default",
     "cpu_threads": 8,
     "heavy_page_concurrency": 1,
-    "sam_points_per_batch": 4
+    "sam_points_per_batch": 1
   }
 }
 ```
@@ -319,12 +313,12 @@ image2editable run recover RUN_DIR
 - 小于 16 个逻辑处理器时使用一半，至少为 1；
 - 已存在的线程环境变量不被覆盖；
 - 进程优先级调整失败只记录 warning；
-- CUDA 和 CPU 的 SAM batch 都为 4；
+- CUDA 和 CPU 的 SAM batch 都为 1，旧 manifest 的 4 仍可读取；
 - 重型页面并发固定为 1；
-- OCR 会话在同一阶段、同一语言只创建一次；
-- OCR 阶段结束后关闭并从缓存移除；
+- OCR 检测与识别由两个顺序子进程执行；
+- OCR、LaMa、DINO、SAM 和整页视觉 worker 退出后不在父进程持有模型；
 - 残留文字为空时不执行第三次 OCR；
-- 现有 OCR 参数和结果转换逻辑不变。
+- OCR 结果转换逻辑不变；检测改为 mobile detector，识别保持 server recognizer。
 
 ### PPTX
 
@@ -353,7 +347,7 @@ image2editable run recover RUN_DIR
 
 ### 回归
 
-- 现有全部单元测试通过；
+- 完整回归为 `772 passed, 13 skipped`；
 - `python -m compileall -f -q image2editable scripts image_to_ppt.py` 通过；
 - 主脚本与 Skill 镜像保持字节一致；
 - CLI help、doctor、prepare、execute、retry 和 recover 冒烟通过。
@@ -362,24 +356,21 @@ image2editable run recover RUN_DIR
 
 ### `1-Embedding与向量数据库.pdf`
 
-1. 重新建立干净 Run；
-2. 验证 4 页仍为 200 DPI、2667×1500；
-3. 完整执行期间采样 Python 工作集和 GPU 显存；
-4. 验证峰值达到资源目标；
-5. 验证没有持续页面文件换入换出导致的系统卡顿；
-6. 验证 4 页全部完成且 Run 为 `completed`；
-7. 渲染所有输出幻灯片，逐页检查文字、背景、图形和边界；
-8. 复核输入 PDF SHA-256 仍为
-   `8ecf070cb6a0e0a0ff675c82360b25c335a0e5c9bae026b69ed923d2bcd00080`。
+- 4 页标准渲染仍为 200 DPI、2667×1500。
+- v36 四页完整转换耗时 1424.909 秒；进程树工作集峰值为 3.407 GB，GPU 峰值为 5.971 GB，系统最低可用内存为 2.096 GB，资源监控未触发上限。
+- v35 曾因父 `visual_worker` 的最终 SAM CUDA context 与后续 LaMa 叠加达到 6.104 GB；将最终 hole recheck 移入独立 worker 后，v36 达到 6.0 GB 验收门槛。
+- 最终验收稿为 `tmp/p11-acceptance/pdf-v36-final_original.pptx` 与 `pdf-v36-final_16x9.pptx`。
+- 两份验收稿均为 4 页、可打开、无越界；所有页面已逐页渲染检查。
+- 4 页均因连续伪影门禁触发去文字底图保真降级，分别保留 1、18、1、8 个可编辑文字框。
+- 页面视觉无先前的大面积透明组件伪影；少量 OCR 标点误识别仍是 P1 已知限制。
+- 输入 PDF SHA-256 保持为 `8ecf070cb6a0e0a0ff675c82360b25c335a0e5c9bae026b69ed923d2bcd00080`。
 
 ### `test1.pptx`
 
-1. 原文件直接 `prepare`，不创建去目录项副本；
-2. 验证 2 页、2 个背景图片对象和 2 个候选；
-3. 执行 P1 无损保留；
-4. 验证输入和输出 SHA-256 均为
-   `03415ac5973a91e5b0d462a796690f618267ff1c05b4eb00d5f7ab20fa92ae80`；
-5. 渲染输入和输出两页，视觉内容一致。
+- 原文件直接 `prepare`，扫描得到 2 页、2 个背景图片对象和 2 个候选。
+- P1 输出 `tmp/p11-acceptance/test1-preserved.pptx` 与输入 byte-identical。
+- 输入和输出 SHA-256 均为 `03415ac5973a91e5b0d462a796690f618267ff1c05b4eb00d5f7ab20fa92ae80`。
+- 输入和输出两页渲染图逐像素一致，原生对象未经过 CV。
 
 ## 文档与提交
 

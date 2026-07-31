@@ -662,27 +662,32 @@ def _sample_text_color(region: np.ndarray) -> str:
 
 
 def _estimate_bold(region: np.ndarray) -> bool:
-    """Estimate whether text is bold by measuring ink density.
-
-    Bold text has thicker strokes, resulting in higher ink-to-background ratio.
-    Uses Otsu binarization for robust foreground/background separation.
-    """
+    """Estimate bold weight from ink density and relative stroke width."""
     if region.size == 0 or region.shape[0] < 5 or region.shape[1] < 5:
         return False
 
     gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
-
-    # Otsu threshold for robust binarization
-    _, binary = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    threshold, _ = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
-
-    # Ink density: ratio of foreground pixels to total
-    ink_ratio = np.count_nonzero(binary) / binary.size
-
-    # Bold Chinese/English text typically has ink_ratio > 0.20
-    # Regular text typically has ink_ratio 0.10-0.18
-    return ink_ratio > 0.20
+    border = np.concatenate([
+        gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]
+    ])
+    if float(np.mean(border)) > threshold:
+        ink = gray <= threshold
+    else:
+        ink = gray > threshold
+    ink_ratio = np.count_nonzero(ink) / ink.size
+    stroke_depth = cv2.distanceTransform(
+        ink.astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    strokes = stroke_depth[stroke_depth > 0]
+    if strokes.size == 0:
+        return False
+    relative_stroke = float(np.percentile(strokes, 90)) / region.shape[0]
+    return ink_ratio > 0.20 and relative_stroke >= 0.05
 
 
 # ---------------------------------------------------------------------------

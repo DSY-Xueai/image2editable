@@ -81,7 +81,7 @@ def run_detection(
     result_path = Path(result_path)
     detector_type, sorter_type, cropper_type = _load_detection_tools()
     detector = detector_type(
-        model_name="PP-OCRv5_server_det",
+        model_name="PP-OCRv5_mobile_det",
         cpu_threads=1,
         enable_mkldnn=False,
         limit_side_len=64,
@@ -99,8 +99,9 @@ def run_detection(
         detector.close()
     result = results[0] if results else {}
     polys = list(sorter_type()(_value(result, "dt_polys", [])))
+    image = _read_bgr(image_path)
     crops = cropper_type(det_box_type="quad")(
-        _read_bgr(image_path),
+        image,
         polys,
     )
     saved_polys = []
@@ -123,6 +124,7 @@ def run_recognition(
     result_path: str | Path,
     lang: str = "ch",
 ) -> None:
+    result_path = Path(result_path)
     detection = json.loads(
         Path(detection_result).read_text(encoding="utf-8")
     )

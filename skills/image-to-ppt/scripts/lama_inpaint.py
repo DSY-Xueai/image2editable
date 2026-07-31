@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
@@ -46,6 +50,37 @@ def _get_model():
 def release_model() -> None:
     global _MODEL
     _MODEL = None
+
+
+def inpaint_large_mask_isolated(
+    image_path: str | Path,
+    mask_path: str | Path,
+    output_path: str | Path,
+) -> None:
+    output_path = Path(output_path).resolve()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("lama_worker.py").resolve()),
+            "--image",
+            str(Path(image_path).resolve()),
+            "--mask",
+            str(Path(mask_path).resolve()),
+            "--output",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise LargeMaskInpaintError(
+            f"Isolated LaMa worker failed: {detail}"
+        )
+    if not output_path.is_file():
+        raise LargeMaskInpaintError(
+            "Isolated LaMa worker did not create the output image"
+        )
 
 
 def inpaint_large_mask(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
