@@ -69,7 +69,7 @@
 - capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
 - `image2editable agent record RUN_DIR --plan PLAN.json` 严格校验计划字段、动作对象、归一化坐标、置信度和非空证据；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、冲突动作均拒绝。
-- Agent next/record 与执行、恢复共用 Run 的非阻塞 OS lease；计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
+- Agent next/record 与执行、恢复共用同一把 Run OS lease；`next` 最多有界等待 30 秒并在单一临界区内读取或发布 challenge，跨平台并发调用只会加载同一个完整结果，超时明确失败；`record` 仍非阻塞拒绝并发。计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
 
 ## 关键修改文件
 

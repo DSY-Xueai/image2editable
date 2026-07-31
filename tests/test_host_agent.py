@@ -248,6 +248,37 @@ def test_concurrent_next_calls_load_one_complete_published_challenge(
     assert (host_run / "host-challenge/challenge.png").is_file()
     assert (host_run / "host-challenge/metadata.json").is_file()
     assert not list(host_run.glob(".host-challenge.tmp-*"))
+    assert not (host_run / ".host-challenge-publication.lock").exists()
+
+
+def test_next_retries_same_main_lock_after_posix_style_parent_conflict(
+    host_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = []
+    enters = 0
+    sleeps = []
+
+    class FakeLease:
+        def __init__(self, path: Path, *, run_root: Path) -> None:
+            attempts.append((Path(path), Path(run_root)))
+
+        def __enter__(self) -> object:
+            nonlocal enters
+            enters += 1
+            if enters == 1:
+                raise RuntimeError("Run is already executing: simulated POSIX parent lock")
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(host_agent, "ExecutionLease", FakeLease)
+    monkeypatch.setattr(host_agent.time, "sleep", sleeps.append)
+    item = next_host_agent_item(host_run)
+    assert item["kind"] == "capability_handshake"
+    assert enters == 2
+    assert all(path.name == "execution.lock" for path, _ in attempts)
+    assert sleeps == [0.01]
 
 
 def test_capability_success_exposes_bound_component_request(host_run: Path, tmp_path: Path) -> None:

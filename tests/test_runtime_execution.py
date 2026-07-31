@@ -14,7 +14,7 @@ import pytest
 from PIL import Image
 from pptx import Presentation
 
-from image2editable import legacy, runtime
+from image2editable import host_agent, legacy, runtime
 from image2editable.contracts import PageStatus, RunStatus, SCHEMA_VERSION
 from image2editable.execution import ExecutionLease
 from image2editable.pptx_input import prepare_pptx_job
@@ -22,7 +22,9 @@ from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
 
 
-def test_host_agent_next_respects_run_execution_lease(tmp_path: Path) -> None:
+def test_host_agent_next_times_out_explicitly_while_execution_lease_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
@@ -30,8 +32,11 @@ def test_host_agent_next_respects_run_execution_lease(tmp_path: Path) -> None:
     store.transition_run(RunStatus.RUNNING)
     store.transition_run(RunStatus.AWAITING_AGENT)
 
+    ticks = iter([0.0, 31.0])
+    monkeypatch.setattr(host_agent.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(host_agent.time, "sleep", lambda seconds: None)
     with ExecutionLease(run_dir / "execution.lock", run_root=run_dir):
-        with pytest.raises(RuntimeError, match="already executing"):
+        with pytest.raises(RuntimeError, match="Timed out waiting for Run execution lock"):
             runtime.next_host_agent_item(run_dir)
 
 

@@ -32,28 +32,23 @@ _PLAN_LIMIT = 4 * 1024 * 1024
 
 def next_host_agent_item(run_dir: str | Path) -> dict:
     store = RunStore.open(run_dir)
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    with _next_execution_lease(store):
         store = RunStore.open(store.root)
         _validate_host_awaiting(store)
         capabilities = _load_capabilities(store)
-        if capabilities is not None:
+        if capabilities is None:
+            challenge = _load_or_create_challenge(store)
+            return {
+                "kind": "capability_handshake",
+                "challenge_id": challenge["challenge_id"],
+                "image_path": str(
+                    (store.root / "host-challenge" / challenge["image_path"]).resolve()
+                ),
+                "required_capabilities": list(REQUIRED_CAPABILITIES),
+            }
+        else:
             request_path, request = _current_request(store)
             return _request_item(request_path, request)
-    with _challenge_publication_lease(store):
-        store = RunStore.open(store.root)
-        _validate_host_awaiting(store)
-        if _load_capabilities(store) is not None:
-            request_path, request = _current_request(store)
-            return _request_item(request_path, request)
-        challenge = _load_or_create_challenge(store)
-        return {
-            "kind": "capability_handshake",
-            "challenge_id": challenge["challenge_id"],
-            "image_path": str(
-                (store.root / "host-challenge" / challenge["image_path"]).resolve()
-            ),
-            "required_capabilities": list(REQUIRED_CAPABILITIES),
-        }
 
 
 def _validate_host_awaiting(store: RunStore) -> None:
@@ -65,10 +60,10 @@ def _validate_host_awaiting(store: RunStore) -> None:
 
 
 @contextmanager
-def _challenge_publication_lease(store: RunStore):
+def _next_execution_lease(store: RunStore):
     deadline = time.monotonic() + 30.0
     lease = ExecutionLease(
-        store.root / ".host-challenge-publication.lock",
+        store.root / "execution.lock",
         run_root=store.root,
     )
     while True:
@@ -77,6 +72,10 @@ def _challenge_publication_lease(store: RunStore):
             break
         except RuntimeError as error:
             if "already executing" not in str(error) or time.monotonic() >= deadline:
+                if "already executing" in str(error):
+                    raise RuntimeError(
+                        "Timed out waiting for Run execution lock"
+                    ) from error
                 raise
             time.sleep(0.01)
     try:
