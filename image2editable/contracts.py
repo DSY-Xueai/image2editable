@@ -13,6 +13,7 @@ class RunStatus(str, Enum):
     CREATED = "created"
     PREPARED = "prepared"
     RUNNING = "running"
+    AWAITING_AGENT = "awaiting_agent"
     FINALIZING = "finalizing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -24,6 +25,7 @@ class PageStatus(str, Enum):
     ANALYZED = "analyzed"
     PRESERVED = "preserved"
     PROCESSING = "processing"
+    AWAITING_AGENT = "awaiting_agent"
     VALIDATED = "validated"
     REPLACED = "replaced"
     PRESERVED_WITH_WARNING = "preserved_with_warning"
@@ -33,7 +35,13 @@ class PageStatus(str, Enum):
 _RUN_TRANSITIONS = {
     RunStatus.CREATED: {RunStatus.PREPARED, RunStatus.FAILED, RunStatus.CANCELLED},
     RunStatus.PREPARED: {RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLED},
-    RunStatus.RUNNING: {RunStatus.FINALIZING, RunStatus.FAILED, RunStatus.CANCELLED},
+    RunStatus.RUNNING: {
+        RunStatus.AWAITING_AGENT,
+        RunStatus.FINALIZING,
+        RunStatus.FAILED,
+        RunStatus.CANCELLED,
+    },
+    RunStatus.AWAITING_AGENT: {RunStatus.PREPARED},
     RunStatus.FINALIZING: {RunStatus.COMPLETED, RunStatus.FAILED},
     RunStatus.FAILED: {RunStatus.PREPARED},
     RunStatus.COMPLETED: set(),
@@ -44,10 +52,12 @@ _PAGE_TRANSITIONS = {
     PageStatus.PENDING: {PageStatus.ANALYZED, PageStatus.PROCESSING, PageStatus.FAILED},
     PageStatus.ANALYZED: {PageStatus.PRESERVED, PageStatus.PROCESSING, PageStatus.FAILED},
     PageStatus.PROCESSING: {
+        PageStatus.AWAITING_AGENT,
         PageStatus.VALIDATED,
         PageStatus.PRESERVED_WITH_WARNING,
         PageStatus.FAILED,
     },
+    PageStatus.AWAITING_AGENT: {PageStatus.PROCESSING},
     PageStatus.VALIDATED: {PageStatus.REPLACED, PageStatus.FAILED},
     PageStatus.FAILED: {PageStatus.PENDING},
     PageStatus.PRESERVED: set(),

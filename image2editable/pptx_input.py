@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET
 
 from PIL import Image
 
+from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import (
     PageStatus,
     RunStatus,
@@ -149,7 +150,9 @@ def prepare_pptx_job(
     output_path: str | Path | None = None,
     slide_size: str = "both",
     lang: str = "ch",
+    agent_provider: str = "host",
 ) -> Path:
+    agent_provider = validate_agent_provider(agent_provider)
     source_path = Path(source).resolve()
     if not source_path.is_file() or source_path.suffix.casefold() != ".pptx":
         raise ValueError(
@@ -262,6 +265,7 @@ def prepare_pptx_job(
             },
             "output_format": "pptx",
             "options": {
+                "agent_provider": agent_provider,
                 "lang": lang,
                 "slide_size": slide_size,
                 "output_path": (

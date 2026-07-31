@@ -8,6 +8,7 @@ import stat
 import tempfile
 from typing import Any, Iterable, Sequence
 
+from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import (
     PageStatus,
     RunStatus,
@@ -47,8 +48,11 @@ def prepare_pdf_job(*args: Any, **kwargs: Any) -> Path:
     return _pdf_function("prepare_pdf_job")(*args, **kwargs)
 
 
-def rerender_pdf_page(*args: Any, **kwargs: Any) -> dict[str, bool]:
-    return _pdf_function("rerender_pdf_page")(*args, **kwargs)
+def rerender_pdf_page(
+    run_dir: str | Path, page_id: str
+) -> dict[str, bool]:
+    _manifest_input(RunStore.open(run_dir))
+    return _pdf_function("rerender_pdf_page")(run_dir, page_id)
 
 
 def prepare_pptx_job(*args: Any, **kwargs: Any) -> Path:
@@ -82,6 +86,7 @@ def shadow_replacement_plans(
 
 
 def next_candidate(run_dir: str | Path) -> dict[str, object]:
+    _manifest_input(RunStore.open(run_dir))
     from image2editable.agent import next_candidate as find_next
 
     return find_next(run_dir)
@@ -91,6 +96,7 @@ def record_decision(
     run_dir: str | Path,
     **kwargs: object,
 ) -> dict[str, object]:
+    _manifest_input(RunStore.open(run_dir))
     from image2editable.agent import record_decision as record
 
     return record(run_dir, **kwargs)
@@ -111,6 +117,7 @@ def prepare_job(
     output_path: str | Path | None = None,
     slide_size: str = "both",
     lang: str = "ch",
+    agent_provider: str = "host",
 ) -> Path:
     input_type, paths = classify_inputs(inputs)
     prepare = {
@@ -125,6 +132,7 @@ def prepare_job(
         output_path=output_path,
         slide_size=slide_size,
         lang=lang,
+        agent_provider=agent_provider,
     )
 
 
@@ -228,7 +236,18 @@ def _manifest_input(
     input_type = input_record.get("type")
     if input_type not in {"images", "pdf", "pptx"}:
         raise RuntimeError(f"Unsupported input type: {input_type}")
+    _manifest_agent_provider(manifest)
     return manifest, input_type
+
+
+def _manifest_agent_provider(manifest: dict[str, Any]) -> str:
+    options = manifest.get("options")
+    if type(options) is not dict:
+        raise RuntimeError("Run manifest agent_provider requires options")
+    try:
+        return validate_agent_provider(options.get("agent_provider"))
+    except ValueError as error:
+        raise RuntimeError("Run manifest agent_provider is invalid") from error
 
 
 def _manifest_resource_policy(manifest: dict[str, Any]) -> dict[str, object]:
@@ -1362,6 +1381,7 @@ def convert(
     output_path: str | Path | None = None,
     slide_size: str = "both",
     lang: str = "ch",
+    agent_provider: str = "host",
 ) -> dict[str, Any]:
     prepared = prepare_job(
         inputs,
@@ -1369,5 +1389,6 @@ def convert(
         output_path=output_path,
         slide_size=slide_size,
         lang=lang,
+        agent_provider=agent_provider,
     )
     return run_job(prepared)

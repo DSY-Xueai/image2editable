@@ -13,6 +13,7 @@ from typing import BinaryIO, Literal, Sequence
 from PIL import Image
 import pypdfium2 as pdfium
 
+from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
 from image2editable.inputs import (
     new_job_id,
@@ -57,7 +58,9 @@ def prepare_pdf_job(
     output_path: str | Path | None = None,
     slide_size: str = "both",
     lang: str = "ch",
+    agent_provider: str = "host",
 ) -> Path:
+    agent_provider = validate_agent_provider(agent_provider)
     source_path = Path(source).resolve()
     if not source_path.is_file() or source_path.suffix.casefold() != ".pdf":
         raise ValueError(f"PDF input must be an existing .pdf file: {source_path}")
@@ -124,6 +127,7 @@ def prepare_pdf_job(
             },
             "output_format": "pptx",
             "options": {
+                "agent_provider": agent_provider,
                 "lang": lang,
                 "slide_size": slide_size,
                 "output_path": (

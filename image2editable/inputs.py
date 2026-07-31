@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
+from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
@@ -127,7 +128,9 @@ def prepare_image_job(
     output_path: str | Path | None = None,
     slide_size: str = "both",
     lang: str = "ch",
+    agent_provider: str = "host",
 ) -> Path:
+    agent_provider = validate_agent_provider(agent_provider)
     if slide_size not in {"original", "16:9", "both"}:
         raise ValueError(f"Unsupported slide_size: {slide_size}")
 
@@ -173,6 +176,7 @@ def prepare_image_job(
             "input": {"type": "images", "items": items},
             "output_format": "pptx",
             "options": {
+                "agent_provider": agent_provider,
                 "lang": lang,
                 "slide_size": slide_size,
                 "output_path": (

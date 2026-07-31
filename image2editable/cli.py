@@ -21,6 +21,11 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--lang", default="ch")
     parser.add_argument(
+        "--agent-provider",
+        choices=("host", "local"),
+        default="host",
+    )
+    parser.add_argument(
         "--slide-size",
         choices=("original", "16:9", "both"),
         default="both",
@@ -115,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_path=args.output,
                 slide_size=args.slide_size,
                 lang=args.lang,
+                agent_provider=args.agent_provider,
             )
         _print_json(summary)
         return 0
@@ -127,6 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_path=args.output,
                 slide_size=args.slide_size,
                 lang=args.lang,
+                agent_provider=args.agent_provider,
             )
         _print_json({"run_dir": str(Path(run_dir).resolve()), "status": "prepared"})
         return 0
