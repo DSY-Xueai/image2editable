@@ -1,6 +1,6 @@
 # Course
 
-## P2.3 Task 9 当前开发状态
+## P2.3 Task 9 已完成
 
 - 图片/PDF 页面已接入统一组件状态机：每页只初始化一次，Host 等待时安全退出，恢复时不重复初始分层；多页 PDF 严格串行。
 - 最终组装只读取状态机验收后的背景、重建图、文字掩码、组件图和逐文件 SHA-256；组件 alpha 扣除文字掩码以避免重影。
@@ -8,7 +8,18 @@
 - PPTX 先写同目录临时文件，实际重新打开并核对页数后再以 no-replace 方式发布；交付记录写入 `pptx_reopen=pass`。
 - 组装 accepted assets 与 component masks 使用已验签 bytes 快照；多 variant 先全部 staging/reopen 通过，再 no-replace 发布，发布异常会清理本轮已发布目标。
 - 本轮新增真实图片/PDF Host plan E2E：覆盖等待/恢复、真实动作执行与质量门禁、冻结/下一轮/父组件回退、同 gate version、单次最终组装、warning 和 no-overwrite/reopen。
-- Task9 指定回归集已验证：`524 passed, 7 skipped`；当前改动仍未提交，待控制者完成 spec/quality 审查。
+- Task9 指定回归集已验证：`524 passed, 7 skipped`，已本地提交。
+
+## P2.3 Task 10 已完成
+
+- 截图型 PPTX 的获批页面先进入共同组件状态机；Host 等待期间不创建 donor、不发布 PPTX，也不会提前启动 OCR/CV worker。
+- 整页截图使用确定性完整父组件初始化，避免仅为进入 Agent 边界就占用约 1 GiB 的视觉/OCR 子进程；后续仍由 Agent 在最多五轮内决定拆分、修复、合并或回退。
+- `ready_for_assembly` 只允许从已验签 `component_result.json` 读取组件图、掩码、重建图、文字掩码和文字对象；donor 组装不重新执行 CV/OCR/Agent。
+- 每个冻结视觉节点生成独立图片对象；可靠 `text_items` 生成文字框。没有可靠文字时明确记录 `raster_text_preserved`，不删除原图文字或伪装成可编辑文字。
+- result、graph、source、mask 和 accepted assets 均校验 Run 内相对路径、SHA-256、普通文件身份、硬链接/符号链接/重解析点与读取中变化；donor 组件、manifest 和 PPTX 使用 no-clobber 发布。
+- `preserved_with_warning` 页面直接保留原截图，不会再次进入旧 CV donor；PPTX patch 失败只回退受影响页面，原生对象、备注、z-order 和其他页面保持不变。
+- PPTX 初始化异常会写入失败状态并可恢复，不再把 Run 留在 `running`；第二轮及以后始终复用首轮绑定的 source 快照，避免 PNG 重编码导致 hash 漂移。
+- 最终全量验证：`1270 passed, 18 skipped`；Ruff 与 `git diff --check` 通过，测试后无 visual/OCR/SAM worker 残留。
 
 ## 当前项目状态
 
@@ -17,7 +28,7 @@
 - 图片与 PDF 进入同一套 OCR、视觉分层、背景修复和 PPTX 组装流程。
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
-- P2.3 Task 8 已实现：Host 计划进入每页最多五轮的组件重修状态机，通过组件立即冻结；提前停止或五轮仍失败时折叠到完整父组件。
+- P2.3 Task 10 已接通 PPTX 获批候选 → 组件状态机 → 已验收 donor → OOXML 原位替换；未通过质量门禁的页面保留原截图并给出 warning。
 
 ## P2.2 既有行为
 
@@ -132,22 +143,21 @@ image2editable run execute runs/pptx-job
 
 ## 真实文件验收
 
-- `test1.pptx`：两页均由 Agent 高置信替换，无回退、无告警。
-  - 第 1 页：1 张干净底图 + 35 个可编辑文字框。
-  - 第 2 页：1 张干净底图 + 26 个可编辑文字框。
-  - 输出：`tmp/p2-agent-test1-v2/final/output.pptx`
-- `1-Embedding与向量数据库.pdf` 第 2 页单页验收：
-  - 1 张干净底图 + 18 个可编辑文字框；27 个与文字冲突的浅灰组件被自动降级移除。
-  - 输出：`tmp/p2-agent-pdf-page2-v3/final/accepted.pptx`
-- 两份输出均可重新打开、无文字溢出；逐页渲染未见浅灰栅格残影或重复文字。
-- `test1.pptx` 源文件 SHA-256 仍为 `03415ac5973a91e5b0d462a796690f618267ff1c05b4eb00d5f7ab20fa92ae80`。
+- `test1.pptx`：两页真实 prepare/decision/Host handshake/两轮计划/质量门禁/父组件回退/PPTX 重开均完成。受控验收计划只重复 `accept` 完整父组件，不能证明语义拆分质量，因此两页按设计进入 `preserved_with_warning`，未误报可编辑，也未启动旧 CV donor。
+  - 输出：`tmp/task10-real-acceptance-20260802-v3/test1-run/final/output.pptx`
+  - 源与输出 SHA-256 均为 `03415ac5973a91e5b0d462a796690f618267ff1c05b4eb00d5f7ab20fa92ae80`。
+- `混合.pptx`：3 页、0 个合格整页截图候选；原生 shape ID、对象 XML hash、z-order、备注、页数和尺寸全部一致。
+  - 输出：`tmp/task10-real-acceptance-20260802-v3/mixed-run/final/output.pptx`
+  - 源与输出 SHA-256 均为 `bb7b11d24f9db74f0a31a52809bfbaa46ca275f4a49085a3e0a1fbe8668ecc0d`。
+- `research_layout_demo_3pages.pdf` 已完成 3 页低资源渲染、输入准备和页面请求检查；本轮不重复执行约 2.2 GiB 的重型分层，避免再次占满用户内存。
+- 验收记录：`tmp/task10-real-acceptance-20260802-v3/acceptance_summary.json`；目录约 85.7 MB，结束后无视觉、OCR 或 SAM 子进程残留。
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–8 已完成 Provider、可恢复视觉资产、组件树/所有权、五轮证据包、Host 握手/严格计划、确定性动作执行、组件级质量门禁和最多五轮的修复状态机。Task 9 尚需把初始分层和逐轮执行接入统一运行时。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–10 已完成统一运行时、最多五轮重修、最终组装和截图型 PPTX 原生对象保护。下一阶段是 Task 11 的本地模型目录/硬件推荐与显式安装。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，由 Task 8 重修或折叠到完整父组件。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
-- 实测单页 PDF 转换的 Python 工作集合计约 2.2 GiB；`test1.pptx` 两页运行目录约 35.6 MiB，未出现内存或磁盘 100%。
+- 实测单页 PDF 重型转换的 Python 工作集合计约 2.2 GiB；截图型 PPTX 的确定性 Agent 入口不启动 OCR/CV，不能证明语义拆分时会安全 warning，而不会为追求通过率生成伪可编辑对象。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

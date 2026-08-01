@@ -26,7 +26,7 @@ from image2editable.legacy import (
     _safe_rmtree,
     advance_legacy_page,
     assemble_legacy_results,
-    execute_legacy,
+    execute_legacy,  # noqa: F401 - retained as the legacy-boundary test seam
     initialize_legacy_page,
 )
 from image2editable.resources import (
@@ -1045,9 +1045,24 @@ def _run_job(
     )
     apply_resource_policy(resource_policy)
     if input_type == "pptx":
-        page_ids = _pptx_page_ids(
-            manifest, page_jobs, PageStatus.ANALYZED
-        )
+        try:
+            page_ids = _pptx_page_ids(manifest, page_jobs, PageStatus.ANALYZED)
+        except RuntimeError:
+            # A resumed Host run has durable page states (processing,
+            # awaiting_agent or validated) rather than the prepare-time
+            # ``analyzed`` marker.  Continue only with known page states.
+            allowed = {
+                PageStatus.ANALYZED.value, PageStatus.PROCESSING.value,
+                PageStatus.AWAITING_AGENT.value, PageStatus.VALIDATED.value,
+                PageStatus.PRESERVED_WITH_WARNING.value,
+            }
+            pages = page_jobs.get("pages", {})
+            if set(pages) != set(manifest.get("pages", [])) or any(
+                page.get("status") not in allowed
+                for page in pages.values()
+            ):
+                raise
+            page_ids = list(manifest["pages"])
         (
             pptx_slide_count,
             pptx_preserved_objects,
@@ -1055,24 +1070,107 @@ def _run_job(
             pptx_input_sha256,
         ) = _pptx_manifest_expectations(manifest, page_jobs)
         validate_pptx_inventories(store, manifest)
-        pptx_shadow_plans = shadow_replacement_plans(store, manifest)
-        pptx_expected_output = _pptx_output_path(store, manifest)
-        pptx_output_existed = _path_entry_exists(pptx_expected_output)
+        # Component repair may pause at the Agent boundary.  Enter RUNNING
+        # only after all immutable PPTX input/inventory checks pass so a
+        # rejected prepare remains recoverable in PREPARED.
+        store.transition_run(RunStatus.RUNNING)
+        try:
+            # Advance any durable component-reconstruction state before asking
+            # the shadow planner for donor/OOXML work.  Host rounds therefore
+            # remain at the durable boundary until assembly-ready.
+            for page_id in page_ids:
+                state_path = (
+                    store.root / "pages" / page_id / "reconstruction"
+                    / "component_state.json"
+                )
+                request_path = (
+                    store.root / "pages" / page_id / "page_request.json"
+                )
+                if state_path.is_file() or not request_path.is_file():
+                    continue
+                # An approved page request is the only entry point for
+                # component extraction.  Full-page candidates use the
+                # deterministic layer builder; other approved candidates use
+                # the existing isolated CV initializer.
+                initialize_legacy_page(store, page_id, _lease=_lease)
+            existing_component_pages = [
+                page_id
+                for page_id in page_ids
+                if (
+                    store.root / "pages" / page_id / "reconstruction"
+                    / "component_state.json"
+                ).is_file()
+            ]
+            if existing_component_pages:
+                _ensure_legacy_pages_processing(store, existing_component_pages)
+                waiting = _advance_legacy_pages(
+                    store, manifest, existing_component_pages, _lease
+                )
+                if waiting is not None:
+                    return waiting
+            # Do not enter the PPTX shadow pipeline while a Host component
+            # round is awaiting its plan.
+            awaiting_components = []
+            for page_id in page_ids:
+                state_path = (
+                    store.root / "pages" / page_id / "reconstruction"
+                    / "component_state.json"
+                )
+                if state_path.is_file():
+                    component_state = store.read_json(
+                        f"pages/{page_id}/reconstruction/component_state.json"
+                    )
+                    validate_component_repair_state(component_state)
+                    if (
+                        component_state.get("provider") == "host"
+                        and component_state.get("phase") not in {
+                            "ready_for_assembly", "preserved_with_warning"
+                        }
+                    ):
+                        awaiting_components.append(page_id)
+            if awaiting_components:
+                _transition_pages(
+                    store, awaiting_components, PageStatus.AWAITING_AGENT
+                )
+                store.transition_run(RunStatus.AWAITING_AGENT)
+                summary = _legacy_waiting_summary(
+                    store, manifest, awaiting_components[0],
+                    {"status": "awaiting_agent"},
+                )
+                store.write_json("run_summary.json", summary)
+                return summary
+            pptx_shadow_plans = shadow_replacement_plans(store, manifest)
+            pptx_expected_output = _pptx_output_path(store, manifest)
+            pptx_output_existed = _path_entry_exists(pptx_expected_output)
+        except Exception as error:
+            cleanup_error = _record_failure(store, page_ids, error)
+            if cleanup_error is not None:
+                raise error from cleanup_error
+            raise
     else:
         page_ids = list(page_jobs["pages"])
         pptx_shadow_plans = []
         pptx_expected_output = None
         pptx_output_existed = False
-    store.transition_run(RunStatus.RUNNING)
+    if store.read_json("run_state.json")["status"] != RunStatus.RUNNING.value:
+        store.transition_run(RunStatus.RUNNING)
     pptx_output_published = False
     pptx_output_record = None
 
     try:
         if input_type == "pptx":
             if pptx_shadow_plans:
+                current_pages = store.read_json("page_jobs.json")["pages"]
                 _transition_pages(
                     store,
-                    [plan["page_id"] for plan in pptx_shadow_plans],
+                    [
+                        plan["page_id"] for plan in pptx_shadow_plans
+                        if current_pages[plan["page_id"]]["status"]
+                        not in {
+                            PageStatus.VALIDATED.value,
+                            PageStatus.PRESERVED_WITH_WARNING.value,
+                        }
+                    ],
                     PageStatus.PROCESSING,
                 )
             manifest_token = _PPTX_EXECUTION_MANIFEST.set(manifest)
@@ -1138,22 +1236,23 @@ def _run_job(
                     page_id = result["page_id"]
                     status = PageStatus(result["status"])
                     if status is PageStatus.REPLACED:
-                        _transition_pages(
-                            store,
-                            [page_id],
-                            PageStatus.VALIDATED,
+                        current_status = PageStatus(
+                            store.read_json("page_jobs.json")["pages"][page_id]["status"]
                         )
-                        _transition_pages(
-                            store,
-                            [page_id],
-                            PageStatus.REPLACED,
-                        )
+                        if current_status is not PageStatus.VALIDATED:
+                            _transition_pages(store, [page_id], PageStatus.VALIDATED)
+                        if current_status is not PageStatus.REPLACED:
+                            _transition_pages(store, [page_id], PageStatus.REPLACED)
                     elif status is PageStatus.PRESERVED_WITH_WARNING:
-                        _transition_pages(
-                            store,
-                            [page_id],
-                            PageStatus.PRESERVED_WITH_WARNING,
+                        current_status = PageStatus(
+                            store.read_json("page_jobs.json")["pages"][page_id]["status"]
                         )
+                        if current_status is not PageStatus.PRESERVED_WITH_WARNING:
+                            _transition_pages(
+                                store,
+                                [page_id],
+                                PageStatus.PRESERVED_WITH_WARNING,
+                            )
                     else:
                         _transition_pages(
                             store,

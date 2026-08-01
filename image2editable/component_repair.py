@@ -774,6 +774,12 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "graph_ref": state["graph_ref"], "round_history": state["round_history"],
         "fallback": state["fallback"],
         "accepted_asset_refs": quality["input_refs"],
+        "text_items": quality.get("text_items", []),
+        "raster_text_preserved": not bool(quality.get("text_items", [])),
+        "warning": (
+            "accepted text was preserved inside raster component images"
+            if not quality.get("text_items", []) else None
+        ),
         "delivery_checks": {"pptx_reopen": "unknown"},
     }
     payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"

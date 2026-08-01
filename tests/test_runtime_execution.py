@@ -1434,16 +1434,17 @@ def test_run_job_executes_agent_approved_shadow_plan(
 
     summary = runtime.run_job(run_dir)
 
-    assert len(calls) == 1
-    assert calls[0][0]["page_id"] == "page_001"
-    assert summary["replaced_pages"] == 1
+    # An approved page request first enters the durable component-repair
+    # boundary.  Until the Host has supplied an accepted result, shadow
+    # execution and final output publication are forbidden.
+    assert summary["status"] == "awaiting_agent"
+    assert calls == []
+    store = RunStore.open(run_dir)
     assert (
-        RunStore.open(run_dir)
-        .read_json("page_jobs.json")["pages"]["page_001"]["status"]
-        == "replaced"
+        store.read_json("page_jobs.json")["pages"]["page_001"]["status"]
+        == "awaiting_agent"
     )
-    assert runtime.run_job(run_dir) == summary
-    assert len(calls) == 1
+    assert not (run_dir / "final" / "output.pptx").exists()
 
 
 def test_completed_pptx_run_is_idempotent_without_recopy(

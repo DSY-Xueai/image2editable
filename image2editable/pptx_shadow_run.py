@@ -15,7 +15,7 @@ from image2editable.pptx_input import (
     _publish_pptx_no_clobber,
     scan_pptx,
 )
-from image2editable.pptx_reconstruct import build_reconstruction_donor
+from image2editable.pptx_reconstruct import build_reconstruction_donor, build_reconstruction_donor_from_result
 from image2editable.pptx_shadow import patch_slide_background
 
 
@@ -98,13 +98,32 @@ def _run_page(
         donor = work_root / "donor.pptx"
         if plan.get("conflict_warning"):
             raise RuntimeError(plan["conflict_warning"])
-        reconstruction = build_reconstruction_donor(
-            plan["image_path"],
-            donor,
-            work_root,
-            decision=plan["decision"],
-            lang=lang,
-        )
+        # Host runs may only consume the durable component-result boundary.
+        # While the Host Agent is awaiting a plan there is no accepted result;
+        # never fall back to the legacy CV/OCR donor builder in that state.
+        if plan.get("provider") == "host" and not plan.get("component_result_path"):
+            raise RuntimeError(
+                "host shadow replacement requires an accepted component result"
+            )
+        if plan.get("component_result_path"):
+            donor_kwargs = {
+                "source_screenshot_sha256": plan["source_screenshot_sha256"],
+                "provider": plan.get("provider", "host"),
+                "initial_component_count": plan.get("initial_component_count", 0),
+            }
+            if plan.get("component_result_sha256") is not None:
+                donor_kwargs.update({
+                    "expected_result_sha256": plan["component_result_sha256"],
+                    "run_root": run_root,
+                })
+            reconstruction = build_reconstruction_donor_from_result(
+                plan["component_result_path"], donor, work_root, **donor_kwargs
+            )
+        else:
+            reconstruction = build_reconstruction_donor(
+                plan["image_path"], donor, work_root,
+                decision=plan["decision"], lang=lang,
+            )
         replacement = patch_slide_background(
             current,
             donor,

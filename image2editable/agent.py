@@ -121,6 +121,50 @@ def shadow_replacement_plans(
             "work_root": str(work_root),
             "decision": decision,
         }
+        state_path = store.root / "pages" / page_id / "reconstruction" / "component_state.json"
+        if state_path.is_file():
+            state = store.read_json(
+                f"pages/{page_id}/reconstruction/component_state.json"
+            )
+            if state.get("phase") == "ready_for_assembly" and state.get("result_ref"):
+                result_ref = state["result_ref"]
+                if (
+                    not isinstance(result_ref, dict)
+                    or set(result_ref) != {"path", "sha256"}
+                    or not isinstance(result_ref["path"], str)
+                    or Path(result_ref["path"]).is_absolute()
+                ):
+                    raise RuntimeError("component result reference is invalid")
+                result_path = (store.root / Path(result_ref["path"])).resolve()
+                if (
+                    not result_path.is_relative_to(store.root.resolve())
+                    or not result_path.is_file()
+                    or sha256_file(result_path) != result_ref["sha256"]
+                ):
+                    raise RuntimeError("component result reference is invalid")
+                plan.update({
+                    "provider": state.get("provider", "host"),
+                    "component_result_path": str(
+                        result_path
+                    ),
+                    "component_result_sha256": result_ref["sha256"],
+                    # The accepted result is bound to the immutable evidence
+                    # ``source.png`` snapshot.  That PNG can be re-encoded
+                    # from the original PPTX media, so its hash is not
+                    # necessarily the container-media hash in page_request.
+                    "source_screenshot_sha256": state["source_sha256"],
+                    "initial_component_count": state.get(
+                        "initial_component_count", 0
+                    ),
+                })
+            elif state.get("phase") == "preserved_with_warning":
+                plan.update({
+                    "provider": state.get("provider", "host"),
+                    "conflict_warning": (
+                        "component reconstruction preserved the original page: "
+                        f"{state.get('stop_reason') or 'quality gate failed'}"
+                    ),
+                })
         if len(shadow_decisions) > 1:
             plan["conflict_warning"] = (
                 "multiple Agent-approved screenshots on one page"
@@ -253,11 +297,18 @@ def _record_decision(
     document["decisions"].append(record)
     store.write_json(path, document)
     if eligible:
+        full_page_candidate = (
+            type(candidate.get("slide_coverage")) is float
+            and candidate.get("slide_coverage") == 1.0
+        )
         page_request = {
             "schema_version": SCHEMA_VERSION,
             "page_id": page_id,
             "source": (Path("pages") / page_id / candidate["image"]).as_posix(),
             "sha256": candidate["image_sha256"],
+            "full_page_candidate": full_page_candidate,
+            "source_shape_id": candidate["source_shape_id"],
+            "slide_coverage": candidate["slide_coverage"],
         }
         store.write_json(
             Path("pages") / page_id / "page_request.json", page_request
