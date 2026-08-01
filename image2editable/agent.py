@@ -252,6 +252,16 @@ def _record_decision(
     }
     document["decisions"].append(record)
     store.write_json(path, document)
+    if eligible:
+        page_request = {
+            "schema_version": SCHEMA_VERSION,
+            "page_id": page_id,
+            "source": (Path("pages") / page_id / candidate["image"]).as_posix(),
+            "sha256": candidate["image_sha256"],
+        }
+        store.write_json(
+            Path("pages") / page_id / "page_request.json", page_request
+        )
     return record
 
 
