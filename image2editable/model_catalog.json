@@ -1,0 +1,14 @@
+{
+  "catalog_version": 1,
+  "models": [
+    {
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "revision": "main",
+      "stability": "experimental",
+      "minimum_vram_gib": 8,
+      "minimum_ram_gib": 16,
+      "required_free_disk_gib": 8,
+      "priority": 100
+    }
+  ]
+}

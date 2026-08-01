@@ -21,6 +21,16 @@
 - PPTX 初始化异常会写入失败状态并可恢复，不再把 Run 留在 `running`；第二轮及以后始终复用首轮绑定的 source 快照，避免 PNG 重编码导致 hash 漂移。
 - 最终全量验证：`1270 passed, 18 skipped`；Ruff 与 `git diff --check` 通过，测试后无 visual/OCR/SAM worker 残留。
 
+## P2.3 Task 11 已完成
+
+- 新增版本化本地模型目录；首个 `Qwen/Qwen3-VL-2B-Instruct@main` 条目保持 `experimental`，真实 Local 验收前不标记 stable、不伪造固定 commit。
+- `models recommend --json` 只读取本地目录并探测 CUDA、显存、内存和缓存所在磁盘，不访问网络、不创建模型缓存；结果包含兼容性、原因、预计空间和缓存路径。
+- `models install agent` 在联网前显示模型、revision、实验性状态、空间和硬件结论；必须交互确认或显式传入 `--yes`，磁盘不足或未确认时下载调用次数为零。
+- 下载使用 Hugging Face 本地 snapshot 缓存；完成后记录解析出的 commit SHA、逐文件大小/SHA-256 和 receipt。`models status` 只在本地复核 receipt、snapshot 边界与文件校验值。
+- 本地 Agent 依赖位于 `agent-local` 可选依赖；CLI 和 Host Runtime 都惰性隔离模型管理模块，Host 转换不导入 PyTorch、不探测或下载本地模型。
+- 本轮只实现模型管理边界，没有下载模型，也尚未把 Local Provider 接入组件推理；该执行链属于 Task 12。
+- Task 11 指定回归：`94 passed, 1 skipped`；最终全量回归：`1297 passed, 19 skipped`。Windows 仅跳过当前环境无权限创建文件软链接的兼容测试，Hugging Face copy fallback 与其余 receipt 校验均通过。
+
 ## 当前项目状态
 
 - 当前分支：`codex/agent-runtime-foundation`；只保留本地提交，不推送、不合并 `main`。
@@ -29,6 +39,7 @@
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
 - P2.3 Task 10 已接通 PPTX 获批候选 → 组件状态机 → 已验收 donor → OOXML 原位替换；未通过质量门禁的页面保留原截图并给出 warning。
+- P2.3 Task 11 已提供本地模型推荐、显式安装和完整性状态检查；Host 模式仍完全不依赖本地模型，Local 推理尚未启用。
 
 ## P2.2 既有行为
 
@@ -126,11 +137,16 @@
 - 共享图片/PDF 清理：`image_to_ppt.py`
 - 背景、前景与质量门禁：`scripts/bg_model.py`、`scripts/fg_extract.py`、`scripts/visual_segment.py`
 - Skill 镜像：`skills/image-to-ppt/scripts/`
+- 本地模型目录与管理：`image2editable/model_catalog.json`、`image2editable/models.py`
+- CLI 与可选依赖：`image2editable/cli.py`、`pyproject.toml`
 
 ## 运行入口
 
 ```bash
 image2editable doctor
+image2editable models recommend --json
+image2editable models status
+image2editable models install agent
 image2editable convert input.pdf -o output.pptx --slide-size original --agent-provider host
 image2editable convert images/ -o output.pptx --slide-size 16:9
 image2editable prepare input.pptx --run-dir runs/pptx-job
@@ -154,7 +170,8 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–10 已完成统一运行时、最多五轮重修、最终组装和截图型 PPTX 原生对象保护。下一阶段是 Task 11 的本地模型目录/硬件推荐与显式安装。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–11 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护和本地模型管理。下一阶段是 Task 12 的 Local Provider 隔离推理。
+- 本地模型目录目前仍为 `revision=main`、`stability=experimental`；只有 Task 12/13 的真实图片、PDF、图片版 PPTX 验收通过后，才固定验收 commit 并调整稳定性。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，由 Task 8 重修或折叠到完整父组件。

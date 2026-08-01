@@ -31,6 +31,12 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "dynamic": ["dependencies"],
         "scripts": {"image2editable": "image2editable.cli:main"},
         "optional-dependencies": {
+            "agent-local": [
+                "huggingface-hub>=0.34.0",
+                "torch>=2.5.0",
+                "transformers>=4.57.0",
+                "accelerate>=1.8.0",
+            ],
             "psd": ["aspose-psd>=26.5.0"],
             "test": [
                 "pytest",
@@ -48,6 +54,9 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "image2editable*",
         "scripts*",
     ]
+    assert data["tool"]["setuptools"]["package-data"] == {
+        "image2editable": ["model_catalog.json"]
+    }
     assert data["tool"]["setuptools"]["dynamic"]["dependencies"] == {
         "file": ["requirements.txt"]
     }
@@ -486,3 +495,117 @@ def test_cli_agent_next_and_record_emit_only_json_to_stdout(
     assert json.loads(capsys.readouterr().out) == {"kind": "x"}
     assert cli.main(["agent", "record", "run", "--plan", str(plan)]) == 0
     assert json.loads(capsys.readouterr().out) == {"status": "recorded"}
+
+
+def test_cli_models_recommend_json_is_routed_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from image2editable import models
+
+    profile = models.HardwareProfile(8, 16, 20, True)
+    expected = {
+        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+        "compatible": True,
+    }
+    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
+    monkeypatch.setattr(
+        models,
+        "recommend_agent_model",
+        lambda hardware, cache_dir=None: expected,
+    )
+
+    assert cli.main(["models", "recommend", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_cli_models_install_yes_displays_plan_before_installing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from image2editable import models
+
+    profile = models.HardwareProfile(8, 16, 20, True)
+    plan = {
+        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+        "revision": "main",
+        "required_free_disk_gib": 8,
+        "cache_dir": "cache",
+        "stability": "experimental",
+        "compatible": True,
+    }
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
+    monkeypatch.setattr(
+        models,
+        "recommend_agent_model",
+        lambda hardware, cache_dir=None: plan,
+    )
+
+    def install(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"model_id": plan["model_id"], "resolved_revision": "a" * 40}
+
+    monkeypatch.setattr(models, "install_agent_model", install)
+
+    assert cli.main(["models", "install", "agent", "--yes"]) == 0
+    captured = capsys.readouterr()
+    assert calls == [
+        {
+            "cache_dir": None,
+            "confirmed": True,
+            "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+            "revision": "main",
+        }
+    ]
+    assert json.loads(captured.out)["resolved_revision"] == "a" * 40
+    assert "Qwen/Qwen3-VL-2B-Instruct" in captured.err
+    assert "experimental" in captured.err
+
+
+def test_cli_models_install_cancelled_before_installer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from image2editable import models
+
+    profile = models.HardwareProfile(8, 16, 20, True)
+    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
+    monkeypatch.setattr(
+        models,
+        "recommend_agent_model",
+        lambda hardware, cache_dir=None: {
+            "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+            "revision": "main",
+            "required_free_disk_gib": 8,
+            "cache_dir": "cache",
+            "stability": "experimental",
+            "compatible": True,
+        },
+    )
+    monkeypatch.setattr(
+        models,
+        "install_agent_model",
+        lambda **kwargs: pytest.fail("installer must not run after cancellation"),
+    )
+    monkeypatch.setattr("builtins.input", lambda prompt: "no")
+
+    assert cli.main(["models", "install", "agent"]) == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "cancelled"}
+
+
+def test_cli_models_status_prints_local_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from image2editable import models
+
+    expected = {
+        "installed": False,
+        "valid": False,
+        "install_command": "image2editable models install agent",
+    }
+    monkeypatch.setattr(models, "model_status", lambda cache_dir=None: expected)
+
+    assert cli.main(["models", "status"]) == 0
+    assert json.loads(capsys.readouterr().out) == expected

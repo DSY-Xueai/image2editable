@@ -104,12 +104,36 @@ def build_parser() -> argparse.ArgumentParser:
     agent_record_parser.add_argument("run_dir")
     agent_record_parser.add_argument("--plan", required=True)
 
+    models_parser = subparsers.add_parser("models")
+    models_subparsers = models_parser.add_subparsers(
+        dest="models_command",
+        required=True,
+    )
+    models_recommend_parser = models_subparsers.add_parser("recommend")
+    models_recommend_parser.add_argument("--json", action="store_true")
+    models_install_parser = models_subparsers.add_parser("install")
+    models_install_parser.add_argument("target", choices=("agent",))
+    models_install_parser.add_argument("--yes", action="store_true")
+    models_subparsers.add_parser("status")
+
     subparsers.add_parser("doctor")
     return parser
 
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _models_module():
+    from image2editable import models
+
+    return models
+
+
+def _print_model_plan(plan: dict[str, object]) -> None:
+    print(
+        json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True), file=sys.stderr
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -119,6 +143,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = check_environment()
         _print_json(report)
         return 0 if report["ready"] else 1
+
+    if args.command == "models":
+        models = _models_module()
+        if args.models_command == "recommend":
+            hardware = models.detect_hardware()
+            recommendation = models.recommend_agent_model(hardware)
+            if args.json:
+                _print_json(recommendation)
+            else:
+                _print_model_plan(recommendation)
+            return 0
+        if args.models_command == "status":
+            _print_json(models.model_status())
+            return 0
+        if args.models_command == "install":
+            hardware = models.detect_hardware()
+            plan = models.recommend_agent_model(hardware)
+            _print_model_plan(plan)
+            confirmed = args.yes
+            if not confirmed:
+                print("确认下载上述实验性模型？[y/N] ", file=sys.stderr, end="")
+                try:
+                    confirmed = input("").strip().casefold() in {"y", "yes"}
+                except EOFError:
+                    confirmed = False
+            if not confirmed:
+                _print_json({"status": "cancelled"})
+                return 1
+            receipt = models.install_agent_model(
+                cache_dir=None,
+                confirmed=True,
+                model_id=plan["model_id"],
+                revision=plan["revision"],
+            )
+            _print_json(receipt)
+            return 0
 
     if args.command == "convert":
         with redirect_stdout(sys.stderr):
