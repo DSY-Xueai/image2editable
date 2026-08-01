@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from datetime import datetime
 import multiprocessing
 import os
@@ -12,6 +14,7 @@ from typing import Any
 
 import pytest
 from PIL import Image
+from pypdf import PdfWriter
 from pptx import Presentation
 
 from image2editable import host_agent, legacy, runtime
@@ -20,6 +23,797 @@ from image2editable.execution import ExecutionLease
 from image2editable.pptx_input import prepare_pptx_job
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
+
+
+def _component_source(path: Path) -> None:
+    image = Image.new("RGB", (32, 32), "black")
+    for y in range(8, 24):
+        for x in range(8, 24):
+            image.putpixel((x, y), (255, 255, 255))
+    image.save(path)
+
+
+def _install_component_e2e_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    baked_background_pages: set[str] | None = None,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    prepared_pages: dict[str, dict[str, Any]] = {}
+    initial_calls: list[str] = []
+    assembly_calls: list[str] = []
+    baked_background_pages = baked_background_pages or set()
+
+    class BoundaryImageModule:
+        @staticmethod
+        def prepare_component_layers(source, work_dir, **kwargs):
+            work = Path(work_dir)
+            page_id = work.parent.parent.name
+            initial_calls.append(page_id)
+            work.mkdir(parents=True)
+            background = work / "background.png"
+            difference = work / "difference.png"
+            text_mask = work / "text-mask.png"
+            component_mask = work / "component-mask.png"
+            component = work / "component.png"
+            if page_id in baked_background_pages:
+                Image.open(source).convert("RGB").save(background)
+            else:
+                Image.new("RGB", (32, 32), "black").save(background)
+            Image.new("RGB", (32, 32), "black").save(difference)
+            Image.new("L", (32, 32), 0).save(text_mask)
+            mask = Image.new("L", (32, 32), 0)
+            for y in range(8, 24):
+                for x in range(8, 24):
+                    mask.putpixel((x, y), 255)
+            mask.save(component_mask)
+            Image.new("RGBA", (16, 16), "white").save(component)
+            state_path = work / "prepared-page.json"
+            state_path.write_text("{}", encoding="utf-8")
+            prepared = {
+                "state_path": str(state_path),
+                "initial_component_count": 1,
+                "original_image_path": str(Path(source).resolve()),
+                "background_original_path": str(background),
+                "background_difference_path": str(difference),
+                "_text_mask_path": str(text_mask),
+                "_element_mask_paths": [str(component_mask)],
+                "components": [{
+                    "path": str(component), "x": 8, "y": 8,
+                    "w": 16, "h": 16, "z_index": 0,
+                }],
+                "img_width": 32, "img_height": 32,
+                "canvas_width": 32, "canvas_height": 32,
+                "content_offset_x": 0, "content_offset_y": 0,
+                "text_items": [],
+            }
+            prepared_pages[page_id] = prepared
+            return prepared
+
+        @staticmethod
+        def load_component_layers(state_path):
+            return prepared_pages[Path(state_path).parents[1].parent.name]
+
+        @staticmethod
+        def _assemble_prepared_slide(slide, output, *args):
+            assembly_calls.append("single")
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(output)
+            return str(output)
+
+        @staticmethod
+        def assemble_pptx_multi(slides, output, **kwargs):
+            assembly_calls.append("multi")
+            presentation = Presentation()
+            for _ in slides:
+                presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(output)
+            return str(output)
+
+    real_import_module = legacy.importlib.import_module
+    monkeypatch.setattr(
+        legacy.importlib,
+        "import_module",
+        lambda name: (
+            BoundaryImageModule
+            if name == "image_to_ppt"
+            else real_import_module(name)
+        ),
+    )
+    monkeypatch.setattr(
+        "scripts.sam_worker.run_component_prompt_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("SAM must not run for accept/fallback plans")
+        ),
+    )
+    return prepared_pages, initial_calls, assembly_calls
+
+
+def _record_current_component_plan(
+    run_dir: Path, plan_path: Path, actions: list[dict[str, Any]]
+) -> None:
+    store = RunStore.open(run_dir)
+    summary = store.read_json("run_summary.json")
+    page_id = summary["current_page"]
+    state = store.read_json(
+        f"pages/{page_id}/reconstruction/component_state.json"
+    )
+    request_ref = state["current_round"]["request_ref"]
+    plan = {
+        "schema_version": 1,
+        "kind": "component_plan",
+        "page_id": page_id,
+        "provider": "host",
+        "repair_round": state["repair_round"],
+        "request_sha256": request_ref["sha256"],
+        "actions": actions,
+    }
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    runtime.record_host_agent_plan(run_dir, plan_path)
+
+
+def _accept_action(component_id: str = "component_0001") -> dict[str, Any]:
+    return {
+        "action": "accept",
+        "object_ids": [component_id],
+        "parameters": {},
+        "confidence": 0.95,
+        "evidence": ["component boundary is complete"],
+    }
+
+
+def _write_mock_component_state(store: RunStore, page_id: str) -> None:
+    reference = {"path": "mock-artifact.json", "sha256": "0" * 64}
+    store.write_json(
+        f"pages/{page_id}/reconstruction/component_state.json",
+        {
+            "schema_version": 1, "page_id": page_id, "provider": "host",
+            "source_sha256": "1" * 64, "initial_component_count": 0,
+            "quality_gate_version": 1, "revision": 1,
+            "phase": "awaiting_plan", "status": "active",
+            "repair_round": 1, "plan_count": 0, "stop_reason": None,
+            "graph_ref": reference,
+            "current_round": {
+                "round": 1, "request_ref": reference,
+                "plan_ref": None, "execution_ref": None, "quality_ref": None,
+            },
+            "frozen": {}, "candidate_ids": [], "failed_ids": [],
+            "fallback": {"status": "none", "parent_ids": []},
+            "last_normalized_plan_sha256": None, "result_ref": None,
+            "delivery_checks": {"pptx_reopen": "unknown"},
+            "updated_at": "now", "round_history": [], "parent_assets": {},
+            "fallback_graph_ref": None, "fallback_quality_ref": None,
+            "fallback_input_refs": None,
+        },
+    )
+
+
+def test_image_component_plan_e2e_pauses_then_assembles_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _, initial_calls, assembly_calls = _install_component_e2e_boundaries(monkeypatch)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", slide_size="16:9",
+        agent_provider="host",
+    )
+
+    waiting = runtime.run_job(run_dir)
+
+    assert waiting["status"] == "awaiting_agent"
+    assert waiting["pending_components"] == 1
+    assert waiting["frozen_components"] == 0
+    assert initial_calls == ["page_001"]
+    assert assembly_calls == []
+    status = runtime.get_status(run_dir)
+    assert status["current_page"] == "page_001"
+    assert status["repair_round"] == 1
+    assert status["pending_components"] == 1
+    assert Path(status["diagnostics"]).is_absolute()
+
+    _record_current_component_plan(
+        run_dir, tmp_path / "image-plan.json", [_accept_action()]
+    )
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert completed["quality_gate_version"] == runtime.COMPONENT_QUALITY_GATE_VERSION
+    assert initial_calls == ["page_001"]
+    assert assembly_calls == ["single"]
+    result = RunStore.open(run_dir).read_json(
+        "pages/page_001/reconstruction/component_result.json"
+    )
+    assert result["status"] == "ready_for_assembly"
+    assert result["final_component_ids"] == ["component_0001"]
+
+
+def test_pdf_component_plan_e2e_is_serial_and_falls_back_before_one_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import image2editable.pdf_input as pdf_input
+
+    source = tmp_path / "source.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=320, height=180)
+    writer.add_blank_page(width=320, height=180)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    def render_pdf(source_path, outputs, *, profile):
+        records = []
+        for index, output in enumerate(outputs):
+            target = Path(output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _component_source(target)
+            records.append({
+                "page_index": index, "page_number": index + 1,
+                "width_pt": 320.0, "height_pt": 180.0, "rotation": 0,
+                "media_box": [0.0, 0.0, 320.0, 180.0],
+                "crop_box": [0.0, 0.0, 320.0, 180.0], "profile": profile,
+                "target_dpi": 144, "effective_dpi": 144.0, "scale": 2.0,
+                "reasons": [], "pixel_width": 32, "pixel_height": 32,
+                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+                "renderer": "test-boundary", "renderer_version": "1",
+            })
+        return records
+
+    monkeypatch.setattr(pdf_input, "render_pdf_document", render_pdf)
+    _, initial_calls, assembly_calls = _install_component_e2e_boundaries(
+        monkeypatch, baked_background_pages={"page_002"}
+    )
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", slide_size="16:9",
+        agent_provider="host",
+    )
+
+    first_wait = runtime.run_job(run_dir)
+    assert first_wait["current_page"] == "page_001"
+    assert initial_calls == ["page_001"]
+    assert assembly_calls == []
+
+    _record_current_component_plan(
+        run_dir, tmp_path / "page-1-plan.json", [_accept_action()]
+    )
+    second_wait = runtime.run_job(run_dir)
+    assert second_wait["current_page"] == "page_002"
+    assert second_wait["repair_round"] == 1
+    assert initial_calls == ["page_001", "page_002"]
+    assert assembly_calls == []
+
+    _record_current_component_plan(
+        run_dir, tmp_path / "page-2-round-1.json", [_accept_action()]
+    )
+    third_wait = runtime.run_job(run_dir)
+    assert third_wait["current_page"] == "page_002"
+    assert third_wait["repair_round"] == 2
+    assert initial_calls == ["page_001", "page_002"]
+    assert assembly_calls == []
+
+    _record_current_component_plan(
+        run_dir, tmp_path / "page-2-round-2.json", []
+    )
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert completed["quality_gate_version"] == runtime.COMPONENT_QUALITY_GATE_VERSION
+    assert initial_calls == ["page_001", "page_002"]
+    assert assembly_calls == ["multi"]
+    store = RunStore.open(run_dir)
+    page_1_state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    page_2_state = store.read_json("pages/page_002/reconstruction/component_state.json")
+    page_2_delivery = store.read_json(
+        "pages/page_002/reconstruction/component_delivery.json"
+    )
+    assert (
+        page_1_state["quality_gate_version"]
+        == page_2_state["quality_gate_version"]
+    )
+    assert page_2_state["status"] == "preserved_with_warning"
+    assert page_2_state["fallback"]["status"] == "warning"
+    assert "full source image" in page_2_delivery["warning"]
+
+
+def test_image_host_pauses_without_assembly_or_completed_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", agent_provider="host"
+    )
+    calls = {"initialize": 0, "assemble": 0}
+
+    def initialize(store: RunStore, page_id: str, *, _lease=None) -> dict:
+        calls["initialize"] += 1
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir(parents=True, exist_ok=True)
+        _write_mock_component_state(store, page_id)
+        return {"status": "request_published", "page_id": page_id}
+
+    monkeypatch.setattr(runtime, "initialize_legacy_page", initialize, raising=False)
+    monkeypatch.setattr(
+        runtime, "advance_legacy_page",
+        lambda store, page_id, **kwargs: {"status": "awaiting_agent", "page_id": page_id},
+        raising=False,
+    )
+
+    def assemble(store: RunStore) -> dict:
+        calls["assemble"] += 1
+        raise AssertionError("assembly must not run while Host is waiting")
+
+    monkeypatch.setattr(runtime, "assemble_legacy_results", assemble, raising=False)
+    monkeypatch.setattr(
+        runtime, "execute_legacy",
+        lambda store: (_ for _ in ()).throw(
+            AssertionError("one-shot legacy execution must not run")
+        ),
+    )
+
+    summary = runtime.run_job(run_dir)
+
+    store = RunStore.open(run_dir)
+    assert summary["status"] == "awaiting_agent"
+    assert summary["provider"] == "host"
+    assert summary["quality_gate_version"] == runtime.COMPONENT_QUALITY_GATE_VERSION
+    assert summary["current_page"] == "page_001"
+    assert store.read_json("run_state.json")["status"] == "awaiting_agent"
+    assert store.read_json("page_jobs.json")["pages"]["page_001"]["status"] == "awaiting_agent"
+    assert not (run_dir / "final" / "output.pptx").exists()
+    assert calls == {"initialize": 1, "assemble": 0}
+
+
+def test_image_resume_does_not_repeat_initialized_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", agent_provider="host"
+    )
+    calls = {"initialize": 0, "advance": 0, "assemble": 0}
+
+    def initialize(store: RunStore, page_id: str, *, _lease=None) -> dict:
+        calls["initialize"] += 1
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir(parents=True, exist_ok=True)
+        _write_mock_component_state(store, page_id)
+        return {"status": "request_published", "page_id": page_id}
+
+    def advance(store: RunStore, page_id: str, *, _lease=None) -> dict:
+        calls["advance"] += 1
+        status = "awaiting_agent" if calls["advance"] == 1 else "ready_for_assembly"
+        return {"status": status, "page_id": page_id}
+
+    def assemble(store: RunStore) -> dict:
+        calls["assemble"] += 1
+        output = store.root / "final" / "output.pptx"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"pptx")
+        return {"pptx": str(output)}
+
+    monkeypatch.setattr(runtime, "initialize_legacy_page", initialize, raising=False)
+    monkeypatch.setattr(runtime, "advance_legacy_page", advance, raising=False)
+    monkeypatch.setattr(runtime, "assemble_legacy_results", assemble, raising=False)
+    monkeypatch.setattr(
+        runtime, "execute_legacy",
+        lambda store: (_ for _ in ()).throw(
+            AssertionError("one-shot legacy execution must not run")
+        ),
+    )
+    monkeypatch.setattr(runtime, "_validate_completed_pptx_output", lambda *args: None)
+
+    assert runtime.run_job(run_dir)["status"] == "awaiting_agent"
+    store = RunStore.open(run_dir)
+    store.transition_run(RunStatus.PREPARED)
+    store.transition_page("page_001", PageStatus.PROCESSING)
+    summary = runtime.run_job(run_dir)
+
+    assert summary["status"] == "completed"
+    assert summary["quality_gate_version"] == runtime.COMPONENT_QUALITY_GATE_VERSION
+    assert calls == {"initialize": 1, "advance": 2, "assemble": 1}
+
+
+def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    calls = {"prepare": 0, "request": 0, "state": 0}
+    reconstruction = run_dir / "pages" / "page_001" / "reconstruction"
+
+    class FakeImageModule:
+        @staticmethod
+        def prepare_component_layers(*args, **kwargs):
+            calls["prepare"] += 1
+            return {"state_path": str(reconstruction / "initial/prepared-page.json"),
+                    "initial_component_count": 2}
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+    monkeypatch.setattr(
+        legacy, "_build_initial_page_session",
+        lambda *args: {"page_id": "page_001"}, raising=False,
+    )
+
+    def request(session: dict, *, repair_round: int) -> Path:
+        calls["request"] += 1
+        path = reconstruction / "agent/round-01/component_agent_request.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    def initialize(store: RunStore, page_id: str, **kwargs) -> dict:
+        calls["state"] += 1
+        store.write_json(
+            f"pages/{page_id}/reconstruction/component_state.json", {"ready": True}
+        )
+        return {"phase": "request_published"}
+
+    monkeypatch.setattr(legacy, "build_component_agent_request", request, raising=False)
+    monkeypatch.setattr(
+        legacy, "initialize_component_repair_state", initialize, raising=False
+    )
+
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        first = legacy.initialize_legacy_page(store, "page_001", _lease=lease)
+        second = legacy.initialize_legacy_page(store, "page_001", _lease=lease)
+
+    assert first["status"] == "initialized"
+    assert second["status"] == "already_initialized"
+    assert calls == {"prepare": 1, "request": 1, "state": 1}
+
+
+def test_initial_page_session_builds_authenticated_parent_graph(
+    tmp_path: Path
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    prepared_root = reconstruction / "initial"
+    prepared_root.mkdir(parents=True)
+    background = prepared_root / "background.png"
+    difference = prepared_root / "difference.png"
+    text_mask = prepared_root / "text-mask.png"
+    component = prepared_root / "component.png"
+    component_mask = prepared_root / "component-mask.png"
+    _image(background)
+    _image(difference)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    Image.new("RGBA", (4, 3), (10, 20, 30, 255)).save(component)
+    Image.new("L", (20, 10), 0).save(component_mask)
+    mask = Image.open(component_mask)
+    mask.putpixel((2, 1), 255)
+    mask.save(component_mask)
+    prepared = {
+        "state_path": str(prepared_root / "prepared-page.json"),
+        "initial_component_count": 1,
+        "original_image_path": str(source),
+        "background_original_path": str(background),
+        "background_difference_path": str(difference),
+        "_text_mask_path": str(text_mask),
+        "_element_mask_paths": [str(component_mask)],
+        "components": [{
+            "path": str(component), "x": 2, "y": 1, "w": 1, "h": 1,
+            "z_index": 0,
+        }],
+    }
+
+    session = legacy._build_initial_page_session(
+        store, "page_001", prepared, reconstruction
+    )
+
+    assert session["provider"] == "host"
+    assert set(session["evidence"]) == set(legacy.EVIDENCE_NAMES)
+    graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
+    assert graph["nodes"][0]["kind"] == "parent"
+    assert graph["nodes"][0]["state"] == "pending"
+    mask_path = Path(session["evidence"]["component-graph.json"]).parent / graph["nodes"][0]["mask"]
+    assert hashlib.sha256(mask_path.read_bytes()).hexdigest() == graph["nodes"][0]["mask_sha256"]
+
+
+def test_legacy_assembly_uses_accepted_reconstruction_and_removes_text_from_alpha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", slide_size="16:9"
+    )
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    assets = reconstruction / "accepted"
+    masks = assets / "masks"
+    masks.mkdir(parents=True)
+    accepted_source = assets / "source.png"
+    background = assets / "background.png"
+    reconstructed = assets / "reconstructed.png"
+    text_mask = assets / "text-mask.png"
+    native = assets / "native.json"
+    Image.new("RGB", (4, 4), "white").save(accepted_source)
+    Image.new("RGB", (4, 4), "white").save(background)
+    Image.new("RGB", (4, 4), "red").save(reconstructed)
+    Image.new("L", (4, 4), 0).save(text_mask)
+    with Image.open(text_mask) as image:
+        image.putpixel((1, 1), 255)
+        image.save(text_mask)
+    native.write_text("{}", encoding="utf-8")
+    mask_path = masks / "component_0001.png"
+    Image.new("L", (4, 4), 255).save(mask_path)
+    graph = {
+        "nodes": [{
+            "id": "component_0001", "kind": "parent", "parent_id": None,
+            "state": "frozen", "mask": "masks/component_0001.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+        }]
+    }
+    graph_path = assets / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+    def ref(path: Path) -> dict:
+        return {
+            "path": path.resolve().relative_to(run_dir.resolve()).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    result = {
+        "schema_version": 1, "page_id": "page_001",
+        "status": "ready_for_assembly", "provider": "host",
+        "repair_rounds": 1, "initial_component_count": 1,
+        "final_component_ids": ["component_0001"], "graph_ref": ref(graph_path),
+        "round_history": [], "fallback": {"status": "none", "parent_ids": []},
+        "accepted_asset_refs": {
+            "source": ref(accepted_source), "background": ref(background),
+            "reconstructed": ref(reconstructed), "text_mask": ref(text_mask),
+            "native_check": ref(native),
+        },
+        "delivery_checks": {"pptx_reopen": "unknown"},
+    }
+    result_path = reconstruction / "component_result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "status": "ready_for_assembly", "result_ref": ref(result_path)
+    })
+    captured = {}
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {
+                "img_width": 4, "img_height": 4, "canvas_width": 4,
+                "canvas_height": 4, "content_offset_x": 0, "content_offset_y": 0,
+                "text_items": [{"text": "editable"}],
+                "original_image_path": str(accepted_source),
+            }
+
+        @staticmethod
+        def _assemble_prepared_slide(slide_data, output_path, *args):
+            captured.update(slide_data)
+            output = Path(output_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(output)
+            return str(output)
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    with Image.open(captured["components"][0]["path"]) as component:
+        alpha = component.getchannel("A")
+        assert alpha.getpixel((1, 1)) == 0
+        assert alpha.getpixel((0, 0)) == 255
+    assert Path(outputs["16:9"]).is_file()
+    delivery = store.read_json(
+        "pages/page_001/reconstruction/component_delivery.json"
+    )
+    assert delivery["delivery_checks"] == {"pptx_reopen": "pass"}
+
+
+def test_accepted_asset_snapshot_survives_replacement_after_hash_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_root = tmp_path / "run"
+    reconstruction = run_root / "pages/page_001/reconstruction"
+    accepted = reconstruction / "accepted"
+    masks = accepted / "masks"
+    masks.mkdir(parents=True)
+    source = accepted / "source.png"
+    background = accepted / "background.png"
+    reconstructed = accepted / "reconstructed.png"
+    text_mask = accepted / "text-mask.png"
+    native = accepted / "native.json"
+    for path, color in ((source, "white"), (background, "black"),
+                        (reconstructed, "red")):
+        Image.new("RGB", (4, 4), color).save(path)
+    Image.new("L", (4, 4), 0).save(text_mask)
+    native.write_text("{}", encoding="utf-8")
+    mask = masks / "component_0001.png"
+    Image.new("L", (4, 4), 255).save(mask)
+    graph = {"nodes": [{
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "frozen", "mask": "masks/component_0001.png",
+        "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+    graph_path = accepted / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    store = RunStore(run_root)
+
+    def ref(path: Path) -> dict[str, str]:
+        return {
+            "path": path.resolve().relative_to(run_root.resolve()).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    result = {
+        "accepted_asset_refs": {
+            name: ref(path) for name, path in {
+                "source": source, "background": background,
+                "reconstructed": reconstructed, "text_mask": text_mask,
+                "native_check": native,
+            }.items()
+        },
+        "graph_ref": ref(graph_path),
+        "final_component_ids": ["component_0001"],
+    }
+    original = legacy._load_legacy_ref
+
+    def replace_after_verify(store_arg, reference):
+        path, payload = original(store_arg, reference)
+        if path == reconstructed:
+            reconstructed.write_bytes(b"attacker replacement")
+        return path, payload
+
+    monkeypatch.setattr(legacy, "_load_legacy_ref", replace_after_verify)
+
+    slide = legacy._accepted_slide_data(
+        store, reconstruction, {"text_items": []}, result
+    )
+
+    with Image.open(slide["components"][0]["path"]) as component:
+        assert component.getpixel((0, 0))[:3] == (255, 0, 0)
+
+
+def test_warning_page_assembly_preserves_full_source_and_records_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", slide_size="16:9"
+    )
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(exist_ok=True)
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {"status": "preserved_with_warning"},
+    )
+    captured = {}
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {
+                "img_width": 12, "img_height": 8,
+                "text_items": [{"text": "must not survive"}],
+                "components": [{"path": "must-not-survive"}],
+            }
+
+        @staticmethod
+        def _assemble_prepared_slide(slide_data, output_path, *args):
+            captured.update(slide_data)
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(output_path)
+            return str(output_path)
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    assert captured["components"] == []
+    assert captured["text_items"] == []
+    assert hashlib.sha256(
+        Path(captured["background_path"]).read_bytes()
+    ).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert Path(outputs["16:9"]).is_file()
+    delivery = store.read_json(
+        "pages/page_001/reconstruction/component_delivery.json"
+    )
+    assert delivery["status"] == "preserved_with_warning"
+    assert "full source image" in delivery["warning"]
+
+
+def test_legacy_assembly_refuses_existing_output_before_assembler_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    output = tmp_path / "existing.pptx"
+    _image(source)
+    output.write_bytes(b"owner data")
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", output_path=output,
+        slide_size="16:9",
+    )
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(exist_ok=True)
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {"status": "preserved_with_warning"},
+    )
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {"img_width": 12, "img_height": 8}
+
+        @staticmethod
+        def _assemble_prepared_slide(*args, **kwargs):
+            raise AssertionError("assembler must not run")
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+
+    with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+        legacy.assemble_legacy_results(store)
+    assert output.read_bytes() == b"owner data"
+
+
+def test_legacy_variant_assembly_does_not_publish_partial_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run", slide_size="both")
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(exist_ok=True)
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {"status": "preserved_with_warning"},
+    )
+    calls = 0
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {"img_width": 12, "img_height": 8}
+
+        @staticmethod
+        def _assemble_prepared_slide(slide_data, output_path, *args):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("second variant failed")
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(output_path)
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+
+    with pytest.raises(RuntimeError, match="second variant failed"):
+        legacy.assemble_legacy_results(store)
+    assert not (run_dir / "final/output_original.pptx").exists()
+    assert not (run_dir / "final/output_16x9.pptx").exists()
 
 
 def test_host_agent_next_times_out_explicitly_while_execution_lease_is_held(
@@ -51,6 +845,27 @@ def _pptx(path: Path, slide_count: int = 2) -> None:
     presentation.save(path)
 
 
+def _mock_legacy_completion(
+    monkeypatch: pytest.MonkeyPatch, assemble
+) -> None:
+    def initialize(store: RunStore, page_id: str, **kwargs) -> dict:
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir(parents=True, exist_ok=True)
+        (reconstruction / "component_state.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        return {"status": "initialized", "page_id": page_id}
+
+    monkeypatch.setattr(runtime, "initialize_legacy_page", initialize)
+    monkeypatch.setattr(
+        runtime, "advance_legacy_page",
+        lambda store, page_id, **kwargs: {
+            "status": "ready_for_assembly", "page_id": page_id
+        },
+    )
+    monkeypatch.setattr(runtime, "assemble_legacy_results", assemble)
+
+
 def _run_synchronized(
     run_dir: str,
     barrier: object,
@@ -80,8 +895,20 @@ def _run_synchronized(
         release.wait(10)
         return {"pptx": str(store.root / "final" / "output.pptx")}
 
+    def initialize(store: RunStore, page_id: str, **kwargs) -> dict:
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir(parents=True, exist_ok=True)
+        (reconstruction / "component_state.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        return {"status": "initialized", "page_id": page_id}
+
     runtime.RunStore.open = synchronized_open
-    runtime.execute_legacy = execute
+    runtime.initialize_legacy_page = initialize
+    runtime.advance_legacy_page = lambda store, page_id, **kwargs: {
+        "status": "ready_for_assembly", "page_id": page_id
+    }
+    runtime.assemble_legacy_results = execute
     try:
         results.put(("ok", runtime.run_job(run_dir)))
     except Exception as error:
@@ -139,7 +966,7 @@ def test_run_job_writes_execution_metadata_while_lease_is_held(
                 pass
         return {"pptx": str(store.root / "final" / "output.pptx")}
 
-    monkeypatch.setattr(runtime, "execute_legacy", execute)
+    _mock_legacy_completion(monkeypatch, execute)
 
     runtime.run_job(run_dir)
 
@@ -1892,7 +2719,7 @@ def test_run_job_completes_and_writes_summary_and_page_results(
         "16:9": str((tmp_path / "wide.pptx").resolve()),
         "original": [str((tmp_path / "first.pptx").resolve())],
     }
-    monkeypatch.setattr(runtime, "execute_legacy", lambda store: outputs)
+    _mock_legacy_completion(monkeypatch, lambda store: outputs)
 
     summary = runtime.run_job(run_dir)
     store = RunStore.open(run_dir)
@@ -1903,6 +2730,7 @@ def test_run_job_completes_and_writes_summary_and_page_results(
         "pages": 2,
         "outputs": outputs,
         "resource_policy": safe_default_policy(),
+        "quality_gate_version": runtime.COMPONENT_QUALITY_GATE_VERSION,
     }
     assert store.read_json("run_summary.json") == summary
     assert store.read_json("run_state.json")["status"] == "completed"
@@ -1931,7 +2759,7 @@ def test_run_job_records_execution_failure_for_run_and_all_pages(
     def fail_execute(store: RunStore) -> dict[str, Any]:
         raise RuntimeError("model unavailable")
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute)
+    _mock_legacy_completion(monkeypatch, fail_execute)
 
     with pytest.raises(RuntimeError, match="model unavailable"):
         runtime.run_job(run_dir)
@@ -1958,10 +2786,8 @@ def test_page_result_write_failure_records_failed_run_and_pages(
     _image(first)
     _image(second)
     run_dir = runtime.prepare_job([first, second], run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "execute_legacy",
-        lambda store: {"16:9": str(tmp_path / "output.pptx")},
+    _mock_legacy_completion(
+        monkeypatch, lambda store: {"16:9": str(tmp_path / "output.pptx")}
     )
     original_write_json = RunStore.write_json
 
@@ -1997,10 +2823,8 @@ def test_completed_transition_failure_can_retry_the_entire_batch(
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "execute_legacy",
-        lambda store: {"16:9": str(tmp_path / "output.pptx")},
+    _mock_legacy_completion(
+        monkeypatch, lambda store: {"16:9": str(tmp_path / "output.pptx")}
     )
     original_transition_run = RunStore.transition_run
 
@@ -2046,7 +2870,7 @@ def test_success_validates_pages_with_one_page_jobs_write(
     _image(first)
     _image(second)
     run_dir = runtime.prepare_job([first, second], run_dir=tmp_path / "run")
-    monkeypatch.setattr(runtime, "execute_legacy", lambda store: {})
+    _mock_legacy_completion(monkeypatch, lambda store: {})
     original_write_json = RunStore.write_json
     validated_writes = 0
 
@@ -2068,7 +2892,7 @@ def test_success_validates_pages_with_one_page_jobs_write(
 
     runtime.run_job(run_dir)
 
-    assert validated_writes == 1
+    assert validated_writes == 2
 
 
 def test_cleanup_error_is_cause_and_does_not_stop_later_failure_records(
@@ -2089,7 +2913,7 @@ def test_cleanup_error_is_cause_and_does_not_stop_later_failure_records(
             raise OSError("page cleanup failed")
         original_transition_pages(store, page_ids, target)
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute)
+    _mock_legacy_completion(monkeypatch, fail_execute)
     monkeypatch.setattr(runtime, "_transition_pages", fail_failed_pages)
 
     with pytest.raises(RuntimeError, match="execution failed") as error:
@@ -2102,7 +2926,7 @@ def test_cleanup_error_is_cause_and_does_not_stop_later_failure_records(
     assert store.read_json("run_summary.json")["status"] == "failed"
     assert (
         store.read_json("page_jobs.json")["pages"]["page_001"]["status"]
-        == "processing"
+        == "validated"
     )
 
     monkeypatch.setattr(runtime, "_transition_pages", original_transition_pages)
@@ -2138,7 +2962,7 @@ def test_retry_recovers_failed_batch_left_running_by_one_run_write_failure(
             raise OSError("run failed write failed")
         return original_transition_run(self, target)
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute_once)
+    _mock_legacy_completion(monkeypatch, fail_execute_once)
     monkeypatch.setattr(RunStore, "transition_run", fail_run_failed_once)
 
     with pytest.raises(RuntimeError, match="execution failed") as error:
@@ -2171,7 +2995,7 @@ def test_retry_page_resets_the_entire_failed_batch(
     def fail_execute(store: RunStore) -> dict[str, Any]:
         raise RuntimeError("failed")
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute)
+    _mock_legacy_completion(monkeypatch, fail_execute)
     with pytest.raises(RuntimeError, match="failed"):
         runtime.run_job(run_dir)
 
@@ -2190,9 +3014,8 @@ def test_retry_page_removes_work_before_resetting_state(
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "execute_legacy",
+    _mock_legacy_completion(
+        monkeypatch,
         lambda store: (_ for _ in ()).throw(RuntimeError("failed")),
     )
     with pytest.raises(RuntimeError, match="failed"):
@@ -2215,9 +3038,8 @@ def test_retry_work_cleanup_failure_preserves_all_state(
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "execute_legacy",
+    _mock_legacy_completion(
+        monkeypatch,
         lambda store: (_ for _ in ()).throw(RuntimeError("failed")),
     )
     with pytest.raises(RuntimeError, match="failed"):
@@ -2252,9 +3074,8 @@ def test_retry_rejects_work_symlink_without_deleting_external_target(
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "execute_legacy",
+    _mock_legacy_completion(
+        monkeypatch,
         lambda store: (_ for _ in ()).throw(RuntimeError("failed")),
     )
     with pytest.raises(RuntimeError, match="failed"):
@@ -2323,7 +3144,7 @@ def test_retry_page_writes_page_jobs_once(
     def fail_execute(store: RunStore) -> dict[str, Any]:
         raise RuntimeError("failed")
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute)
+    _mock_legacy_completion(monkeypatch, fail_execute)
     with pytest.raises(RuntimeError, match="failed"):
         runtime.run_job(run_dir)
 
@@ -2357,7 +3178,7 @@ def test_retry_page_write_failure_preserves_page_jobs(
     def fail_execute(store: RunStore) -> dict[str, Any]:
         raise RuntimeError("failed")
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail_execute)
+    _mock_legacy_completion(monkeypatch, fail_execute)
     with pytest.raises(RuntimeError, match="failed"):
         runtime.run_job(run_dir)
 
@@ -2517,7 +3338,7 @@ def test_run_job_returns_existing_completed_summary(tmp_path: Path, monkeypatch)
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(runtime, "execute_legacy", lambda store: {})
+    _mock_legacy_completion(monkeypatch, lambda store: {})
     completed = runtime.run_job(run_dir)
 
     def unexpected_execute(store: RunStore) -> dict[str, Any]:
@@ -2534,7 +3355,7 @@ def test_run_job_validates_existing_completed_summary(
     source = tmp_path / "source.png"
     _image(source)
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
-    monkeypatch.setattr(runtime, "execute_legacy", lambda store: {})
+    _mock_legacy_completion(monkeypatch, lambda store: {})
     runtime.run_job(run_dir)
     store = RunStore.open(run_dir)
     summary = store.read_json("run_summary.json")
@@ -2555,7 +3376,7 @@ def test_retry_validates_existing_failed_summary(
     def fail(store: RunStore) -> dict[str, Any]:
         raise RuntimeError("failed")
 
-    monkeypatch.setattr(runtime, "execute_legacy", fail)
+    _mock_legacy_completion(monkeypatch, fail)
     with pytest.raises(RuntimeError, match="failed"):
         runtime.run_job(run_dir)
     store = RunStore.open(run_dir)
@@ -3023,24 +3844,19 @@ def test_legacy_failure_retains_work_and_records_absolute_diagnostics(
     run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
     diagnostic_name = "failure.txt"
 
-    def fail_conversion(*args: Any, _work_root: Path, **kwargs: Any) -> Any:
-        page_root = _work_root / "page_001"
-        page_root.mkdir()
+    def fail_initialization(store, page_id, **kwargs):
+        page_root = store.root / "pages" / page_id / "reconstruction"
+        page_root.mkdir(parents=True)
         (page_root / diagnostic_name).write_text("details", encoding="utf-8")
         raise RuntimeError("conversion failed")
 
-    fake_module = types.SimpleNamespace(convert_variants=fail_conversion)
-    monkeypatch.setattr(
-        legacy.importlib,
-        "import_module",
-        lambda name: fake_module,
-    )
+    monkeypatch.setattr(runtime, "initialize_legacy_page", fail_initialization)
 
     with pytest.raises(RuntimeError, match="conversion failed"):
         runtime.run_job(run_dir)
 
-    work_root = (run_dir / "work").resolve()
-    assert (work_root / "page_001" / diagnostic_name).read_text(
+    diagnostics = (run_dir / "pages/page_001/reconstruction").resolve()
+    assert (diagnostics / diagnostic_name).read_text(
         encoding="utf-8"
     ) == "details"
     assert RunStore.open(run_dir).read_json("run_summary.json") == {
@@ -3048,7 +3864,7 @@ def test_legacy_failure_retains_work_and_records_absolute_diagnostics(
         "status": "failed",
         "error": {"type": "RuntimeError", "message": "conversion failed"},
         "outputs": {},
-        "diagnostics": str(work_root),
+        "diagnostics": str(diagnostics),
     }
 
 
@@ -3082,25 +3898,12 @@ def test_legacy_cleanup_failure_after_conversion_records_failed_run_and_diagnost
     monkeypatch.setattr(legacy, "_safe_rmtree", fail_cleanup, raising=False)
 
     with pytest.raises(OSError, match="work cleanup failed"):
-        runtime.run_job(run_dir)
+        legacy.execute_legacy(RunStore.open(run_dir))
 
-    store = RunStore.open(run_dir)
     work_root = (run_dir / "work").resolve()
-    assert store.read_json("run_state.json")["status"] == "failed"
-    assert {
-        page["status"]
-        for page in store.read_json("page_jobs.json")["pages"].values()
-    } == {"failed"}
     assert (work_root / "page_001" / diagnostic_name).read_text(
         encoding="utf-8"
     ) == "complete"
-    assert store.read_json("run_summary.json") == {
-        "schema_version": SCHEMA_VERSION,
-        "status": "failed",
-        "error": {"type": "OSError", "message": "work cleanup failed"},
-        "outputs": {},
-        "diagnostics": str(work_root),
-    }
 
 
 @pytest.mark.parametrize(
@@ -3240,7 +4043,7 @@ def test_convert_accepts_one_path_directly(
     source = tmp_path / "source.png"
     _image(source)
     value = str(source) if as_string else source
-    monkeypatch.setattr(runtime, "execute_legacy", lambda store: {})
+    _mock_legacy_completion(monkeypatch, lambda store: {})
 
     summary = runtime.convert(value, run_dir=tmp_path / "run")
 

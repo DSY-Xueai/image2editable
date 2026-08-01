@@ -50,6 +50,21 @@ def test_advance_without_state_only_reports_needs_initialization(tmp_path: Path)
     assert not (reconstruction / "agent").exists()
 
 
+def test_component_repair_rejects_unheld_execution_lease(page_session: dict) -> None:
+    from image2editable.execution import ExecutionLease
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    lease = ExecutionLease(store.root / "execution.lock", run_root=store.root)
+
+    with pytest.raises(RuntimeError, match="held Run execution lease"):
+        initialize_component_repair_state(
+            store, "page_001", request_path=request_path,
+            initial_component_count=2, _lease=lease,
+        )
+
+
 def test_initialized_state_points_to_hash_bound_current_request(page_session: dict) -> None:
     from image2editable.store import RunStore
 
@@ -169,6 +184,10 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     assert state["frozen"]["candidate_b"] == state["parent_assets"]["candidate_b"]["sha256"]
     assert state["delivery_checks"] == {"pptx_reopen": "unknown"}
     assert state["result_ref"] is not None
+    result = store.read_json("pages/page_001/reconstruction/component_result.json")
+    assert set(result["accepted_asset_refs"]) == {
+        "source", "background", "reconstructed", "text_mask", "native_check"
+    }
 
 
 def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: dict) -> None:

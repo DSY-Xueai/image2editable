@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 import secrets
 import shutil
@@ -37,12 +37,19 @@ MARKER_JSON_LIMIT = 64 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 
 
-def advance_component_repair(store, page_id: str) -> dict:
+def advance_component_repair(
+    store, page_id: str, *, _lease: ExecutionLease | None = None
+) -> dict:
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     state_path = reconstruction / COMPONENT_STATE_NAME
     if not state_path.is_file():
         return {"status": "needs_initialization", "page_id": page_id}
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         state = validate_component_repair_state(store.read_json(
             f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         ))
@@ -79,23 +86,13 @@ def advance_component_repair(store, page_id: str) -> dict:
             normalized = _normalized_plan_sha256(plan)
             if not plan["actions"] or normalized == state["last_normalized_plan_sha256"]:
                 updated = dict(state)
-                updated["phase"] = "fallback_required"
-                updated["stop_reason"] = (
-                    "empty_plan" if not plan["actions"] else "repeated_plan"
-                )
                 updated["last_normalized_plan_sha256"] = normalized
-                updated["fallback"] = {
-                    "status": "required", "parent_ids": state["fallback"]["parent_ids"]
-                }
-                updated["revision"] += 1
-                updated["updated_at"] = _utc_now()
-                validate_component_repair_state(updated)
-                store.write_json(
-                    f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}", updated
+                return _commit_fallback_required(
+                    store,
+                    updated,
+                    page_id,
+                    "empty_plan" if not plan["actions"] else "repeated_plan",
                 )
-                return {"status": "fallback_required", "page_id": page_id,
-                        "repair_round": state["repair_round"],
-                        "stop_reason": updated["stop_reason"]}
             return {"status": "needs_execution", "page_id": page_id,
                     "repair_round": state["repair_round"]}
         if state["phase"] == "actions_executed":
@@ -140,12 +137,29 @@ def initialize_component_repair_state(
     *,
     request_path: str | Path,
     initial_component_count: int,
+    _lease: ExecutionLease | None = None,
 ) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         return _initialize_component_repair_state_locked(
             store, page_id, request_path=request_path,
             initial_component_count=initial_component_count,
         )
+
+
+def _require_held_execution_lease(store, lease: ExecutionLease) -> None:
+    if (
+        not isinstance(lease, ExecutionLease)
+        or not lease._file_locked
+        or lease._file is None
+        or lease.path != (store.root / "execution.lock").resolve()
+        or lease.run_root != store.root.resolve()
+    ):
+        raise RuntimeError("component repair requires the held Run execution lease")
 
 
 def _initialize_component_repair_state_locked(
@@ -234,8 +248,14 @@ def record_component_execution(
     *,
     execution_path: str | Path,
     output_graph_path: str | Path,
+    _lease: ExecutionLease | None = None,
 ) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
@@ -310,8 +330,15 @@ def record_component_execution(
         return updated
 
 
-def record_component_quality(store, page_id: str) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+def record_component_quality(
+    store, page_id: str, *, _lease: ExecutionLease | None = None
+) -> dict:
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
@@ -341,8 +368,14 @@ def record_next_component_request(
     page_id: str,
     *,
     request_path: str | Path,
+    _lease: ExecutionLease | None = None,
 ) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
@@ -391,9 +424,15 @@ def record_next_component_request(
 
 
 def record_parent_fallback_execution(
-    store, page_id: str, *, graph_path: str | Path, quality_input_refs: dict
+    store, page_id: str, *, graph_path: str | Path, quality_input_refs: dict,
+    _lease: ExecutionLease | None = None,
 ) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
@@ -457,8 +496,15 @@ def record_parent_fallback_execution(
         return updated
 
 
-def record_parent_fallback_quality(store, page_id: str) -> dict:
-    with ExecutionLease(store.root / "execution.lock", run_root=store.root):
+def record_parent_fallback_quality(
+    store, page_id: str, *, _lease: ExecutionLease | None = None
+) -> dict:
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
@@ -712,6 +758,14 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:
     reconstruction = store.root / "pages" / page_id / "reconstruction"
+    quality_ref = (
+        state["fallback_quality_ref"]
+        if state["fallback"]["status"] == "parent_preserved"
+        else state["current_round"]["quality_ref"]
+    )
+    quality = json.loads(_load_state_artifact(
+        store.root, quality_ref
+    ).decode("utf-8"))
     result = {
         "schema_version": 1, "page_id": page_id, "status": "ready_for_assembly",
         "provider": state["provider"], "repair_rounds": state["plan_count"],
@@ -719,6 +773,7 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "final_component_ids": sorted(state["frozen"]),
         "graph_ref": state["graph_ref"], "round_history": state["round_history"],
         "fallback": state["fallback"],
+        "accepted_asset_refs": quality["input_refs"],
         "delivery_checks": {"pptx_reopen": "unknown"},
     }
     payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"

@@ -1,5 +1,15 @@
 # Course
 
+## P2.3 Task 9 当前开发状态
+
+- 图片/PDF 页面已接入统一组件状态机：每页只初始化一次，Host 等待时安全退出，恢复时不重复初始分层；多页 PDF 严格串行。
+- 最终组装只读取状态机验收后的背景、重建图、文字掩码、组件图和逐文件 SHA-256；组件 alpha 扣除文字掩码以避免重影。
+- `preserved_with_warning` 明确使用完整源图且不输出伪可编辑组件或文字，并写入降级警告。
+- PPTX 先写同目录临时文件，实际重新打开并核对页数后再以 no-replace 方式发布；交付记录写入 `pptx_reopen=pass`。
+- 组装 accepted assets 与 component masks 使用已验签 bytes 快照；多 variant 先全部 staging/reopen 通过，再 no-replace 发布，发布异常会清理本轮已发布目标。
+- 本轮新增真实图片/PDF Host plan E2E：覆盖等待/恢复、真实动作执行与质量门禁、冻结/下一轮/父组件回退、同 gate version、单次最终组装、warning 和 no-overwrite/reopen。
+- Task9 指定回归集已验证：`524 passed, 7 skipped`；当前改动仍未提交，待控制者完成 spec/quality 审查。
+
 ## 当前项目状态
 
 - 当前分支：`codex/agent-runtime-foundation`；只保留本地提交，不推送、不合并 `main`。

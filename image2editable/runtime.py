@@ -8,7 +8,10 @@ import stat
 import tempfile
 from typing import Any, Iterable, Sequence
 
-from image2editable.component_contracts import validate_agent_provider
+from image2editable.component_contracts import (
+    validate_agent_provider,
+    validate_component_repair_state,
+)
 from image2editable.contracts import (
     PageStatus,
     RunStatus,
@@ -19,7 +22,13 @@ from image2editable.contracts import (
 )
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
 from image2editable.execution import ExecutionLease
-from image2editable.legacy import _safe_rmtree, execute_legacy
+from image2editable.legacy import (
+    _safe_rmtree,
+    advance_legacy_page,
+    assemble_legacy_results,
+    execute_legacy,
+    initialize_legacy_page,
+)
 from image2editable.resources import (
     apply_resource_policy,
     validate_resource_policy,
@@ -30,6 +39,7 @@ from image2editable.store import RunStore
 _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
     "_PPTX_EXECUTION_MANIFEST", default=None
 )
+COMPONENT_QUALITY_GATE_VERSION = "component-quality-v1"
 
 
 def _pdf_function(name: str) -> Any:
@@ -152,11 +162,19 @@ def prepare_job(
 
 def get_status(run_dir: str | Path) -> dict[str, Any]:
     store = RunStore.open(run_dir)
-    _manifest_input(store)
-    return {
-        "run": store.read_json("run_state.json"),
-        "pages": store.read_json("page_jobs.json"),
-    }
+    manifest, _ = _manifest_input(store)
+    run = store.read_json("run_state.json")
+    pages = store.read_json("page_jobs.json")
+    status = {"run": run, "pages": pages}
+    if run["status"] == RunStatus.AWAITING_AGENT.value:
+        awaiting = [
+            page_id for page_id in manifest["pages"]
+            if pages["pages"][page_id]["status"] == PageStatus.AWAITING_AGENT.value
+        ]
+        if len(awaiting) != 1:
+            raise RuntimeError("Awaiting Agent Run must have one current page")
+        status.update(_legacy_component_status(store, awaiting[0]))
+    return status
 
 
 def _transition_pages(
@@ -172,6 +190,91 @@ def _transition_pages(
     }
     pages.update(updates)
     store.write_json("page_jobs.json", page_jobs)
+
+
+def _legacy_waiting_summary(
+    store: RunStore, manifest: dict[str, Any], page_id: str, outcome: dict
+) -> dict[str, Any]:
+    component = _legacy_component_status(store, page_id)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": RunStatus.AWAITING_AGENT.value,
+        "provider": manifest["options"]["agent_provider"],
+        "quality_gate_version": COMPONENT_QUALITY_GATE_VERSION,
+        **component,
+        "updated_at": utc_now(),
+    }
+
+
+def _legacy_component_status(store: RunStore, page_id: str) -> dict[str, Any]:
+    state = validate_component_repair_state(store.read_json(
+        f"pages/{page_id}/reconstruction/component_state.json"
+    ))
+    if state["page_id"] != page_id:
+        raise RuntimeError("Component repair status page identity mismatch")
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    return {
+        "current_page": page_id,
+        "repair_round": state["repair_round"],
+        "frozen_components": len(state["frozen"]),
+        "pending_components": len(state["candidate_ids"]),
+        "provider": state["provider"],
+        "diagnostics": str((reconstruction / "agent").resolve()),
+    }
+
+
+def _advance_legacy_pages(
+    store: RunStore, manifest: dict[str, Any], page_ids: list[str],
+    lease: ExecutionLease,
+) -> dict[str, Any] | None:
+    completed = {
+        PageStatus.VALIDATED.value,
+        PageStatus.PRESERVED_WITH_WARNING.value,
+    }
+    for page_id in page_ids:
+        if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
+            continue
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        if not (reconstruction / "component_state.json").is_file():
+            initialize_legacy_page(store, page_id, _lease=lease)
+        for _ in range(32):
+            outcome = advance_legacy_page(store, page_id, _lease=lease)
+            if outcome["status"] != "processing":
+                break
+        else:
+            raise RuntimeError("Legacy component page exceeded durable boundary limit")
+        if outcome["status"] == "awaiting_agent":
+            _transition_pages(store, [page_id], PageStatus.AWAITING_AGENT)
+            store.transition_run(RunStatus.AWAITING_AGENT)
+            summary = _legacy_waiting_summary(store, manifest, page_id, outcome)
+            store.write_json("run_summary.json", summary)
+            return summary
+        if outcome["status"] == "preserved_with_warning":
+            _transition_pages(store, [page_id], PageStatus.PRESERVED_WITH_WARNING)
+        elif outcome["status"] == "ready_for_assembly":
+            _transition_pages(store, [page_id], PageStatus.VALIDATED)
+        else:
+            raise RuntimeError(
+                "Legacy component page did not reach a terminal boundary: "
+                f"{outcome['status']}"
+            )
+    return None
+
+
+def _ensure_legacy_pages_processing(
+    store: RunStore, page_ids: list[str]
+) -> None:
+    pages = store.read_json("page_jobs.json")["pages"]
+    completed = {
+        PageStatus.VALIDATED.value,
+        PageStatus.PRESERVED_WITH_WARNING.value,
+    }
+    for page_id in page_ids:
+        if pages[page_id]["status"] not in {
+            PageStatus.PROCESSING.value,
+            *completed,
+        }:
+            _transition_pages(store, [page_id], PageStatus.PROCESSING)
 
 
 def _record_failure(
@@ -230,6 +333,15 @@ def _record_failure(
             work = None
         if work is not None:
             summary["diagnostics"] = str(work[0])
+        elif page_ids:
+            reconstruction = (
+                store.root / "pages" / page_ids[0] / "reconstruction"
+            ).resolve()
+            if reconstruction.is_dir() and any(
+                child.name != "component_state.json"
+                for child in reconstruction.iterdir()
+            ):
+                summary["diagnostics"] = str(reconstruction)
         store.write_json(
             "run_summary.json",
             summary,
@@ -845,13 +957,13 @@ def _isolate_recorded_pptx_output(
 
 
 def run_job(run_dir: str | Path) -> dict[str, Any]:
-    return _run_job(run_dir, lease_acquired=False)
+    return _run_job(run_dir, _lease=None)
 
 
 def _run_job(
     run_dir: str | Path,
     *,
-    lease_acquired: bool,
+    _lease: ExecutionLease | None,
 ) -> dict[str, Any]:
     store = RunStore.open(run_dir)
     manifest, input_type = _manifest_input(store)
@@ -914,12 +1026,12 @@ def _run_job(
         raise RuntimeError(
             f"Run must be prepared before execution; current status is {state['status']}"
         )
-    if not lease_acquired:
+    if _lease is None:
         with ExecutionLease(
             store.root / "execution.lock",
             run_root=store.root,
-        ):
-            return _run_job(store.root, lease_acquired=True)
+        ) as lease:
+            return _run_job(store.root, _lease=lease)
 
     store.write_json(
         "execution.json",
@@ -1056,8 +1168,11 @@ def _run_job(
                 _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)
         else:
-            _transition_pages(store, page_ids, PageStatus.PROCESSING)
-            outputs = execute_legacy(store)
+            _ensure_legacy_pages_processing(store, page_ids)
+            waiting = _advance_legacy_pages(store, manifest, page_ids, _lease)
+            if waiting is not None:
+                return waiting
+            outputs = assemble_legacy_results(store)
             for page_id in page_ids:
                 store.write_json(
                     Path("pages") / page_id / "page_result.json",
@@ -1068,7 +1183,6 @@ def _run_job(
                         "outputs": outputs,
                     },
                 )
-            _transition_pages(store, page_ids, PageStatus.VALIDATED)
             store.transition_run(RunStatus.FINALIZING)
             summary = {
                 "schema_version": SCHEMA_VERSION,
@@ -1076,6 +1190,7 @@ def _run_job(
                 "pages": len(page_ids),
                 "outputs": outputs,
                 "resource_policy": resource_policy,
+                "quality_gate_version": COMPONENT_QUALITY_GATE_VERSION,
             }
         store.write_json("run_summary.json", summary)
         store.transition_run(RunStatus.COMPLETED)
