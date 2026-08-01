@@ -72,11 +72,25 @@ def execute_component_actions(
         validate_component_action(action, graph=validated)
         object_ids = action["object_ids"]
         name = action["action"]
-        if name == "collapse_to_parent":
+        if name == "attach_text":
+            visual, text = object_ids
+            valid_states = (
+                nodes[visual]["state"] == "pending"
+                and nodes[text]["state"] == "frozen"
+            )
+            if not valid_states:
+                raise ValueError("attach_text requires pending visual and frozen text")
+        elif name == "collapse_to_parent":
             allowed_states = {"inactive", "pending"}
+            valid_states = all(
+                nodes[value]["state"] in allowed_states for value in object_ids
+            )
         else:
             allowed_states = {"pending"}
-        if any(nodes[value]["state"] not in allowed_states for value in object_ids):
+            valid_states = all(
+                nodes[value]["state"] in allowed_states for value in object_ids
+            )
+        if not valid_states:
             raise ValueError(f"{name} requires a pending component")
         if touched & set(object_ids):
             raise ValueError("component plan has conflicting object actions")

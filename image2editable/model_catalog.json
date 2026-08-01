@@ -6,7 +6,9 @@
       "revision": "main",
       "stability": "experimental",
       "minimum_vram_gib": 8,
-      "minimum_ram_gib": 16,
+      "minimum_available_vram_gib": 6.5,
+      "minimum_ram_gib": 15,
+      "minimum_available_ram_gib": 6,
       "required_free_disk_gib": 8,
       "priority": 100
     }

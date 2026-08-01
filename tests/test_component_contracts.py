@@ -160,23 +160,40 @@ def test_component_plan_rejects_invalid_action_object_count(action: str, object_
 )
 def test_component_plan_rejects_graph_role_and_parent_mismatch(action: str, object_ids: list[str]) -> None:
     request, graph = _plan_contract_fixture()
-    with pytest.raises(ValueError, match="kind|role|parent|text"):
+    with pytest.raises(ValueError, match="kind|role|parent|text|frozen"):
         component_contracts.validate_component_plan(_plan(request, action, object_ids), request=request, graph=graph)
+
+
+def test_component_plan_rejects_attach_text_to_pending_text() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].append("text")
+    request["candidate_ids"].sort()
+    request["frozen_ids"] = []
+    next(node for node in graph["nodes"] if node["id"] == "text")["state"] = "pending"
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_component_plan(
+            _plan(request, "attach_text", ["visual", "text"]),
+            request=request,
+            graph=graph,
+        )
 
 
 def _plan_contract_fixture() -> tuple[dict, dict]:
     ids = ["visual", "visual2", "text", "parent_a", "parent_b", "child_a", "child_b"]
     request = {"schema_version": 1, "page_id": "page_001", "provider": "host",
                "repair_round": 1, "source_sha256": "a" * 64, "graph_sha256": "b" * 64,
-               "candidate_ids": sorted(ids), "frozen_ids": [],
+               "candidate_ids": sorted(set(ids) - {"text"}), "frozen_ids": ["text"],
                "evidence": {name: {"path": name, "sha256": "c" * 64}
                             for name in component_contracts.COMPONENT_EVIDENCE_NAMES}}
     def node(value: str, kind: str, parent: str | None, z: int) -> dict:
         return {"id": value, "kind": kind, "parent_id": parent, "state": "pending",
                 "mask": f"masks/{value}.png", "mask_sha256": "d" * 64,
                 "bbox": [0, 0, 2, 2], "z_index": z, "text_ids": []}
+    text = node("text", "text", None, 2)
+    text["state"] = "frozen"
     graph = {"nodes": [node("visual", "parent", None, 0), node("visual2", "parent", None, 1),
-                       node("text", "text", None, 2), node("parent_a", "parent", None, 3),
+                       text, node("parent_a", "parent", None, 3),
                        node("parent_b", "parent", None, 4), node("child_a", "child", "parent_a", 5),
                        node("child_b", "child", "parent_b", 6)]}
     return request, graph

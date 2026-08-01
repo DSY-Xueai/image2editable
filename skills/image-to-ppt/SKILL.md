@@ -1,6 +1,6 @@
 ---
 name: image-to-ppt
-description: 将一张或多张图片转换为严格质量校验、分层可编辑的 PowerPoint。用于把截图、设计稿或幻灯片图片重建为原比例与 16:9 PPTX，包含 clean background、无文字且相互独立的透明视觉组件和可编辑文本框。
+description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX 转换为严格质量校验、分层可编辑的 PowerPoint；保留既有原生文字、形状、表格和图表，并支持宿主视觉 Agent 或显式安装的本地视觉 Agent。用于截图、设计稿、科研图和幻灯片页面的组件重建、残影检查与可编辑输出。
 ---
 
 # Image to PPT
@@ -54,12 +54,55 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 旧 `convert()` 保持兼容：默认返回单个 16:9 PPTX 路径字符串；CLI 默认输出两种尺寸。
 
-## PPTX Agent 候选路由
+## 统一 Runtime Agent 模式
 
-在完整仓库环境中，P2.1 支持让 Agent 审核 PPTX 内的高置信截图候选：
+在完整仓库环境中，先按运行环境选择 Provider。Provider 写入 Run 后不可切换，两种模式共享同一套严格组件动作、最多五轮修复和质量门禁。
+
+优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
+
+只有用户要求离线/自托管 Agent 时才选择 `local`。不要硬编码模型；先读取当前电脑配置和版本化目录：
 
 ```bash
-image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable models recommend --json
+image2editable models status
+```
+
+推荐结果必须 `compatible=true`，状态必须 `installed=true` 且 `valid=true`。若未安装，先向用户说明推荐模型、revision、`experimental/stable` 状态、内存/显存和磁盘结论；只有取得明确下载授权后才运行 `image2editable models install agent`。转换期间不会自动下载，也不自动回退到 Host。
+
+Local 运行由 Runtime 内部串行完成：
+
+```bash
+image2editable convert input.pdf -o output.pptx --agent-provider local
+image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider local
+image2editable run execute runs/pptx-job
+```
+
+Host 运行先准备并推进到 `awaiting_agent`：
+
+```bash
+image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
+image2editable run execute runs/pptx-job
+image2editable agent next runs/pptx-job
+image2editable agent record runs/pptx-job --plan response.json
+image2editable run execute runs/pptx-job
+```
+
+第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及八项绝对证据路径。逐张查看源图、编号掩码、OCR overlay、ownership、当前重建和差异图，再生成绑定当前 `request_sha256` 的严格 `component_plan`；记录并继续执行，直到完成或 Runtime 安全回退。
+
+```json
+{
+  "schema_version": 1,
+  "kind": "host_capability_response",
+  "challenge_id": "agent next 返回的值",
+  "observed": {"shape": "circle", "color": "#2b8a3e", "count": 3}
+}
+```
+
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中存在的 ID 和既定九类动作，不添加未知字段。
+
+PPTX 的整页截图候选先使用决策路由：
+
+```bash
 image2editable run next runs/pptx-job
 image2editable decision record runs/pptx-job \
   --page page_001 --object 7 \
@@ -70,7 +113,9 @@ image2editable decision record runs/pptx-job \
 
 每次先查看 `run next` 返回的绝对 `image_path`。只有图片覆盖大部分页面、包含标题/多个文字区/图表或卡片等完整页面结构，且明显不是照片、Logo、头像或装饰素材时，才记录 `replace + full_slide_screenshot`。证据冲突或不确定时记录 `preserve` 或 `ambiguous`；不要为了提高拆分数量抬高置信度。
 
-Runtime 只有在 `confidence >= 0.92` 时才把完整截图送入后续 shadow-run 队列。P2.1 只生成并记录候选判断，尚不修改 PPTX；当前执行路径仍逐字节保留原生文字、形状和其他对象。
+组件计划必须以视觉整体为单位：科研图、表格只是示例，不得按固定类型写死；不要把本属一个整体的组件无依据拆碎。OCR 文字以冻结的 `text_XXXX` 只读节点出现，只能作为 `attach_text` 的第二对象。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
+
+Runtime 只有在 `confidence >= 0.92` 时才重建完整截图。通过门禁后只原位替换命中的截图对象；既有原生文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生。未通过页面保留原截图并给出 warning，不伪装成可编辑组件。
 
 ## 严格管线
 

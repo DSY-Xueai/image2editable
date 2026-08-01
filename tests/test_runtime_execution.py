@@ -162,6 +162,24 @@ def _accept_action(component_id: str = "component_0001") -> dict[str, Any]:
     }
 
 
+def _local_receipt(tmp_path: Path) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "model_id": "test/model",
+        "requested_revision": "test",
+        "resolved_revision": "a" * 40,
+        "stability": "experimental",
+        "snapshot_path": str((tmp_path / "model-snapshot").resolve()),
+        "files": [
+            {
+                "path": "config.json",
+                "size": 2,
+                "sha256": "b" * 64,
+            }
+        ],
+    }
+
+
 def _write_mock_component_state(store: RunStore, page_id: str) -> None:
     reference = {"path": "mock-artifact.json", "sha256": "0" * 64}
     store.write_json(
@@ -226,6 +244,278 @@ def test_image_component_plan_e2e_pauses_then_assembles_once(
     )
     assert result["status"] == "ready_for_assembly"
     assert result["final_component_ids"] == ["component_0001"]
+
+
+def test_local_provider_runs_complete_without_host_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _, initial_calls, assembly_calls = _install_component_e2e_boundaries(monkeypatch)
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="local",
+    )
+    receipt = _local_receipt(tmp_path)
+    plans = []
+    monkeypatch.setattr(runtime, "_local_model_receipt", lambda store: receipt)
+
+    def fake_local_agent(request_path, *, model_receipt, resource_policy):
+        request_path = Path(request_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        plan = {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": request["page_id"],
+            "provider": "local",
+            "repair_round": request["repair_round"],
+            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            "actions": [_accept_action()],
+        }
+        plans.append(plan)
+        assert model_receipt is receipt
+        assert resource_policy["name"] == "safe-default"
+        return plan
+
+    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert completed["agent_model"]["resolved_revision"] == "a" * 40
+    assert initial_calls == ["page_001"]
+    assert assembly_calls == ["single"]
+    assert [plan["provider"] for plan in plans] == ["local"]
+    assert not (run_dir / "host_capabilities.json").exists()
+    assert not (run_dir / "host-challenge").exists()
+    state = RunStore.open(run_dir).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["provider"] == "local"
+    assert state["plan_count"] == 1
+    provenance = RunStore.open(run_dir).read_json("local-agent-model.json")
+    assert provenance["receipt"]["resolved_revision"] == "a" * 40
+    assert len(provenance["receipt_sha256"]) == 64
+
+
+def test_local_provider_runs_multiple_rounds_serially_without_pausing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(
+        monkeypatch,
+        baked_background_pages={"page_001"},
+    )
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="local",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_local_model_receipt",
+        lambda store: _local_receipt(tmp_path),
+    )
+    rounds = []
+
+    def fake_local_agent(request_path, **kwargs):
+        request_path = Path(request_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        repair_round = request["repair_round"]
+        rounds.append(repair_round)
+        return {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": request["page_id"],
+            "provider": "local",
+            "repair_round": request["repair_round"],
+            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            "actions": [_accept_action()] if request["repair_round"] == 1 else [],
+        }
+
+    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert rounds == [1, 2]
+    assert RunStore.open(run_dir).read_json("run_state.json")["status"] == "completed"
+    state = RunStore.open(run_dir).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["plan_count"] == 2
+    assert state["status"] == "preserved_with_warning"
+    assert not (run_dir / "host_capabilities.json").exists()
+    round_two = run_dir / "pages/page_001/reconstruction/agent/round-02"
+    assert (round_two / "numbered-masks.png").read_bytes() != (
+        round_two / "source.png"
+    ).read_bytes()
+    assert (round_two / "ownership.png").read_bytes() != (
+        round_two / "source.png"
+    ).read_bytes()
+
+
+def test_next_round_disk_reserve_fails_before_evidence_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(
+        monkeypatch,
+        baked_background_pages={"page_001"},
+    )
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="local",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_local_model_receipt",
+        lambda store: _local_receipt(tmp_path),
+    )
+
+    def fake_local_agent(request_path, **kwargs):
+        request_path = Path(request_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        return {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": request["page_id"],
+            "provider": "local",
+            "repair_round": request["repair_round"],
+            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            "actions": [_accept_action()],
+        }
+
+    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+    real_reserve = legacy._ensure_component_disk_reserve
+    reserve_calls = 0
+
+    def fail_next_publication(*args, **kwargs):
+        nonlocal reserve_calls
+        reserve_calls += 1
+        if reserve_calls == 3:
+            raise RuntimeError("component page disk reserve is insufficient")
+        return real_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(
+        legacy,
+        "_ensure_component_disk_reserve",
+        fail_next_publication,
+    )
+
+    with pytest.raises(RuntimeError, match="disk reserve"):
+        runtime.run_job(run_dir)
+
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    assert reserve_calls == 3
+    assert not (reconstruction / "evidence-round-02").exists()
+
+
+def test_local_provider_stops_at_five_page_batches_and_falls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(
+        monkeypatch,
+        baked_background_pages={"page_001"},
+    )
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="local",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_local_model_receipt",
+        lambda store: _local_receipt(tmp_path),
+    )
+    rounds = []
+
+    def fake_local_agent(request_path, **kwargs):
+        request_path = Path(request_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        repair_round = request["repair_round"]
+        rounds.append(repair_round)
+        return {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": request["page_id"],
+            "provider": "local",
+            "repair_round": request["repair_round"],
+            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            "actions": [
+                {
+                    "action": "expand",
+                    "object_ids": ["component_0001"],
+                    "parameters": {"margin_ratio": repair_round / 100},
+                    "confidence": 0.95,
+                    "evidence": ["bounded distinct repair attempt"],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert rounds == [1, 2, 3, 4, 5]
+    state = RunStore.open(run_dir).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["plan_count"] == 5
+    assert state["stop_reason"] == "round_limit"
+    assert state["status"] == "preserved_with_warning"
+    assert not (
+        run_dir / "pages/page_001/reconstruction/agent/round-06"
+    ).exists()
+
+
+def test_local_missing_model_stops_before_heavy_page_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        agent_provider="local",
+    )
+    initialized = False
+
+    def missing_model(store):
+        raise RuntimeError(
+            "Local Agent model is unavailable; run: "
+            "image2editable models install agent"
+        )
+
+    def unexpected_initialize(*args, **kwargs):
+        nonlocal initialized
+        initialized = True
+        raise AssertionError("heavy page initialization must not start")
+
+    monkeypatch.setattr(runtime, "_local_model_receipt", missing_model)
+    monkeypatch.setattr(runtime, "initialize_legacy_page", unexpected_initialize)
+
+    with pytest.raises(RuntimeError, match="models install agent"):
+        runtime.run_job(run_dir)
+
+    assert initialized is False
+    assert not (run_dir / "host_capabilities.json").exists()
 
 
 def test_pdf_component_plan_e2e_is_serial_and_falls_back_before_one_assembly(
@@ -484,9 +774,13 @@ def test_initial_page_session_builds_authenticated_parent_graph(
     text_mask = prepared_root / "text-mask.png"
     component = prepared_root / "component.png"
     component_mask = prepared_root / "component-mask.png"
-    _image(background)
-    _image(difference)
+    Image.new("RGB", (20, 10), (1, 2, 3)).save(source)
+    Image.new("RGB", (20, 10), "black").save(background)
+    Image.new("RGB", (20, 10), "black").save(difference)
     Image.new("L", (20, 10), 0).save(text_mask)
+    with Image.open(text_mask) as image:
+        image.putpixel((10, 5), 255)
+        image.save(text_mask)
     Image.new("RGBA", (4, 3), (10, 20, 30, 255)).save(component)
     Image.new("L", (20, 10), 0).save(component_mask)
     mask = Image.open(component_mask)
@@ -504,6 +798,7 @@ def test_initial_page_session_builds_authenticated_parent_graph(
             "path": str(component), "x": 2, "y": 1, "w": 1, "h": 1,
             "z_index": 0,
         }],
+        "text_items": [{"text": "T", "box": [10, 4, 3, 2]}],
     }
 
     session = legacy._build_initial_page_session(
@@ -513,10 +808,65 @@ def test_initial_page_session_builds_authenticated_parent_graph(
     assert session["provider"] == "host"
     assert set(session["evidence"]) == set(legacy.EVIDENCE_NAMES)
     graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
-    assert graph["nodes"][0]["kind"] == "parent"
-    assert graph["nodes"][0]["state"] == "pending"
-    mask_path = Path(session["evidence"]["component-graph.json"]).parent / graph["nodes"][0]["mask"]
-    assert hashlib.sha256(mask_path.read_bytes()).hexdigest() == graph["nodes"][0]["mask_sha256"]
+    visual, text = graph["nodes"]
+    assert visual["kind"] == "parent"
+    assert visual["state"] == "pending"
+    assert visual["bbox"] == [2, 1, 3, 2]
+    assert text["id"] == "text_0001"
+    assert text["kind"] == "text"
+    assert text["state"] == "frozen"
+    assert text["bbox"] == [10, 4, 13, 6]
+    graph_root = Path(session["evidence"]["component-graph.json"]).parent
+    for node in graph["nodes"]:
+        mask_path = graph_root / node["mask"]
+        assert hashlib.sha256(mask_path.read_bytes()).hexdigest() == node["mask_sha256"]
+    request_path = legacy.build_component_agent_request(session, repair_round=1)
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["candidate_ids"] == ["component_0001"]
+    assert request["frozen_ids"] == ["text_0001"]
+    evidence = session["evidence"]
+    for name in ("numbered-masks.png", "ocr-overlay.png", "ownership.png"):
+        assert Path(evidence[name]).read_bytes() != Path(evidence["source.png"]).read_bytes()
+    with Image.open(evidence["reconstructed.png"]) as reconstructed:
+        assert reconstructed.getpixel((0, 0)) == (0, 0, 0)
+        assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
+
+
+def test_initial_page_session_reserves_disk_before_writing_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    difference = tmp_path / "difference.png"
+    text_mask = tmp_path / "text-mask.png"
+    for path in (source, background, difference):
+        Image.new("RGB", (20, 10), "black").save(path)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    monkeypatch.setattr(
+        legacy.shutil,
+        "disk_usage",
+        lambda path: types.SimpleNamespace(free=1),
+    )
+
+    with pytest.raises(RuntimeError, match="disk reserve"):
+        legacy._build_initial_page_session(
+            RunStore.open(run_dir),
+            "page_001",
+            {
+                "original_image_path": str(source),
+                "background_original_path": str(background),
+                "background_difference_path": str(difference),
+                "_text_mask_path": str(text_mask),
+                "_element_mask_paths": [],
+                "components": [],
+                "text_items": [],
+            },
+            reconstruction,
+        )
+
+    assert not (reconstruction / "evidence-source").exists()
 
 
 def test_legacy_assembly_uses_accepted_reconstruction_and_removes_text_from_alpha(
@@ -1354,6 +1704,48 @@ def test_run_job_preserves_pptx_without_calling_legacy(
         page["status"]
         for page in store.read_json("page_jobs.json")["pages"].values()
     } == {"preserved"}
+
+
+def test_host_pptx_completion_never_reads_local_model_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.pptx"
+    _pptx(source, slide_count=1)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    monkeypatch.setattr(
+        runtime,
+        "_local_model_summary",
+        lambda store: (_ for _ in ()).throw(
+            AssertionError("Host read Local model state")
+        ),
+    )
+
+    assert runtime.run_job(run_dir)["status"] == "completed"
+
+
+def test_local_pptx_completed_summary_with_model_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.pptx"
+    _pptx(source, slide_count=1)
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        agent_provider="local",
+    )
+    runtime._bind_local_model_receipt(
+        RunStore.open(run_dir),
+        _local_receipt(tmp_path),
+    )
+    completed = runtime.run_job(run_dir)
+
+    def unexpected_execute(store: RunStore) -> dict[str, object]:
+        raise AssertionError("completed Local PPTX executed again")
+
+    monkeypatch.setattr(runtime, "execute_pptx_preserve", unexpected_execute)
+
+    assert completed["agent_model"]["provider"] == "local"
+    assert runtime.run_job(run_dir) == completed
 
 
 def test_run_job_executes_agent_approved_shadow_plan(

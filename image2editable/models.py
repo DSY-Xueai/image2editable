@@ -23,7 +23,9 @@ _MODEL_KEYS = {
     "revision",
     "stability",
     "minimum_vram_gib",
+    "minimum_available_vram_gib",
     "minimum_ram_gib",
+    "minimum_available_ram_gib",
     "required_free_disk_gib",
     "priority",
 }
@@ -41,6 +43,8 @@ class HardwareProfile:
     ram_gib: float
     free_disk_gib: float
     cuda: bool
+    available_vram_gib: float | None = None
+    available_ram_gib: float | None = None
 
 
 def snapshot_download(**kwargs: object) -> str:
@@ -90,7 +94,9 @@ def _validate_catalog_entry(entry: object) -> None:
             raise ValueError(f"model catalog entry has invalid {key}")
     for key in (
         "minimum_vram_gib",
+        "minimum_available_vram_gib",
         "minimum_ram_gib",
+        "minimum_available_ram_gib",
         "required_free_disk_gib",
         "priority",
     ):
@@ -110,7 +116,7 @@ def _free_disk_gib(cache_dir: Path) -> float:
     return round(shutil.disk_usage(_existing_parent(cache_dir)).free / _GIB, 2)
 
 
-def _ram_gib() -> float:
+def _ram_profile() -> tuple[float, float]:
     if os.name == "nt":
 
         class MemoryStatus(ctypes.Structure):
@@ -129,45 +135,57 @@ def _ram_gib() -> float:
         status = MemoryStatus()
         status.length = ctypes.sizeof(status)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return round(status.total_physical / _GIB, 2)
-        return 0.0
+            return (
+                round(status.total_physical / _GIB, 2),
+                round(status.available_physical / _GIB, 2),
+            )
+        return 0.0, 0.0
     if hasattr(os, "sysconf"):
         try:
             pages = int(os.sysconf("SC_PHYS_PAGES"))
+            available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
             page_size = int(os.sysconf("SC_PAGE_SIZE"))
-            return round((pages * page_size) / _GIB, 2)
+            return (
+                round((pages * page_size) / _GIB, 2),
+                round((available_pages * page_size) / _GIB, 2),
+            )
         except (OSError, TypeError, ValueError):
             pass
-    return 0.0
+    return 0.0, 0.0
 
 
-def _cuda_profile() -> tuple[bool, float]:
+def _cuda_profile() -> tuple[bool, float, float]:
     try:
         if importlib.util.find_spec("torch") is None:
-            return False, 0.0
+            return False, 0.0, 0.0
         torch = importlib.import_module("torch")
         if not torch.cuda.is_available():
-            return False, 0.0
+            return False, 0.0, 0.0
         device_count = int(torch.cuda.device_count())
-        largest = max(
-            torch.cuda.get_device_properties(index).total_memory
-            for index in range(device_count)
-        )
-        return True, round(largest / _GIB, 2)
-    except (AttributeError, ImportError, OSError, RuntimeError, ValueError):
-        return False, 0.0
+        profiles = []
+        for index in range(device_count):
+            total = int(torch.cuda.get_device_properties(index).total_memory)
+            free, _ = torch.cuda.mem_get_info(index)
+            profiles.append((int(free), total))
+        available, total = max(profiles)
+        return True, round(total / _GIB, 2), round(available / _GIB, 2)
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return False, 0.0, 0.0
 
 
 def detect_hardware(cache_dir: str | Path | None = None) -> HardwareProfile:
     cache = (
         Path(cache_dir).expanduser().resolve() if cache_dir else default_model_cache()
     )
-    cuda, vram_gib = _cuda_profile()
+    cuda, vram_gib, available_vram_gib = _cuda_profile()
+    ram_gib, available_ram_gib = _ram_profile()
     return HardwareProfile(
         vram_gib=vram_gib,
-        ram_gib=_ram_gib(),
+        ram_gib=ram_gib,
         free_disk_gib=_free_disk_gib(cache),
         cuda=cuda,
+        available_vram_gib=available_vram_gib,
+        available_ram_gib=available_ram_gib,
     )
 
 
@@ -188,10 +206,28 @@ def _compatibility_reasons(
             f"显存 {_format_gib(hardware.vram_gib)} GiB < "
             f"{_format_gib(entry['minimum_vram_gib'])} GiB"
         )
+    if (
+        hardware.available_vram_gib is not None
+        and hardware.available_vram_gib
+        < float(entry["minimum_available_vram_gib"])
+    ):
+        reasons.append(
+            f"可用显存 {_format_gib(hardware.available_vram_gib)} GiB < "
+            f"{_format_gib(entry['minimum_available_vram_gib'])} GiB"
+        )
     if hardware.ram_gib < float(entry["minimum_ram_gib"]):
         reasons.append(
             f"内存 {_format_gib(hardware.ram_gib)} GiB < "
             f"{_format_gib(entry['minimum_ram_gib'])} GiB"
+        )
+    if (
+        hardware.available_ram_gib is not None
+        and hardware.available_ram_gib
+        < float(entry["minimum_available_ram_gib"])
+    ):
+        reasons.append(
+            f"可用内存 {_format_gib(hardware.available_ram_gib)} GiB < "
+            f"{_format_gib(entry['minimum_available_ram_gib'])} GiB"
         )
     if hardware.free_disk_gib < float(entry["required_free_disk_gib"]):
         reasons.append(
@@ -288,10 +324,16 @@ def recommend_agent_model(
             else "CUDA、显存、内存、磁盘和本地依赖均满足目录要求"
         ),
         "minimum_vram_gib": selected["minimum_vram_gib"],
+        "minimum_available_vram_gib": selected["minimum_available_vram_gib"],
         "minimum_ram_gib": selected["minimum_ram_gib"],
+        "minimum_available_ram_gib": selected["minimum_available_ram_gib"],
         "required_free_disk_gib": selected["required_free_disk_gib"],
         "cache_dir": str(cache),
-        "hardware": asdict(hardware),
+        "hardware": {
+            key: value
+            for key, value in asdict(hardware).items()
+            if value is not None
+        },
         "dependencies": dependencies,
     }
 

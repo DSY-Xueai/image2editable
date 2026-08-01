@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -14,10 +15,11 @@ import sys
 import tempfile
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 from pptx import Presentation
 
 from image2editable.contracts import validate_schema_version
+from image2editable.component_contracts import MAX_REPAIR_ROUNDS
 from image2editable.component_repair import (
     EVIDENCE_NAMES,
     advance_component_repair,
@@ -532,7 +534,9 @@ def _prepare_full_page_layers(source: Path, work_dir: Path) -> dict[str, Any]:
     )
     return {
         "original_image_path": work_dir / "source-image.png",
+        "background_original_path": work_dir / "background-original.png",
         "background_difference_path": work_dir / "background-difference.png",
+        "_text_mask_path": work_dir / "source-text-mask.png",
         "_element_mask_paths": [work_dir / "element-mask-0001.png"],
         "components": [{
             "path": work_dir / "component-0001.png",
@@ -546,24 +550,22 @@ def _prepare_full_page_layers(source: Path, work_dir: Path) -> dict[str, Any]:
 def _build_initial_page_session(
     store: RunStore, page_id: str, prepared: dict, reconstruction: Path
 ) -> dict:
+    with Image.open(prepared["original_image_path"]) as image:
+        page_size = image.size
+    text_items = _component_text_items(prepared.get("text_items", []), page_size)
+    _ensure_component_disk_reserve(
+        reconstruction,
+        Path(prepared["original_image_path"]),
+        node_count=len(prepared["components"]) + len(text_items),
+        repair_round=1,
+    )
     evidence_root = reconstruction / "evidence-source"
     evidence_root.mkdir(parents=True, exist_ok=False)
     masks_root = evidence_root / "masks"
     masks_root.mkdir()
-
-    sources = {
-        "source.png": Path(prepared["original_image_path"]),
-        "numbered-masks.png": Path(prepared["original_image_path"]),
-        "ocr-overlay.png": Path(prepared["original_image_path"]),
-        "ownership.png": Path(prepared["original_image_path"]),
-        "reconstructed.png": Path(prepared["original_image_path"]),
-        "difference.png": Path(prepared["background_difference_path"]),
-    }
-    evidence = {}
-    for name, source in sources.items():
-        target = evidence_root / name
-        shutil.copyfile(source, target)
-        evidence[name] = target
+    source_target = evidence_root / "source.png"
+    shutil.copyfile(prepared["original_image_path"], source_target)
+    evidence = {"source.png": source_target}
 
     nodes = []
     masks = prepared["_element_mask_paths"]
@@ -585,8 +587,26 @@ def _build_initial_page_session(
             "id": component_id, "kind": "parent", "parent_id": None,
             "state": "pending", "mask": f"masks/{mask_target.name}",
             "mask_sha256": sha256_file(mask_target),
-            "bbox": [left, top, right - left, bottom - top],
+            "bbox": [left, top, right, bottom],
             "z_index": component.get("z_index", index - 1), "text_ids": [],
+        })
+    for index, item in enumerate(text_items, start=1):
+        text_id = item["id"]
+        mask_target = masks_root / f"{text_id}.png"
+        mask = Image.new("L", page_size, 0)
+        left, top, right, bottom = item["box"]
+        ImageDraw.Draw(mask).rectangle(
+            (left, top, right - 1, bottom - 1),
+            fill=255,
+        )
+        mask.save(mask_target)
+        mask.close()
+        nodes.append({
+            "id": text_id, "kind": "text", "parent_id": None,
+            "state": "frozen", "mask": f"masks/{mask_target.name}",
+            "mask_sha256": sha256_file(mask_target),
+            "bbox": item["box"], "z_index": len(components) + index - 1,
+            "text_ids": [],
         })
     graph_path = evidence_root / "component-graph.json"
     graph_path.write_text(
@@ -596,10 +616,26 @@ def _build_initial_page_session(
     evidence["component-graph.json"] = graph_path
     quality_path = evidence_root / "quality-report.json"
     quality_path.write_text(
-        json.dumps({"schema_version": 1, "phase": "initial_layers"}),
+        json.dumps({
+            "schema_version": 1,
+            "phase": "initial_layers",
+            "text_items": text_items,
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
     evidence["quality-report.json"] = quality_path
+    evidence.update(
+        _render_component_evidence(
+            source_path=source_target,
+            graph={"nodes": nodes},
+            graph_dir=evidence_root,
+            text_mask_path=Path(prepared["_text_mask_path"]),
+            background_path=Path(prepared["background_original_path"]),
+            reconstructed_path=None,
+            output_dir=evidence_root,
+            text_items=text_items,
+        )
+    )
     if set(evidence) != set(EVIDENCE_NAMES):
         raise RuntimeError("legacy component evidence set is incomplete")
     return {
@@ -608,6 +644,200 @@ def _build_initial_page_session(
         "reconstruction_dir": reconstruction,
         "evidence": evidence,
     }
+
+
+def _component_text_items(items: object, page_size: tuple[int, int]) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+    width, height = page_size
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        box = item.get("box")
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or any(
+                type(value) not in {int, float} or not math.isfinite(value)
+                for value in box
+            )
+        ):
+            continue
+        x, y, box_width, box_height = box
+        if (
+            not item["text"].strip()
+            or box_width <= 0
+            or box_height <= 0
+            or x >= width
+            or y >= height
+            or x + box_width <= 0
+            or y + box_height <= 0
+        ):
+            continue
+        left = max(0, min(width - 1, int(x)))
+        top = max(0, min(height - 1, int(y)))
+        right = max(left + 1, min(width, math.ceil(x + box_width)))
+        bottom = max(top + 1, min(height, math.ceil(y + box_height)))
+        normalized.append({
+            "id": f"text_{len(normalized) + 1:04d}",
+            "text": item["text"],
+            "box": [left, top, right, bottom],
+        })
+    return normalized
+
+
+def _ensure_component_disk_reserve(
+    reconstruction: Path,
+    source_path: Path,
+    *,
+    node_count: int,
+    repair_round: int,
+) -> None:
+    with Image.open(source_path) as image:
+        width, height = image.size
+    pixels = width * height
+    remaining_rounds = MAX_REPAIR_ROUNDS - repair_round + 1
+    color_files = 16 * 4 * pixels
+    mask_files = max(1, node_count) * 6 * 2 * pixels
+    metadata = 8 * 1024 * 1024
+    safety_margin = max(256 * 1024 * 1024, 8 * pixels)
+    required = remaining_rounds * (color_files + mask_files + metadata)
+    required += safety_margin
+    if shutil.disk_usage(reconstruction).free < required:
+        raise RuntimeError(
+            "component page disk reserve is insufficient before page artifact write"
+        )
+
+
+def _render_component_evidence(
+    *,
+    source_path: Path,
+    graph: dict,
+    graph_dir: Path,
+    text_mask_path: Path,
+    background_path: Path,
+    reconstructed_path: Path | None,
+    output_dir: Path,
+    text_items: list[dict],
+) -> dict[str, Path]:
+    with Image.open(source_path) as image:
+        source = image.convert("RGB").copy()
+    if reconstructed_path is None:
+        with Image.open(background_path) as image:
+            reconstructed = image.convert("RGB").copy()
+        if reconstructed.size != source.size:
+            raise ValueError("component evidence background dimensions differ")
+    else:
+        with Image.open(reconstructed_path) as image:
+            reconstructed = image.convert("RGB").copy()
+        if reconstructed.size != source.size:
+            raise ValueError("component evidence reconstruction dimensions differ")
+
+    numbered = source.copy()
+    ownership = Image.new("RGB", source.size, (24, 24, 24))
+    numbered_draw = ImageDraw.Draw(numbered)
+    ownership_draw = ImageDraw.Draw(ownership)
+    colors = (
+        (255, 80, 80),
+        (70, 180, 255),
+        (90, 220, 120),
+        (255, 190, 60),
+        (190, 100, 255),
+        (60, 220, 210),
+    )
+    for index, node in enumerate(graph["nodes"]):
+        if node["kind"] == "text" or node["state"] not in {
+            "pending",
+            "pending_gate",
+            "frozen",
+        }:
+            continue
+        mask_path = graph_dir / Path(node["mask"])
+        if sha256_file(mask_path) != node["mask_sha256"]:
+            raise ValueError("component evidence mask sha256 mismatch")
+        with Image.open(mask_path) as image:
+            mask = image.convert("L").copy()
+        if mask.size != source.size:
+            raise ValueError("component evidence mask dimensions differ")
+        color = colors[index % len(colors)]
+        alpha = mask.point(lambda value: value * 96 // 255)
+        color_layer = Image.new("RGB", source.size, color)
+        numbered.paste(color_layer, (0, 0), alpha)
+        ownership.paste(color_layer, (0, 0), mask)
+        if reconstructed_path is None:
+            reconstructed.paste(source, (0, 0), mask)
+        left, top, right, bottom = node["bbox"]
+        label_at = ((left + right) // 2, (top + bottom) // 2)
+        for draw in (numbered_draw, ownership_draw):
+            draw.text(
+                label_at,
+                node["id"],
+                fill="white",
+                stroke_width=2,
+                stroke_fill="black",
+                anchor="mm",
+            )
+        color_layer.close()
+        alpha.close()
+        mask.close()
+
+    paths = {}
+    for name, evidence_image in (
+        ("numbered-masks.png", numbered),
+        ("ownership.png", ownership),
+    ):
+        path = output_dir / name
+        evidence_image.save(path)
+        evidence_image.close()
+        paths[name] = path
+
+    with Image.open(text_mask_path) as image:
+        text_mask = image.convert("L").copy()
+    if text_mask.size != source.size:
+        raise ValueError("component evidence text mask dimensions differ")
+    ocr_overlay = source.copy()
+    text_color = Image.new("RGB", source.size, (255, 225, 0))
+    text_alpha = text_mask.point(lambda value: value * 112 // 255)
+    ocr_overlay.paste(text_color, (0, 0), text_alpha)
+    text_color.close()
+    text_alpha.close()
+    ocr_draw = ImageDraw.Draw(ocr_overlay)
+    ocr_draw.text(
+        (4, 4),
+        "OCR/TEXT MASK",
+        fill="white",
+        stroke_width=2,
+        stroke_fill="black",
+    )
+    for item in text_items:
+        left, top, right, bottom = item["box"]
+        ocr_draw.rectangle((left, top, right, bottom), outline=(255, 225, 0), width=2)
+        label = f'{item["id"]}: {item["text"].replace(chr(10), " ")[:40]}'
+        ocr_draw.text(
+            (left, max(0, top - 12)),
+            label,
+            fill="white",
+            stroke_width=2,
+            stroke_fill="black",
+        )
+    ocr_path = output_dir / "ocr-overlay.png"
+    ocr_overlay.save(ocr_path)
+    ocr_overlay.close()
+    text_mask.close()
+    paths["ocr-overlay.png"] = ocr_path
+
+    difference = ImageOps.autocontrast(ImageChops.difference(source, reconstructed))
+    for name, evidence_image in (
+        ("reconstructed.png", reconstructed),
+        ("difference.png", difference),
+    ):
+        path = output_dir / name
+        evidence_image.save(path)
+        evidence_image.close()
+        paths[name] = path
+    source.close()
+    return paths
 
 
 def advance_legacy_page(
@@ -680,7 +910,8 @@ def _quality_assets(
         "schema_version": 1, "page_id": page_id,
         "source_sha256": sha256_file(source_path),
         "protected_native_overlap": "pass",
-    }), encoding="utf-8")
+        "text_items": prepared.get("text_items", []),
+    }, ensure_ascii=False), encoding="utf-8")
     return {
         name: {
             "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
@@ -706,6 +937,18 @@ def _execute_legacy_round(
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     source = request_path.parent / Path(request["evidence"]["source.png"]["path"])
+    projected_nodes = len(graph["nodes"])
+    for action in plan["actions"]:
+        if action["action"] == "split":
+            projected_nodes += action["parameters"]["parts"]
+        elif action["action"] == "merge":
+            projected_nodes += 1
+    _ensure_component_disk_reserve(
+        store.root / "pages" / page_id / "reconstruction",
+        source,
+        node_count=projected_nodes,
+        repair_round=state["repair_round"],
+    )
     with Image.open(source) as image:
         pixels = np.asarray(image.convert("RGB")).copy()
     reconstruction = store.root / "pages" / page_id / "reconstruction"
@@ -759,16 +1002,27 @@ def _publish_next_legacy_request(
     # can produce a different byte hash even though its pixels are identical.
     source = _state_artifact(store, refs["source"])
     reconstruction = store.root / "pages" / page_id / "reconstruction"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    module = importlib.import_module("image_to_ppt")
+    prepared = module.load_component_layers(
+        reconstruction / "initial" / "prepared_page.json"
+    )
+    with Image.open(source) as image:
+        text_items = _component_text_items(
+            prepared.get("text_items", []), image.size
+        )
+    _ensure_component_disk_reserve(
+        reconstruction,
+        source,
+        node_count=len(graph["nodes"]),
+        repair_round=repair_round,
+    )
     evidence_root = reconstruction / f"evidence-round-{repair_round:02d}"
     evidence_root.mkdir(exist_ok=False)
     evidence = {}
     copies = {
         "source.png": source,
-        "numbered-masks.png": source,
-        "ocr-overlay.png": source,
-        "ownership.png": source,
         "reconstructed.png": _state_artifact(store, refs["reconstructed"]),
-        "difference.png": _state_artifact(store, refs["background"]),
         "component-graph.json": graph_path,
         "quality-report.json": quality_path,
     }
@@ -777,6 +1031,18 @@ def _publish_next_legacy_request(
         shutil.copyfile(source_path, target)
         evidence[name] = target
     shutil.copytree(graph_path.parent / "masks", evidence_root / "masks")
+    evidence.update(
+        _render_component_evidence(
+            source_path=evidence["source.png"],
+            graph=graph,
+            graph_dir=evidence_root,
+            text_mask_path=_state_artifact(store, refs["text_mask"]),
+            background_path=_state_artifact(store, refs["background"]),
+            reconstructed_path=evidence["reconstructed.png"],
+            output_dir=evidence_root,
+            text_items=text_items,
+        )
+    )
     session = {
         "page_id": page_id, "provider": state["provider"],
         "reconstruction_dir": reconstruction, "evidence": evidence,
@@ -800,9 +1066,15 @@ def _execute_legacy_parent_fallback(
     graph_path = _state_artifact(store, state["graph_ref"])
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     source = _source_path(store, page_id)
+    output_dir = store.root / "pages" / page_id / "reconstruction/parent-fallback"
+    _ensure_component_disk_reserve(
+        output_dir.parent,
+        source,
+        node_count=len(graph["nodes"]),
+        repair_round=state["repair_round"],
+    )
     with Image.open(source) as image:
         pixels = np.asarray(image.convert("RGB")).copy()
-    output_dir = store.root / "pages" / page_id / "reconstruction/parent-fallback"
     actions = [{
         "action": "collapse_to_parent", "object_ids": [parent_id],
         "parameters": {}, "confidence": 1.0,
@@ -815,6 +1087,16 @@ def _execute_legacy_parent_fallback(
     parent_ids = set(state["fallback"]["parent_ids"])
     for node in next_graph["nodes"]:
         if node["id"] in parent_ids:
+            initial_mask = _state_artifact(store, state["parent_assets"][node["id"]])
+            restored_mask = output_dir / Path(node["mask"])
+            shutil.copyfile(initial_mask, restored_mask)
+            with Image.open(restored_mask) as image:
+                bbox = image.convert("L").getbbox()
+            if bbox is None:
+                raise ValueError("initial parent fallback mask is empty")
+            left, top, right, bottom = bbox
+            node["mask_sha256"] = sha256_file(restored_mask)
+            node["bbox"] = [left, top, right, bottom]
             node["state"] = "pending_gate"
     output_graph = output_dir / "component-graph.json"
     output_graph.write_text(

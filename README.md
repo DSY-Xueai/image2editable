@@ -149,11 +149,26 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 ### 命令行运行
 
-#### 统一 Runtime（P1）
+#### 统一 Runtime
+
+组件重建提供两种互斥的 Agent Provider；Provider 在创建 Run 时冻结，不会中途自动切换：
+
+- `host`（默认）：直接使用当前 Codex、Claude Code 等宿主 AI，不下载额外的组件决策模型。宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；Runtime 会通过一次视觉能力握手后，逐轮请求组件计划。
+- `local`（实验性）：使用用户显式安装的本地视觉模型，Runtime 在隔离子进程中自动完成每页最多五轮计划与质量门禁。转换期间严格离线，不会自动下载模型。
+
+Local 模式不要硬编码模型名。先让 Skill/Agent 读取当前电脑配置和版本化模型目录：
 
 ```bash
-# 图片或目录继续使用现有可编辑 PPTX 管线
-image2editable convert input.png -o output.pptx --slide-size 16:9
+image2editable models recommend --json
+image2editable models status
+```
+
+只有推荐结果兼容、状态为已安装且有效时才能直接使用 Local。未安装时必须先向用户说明模型、revision、实验性状态和资源要求，并取得明确授权后执行 `image2editable models install agent`；Host 模式不执行模型探测或下载。两种模式共享相同的组件动作、最多五轮限制、确定性执行和质量门禁，互不读取对方的握手、计划或模型状态。
+
+```bash
+# 图片、PDF 和图片版 PPTX 均可选择 Host 或 Local
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider host
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
 
 # PDF 可直接转换，也可准备任务后按页请求一次细节重渲染再执行
 image2editable convert input.pdf -o output.pptx --slide-size 16:9
@@ -162,8 +177,8 @@ image2editable run render-detail runs/pdf-job --page page_001
 image2editable run execute runs/pdf-job
 image2editable run recover runs/pdf-job
 
-# PPTX P2.1：准备高置信候选，Agent 查看 image_path 后记录判断
-image2editable prepare input.pptx --run-dir runs/pptx-job
+# PPTX：保留原生文字、形状、表格、图表和未命中图片；仅处理高置信整页截图候选
+image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
 image2editable run next runs/pptx-job
 image2editable decision record runs/pptx-job \
   --page page_001 --object 7 \
@@ -171,8 +186,8 @@ image2editable decision record runs/pptx-job \
   --category full_slide_screenshot \
   --evidence "complete slide layout"
 
-# 当前执行路径仍无损保留 PPTX；OOXML 替换将在后续 shadow-run 阶段接入
-image2editable convert input.pptx -o preserved.pptx
+# Agent 确认并且组件质量门禁通过后，原位替换命中的截图页；失败页面保留原截图并给出 warning
+image2editable run execute runs/pptx-job
 
 # 检查本地依赖
 image2editable doctor
@@ -184,7 +199,7 @@ Unified CLI 的位置参数概念为 `sources`：可输入图片文件/目录、
 
 PDF 会先自适应渲染，再复用现有“图像转可编辑 PPTX”管线。标准目标为 200 DPI；小页会提高到短边至少 1200 px，但不超过 300 DPI；所有渲染均限制长边不超过 6000 px、总像素不超过 24 MP。Agent 或用户可对每页调用一次 `render-detail`，以 300 DPI 目标重新渲染。物理宽高比相同的 PDF 页面可合并为保持该比例的多页 PPTX；混合宽高比时，`original` 输出为逐页文件，同时仍可生成统一 16:9 版本。所有布局均等比放置，不做非均匀拉伸。
 
-PPTX 输入只读扫描 OOXML 原生对象、备注、图片关系和稳定指纹，仅将覆盖幻灯片至少 80% 且结构安全的大图标记为候选。P2.1 会逐字节提取候选原图，向 Agent 提供覆盖率、边距、原生对象统计和绑定哈希；Runtime 只允许 `replace + full_slide_screenshot + confidence >= 0.92` 进入后续 shadow-run 队列，照片、Logo、装饰图和不确定项全部保留，且不需要逐对象询问用户。当前执行输出仍与输入 PPTX byte-identical；OCR/重建、shadow QA 与 OOXML 原位替换尚未接入。
+PPTX 输入只读扫描 OOXML 原生对象、备注、图片关系和稳定指纹，仅将覆盖幻灯片至少 80% 且结构安全的大图标记为候选。Runtime 只允许 `replace + full_slide_screenshot + confidence >= 0.92` 进入组件重建；照片、Logo、装饰图和不确定项全部保留。候选页通过组件质量门禁和 PPTX reopen 后才进行 OOXML 原位替换，未通过时保留原截图并记录 warning；现有可编辑文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生对象。
 
 正式支持 Python 3.10–3.12；`doctor` 现在也检查 PDFium。
 

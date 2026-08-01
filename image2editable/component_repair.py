@@ -151,6 +151,106 @@ def initialize_component_repair_state(
         )
 
 
+def record_local_component_plan(
+    store,
+    page_id: str,
+    *,
+    plan: dict,
+    _lease: ExecutionLease | None = None,
+) -> dict:
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
+        relative_state = (
+            f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        )
+        state = validate_component_repair_state(store.read_json(relative_state))
+        _validate_repair_state_identity(store, state, page_id)
+        if state["provider"] != "local" or state["phase"] not in {
+            "awaiting_plan",
+            "plan_recorded",
+        }:
+            raise RuntimeError("Local component plan does not match repair state")
+        request_payload = _load_state_artifact(
+            store.root, state["current_round"]["request_ref"]
+        )
+        request = json.loads(request_payload.decode("utf-8"))
+        graph = json.loads(
+            _load_state_artifact(
+                store.root,
+                state["graph_ref"],
+                max_bytes=GRAPH_JSON_LIMIT,
+            ).decode("utf-8")
+        )
+        validate_component_plan(plan, request=request, graph=graph)
+        if (
+            plan["request_sha256"]
+            != state["current_round"]["request_ref"]["sha256"]
+        ):
+            raise ValueError(
+                "component plan request_sha256 does not match current request"
+            )
+        payload = json.dumps(
+            plan,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        destination = reconstruction / (
+            f"local-component-plan-{state['repair_round']:02d}-"
+            f"{state['current_round']['request_ref']['sha256']}.json"
+        )
+        if destination.exists() or destination.is_symlink():
+            if (
+                _read_bound_file(
+                    destination,
+                    store.root,
+                    max_bytes=REQUEST_JSON_LIMIT,
+                    label="local component plan",
+                )
+                != payload
+            ):
+                raise RuntimeError(
+                    "A different local component plan is already recorded"
+                )
+        else:
+            _write_exclusive(destination, payload, reconstruction)
+        plan_ref = {
+            "path": destination.resolve()
+            .relative_to(store.root.resolve())
+            .as_posix(),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        if state["phase"] == "plan_recorded":
+            if state["current_round"]["plan_ref"] != plan_ref:
+                raise RuntimeError(
+                    "A different local component plan is already recorded"
+                )
+            return {
+                "status": "recorded",
+                "plan_ref": plan_ref,
+                "recovered": True,
+            }
+        updated = dict(state)
+        updated["current_round"] = dict(state["current_round"])
+        updated["current_round"]["plan_ref"] = plan_ref
+        updated["phase"] = "plan_recorded"
+        updated["plan_count"] += 1
+        updated["revision"] += 1
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative_state, updated)
+        return {
+            "status": "recorded",
+            "plan_ref": plan_ref,
+            "recovered": False,
+        }
+
+
 def _require_held_execution_lease(store, lease: ExecutionLease) -> None:
     if (
         not isinstance(lease, ExecutionLease)
@@ -184,7 +284,7 @@ def _initialize_component_repair_state_locked(
     relative_graph = graph_path.resolve().relative_to(store.root.resolve()).as_posix()
     frozen = {
         node["id"]: node["mask_sha256"] for node in graph["nodes"]
-        if node["state"] == "frozen"
+        if node["state"] == "frozen" and node["kind"] != "text"
     }
     parent_assets = {}
     for node in graph["nodes"]:
@@ -392,7 +492,13 @@ def record_next_component_request(
             or request["repair_round"] != state["repair_round"] + 1
             or request["source_sha256"] != state["source_sha256"]
             or request["candidate_ids"] != state["failed_ids"]
-            or request["frozen_ids"] != sorted(state["frozen"])
+            or request["frozen_ids"] != sorted(
+                set(state["frozen"])
+                | {
+                    node["id"] for node in graph["nodes"]
+                    if node["kind"] == "text" and node["state"] == "frozen"
+                }
+            )
         ):
             raise ValueError("next component request does not match repair state")
         before = json.loads(_load_state_artifact(
@@ -554,13 +660,17 @@ def _verify_quality_input_refs(store, state: dict, refs: object) -> dict:
     native = json.loads(_load_state_artifact(
         store.root, refs["native_check"]
     ).decode("utf-8"))
-    if not isinstance(native, dict) or set(native) != {
+    native_fields = {
         "schema_version", "page_id", "source_sha256", "protected_native_overlap"
+    }
+    if not isinstance(native, dict) or set(native) not in {
+        frozenset(native_fields), frozenset(native_fields | {"text_items"})
     } or (
         native["schema_version"] != 1
         or native["page_id"] != state["page_id"]
         or native["source_sha256"] != state["source_sha256"]
         or native["protected_native_overlap"] not in {"pass", "fail", "unknown"}
+        or not isinstance(native.get("text_items", []), list)
     ):
         raise ValueError("component native overlap check is invalid")
     return refs
@@ -641,6 +751,8 @@ def _recompute_quality_artifact(
         "initial_component_count": state["initial_component_count"],
         "input_refs": input_refs, "report": report,
     }
+    if native.get("text_items"):
+        quality["text_items"] = native["text_items"]
     payload = json.dumps(
         quality, ensure_ascii=False, indent=2, sort_keys=True
     ).encode("utf-8") + b"\n"
@@ -731,7 +843,7 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
     }
     frozen = dict(state["frozen"])
     for node in graph["nodes"]:
-        if node["state"] == "frozen":
+        if node["state"] == "frozen" and node["kind"] != "text":
             frozen[node["id"]] = node["mask_sha256"]
     history = list(state["round_history"])
     history[-1] = dict(history[-1])

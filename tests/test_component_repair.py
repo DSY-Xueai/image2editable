@@ -25,6 +25,7 @@ from image2editable.component_repair import (
     record_parent_fallback_execution,
     record_parent_fallback_quality,
     record_component_quality,
+    record_local_component_plan,
 )
 import image2editable.component_repair as component_repair
 from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
@@ -96,6 +97,48 @@ def test_initialized_state_points_to_hash_bound_current_request(page_session: di
     assert advance_component_repair(store, "page_001")["status"] == "awaiting_agent"
     persisted = store.read_json("pages/page_001/reconstruction/component_state.json")
     assert persisted["phase"] == "awaiting_plan"
+
+
+def test_local_plan_is_hash_bound_and_recorded_without_host_state(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    local_session = {**page_session, "provider": "local"}
+    request_path = build_component_agent_request(local_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json(
+        "job_manifest.json",
+        {
+            "schema_version": 1,
+            "pages": ["page_001"],
+            "options": {"agent_provider": "local"},
+        },
+    )
+    initialize_component_repair_state(
+        store,
+        "page_001",
+        request_path=request_path,
+        initial_component_count=2,
+    )
+    assert advance_component_repair(store, "page_001")["status"] == "awaiting_agent"
+    plan = {
+        "schema_version": 1,
+        "kind": "component_plan",
+        "page_id": "page_001",
+        "provider": "local",
+        "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("accept", ["candidate_b"])],
+    }
+
+    recorded = record_local_component_plan(store, "page_001", plan=plan)
+
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert state["phase"] == "plan_recorded"
+    assert state["plan_count"] == 1
+    assert state["current_round"]["plan_ref"] == recorded["plan_ref"]
+    assert not (store.root / "host_capabilities.json").exists()
 
 
 def test_execution_quality_freeze_reaches_ready_for_assembly(
@@ -504,7 +547,7 @@ def _action_case(tmp_path: Path) -> tuple[np.ndarray, dict, Path]:
         ("left", "child", "parent", "pending", 1),
         ("right", "child", "parent", "pending", 2),
         ("frozen", "parent", None, "frozen", 3),
-        ("text", "text", None, "pending", 4),
+        ("text", "text", None, "frozen", 4),
     ]
     for component_id, kind, parent_id, state, z_index in specs:
         path = masks / f"{component_id}.png"

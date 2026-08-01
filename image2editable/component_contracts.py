@@ -335,6 +335,13 @@ def validate_component_action(action: object, *, graph: dict | None = None) -> d
         node["id"] for node in graph_nodes
         if isinstance(node, dict) and node.get("state") == "frozen"
     )
+    if (
+        validated_graph is None
+        and isinstance(action, dict)
+        and action.get("action") == "attach_text"
+        and len(object_ids) == 2
+    ):
+        frozen_ids = [object_ids[1]]
     candidate_ids = sorted(
         (set(object_ids) | {
             node["id"] for node in graph_nodes
@@ -410,7 +417,15 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             or (name == "attach_text" and len(object_ids) != 2)
         ):
             raise ValueError("component action object count is invalid")
-        if set(object_ids) & set(request["frozen_ids"]):
+        if graph is not None:
+            _validate_action_graph_roles(name, object_ids, graph)
+        if name == "attach_text" and object_ids[1] not in request["frozen_ids"]:
+            raise ValueError("attach_text requires a frozen text object")
+        frozen_targets = set(object_ids) & set(request["frozen_ids"])
+        if frozen_targets and not (
+            name == "attach_text"
+            and frozen_targets == {object_ids[1]}
+        ):
             raise ValueError("component action object is frozen")
         if touched & set(object_ids):
             raise ValueError("component plan has conflicting object actions")
@@ -449,8 +464,6 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     _validate_normalized_point(point, field)
             if not parameters["positive"]:
                 raise ValueError("component action positive coordinates are invalid")
-        if graph is not None:
-            _validate_action_graph_roles(name, object_ids, graph)
     return plan
 
 
@@ -465,6 +478,8 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
     if action == "attach_text":
         if selected[0].get("kind") == "text" or selected[1].get("kind") != "text":
             raise ValueError("attach_text requires visual then text roles")
+        if selected[1].get("state") != "frozen":
+            raise ValueError("attach_text requires a frozen text object")
         return
     if action == "collapse_to_parent":
         if selected[0].get("kind") != "parent":

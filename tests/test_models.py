@@ -21,7 +21,9 @@ def _catalog() -> dict[str, object]:
                 "revision": "main",
                 "stability": "experimental",
                 "minimum_vram_gib": 8,
-                "minimum_ram_gib": 16,
+                "minimum_available_vram_gib": 6.5,
+                "minimum_ram_gib": 15,
+                "minimum_available_ram_gib": 6,
                 "required_free_disk_gib": 8,
                 "priority": 100,
             }
@@ -65,7 +67,9 @@ def test_recommend_uses_hardware_and_catalog_without_network(
         "compatible": True,
         "reason": "CUDA、显存、内存、磁盘和本地依赖均满足目录要求",
         "minimum_vram_gib": 8,
-        "minimum_ram_gib": 16,
+        "minimum_available_vram_gib": 6.5,
+        "minimum_ram_gib": 15,
+        "minimum_available_ram_gib": 6,
         "required_free_disk_gib": 8,
         "cache_dir": str(tmp_path.resolve()),
         "hardware": {
@@ -109,8 +113,49 @@ def test_recommend_explains_incompatible_hardware(tmp_path: Path) -> None:
 
     assert result["compatible"] is False
     assert result["reason"] == (
-        "未检测到 CUDA；显存 0 GiB < 8 GiB；内存 8 GiB < 16 GiB；可用磁盘 4 GiB < 8 GiB"
+        "未检测到 CUDA；显存 0 GiB < 8 GiB；内存 8 GiB < 15 GiB；可用磁盘 4 GiB < 8 GiB"
     )
+
+
+def test_recommend_rejects_low_currently_available_memory(tmp_path: Path) -> None:
+    result = models.recommend_agent_model(
+        HardwareProfile(
+            vram_gib=8,
+            ram_gib=16,
+            free_disk_gib=20,
+            cuda=True,
+            available_vram_gib=5.5,
+            available_ram_gib=4,
+        ),
+        catalog=_catalog(),
+        cache_dir=tmp_path,
+        package_versions=_compatible_packages(),
+    )
+
+    assert result["compatible"] is False
+    assert result["reason"] == (
+        "可用显存 5.5 GiB < 6.5 GiB；可用内存 4 GiB < 6 GiB"
+    )
+
+
+def test_recommend_accepts_nominal_8gb_gpu_and_16gb_ram_capacity(
+    tmp_path: Path,
+) -> None:
+    result = models.recommend_agent_model(
+        HardwareProfile(
+            vram_gib=8,
+            ram_gib=15.22,
+            free_disk_gib=20,
+            cuda=True,
+            available_vram_gib=6.75,
+            available_ram_gib=6.5,
+        ),
+        catalog=_catalog(),
+        cache_dir=tmp_path,
+        package_versions=_compatible_packages(),
+    )
+
+    assert result["compatible"] is True
 
 
 @pytest.mark.parametrize(
@@ -159,6 +204,12 @@ def test_cuda_profile_uses_the_largest_available_gpu(
             gib = 4 if index == 0 else 12
             return type("Properties", (), {"total_memory": gib * 1024**3})()
 
+        @staticmethod
+        def mem_get_info(index: int) -> tuple[int, int]:
+            free_gib = 3 if index == 0 else 10
+            total_gib = 4 if index == 0 else 12
+            return free_gib * 1024**3, total_gib * 1024**3
+
     monkeypatch.setattr(models.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(
         models.importlib,
@@ -166,7 +217,7 @@ def test_cuda_profile_uses_the_largest_available_gpu(
         lambda name: type("Torch", (), {"cuda": FakeCuda})(),
     )
 
-    assert models._cuda_profile() == (True, 12.0)
+    assert models._cuda_profile() == (True, 12.0, 10.0)
 
 
 def test_install_stops_before_network_when_disk_is_insufficient(
@@ -275,7 +326,9 @@ def test_install_downloads_the_exact_model_and_revision_that_were_confirmed(
             "revision": "large-main",
             "stability": "experimental",
             "minimum_vram_gib": 24,
+            "minimum_available_vram_gib": 20,
             "minimum_ram_gib": 32,
+            "minimum_available_ram_gib": 16,
             "required_free_disk_gib": 20,
             "priority": 200,
         }

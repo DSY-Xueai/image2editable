@@ -28,8 +28,24 @@
 - `models install agent` 在联网前显示模型、revision、实验性状态、空间和硬件结论；必须交互确认或显式传入 `--yes`，磁盘不足或未确认时下载调用次数为零。
 - 下载使用 Hugging Face 本地 snapshot 缓存；完成后记录解析出的 commit SHA、逐文件大小/SHA-256 和 receipt。`models status` 只在本地复核 receipt、snapshot 边界与文件校验值。
 - 本地 Agent 依赖位于 `agent-local` 可选依赖；CLI 和 Host Runtime 都惰性隔离模型管理模块，Host 转换不导入 PyTorch、不探测或下载本地模型。
-- 本轮只实现模型管理边界，没有下载模型，也尚未把 Local Provider 接入组件推理；该执行链属于 Task 12。
+- Task 11 只实现模型管理边界，没有下载模型；Local Provider 推理执行链已由后续 Task 12 接通。
 - Task 11 指定回归：`94 passed, 1 skipped`；最终全量回归：`1297 passed, 19 skipped`。Windows 仅跳过当前环境无权限创建文件软链接的兼容测试，Hugging Face copy fallback 与其余 receipt 校验均通过。
+
+## P2.3 Task 12 已完成
+
+- Local Provider 已接入统一组件状态机：Runtime 在内部完成“生成请求 → 单轮本地视觉推理 → 严格记录计划 → 确定性执行/门禁”的循环，不进入 Host 的公开 `awaiting_agent`，也不读取 Host 握手、会话或计划。
+- 初轮和后续轮次不再用源图冒充诊断证据：`numbered-masks.png` 显示彩色组件掩码与准确 ID，`ocr-overlay.png` 显示稳定 `text_XXXX`、逐项 OCR box/text，`ownership.png` 显示独占像素归属，`reconstructed.png` 与 `difference.png` 来自当前确定性重建；证据图改为分批保存释放，避免六张整页 RGB 图同时常驻内存。
+- 每个重修轮次启动一个独立 `local_agent_worker` 子进程；视觉模型只在 worker 内惰性加载，结束或超时后以进程退出作为 RAM/VRAM 释放边界。模型与处理器均使用已确认 snapshot 和 `local_files_only=True`，同时启用 Hugging Face/Transformers 离线环境，不会在转换中下载模型。
+- worker 只允许九种既定动作；请求、八项证据和组件图重新校验路径与 SHA-256，生成计划先在 worker 校验，再由父进程使用与 Host 相同的严格 Schema/组件图校验器复核并原子记录。
+- 本地计划按页面、轮次和请求 hash 持久化且不可覆盖；相同计划可恢复，不同计划拒绝。最多五个页面级批量重修轮次、冻结规则、父子互斥、父组件/原页回退和质量门禁继续由共同状态机控制，Local Agent 无权放宽。
+- OCR 文字以冻结、只读的 text 节点进入真实组件图，不参与视觉组件质量计数；`attach_text` 只允许待修视觉节点引用冻结文字节点，其他动作不能修改文字节点。原始 `text_items` 继续进入最终可编辑 PPTX，而不是只画在诊断图上。
+- 硬件与依赖推荐在一次性 `models recommend --json` 子进程中执行，避免 PyTorch/CUDA 常驻转换主进程；除总 RAM/VRAM 外也检查当前可用 RAM/VRAM。标称 16GB RAM/8GB VRAM 目标按至少 15 GiB 总 RAM、8 GiB 总 VRAM、6 GiB 可用 RAM、6.5 GiB 可用 VRAM 判定，避免 Windows 可见容量换算造成永久误拒绝。
+- 每轮证据发布前、动作执行前和 Local worker 启动前都检查页面磁盘预算；按解码后整页像素、当前/计划新增节点、剩余轮次和至少 256 MiB 安全余量预留，空间不足时不创建下一轮 evidence 或 execution 目录。
+- 首次 Local 执行将模型 ID、请求 revision、解析 commit、snapshot、文件清单及 receipt hash 冻结到 Run；恢复时若全局模型已变更则拒绝混用，Local PPTX 完成态可重复校验该摘要。Host 完成路径不读取、也不接受 Local provenance。
+- worker 超时、非零退出或无效计划会通过受保护目录链和独占文件写入有界诊断；不安全诊断目录不能越界，也不会掩盖原始 worker 错误。不自动切换 Provider。
+- 父组件在五轮修复后回退时从首轮 hash-bound 资产恢复完整原始掩码，而不是沿用被 expand/shrink 等动作修改后的父掩码。
+- `README.md` 与 `skills/image-to-ppt/SKILL.md` 已同步 Host/Local 两种用法：Host 复用具备视觉能力的 Codex/Claude 等宿主，Local 必须先按实时硬件推荐并取得明确下载授权；两者在单个 Run 内互斥且不共享私有状态。
+- 当前只完成 mock/契约验收，没有下载或真实加载模型，Local 状态继续为 `experimental`；`models status` 显示 `installed=false`。`attach_text` 契约定向回归为 `61 passed`，最终全量回归为 `1319 passed, 20 skipped`。
 
 ## 当前项目状态
 
@@ -39,7 +55,7 @@
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
 - P2.3 Task 10 已接通 PPTX 获批候选 → 组件状态机 → 已验收 donor → OOXML 原位替换；未通过质量门禁的页面保留原截图并给出 warning。
-- P2.3 Task 11 已提供本地模型推荐、显式安装和完整性状态检查；Host 模式仍完全不依赖本地模型，Local 推理尚未启用。
+- P2.3 Task 12 已接通隔离的 Local 推理；Host 模式仍完全不依赖本地模型。Local 尚未下载实际模型或通过真实文件验收，因此仍为实验性。
 
 ## P2.2 既有行为
 
@@ -137,7 +153,8 @@
 - 共享图片/PDF 清理：`image_to_ppt.py`
 - 背景、前景与质量门禁：`scripts/bg_model.py`、`scripts/fg_extract.py`、`scripts/visual_segment.py`
 - Skill 镜像：`skills/image-to-ppt/scripts/`
-- 本地模型目录与管理：`image2editable/model_catalog.json`、`image2editable/models.py`
+- 用户与 Agent 使用说明：`README.md`、`skills/image-to-ppt/SKILL.md`
+- 本地模型目录、管理与隔离推理：`image2editable/model_catalog.json`、`image2editable/models.py`、`image2editable/local_agent.py`、`image2editable/local_agent_worker.py`
 - CLI 与可选依赖：`image2editable/cli.py`、`pyproject.toml`
 
 ## 运行入口
@@ -148,6 +165,7 @@ image2editable models recommend --json
 image2editable models status
 image2editable models install agent
 image2editable convert input.pdf -o output.pptx --slide-size original --agent-provider host
+image2editable convert input.pdf -o output.pptx --slide-size original --agent-provider local
 image2editable convert images/ -o output.pptx --slide-size 16:9
 image2editable prepare input.pptx --run-dir runs/pptx-job
 image2editable agent next runs/pptx-job
@@ -170,8 +188,8 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–11 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护和本地模型管理。下一阶段是 Task 12 的 Local Provider 隔离推理。
-- 本地模型目录目前仍为 `revision=main`、`stability=experimental`；只有 Task 12/13 的真实图片、PDF、图片版 PPTX 验收通过后，才固定验收 commit 并调整稳定性。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–12 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护、本地模型管理、Local Provider 隔离推理，以及双 Provider 的 README/Skill 使用说明。下一阶段是 Task 13 的真实模型与真实图片、PDF、图片版/混合 PPTX 验收。
+- 本地模型目录目前仍为 `revision=main`、`stability=experimental`；Task 12 没有下载模型。只有取得用户明确下载授权并完成 Task 13 的真实图片、PDF、图片版 PPTX 验收后，才固定验收 commit 并调整稳定性。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，由 Task 8 重修或折叠到完整父组件。
