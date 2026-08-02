@@ -14,6 +14,7 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     assert AGENT_PROVIDERS == frozenset({"host", "local"})
     assert MAX_REPAIR_ROUNDS == 5
     assert "pending_gate" in component_contracts.COMPONENT_STATES
+    assert "component-isolation.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
 
 
 @pytest.mark.parametrize(

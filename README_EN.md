@@ -21,7 +21,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 > Input image | Multiple images are also supported
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
-> High-confidence PPTX layers keep foreground elements movable and text boxes editable. When layer quality is uncertain, the visual background is preserved while text remains editable.
+> Pages that pass the hard gates keep visual components movable and free of text pixels. Every reliable OCR string is contributed exactly once by a native editable text box; a failing page alone is preserved with a warning.
 >
 > For the best visual results in a 16:9 PPT, using a 16:9 input image is recommended.
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
@@ -35,7 +35,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 | Background repair | PPTX uses OpenCV for small or narrow masks and LaMa for large or deep masks; PSD uses two-pass background modeling and inpainting |
 | Foreground separation | PPTX uses Grounding DINO semantic proposals and SAM 2.1 segmentation; PSD uses differences, edges, and connected components |
 | OCR text reconstruction | Detects text and estimates font size, color, weight, and alignment |
-| PPTX export | High-confidence pages use independent transparent components and editable text boxes; uncertain pages use a text-clean fidelity background with editable text; outputs original-aspect-ratio and 16:9 versions by default |
+| PPTX export | Passing pages use minimal complete transparent visual components and editable text boxes; a page still failing after five batches is preserved unchanged; outputs original-aspect-ratio and 16:9 versions by default |
 | Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
 | PSD export | Generates a layered PSD with a background layer, foreground pixel layers, and Photoshop text layers |
 | Batch processing | Accepts multiple images or a directory; PPTX files are combined into multiple slides, while PSD exports one file per image |
@@ -196,7 +196,7 @@ image2editable convert input.pptx -o preserved.pptx
 image2editable doctor
 ```
 
-For Host, the Skill loops through `run execute → agent next → visually inspect all evidence → agent record → run execute` until completion or the five-round page limit. Passed components are frozen. The Agent can absorb redundant overlapping fragments into one complete parent and can explicitly rebuild residual background only when the outer canvas is sufficiently uniform. Text-clean component fill is restored beneath editable text instead of cutting transparent OCR rectangles. If the parent still fails, the original page is retained with `preserved_with_warning`. The Runtime never reports success by clearing all components.
+For Host, the Skill loops through `run execute → agent next → visually inspect all nine evidence artifacts, including component-isolation.png → agent record → run execute` until completion or the five-batch page limit. Local inspects the same evidence and uses the same hard gates; neither Provider's confidence can relax them. Passed components are frozen. Each component is the smallest independently movable complete visual unit and is rendered from text-clean RGB with its final full alpha. Component and background views must contain no source glyph residual, while reliable OCR text must be contributed exactly once by an editable text box. Raster text is never an accepted fallback. If the parent still fails, only that page is retained with `preserved_with_warning`; clearing components cannot report success.
 
 For PPTX input, existing native text, shapes, tables, charts, notes, z-order, unmatched images, and unmatched slides are preserved. Reconstructed components are normally movable transparent image objects; arbitrary conversion into native vectors or SmartArt is not promised.
 

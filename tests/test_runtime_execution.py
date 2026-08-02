@@ -1197,6 +1197,8 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
     Image.new("RGB", size, (1, 2, 3)).save(source_path)
     Image.new("RGB", size, "black").save(background_path)
     Image.new("RGB", size, (9, 8, 7)).save(supplied_path)
+    text_clean_path = tmp_path / "text-clean.png"
+    Image.new("RGB", size, (30, 40, 50)).save(text_clean_path)
     mask = Image.new("L", size, 0)
     mask.putpixel(overlap, 255)
     mask.save(text_mask_path)
@@ -1233,6 +1235,7 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
         graph_dir=tmp_path,
         text_mask_path=text_mask_path,
         background_path=background_path,
+        text_clean_path=text_clean_path,
         reconstructed_path=None,
         output_dir=initial_dir,
         text_items=[],
@@ -1243,6 +1246,7 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
         graph_dir=tmp_path,
         text_mask_path=text_mask_path,
         background_path=background_path,
+        text_clean_path=text_clean_path,
         reconstructed_path=supplied_path,
         output_dir=later_dir,
         text_items=[],
@@ -1257,6 +1261,12 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
     with Image.open(later["reconstructed.png"]) as reconstructed:
         assert reconstructed.getpixel(non_text) == (9, 8, 7)
         assert reconstructed.getpixel(overlap) == (9, 8, 7)
+    with Image.open(initial["component-isolation.png"]) as isolation:
+        assert isolation.mode == "RGBA"
+        pixels = np.asarray(isolation)
+        opaque_rgb = pixels[pixels[:, :, 3] == 255, :3]
+        assert np.any(np.all(opaque_rgb == (30, 40, 50), axis=1))
+        assert not np.any(np.all(opaque_rgb == (1, 2, 3), axis=1))
 
 
 def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(

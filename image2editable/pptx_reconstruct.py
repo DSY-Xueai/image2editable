@@ -285,7 +285,7 @@ def build_reconstruction_donor_from_result(
             if node["state"] == "frozen" and node["kind"] != "text"
         ]
         text_items = _validated_text_items(data.get("text_items", []), width, height)
-        raster_text_preserved = not bool(text_items)
+        raster_text_preserved = False
         component_manifest = []
         for node in active_nodes:
             if native_graph_path is None:
@@ -348,10 +348,7 @@ def build_reconstruction_donor_from_result(
         "text_boxes": len(data.get("text_items", [])),
         "assets": data.get("assets", []),
         "raster_text_preserved": raster_text_preserved,
-        "warning": (
-            "accepted text was preserved inside raster component images"
-            if raster_text_preserved else None
-        ),
+        "warning": None,
     }
     root = work_root_path
     manifest_path = root / "reconstruction_manifest.json"

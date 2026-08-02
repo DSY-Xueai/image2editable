@@ -569,6 +569,7 @@ def _build_initial_page_session(
             graph_dir=evidence_root,
             text_mask_path=Path(prepared["_text_mask_path"]),
             background_path=Path(prepared["background_original_path"]),
+            text_clean_path=Path(prepared.get("_text_clean_path", prepared["original_image_path"])),
             reconstructed_path=None,
             output_dir=evidence_root,
             text_items=text_items,
@@ -655,6 +656,7 @@ def _render_component_evidence(
     graph_dir: Path,
     text_mask_path: Path,
     background_path: Path,
+    text_clean_path: Path | None = None,
     reconstructed_path: Path | None,
     output_dir: Path,
     text_items: list[dict],
@@ -670,6 +672,10 @@ def _render_component_evidence(
             text_mask = keep(image.convert("L"))
         if text_mask.size != source.size:
             raise ValueError("component evidence text mask dimensions differ")
+        with Image.open(text_clean_path or source_path) as image:
+            text_clean = keep(image.convert("RGB"))
+        if text_clean.size != source.size:
+            raise ValueError("component evidence text-clean dimensions differ")
         if reconstructed_path is None:
             with Image.open(background_path) as image:
                 reconstructed = keep(image.convert("RGB"))
@@ -693,13 +699,22 @@ def _render_component_evidence(
             (190, 100, 255),
             (60, 220, 210),
         )
-        for node in graph["nodes"]:
-            if node["kind"] == "text" or node["state"] not in {
+        isolation_nodes = [
+            node for node in graph["nodes"]
+            if node["kind"] != "text" and node["state"] in {
                 "pending",
                 "pending_gate",
                 "frozen",
-            }:
-                continue
+            }
+        ]
+        columns = max(1, min(3, len(isolation_nodes)))
+        rows = max(1, math.ceil(len(isolation_nodes) / columns))
+        cell_width, cell_height, label_height = 320, 240, 24
+        isolation = keep(Image.new(
+            "RGBA", (columns * cell_width, rows * cell_height), (0, 0, 0, 0)
+        ))
+        isolation_draw = ImageDraw.Draw(isolation)
+        for index, node in enumerate(isolation_nodes):
             mask_path = graph_dir / Path(node["mask"])
             if sha256_file(mask_path) != node["mask_sha256"]:
                 raise ValueError("component evidence mask sha256 mismatch")
@@ -715,6 +730,31 @@ def _render_component_evidence(
                 color = colors[int(node["z_index"]) % len(colors)]
                 alpha = keep_node(mask.point(lambda value: value * 96 // 255))
                 render_mask = keep_node(ImageChops.subtract(mask, text_mask))
+                bbox = mask.getbbox()
+                if bbox is None:
+                    raise ValueError("component evidence mask is empty")
+                clean_crop = keep_node(text_clean.crop(bbox))
+                isolated = keep_node(clean_crop.convert("RGBA"))
+                isolated_alpha = keep_node(mask.crop(bbox))
+                isolated.putalpha(isolated_alpha)
+                isolated.thumbnail(
+                    (cell_width - 16, cell_height - label_height - 16),
+                    Image.Resampling.LANCZOS,
+                )
+                cell_left = (index % columns) * cell_width
+                cell_top = (index // columns) * cell_height
+                isolation_draw.text(
+                    (cell_left + 4, cell_top + 4), node["id"], fill="white",
+                    stroke_width=2, stroke_fill="black",
+                )
+                isolation.alpha_composite(
+                    isolated,
+                    (
+                        cell_left + (cell_width - isolated.width) // 2,
+                        cell_top + label_height
+                        + (cell_height - label_height - isolated.height) // 2,
+                    ),
+                )
                 color_layer = keep_node(Image.new("RGB", source.size, color))
                 numbered.paste(color_layer, (0, 0), alpha)
                 ownership.paste(color_layer, (0, 0), render_mask)
@@ -736,6 +776,7 @@ def _render_component_evidence(
         for name, evidence_image in (
             ("numbered-masks.png", numbered),
             ("ownership.png", ownership),
+            ("component-isolation.png", isolation),
         ):
             path = output_dir / name
             evidence_image.save(path)
@@ -1129,6 +1170,7 @@ def _publish_next_legacy_request(
             graph_dir=evidence_root,
             text_mask_path=_state_artifact(store, refs["text_mask"]),
             background_path=_state_artifact(store, refs["background"]),
+            text_clean_path=Path(prepared.get("_text_clean_path", prepared["original_image_path"])),
             reconstructed_path=evidence["reconstructed.png"],
             output_dir=evidence_root,
             text_items=text_items,

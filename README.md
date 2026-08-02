@@ -21,7 +21,7 @@
 > 输入图片 | 也可输入多张
 <img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
-> 高置信分层的 PPTX 输出中，前景元素可移动，文本框可编辑；质量不足时自动保留视觉底图，文字仍可编辑。
+> 通过硬门禁的 PPTX 输出中，视觉组件可移动且不含文字像素，所有可靠 OCR 文字只由一个原生可编辑文本框贡献；质量不足时仅保留该页原始内容并给出 warning。
 >
 > 为获得最佳的 16:9 PPT 视觉效果，建议输入图片采用 16:9 比例。
 <img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
@@ -35,7 +35,7 @@
 | 背景修复 | PPTX 对小/窄遮罩使用 OpenCV、对大/深遮罩使用 LaMa；PSD 使用两轮背景建模与 inpainting 修复 |
 | 前景拆分 | PPTX 使用 Grounding DINO 语义候选与 SAM 2.1 分割；PSD 使用差分、边缘和连通域 |
 | OCR 文本重建 | 识别文本并估计字号、颜色、粗体、对齐方式 |
-| PPTX 导出 | 高置信时生成背景、独立透明组件和可编辑文本框；质量不足时使用去文字保真底图并保留可编辑文字；默认同时输出原图比例与 16:9 版本 |
+| PPTX 导出 | 通过门禁时生成背景、最小完整透明视觉组件和可编辑文本框；任一页五批后仍失败时仅原样保留该页；默认同时输出原图比例与 16:9 版本 |
 | 资源保护 | 重型页面串行，OCR、LaMa、DINO、SAM 和整页视觉阶段使用顺序子进程；SAM2.1 Large 默认单批推理 |
 | PSD 导出 | 生成分层 PSD：背景层、前景像素层、Photoshop 文本图层 |
 | 批量处理 | 多张图片或目录输入；PPTX 合并为多页，PSD 每图一个文件 |
@@ -72,7 +72,7 @@ PPTX 转换依赖 Grounding DINO、SAM 2.1 和 LaMa。首次运行会自动下�
 
 默认策略限制重型页面并发为 1、数值计算线程最多为 8、SAM `points_per_batch=1`。OCR 检测/识别、LaMa、DINO、SAM prompted/automatic/最终孔洞复检和整页视觉处理按阶段运行在顺序子进程中，以进程退出作为资源释放边界。该策略仍使用 SAM2.1 Large，不降低 PDF 的 200 DPI 基线、SAM 采样点或候选阈值；代价是转换时间会增加。
 
-最终质量门禁检查非文字区域的 P99、异常像素比例和最大连续伪影区域。分层重建有可见风险时，页面自动改用已生成的去文字保真底图并保留 OCR 文字框；此时文字可编辑，但视觉对象不再独立拆层。
+最终质量门禁同时检查组件、无组件背景和合成结果：最终完整 alpha 内不得残留源字形，背景文字区不得留下相对局部底色可见的字印，可靠 OCR 文字必须且只能由可编辑文本框贡献一次。不允许用栅格文字兜底；页面五批后仍失败时保留该页原始内容。
 
 ### OCR 引擎
 
@@ -167,7 +167,7 @@ image2editable models status
 
 只有推荐结果兼容、状态为已安装且有效时才能直接使用 Local。未安装时必须先向用户说明模型、revision、实验性状态和资源要求，并取得明确授权后执行 `image2editable models install agent`；Host 模式不执行模型探测或下载。两种模式共享相同的组件动作、最多五轮限制、确定性执行和质量门禁，互不读取对方的握手、计划或模型状态。
 
-Host 由 Skill 循环执行 `run execute → agent next → 查看八项诊断证据 → agent record → run execute`，直到完成或每页达到 5 轮。已通过组件立即冻结；Agent 可将被误拆且相互重叠的碎片吸收到完整父组件，并在外缘画布足够一致时显式重建残影背景。文字区使用去字后的组件底色回填，不挖透明矩形；父组件仍失败时保留原页并标记 `preserved_with_warning`，不会用清空组件换取成功。重建组件通常是可移动的透明图片对象；项目不承诺把任意图形转换为原生矢量或 SmartArt。
+Host 由 Skill 循环执行 `run execute → agent next → 查看九项诊断证据（含 component-isolation.png）→ agent record → run execute`，直到完成或每页达到 5 轮。Local 查看相同证据并受同一硬门禁约束；两者的 confidence 都不能放宽门禁。已通过组件立即冻结；Agent 可将同一物理实体的重复碎片吸收到完整父组件，并在外缘画布足够一致时显式重建残影背景。文字区使用去字后的组件 RGB 和最终完整 alpha，不挖透明矩形；父组件仍失败时保留原页并标记 `preserved_with_warning`，不会用清空组件或栅格文字换取成功。重建组件通常是可移动的透明图片对象；项目不承诺把任意图形转换为原生矢量或 SmartArt。
 
 ```bash
 # 图片、PDF 和图片版 PPTX 均可选择 Host 或 Local

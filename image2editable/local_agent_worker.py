@@ -35,6 +35,7 @@ The object must contain exactly: schema_version, kind, page_id, provider, repair
 Allowed actions are: accept, discard, merge, split, expand, shrink, retry_with_box, retry_with_points, attach_text, collapse_to_parent, rebuild_background, absorb_into_parent.
 Never target a frozen object. Never activate a parent and its child together.
 Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
+Inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels.
 Use the counterfactual test: after one unit is moved alone, both that unit and the remaining visual units should still be complete.
 Every action must contain exactly action, object_ids, parameters, confidence, evidence.
 accept/discard/merge/attach_text/collapse_to_parent parameters: {}.
@@ -51,6 +52,7 @@ _IMAGE_EVIDENCE = (
     "source.png",
     "numbered-masks.png",
     "ocr-overlay.png",
+    "component-isolation.png",
     "ownership.png",
     "reconstructed.png",
     "difference.png",
@@ -59,6 +61,7 @@ _EVIDENCE_DESCRIPTIONS = {
     "source.png": "original page pixels",
     "numbered-masks.png": "colored component masks with exact component IDs",
     "ocr-overlay.png": "OCR/text ownership mask over the source",
+    "component-isolation.png": "one numbered transparent candidate per cell, rendered from text-clean RGB and full alpha",
     "ownership.png": "exclusive component pixel ownership colors and IDs",
     "reconstructed.png": "current deterministic reconstruction",
     "difference.png": "contrast-expanded source versus reconstruction difference",

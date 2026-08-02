@@ -91,9 +91,9 @@ image2editable agent record runs/pptx-job --plan response.json
 image2editable run execute runs/pptx-job
 ```
 
-第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及八项绝对证据路径。逐张查看源图、编号掩码、OCR overlay、ownership、当前重建和差异图，再生成绑定当前 `request_sha256` 的严格 `component_plan`；记录并继续执行，直到完成或 Runtime 安全回退。
+第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及九项绝对证据路径。必须查看 `component-isolation.png` 中每格单独的候选，确认其使用 text-clean RGB 与完整 alpha 且不含 OCR 文字像素；同时逐张查看源图、编号掩码、OCR overlay、ownership、当前重建和差异图，再生成绑定当前 `request_sha256` 的严格 `component_plan`。Host 与 Local 使用同一门禁，Agent confidence 不能放宽硬失败。
 
-每页最多 5 个重修批次。已通过组件冻结；失败子组件折叠为完整父组件，父组件仍失败时保留原页并报告 `preserved_with_warning`。不得用清空组件换取成功。重建组件通常是透明图片对象，不承诺把任意图形转换为原生矢量或 SmartArt。
+每页最多 5 个重修批次。已通过组件冻结；失败子组件折叠为完整父组件，父组件仍失败时只保留该页并报告 `preserved_with_warning`。不得用清空组件或栅格文字换取成功。可靠 OCR 文字必须全部由原生可编辑文本框贡献且仅出现一次；视觉组件和背景不得残留文字像素。重建组件通常是透明图片对象，不承诺把任意图形转换为原生矢量或 SmartArt。
 
 ```json
 {

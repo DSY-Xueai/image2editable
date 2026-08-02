@@ -573,6 +573,77 @@ def test_agent_confidence_cannot_relax_hard_gate() -> None:
     assert _evaluate_synthetic(case, confidence=0.01)["violations"] == _evaluate_synthetic(case, confidence=1.0)["violations"]
 
 
+def _text_isolation_case() -> dict:
+    import cv2
+
+    shape = (96, 180)
+    source = np.full((*shape, 3), 228, dtype=np.uint8)
+    component_mask = np.zeros(shape, dtype=bool)
+    component_mask[18:78, 20:160] = True
+    source[component_mask] = (70, 125, 190)
+    text_mask = np.zeros(shape, dtype=bool)
+    text_mask[34:67, 42:140] = True
+    cv2.putText(
+        source, "EDIT", (45, 62), cv2.FONT_HERSHEY_SIMPLEX,
+        0.9, (238, 238, 238), 2, cv2.LINE_AA,
+    )
+    background = np.full_like(source, 228)
+    reconstructed = background.copy()
+    reconstructed[component_mask] = (70, 125, 190)
+    node = {
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/component_0001.png",
+        "mask_sha256": "a" * 64, "bbox": [20, 18, 160, 78],
+        "z_index": 0, "text_ids": [],
+    }
+    return {
+        "source": source, "background": background,
+        "reconstructed": reconstructed, "component_mask": component_mask,
+        "text_mask": text_mask, "node": node, "graph": {"nodes": [node]},
+    }
+
+
+def test_component_full_alpha_with_source_glyph_pixels_fails_isolation_gate() -> None:
+    case = _text_isolation_case()
+    glyph = case["text_mask"] & np.any(case["source"] != (70, 125, 190), axis=2)
+    case["reconstructed"][glyph] = case["source"][glyph]
+
+    report = _evaluate_synthetic(case)
+
+    assert report["metrics"]["component_text_residual_ratio"] > 0
+    assert "component_text_residual" in report["violations"]
+
+
+def test_background_with_source_glyph_pixels_fails_text_isolation_gate() -> None:
+    case = _text_isolation_case()
+    glyph = case["text_mask"] & np.any(case["source"] != (70, 125, 190), axis=2)
+    case["background"][glyph] = case["source"][glyph]
+
+    report = _evaluate_synthetic(case)
+
+    assert report["metrics"]["background_text_residual_ratio"] > 0
+    assert "background_text_residual" in report["violations"]
+
+
+def test_reliable_ocr_requires_exactly_one_editable_text_contribution() -> None:
+    report = evaluate_page_quality(
+        [],
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"pptx_reopen": "pass", "editable_text_once": "fail"},
+        expected_component_ids=[], initial_component_count=0,
+    )
+
+    assert report["accepted"] is False
+    assert "editable_text_once" in report["violations"]
+
+
+def test_clean_component_and_background_pass_text_isolation_gate() -> None:
+    report = _evaluate_synthetic(_text_isolation_case())
+
+    assert "component_text_residual" not in report["violations"]
+    assert "background_text_residual" not in report["violations"]
+
+
 def test_text_ghost_is_only_attributed_to_the_adjacent_component() -> None:
     case = _synthetic_quality_case(defect="text_ghost")
     remote_mask = np.zeros(case["component_mask"].shape, dtype=bool)
@@ -844,6 +915,62 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
     assert accepted["accepted"] is True
     assert unknown["accepted"] is False
     assert {"protected_native_overlap_unknown", "pptx_reopen_unknown"} <= set(unknown["violations"])
+
+
+def test_repair_quality_round_rejects_reliable_text_without_editable_object(tmp_path) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"], text_items=[],
+    )
+
+    assert "editable_text_once" in report["violations"]
+
+
+def test_repair_quality_round_requires_one_editable_item_per_text_node(tmp_path) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    for index in range(2):
+        case["graph"]["nodes"].append({
+            "id": f"text_{index + 1:04d}", "kind": "text",
+            "parent_id": None, "state": "frozen",
+            "mask": f"masks/text_{index + 1:04d}.png",
+            "mask_sha256": chr(ord("b") + index) * 64,
+            "bbox": [24, 20, 40, 24], "z_index": index + 1,
+            "text_ids": [],
+        })
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        text_items=[{"text": "only one", "box": [24, 20, 40, 24]}],
+    )
+
+    assert "editable_text_once" in report["violations"]
 
 
 def test_repair_quality_owner_map_includes_frozen_components(tmp_path) -> None:

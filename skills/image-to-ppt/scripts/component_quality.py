@@ -26,6 +26,7 @@ class _PageQualityContext:
     source_luma: np.ndarray
     text: np.ndarray
     text_ink: np.ndarray
+    background_text_residual_ratio: float
     exterior_owner_count: np.ndarray
     component_owner_count: np.ndarray
 
@@ -43,6 +44,7 @@ _METRIC_FIELDS = frozenset({
     "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio",
     "alpha_duplicate_ratio", "exterior_shadow_pixels", "exterior_alpha_pixels",
     "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
+    "component_text_residual_ratio", "background_text_residual_ratio",
     "parent_coverage_ratio", "component_overlap_pixels",
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
@@ -318,6 +320,9 @@ def _prepare_page_quality_context(
         np.abs(source_rgb.astype(np.int16) - background_rgb.astype(np.int16)), axis=2
     )
     text = _exact_mask(text_mask, shape, "text mask")
+    text_ink = _text_ink_mask(source_rgb, text, calibration)
+    background_text_residual = text_ink & (background_delta <= 3.0)
+    background_residual_pixels, _ = _largest_region(background_text_residual)
     exterior_owner_count = np.zeros(shape, dtype=np.uint16)
     component_owner_count = np.zeros(shape, dtype=np.uint16)
     boundary_kernel = np.ones((3, 3), dtype=np.uint8)
@@ -335,7 +340,10 @@ def _prepare_page_quality_context(
         background_delta=background_delta,
         source_luma=cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32),
         text=text,
-        text_ink=_text_ink_mask(source_rgb, text, calibration),
+        text_ink=text_ink,
+        background_text_residual_ratio=(
+            background_residual_pixels / max(int(np.count_nonzero(text_ink)), 1)
+        ),
         exterior_owner_count=exterior_owner_count,
         component_owner_count=component_owner_count,
     )
@@ -431,7 +439,8 @@ def component_metrics(
     )
     source_rgb = context.source_rgb
     shape = source_rgb.shape[:2]
-    support, outside = _project_component_mask(component_mask, shape)
+    full_support, outside = _project_component_mask(component_mask, shape)
+    support = full_support.copy()
     support &= ~context.text
     support_pixels = int(np.count_nonzero(support))
     parent_coverage_ratio = 1.0
@@ -508,6 +517,22 @@ def component_metrics(
         & (background_delta > hard_tolerance)
         & (reconstruction_delta <= hard_tolerance)
     )
+    component_text_residual = (
+        full_support
+        & context.text_ink
+        & (reconstruction_delta <= hard_tolerance)
+    )
+    component_text_residual_pixels, _ = _largest_region(
+        component_text_residual
+    )
+    background_text_residual = (
+        text_support
+        & context.text_ink
+        & (background_delta <= hard_tolerance)
+    )
+    background_text_residual_pixels, _ = _largest_region(
+        background_text_residual
+    )
     active_states = {"pending", "pending_gate", "frozen"}
     nodes = {value.get("id"): value for value in graph.get("nodes", []) if isinstance(value, dict)}
     parent_child_double = any(
@@ -534,6 +559,14 @@ def component_metrics(
         "orphan_residual_pixels": int(np.count_nonzero(ambiguous_exterior)),
         "text_support_pixels": int(np.count_nonzero(text_support)),
         "text_duplicate_ratio": _ratio(text_ghost, int(np.count_nonzero(text_support))),
+        "component_text_residual_ratio": (
+            component_text_residual_pixels
+            / max(int(np.count_nonzero(text_support)), 1)
+        ),
+        "background_text_residual_ratio": (
+            background_text_residual_pixels
+            / max(int(np.count_nonzero(text_support)), 1)
+        ),
         "parent_coverage_ratio": parent_coverage_ratio,
         "component_overlap_pixels": int(np.count_nonzero(
             support & (context.component_owner_count > 1)
@@ -588,6 +621,20 @@ def evaluate_component(
         and metrics["text_duplicate_ratio"] * metrics["text_support_pixels"] >= text_pixel_floor
     ):
         violations.append("text_ghost")
+    residual_pixel_floor = max(
+        calibration.min_component_pixels,
+        calibration.text_halo_px ** 2,
+    )
+    if (
+        metrics["component_text_residual_ratio"]
+        * metrics["text_support_pixels"] >= residual_pixel_floor
+    ):
+        violations.append("component_text_residual")
+    if (
+        metrics["background_text_residual_ratio"]
+        * metrics["text_support_pixels"] >= residual_pixel_floor
+    ):
+        violations.append("background_text_residual")
     if metrics["alpha_duplicate_ratio"] >= 0.02:
         violations.append("alpha_halo")
     if metrics["parent_child_double"]:
@@ -609,7 +656,7 @@ def evaluate_component(
         violations.append("protected_native_overlap")
     previous = previous_metrics or {}
     improvement = {}
-    for key in ("missing_ratio", "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio", "alpha_duplicate_ratio", "text_duplicate_ratio"):
+    for key in ("missing_ratio", "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio", "alpha_duplicate_ratio", "text_duplicate_ratio", "component_text_residual_ratio", "background_text_residual_ratio"):
         if key not in previous:
             continue
         prior = float(previous[key])
@@ -677,6 +724,20 @@ def evaluate_page_quality(
         violations.append("pptx_reopen_unknown")
     elif reopen_state == "fail":
         violations.append("pptx_reopen")
+    if page_checks is not None and "editable_text_once" in page_checks:
+        editable_state = _check_state(page_checks, "editable_text_once")
+        if editable_state != "pass":
+            violations.append(
+                "editable_text_once_unknown"
+                if editable_state == "unknown" else "editable_text_once"
+            )
+    if page_checks is not None and "background_text_clean" in page_checks:
+        background_state = _check_state(page_checks, "background_text_clean")
+        if background_state != "pass":
+            violations.append(
+                "background_text_residual_unknown"
+                if background_state == "unknown" else "background_text_residual"
+            )
     if (
         float(visual_metrics["mae"]) > 8.0
         or float(visual_metrics["p95"]) > 32.0
@@ -688,7 +749,19 @@ def evaluate_page_quality(
         "violations": sorted(set(violations)),
         "component_reports": component_reports,
         "visual_metrics": dict(visual_metrics),
-        "checks": {"pptx_reopen": reopen_state},
+        "checks": {
+            "pptx_reopen": reopen_state,
+            **(
+                {"editable_text_once": _check_state(page_checks, "editable_text_once")}
+                if page_checks is not None and "editable_text_once" in page_checks
+                else {}
+            ),
+            **(
+                {"background_text_clean": _check_state(page_checks, "background_text_clean")}
+                if page_checks is not None and "background_text_clean" in page_checks
+                else {}
+            ),
+        },
     }
 
 

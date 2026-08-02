@@ -805,6 +805,7 @@ def _recompute_quality_artifact(
         text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
+        text_items=native.get("text_items", []),
     )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
@@ -953,11 +954,8 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "fallback": state["fallback"],
         "accepted_asset_refs": quality["input_refs"],
         "text_items": quality.get("text_items", []),
-        "raster_text_preserved": not bool(quality.get("text_items", [])),
-        "warning": (
-            "accepted text was preserved inside raster component images"
-            if not quality.get("text_items", []) else None
-        ),
+        "raster_text_preserved": False,
+        "warning": None,
         "delivery_checks": {"pptx_reopen": "unknown"},
     }
     payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
@@ -1114,6 +1112,7 @@ def evaluate_component_quality_round(
     previous_reports: dict | None = None,
     agent_confidence_by_id: dict | None = None,
     over_merged_component_ids: set[str] | None = None,
+    text_items: list[dict] | None = None,
 ) -> dict:
     import numpy as np
 
@@ -1203,6 +1202,33 @@ def evaluate_component_quality_round(
         calibration=calibration,
         component_masks=[masks[node["id"]] for node in active_visual],
     )
+    page_checks = dict(page_checks)
+    text_pixels = int(np.count_nonzero(page_context.text_ink))
+    residual_pixels = page_context.background_text_residual_ratio * text_pixels
+    if residual_pixels >= max(
+        calibration.min_component_pixels,
+        calibration.text_halo_px ** 2,
+    ):
+        page_checks["background_text_clean"] = "fail"
+    else:
+        page_checks["background_text_clean"] = "pass"
+    if text_items is not None:
+        text_node_count = sum(
+            node["kind"] == "text" and node["state"] == "frozen"
+            for node in validated["nodes"]
+        )
+        page_checks["editable_text_once"] = (
+            "pass"
+            if (
+                (not np.any(page_context.text) and not text_items)
+                or (
+                    np.any(page_context.text)
+                    and len(text_items) == text_node_count
+                    and text_node_count > 0
+                )
+            )
+            else "fail"
+        )
     for node in candidates:
         component_id = node["id"]
         component_mask = masks[component_id]

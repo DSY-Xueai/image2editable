@@ -15,6 +15,7 @@ COMPONENT_EVIDENCE_NAMES = frozenset(
         "source.png",
         "numbered-masks.png",
         "ocr-overlay.png",
+        "component-isolation.png",
         "ownership.png",
         "reconstructed.png",
         "difference.png",
