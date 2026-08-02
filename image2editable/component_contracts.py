@@ -307,6 +307,8 @@ _ACTION_PARAMETERS = {
     "retry_with_points": frozenset({"positive", "negative"}),
     "attach_text": frozenset(),
     "collapse_to_parent": frozenset(),
+    "rebuild_background": frozenset({"margin_ratio"}),
+    "absorb_into_parent": frozenset(),
 }
 _SINGLE_OBJECT_ACTIONS = frozenset(
     {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
@@ -406,12 +408,17 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             if node.get("id") in candidate_ids and node.get("parent_id") is not None
         }
     touched = set()
+    background_rebuilds = 0
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
             raise ValueError("component action fields are invalid")
         name = action["action"]
         if type(name) is not str or name not in _ACTION_PARAMETERS:
             raise ValueError("component action is invalid")
+        if name == "rebuild_background":
+            background_rebuilds += 1
+            if background_rebuilds > 1:
+                raise ValueError("component plan has multiple background rebuilds")
         object_ids = action["object_ids"]
         if (
             not isinstance(object_ids, list) or not object_ids
@@ -419,7 +426,10 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             or len(object_ids) != len(set(object_ids))
             or any(
                 value not in known_ids
-                and not (name == "collapse_to_parent" and value in collapsible_parent_ids)
+                and not (
+                    name in {"collapse_to_parent", "absorb_into_parent"}
+                    and value in collapsible_parent_ids
+                )
                 for value in object_ids
             )
         ):
@@ -427,6 +437,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
         if (
             (name in _SINGLE_OBJECT_ACTIONS and len(object_ids) != 1)
             or (name == "merge" and len(object_ids) < 2)
+            or (name == "absorb_into_parent" and len(object_ids) < 2)
             or (name == "attach_text" and len(object_ids) != 2)
         ):
             raise ValueError("component action object count is invalid")
@@ -440,9 +451,10 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             and frozen_targets == {object_ids[1]}
         ):
             raise ValueError("component action object is frozen")
-        if touched & set(object_ids):
-            raise ValueError("component plan has conflicting object actions")
-        touched.update(object_ids)
+        if name != "rebuild_background":
+            if touched & set(object_ids):
+                raise ValueError("component plan has conflicting object actions")
+            touched.update(object_ids)
         parameters = action["parameters"]
         if not isinstance(parameters, dict) or set(parameters) != _ACTION_PARAMETERS[name]:
             raise ValueError("component action parameters are invalid")
@@ -460,6 +472,12 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             or not 0 < parameters["margin_ratio"] <= 1
         ):
             raise ValueError("component action margin_ratio is invalid")
+        if name == "rebuild_background" and (
+            type(parameters["margin_ratio"]) not in {int, float}
+            or not math.isfinite(parameters["margin_ratio"])
+            or not 0 < parameters["margin_ratio"] <= 0.1
+        ):
+            raise ValueError("component action background margin_ratio is invalid")
         if name == "retry_with_box":
             box = parameters["box"]
             if not isinstance(box, list) or len(box) != 4:
@@ -497,6 +515,12 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
     if action == "collapse_to_parent":
         if selected[0].get("kind") != "parent":
             raise ValueError("collapse_to_parent requires parent kind")
+        return
+    if action == "absorb_into_parent":
+        if selected[0].get("kind") != "parent":
+            raise ValueError("absorb_into_parent requires parent first")
+        if any(node.get("kind") == "text" for node in selected[1:]):
+            raise ValueError("absorb_into_parent cannot absorb text kind")
         return
     if any(node.get("kind") == "text" for node in selected):
         raise ValueError("component action cannot target text kind")

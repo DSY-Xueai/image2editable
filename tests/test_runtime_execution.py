@@ -12,6 +12,7 @@ import types
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 from pypdf import PdfWriter
@@ -1309,7 +1310,7 @@ def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
     ]
 
 
-def test_quality_reconstruction_excludes_editable_text_pixels(
+def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source.png"
@@ -1357,7 +1358,98 @@ def test_quality_reconstruction_excludes_editable_text_pixels(
 
     with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
-        assert reconstructed.getpixel((1, 1)) == (255, 255, 255)
+        assert reconstructed.getpixel((1, 1)) == (255, 0, 0)
+
+
+def test_text_region_is_assigned_to_the_best_component_owner() -> None:
+    text = np.zeros((8, 10), dtype=bool)
+    text[2:6, 3:7] = True
+    left = np.zeros_like(text)
+    right = np.zeros_like(text)
+    left[2:6, 3:5] = True
+    right[2:4, 6:7] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [left, right], text
+    )
+
+    assert np.all(assigned[0][text])
+    assert np.count_nonzero(assigned[1] & text) == 0
+    assert np.count_nonzero(left & text) == 8
+
+
+def test_agent_can_rebuild_uniform_canvas_under_active_components(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    component_mask = masks / "component.png"
+    source_image = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(source_image).rectangle((12, 8, 27, 21), fill="black")
+    source_image.save(source)
+    source_image.close()
+    current_image = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(current_image).rectangle((10, 6, 29, 23), fill=(180, 180, 180))
+    current_image.save(current)
+    current_image.close()
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((12, 8, 27, 21), fill=255)
+    mask.save(component_mask)
+    Image.new("L", (40, 30), 0).save(text_mask)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": "masks/component.png",
+        "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
+        "bbox": [12, 8, 28, 22], "z_index": 0, "text_ids": [],
+    }]}
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.1, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((20, 15)) == (255, 255, 255)
+        assert rebuilt.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_background_rebuild_rejects_nonuniform_canvas_border(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    component_mask = masks / "component.png"
+    source_image = Image.new("RGB", (40, 30), "white")
+    draw = ImageDraw.Draw(source_image)
+    draw.rectangle((0, 0, 39, 2), fill="red")
+    draw.rectangle((0, 27, 39, 29), fill="blue")
+    source_image.save(source)
+    Image.new("RGB", (40, 30), "white").save(current)
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((12, 8, 27, 21), fill=255)
+    mask.save(component_mask)
+    Image.new("L", (40, 30), 0).save(text_mask)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": "masks/component.png",
+        "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
+        "bbox": [12, 8, 28, 22], "z_index": 0, "text_ids": [],
+    }]}
+
+    with pytest.raises(ValueError, match="not uniform"):
+        legacy._rebuild_canvas_background(
+            source_path=source, current_background_path=current,
+            graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+            margin_ratio=0.01, output_path=tmp_path / "rebuilt.png",
+        )
 
 
 def test_initial_page_session_reserves_disk_before_writing_evidence(
@@ -1397,7 +1489,7 @@ def test_initial_page_session_reserves_disk_before_writing_evidence(
     assert not (reconstruction / "evidence-source").exists()
 
 
-def test_legacy_assembly_uses_accepted_reconstruction_and_removes_text_from_alpha(
+def test_legacy_assembly_preserves_text_clean_component_fill_in_alpha(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.png"
@@ -1490,7 +1582,7 @@ def test_legacy_assembly_uses_accepted_reconstruction_and_removes_text_from_alph
 
     with Image.open(captured["components"][0]["path"]) as component:
         alpha = component.getchannel("A")
-        assert alpha.getpixel((1, 1)) == 0
+        assert alpha.getpixel((1, 1)) == 255
         assert alpha.getpixel((0, 0)) == 255
     assert Path(outputs["16:9"]).is_file()
     delivery = store.read_json(

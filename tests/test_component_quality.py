@@ -403,6 +403,45 @@ def test_generic_internal_duplicate_is_not_misclassified_as_shadow_or_alpha() ->
     assert "alpha_halo" not in violations
 
 
+def test_nonhierarchical_component_overlap_fails_quality_gate() -> None:
+    case = _synthetic_quality_case()
+    other = np.zeros_like(case["component_mask"])
+    other[26:34, 24:32] = True
+    case["graph"]["nodes"].append({
+        "id": "component_0002", "kind": "parent", "parent_id": None,
+        "state": "frozen", "mask": "masks/component_0002.png",
+        "mask_sha256": "b" * 64, "bbox": [24, 26, 32, 34],
+        "z_index": 1, "text_ids": [],
+    })
+    module = importlib.import_module("image2editable.component_quality")
+    context = module._prepare_page_quality_context(
+        case["source"], case["background"], case["reconstructed"],
+        case["text_mask"], component_masks=[case["component_mask"], other],
+    )
+    calibration = calibrate_page(case["source"], case["text_mask"])
+
+    report = evaluate_component(
+        case["source"], case["background"], case["reconstructed"],
+        case["node"], case["graph"], calibration,
+        component_mask=case["component_mask"], text_mask=case["text_mask"],
+        page_checks={"protected_native_overlap": "pass"},
+        _page_context=context,
+    )
+
+    assert "component_overlap" in report["violations"]
+
+
+def test_canvas_colored_component_fill_is_not_a_visible_duplicate() -> None:
+    case = _synthetic_quality_case()
+    fill = np.zeros(case["component_mask"].shape, dtype=bool)
+    fill[26:34, 24:32] = True
+    case["source"][fill] = 97
+    case["background"][fill] = 97
+    case["reconstructed"][fill] = 97
+
+    assert "duplicate_pixels" not in _evaluate_synthetic(case)["violations"]
+
+
 def test_agent_confidence_cannot_relax_hard_gate() -> None:
     case = _synthetic_quality_case(defect="text_ghost")
     assert _evaluate_synthetic(case, confidence=0.01)["violations"] == _evaluate_synthetic(case, confidence=1.0)["violations"]
@@ -429,6 +468,28 @@ def test_text_ghost_is_only_attributed_to_the_adjacent_component() -> None:
     )
     assert "text_ghost" in adjacent["violations"]
     assert "text_ghost" not in remote["violations"]
+
+
+def test_text_box_background_is_not_counted_as_a_text_ghost() -> None:
+    case = _synthetic_quality_case()
+    text = case["text_mask"]
+    case["source"][text] = 96
+    glyph = np.zeros_like(text)
+    glyph[21:23, 27:37] = True
+    case["source"][glyph] = 20
+
+    report = _evaluate_synthetic(case)
+
+    assert "text_ghost" not in report["violations"]
+
+
+def test_clean_component_fill_inside_text_box_is_not_a_text_ghost() -> None:
+    case = _synthetic_quality_case()
+    text = case["text_mask"]
+    case["source"][text] = 186
+    case["reconstructed"][text] = 186
+
+    assert "text_ghost" not in _evaluate_synthetic(case)["violations"]
 
 
 def test_internal_page_context_reuses_full_page_conversions(monkeypatch) -> None:

@@ -85,6 +85,12 @@ def execute_component_actions(
             valid_states = all(
                 nodes[value]["state"] in allowed_states for value in object_ids
             )
+        elif name == "absorb_into_parent":
+            parent, *absorbed = object_ids
+            valid_states = (
+                nodes[parent]["state"] in {"inactive", "pending"}
+                and all(nodes[value]["state"] == "pending" for value in absorbed)
+            )
         else:
             allowed_states = {"pending"}
             valid_states = all(
@@ -92,9 +98,10 @@ def execute_component_actions(
             )
         if not valid_states:
             raise ValueError(f"{name} requires a pending component")
-        if touched & set(object_ids):
-            raise ValueError("component plan has conflicting object actions")
-        touched.update(object_ids)
+        if name != "rebuild_background":
+            if touched & set(object_ids):
+                raise ValueError("component plan has conflicting object actions")
+            touched.update(object_ids)
     for action in actions:
         object_ids = action["object_ids"]
         name = action["action"]
@@ -104,12 +111,23 @@ def execute_component_actions(
             nodes[object_ids[0]]["state"] = "pending_gate"
         elif name == "discard":
             nodes[object_ids[0]]["state"] = "inactive"
+        elif name == "rebuild_background":
+            pass
         elif name == "attach_text":
             visual, text = object_ids
             nodes[visual]["text_ids"] = sorted(set(nodes[visual]["text_ids"] + [text]))
         elif name == "collapse_to_parent":
             parent = object_ids[0]
             nodes[parent]["state"] = "pending"
+            _deactivate_descendants(nodes, parent)
+        elif name == "absorb_into_parent":
+            parent, *absorbed = object_ids
+            masks[parent] = np.logical_or.reduce(
+                [masks[value] for value in object_ids]
+            )
+            nodes[parent]["state"] = "pending"
+            for component_id in absorbed:
+                nodes[component_id]["state"] = "inactive"
             _deactivate_descendants(nodes, parent)
         elif name == "merge":
             selected = [nodes[value] for value in object_ids]

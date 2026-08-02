@@ -156,6 +156,7 @@ def test_test1_two_page_component_state_to_shadow_output(
             "exterior_alpha_pixels": 0, "orphan_residual_pixels": 0,
             "text_support_pixels": 0, "text_duplicate_ratio": 0.0,
             "ownership_out_of_bounds_pixels": 0, "parent_coverage_ratio": 1.0,
+            "component_overlap_pixels": 0,
             "parent_child_double": False,
             "noise_l1": 0.0, "local_contrast": 0.0, "edge_width_px": 0,
             "text_halo_px": 0, "adaptive_pixel_tolerance": 0.0,

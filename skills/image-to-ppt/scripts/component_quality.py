@@ -25,6 +25,7 @@ class _PageQualityContext:
     source_luma: np.ndarray
     text: np.ndarray
     exterior_owner_count: np.ndarray
+    component_owner_count: np.ndarray
 
 
 _CHECK_STATES = frozenset({"pass", "fail", "unknown"})
@@ -33,7 +34,7 @@ _METRIC_FIELDS = frozenset({
     "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio",
     "alpha_duplicate_ratio", "exterior_shadow_pixels", "exterior_alpha_pixels",
     "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
-    "parent_coverage_ratio",
+    "parent_coverage_ratio", "component_overlap_pixels",
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
     "adaptive_pixel_tolerance", "hard_pixel_tolerance",
@@ -178,9 +179,11 @@ def _prepare_page_quality_context(
         np.abs(source_rgb.astype(np.int16) - background_rgb.astype(np.int16)), axis=2
     )
     exterior_owner_count = np.zeros(shape, dtype=np.uint16)
+    component_owner_count = np.zeros(shape, dtype=np.uint16)
     boundary_kernel = np.ones((3, 3), dtype=np.uint8)
     for mask in component_masks or []:
         support, _ = _project_component_mask(mask, shape)
+        component_owner_count += support.astype(np.uint16)
         adjacent = cv2.dilate(support.astype(np.uint8), boundary_kernel) > 0
         adjacent &= ~support
         exterior_owner_count += adjacent.astype(np.uint16)
@@ -193,6 +196,7 @@ def _prepare_page_quality_context(
         source_luma=cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32),
         text=_exact_mask(text_mask, shape, "text mask"),
         exterior_owner_count=exterior_owner_count,
+        component_owner_count=component_owner_count,
     )
 
 
@@ -215,6 +219,7 @@ def component_metrics(
     source_rgb = context.source_rgb
     shape = source_rgb.shape[:2]
     support, outside = _project_component_mask(component_mask, shape)
+    support &= ~context.text
     support_pixels = int(np.count_nonzero(support))
     parent_coverage_ratio = 1.0
     if parent_mask is not None:
@@ -236,7 +241,6 @@ def component_metrics(
     missing = support & (reconstruction_delta > hard_tolerance)
     duplicate = support & (background_delta <= hard_tolerance)
     missing_pixels, missing_region = _largest_region(missing)
-    duplicate_pixels, _ = _largest_region(duplicate)
     radius = calibration.edge_width_px
     edge_kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
     edge = cv2.morphologyEx(support.astype(np.uint8), cv2.MORPH_GRADIENT, edge_kernel) > 0
@@ -252,6 +256,9 @@ def component_metrics(
     baseline_luma = float(cv2.cvtColor(
         np.asarray([[baseline]], dtype=np.uint8), cv2.COLOR_RGB2GRAY
     )[0, 0])
+    if support_pixels >= calibration.min_component_pixels:
+        duplicate &= np.abs(source_luma - baseline_luma) > 6.0
+    duplicate_pixels, _ = _largest_region(duplicate)
     largest_inner_shadow, _ = _largest_region(
         duplicate & (source_luma < baseline_luma - 6.0)
     )
@@ -282,7 +289,29 @@ def component_metrics(
     text_support = context.text & (
         cv2.dilate(support.astype(np.uint8), text_kernel) > 0
     )
-    text_ghost = text_support & (reconstruction_delta <= hard_tolerance)
+    text_ink = np.zeros(shape, dtype=bool)
+    text_count, text_labels = cv2.connectedComponents(
+        context.text.astype(np.uint8), 8
+    )
+    ink_threshold = max(12.0, calibration.noise_l1 * 4.0)
+    source_float = source_rgb.astype(np.float32)
+    for label in range(1, text_count):
+        region = text_labels == label
+        ring = cv2.dilate(region.astype(np.uint8), text_kernel) > 0
+        ring &= ~region
+        samples = source_rgb[ring]
+        if not len(samples):
+            samples = source_rgb[region]
+        local_fill = np.median(samples.astype(np.float32), axis=0)
+        text_ink[region] = np.max(
+            np.abs(source_float[region] - local_fill), axis=1
+        ) > ink_threshold
+    text_ghost = (
+        text_support
+        & text_ink
+        & (background_delta > hard_tolerance)
+        & (reconstruction_delta <= hard_tolerance)
+    )
     active_states = {"pending", "pending_gate", "frozen"}
     nodes = {value.get("id"): value for value in graph.get("nodes", []) if isinstance(value, dict)}
     parent_child_double = any(
@@ -310,6 +339,9 @@ def component_metrics(
         "text_support_pixels": int(np.count_nonzero(text_support)),
         "text_duplicate_ratio": _ratio(text_ghost, int(np.count_nonzero(text_support))),
         "parent_coverage_ratio": parent_coverage_ratio,
+        "component_overlap_pixels": int(np.count_nonzero(
+            support & (context.component_owner_count > 1)
+        )),
         "ownership_out_of_bounds_pixels": outside,
         "parent_child_double": parent_child_double,
         "noise_l1": calibration.noise_l1,
@@ -362,6 +394,8 @@ def evaluate_component(
         violations.append("alpha_halo")
     if metrics["parent_child_double"]:
         violations.append("parent_child_double")
+    if metrics["component_overlap_pixels"]:
+        violations.append("component_overlap")
     if metrics["duplicate_ratio"] >= hard_pixel_ratio:
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:

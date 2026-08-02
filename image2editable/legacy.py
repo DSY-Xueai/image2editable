@@ -898,8 +898,107 @@ def _state_artifact(store: RunStore, reference: dict) -> Path:
     return _load_legacy_ref(store, reference)[0]
 
 
+def _rebuild_canvas_background(
+    *,
+    source_path: Path,
+    current_background_path: Path,
+    graph: dict,
+    graph_dir: Path,
+    text_mask_path: Path,
+    margin_ratio: float,
+    output_path: Path,
+) -> Path:
+    import cv2
+    import numpy as np
+
+    if not 0 < margin_ratio <= 0.1:
+        raise ValueError("background rebuild margin_ratio is invalid")
+    with Image.open(source_path) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    with Image.open(current_background_path) as image:
+        current = np.asarray(image.convert("RGB")).copy()
+    with Image.open(text_mask_path) as image:
+        repair = np.asarray(image.convert("L")) > 0
+    if source.shape != current.shape or repair.shape != source.shape[:2]:
+        raise ValueError("background rebuild input dimensions differ")
+
+    graph_root = graph_dir.resolve()
+    for node in graph["nodes"]:
+        if node["kind"] == "text" or node["state"] not in {
+            "pending", "pending_gate", "frozen"
+        }:
+            continue
+        mask_path = (graph_dir / Path(node["mask"])).resolve()
+        if not mask_path.is_relative_to(graph_root):
+            raise ValueError("background rebuild mask is outside graph directory")
+        if sha256_file(mask_path) != node["mask_sha256"]:
+            raise ValueError("background rebuild mask sha256 mismatch")
+        with Image.open(mask_path) as image:
+            mask = np.asarray(image.convert("L")) > 0
+        if mask.shape != repair.shape:
+            raise ValueError("background rebuild mask dimensions differ")
+        repair |= mask
+
+    height, width = repair.shape
+    radius = max(1, round(min(height, width) * margin_ratio))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+    )
+    repair = cv2.dilate(repair.astype(np.uint8), kernel) > 0
+    border_width = max(2, round(min(height, width) * 0.03))
+    border = np.zeros(repair.shape, dtype=bool)
+    border[:border_width] = True
+    border[-border_width:] = True
+    border[:, :border_width] = True
+    border[:, -border_width:] = True
+    samples = source[border & ~repair]
+    if len(samples) < 64:
+        raise ValueError("background rebuild has insufficient canvas evidence")
+    canvas = np.median(samples.astype(np.float32), axis=0)
+    deviations = np.max(np.abs(samples.astype(np.float32) - canvas), axis=1)
+    if float(np.percentile(deviations, 90)) > 12.0:
+        raise ValueError("background rebuild canvas border is not uniform")
+
+    rebuilt = current.copy()
+    rebuilt[repair] = np.rint(canvas).astype(np.uint8)
+    Image.fromarray(rebuilt, mode="RGB").save(output_path)
+    return output_path
+
+
+def _assign_text_regions_to_component_masks(
+    component_masks: list[Any], text_mask: Any
+) -> list[Any]:
+    import cv2
+    import numpy as np
+
+    text = np.asarray(text_mask, dtype=bool)
+    assigned = [np.asarray(mask, dtype=bool).copy() for mask in component_masks]
+    if not assigned:
+        return assigned
+    if any(mask.shape != text.shape for mask in assigned):
+        raise ValueError("component text ownership mask dimensions differ")
+    count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
+    for label in range(1, count):
+        region = labels == label
+        pixels = int(np.count_nonzero(region))
+        overlaps = [int(np.count_nonzero(mask & region)) for mask in assigned]
+        best = max(range(len(assigned)), key=overlaps.__getitem__)
+        if overlaps[best] / max(pixels, 1) >= 0.45:
+            for index, mask in enumerate(assigned):
+                if index != best:
+                    mask[region] = False
+            assigned[best] |= region
+    return assigned
+
+
 def _quality_assets(
-    store: RunStore, page_id: str, graph: dict, graph_dir: Path, output_dir: Path
+    store: RunStore,
+    page_id: str,
+    graph: dict,
+    graph_dir: Path,
+    output_dir: Path,
+    *,
+    background_path_override: Path | None = None,
 ) -> dict:
     import numpy as np
 
@@ -908,17 +1007,25 @@ def _quality_assets(
         store.root / "pages" / page_id / "reconstruction/initial/prepared_page.json"
     )
     source_path = Path(prepared["original_image_path"])
-    background_path = Path(prepared["background_original_path"])
+    text_clean_path = Path(prepared.get("_text_clean_path", source_path))
+    background_path = (
+        Path(prepared["background_original_path"])
+        if background_path_override is None
+        else background_path_override
+    )
     text_mask_path = Path(prepared["_text_mask_path"])
     with Image.open(source_path) as image:
         source = np.asarray(image.convert("RGB")).copy()
+    with Image.open(text_clean_path) as image:
+        text_clean = np.asarray(image.convert("RGB")).copy()
     with Image.open(background_path) as image:
         background = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_mask = np.asarray(image.convert("L")) > 0
-    if text_mask.shape != source.shape[:2]:
-        raise ValueError("quality text mask dimensions differ")
+    if text_mask.shape != source.shape[:2] or text_clean.shape != source.shape:
+        raise ValueError("quality text-clean dimensions differ")
     reconstructed = background.copy()
+    component_masks = []
     for node in graph["nodes"]:
         if node["kind"] == "text" or node["state"] not in {
             "pending", "pending_gate", "frozen"
@@ -929,8 +1036,12 @@ def _quality_assets(
             raise ValueError("execution graph mask sha256 mismatch")
         with Image.open(mask_path) as image:
             mask = np.asarray(image.convert("L")) > 0
-        render_mask = mask & ~text_mask
-        reconstructed[render_mask] = source[render_mask]
+        component_masks.append(mask)
+    component_masks = _assign_text_regions_to_component_masks(
+        component_masks, text_mask
+    )
+    for mask in component_masks:
+        reconstructed[mask] = text_clean[mask]
     assets = {
         "background": output_dir / "background.png",
         "reconstructed": output_dir / "reconstructed.png",
@@ -971,6 +1082,15 @@ def _execute_legacy_round(
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     source = request_path.parent / Path(request["evidence"]["source.png"]["path"])
+    quality_evidence = request_path.parent / Path(
+        request["evidence"]["quality-report.json"]["path"]
+    )
+    previous_quality = json.loads(quality_evidence.read_text(encoding="utf-8"))
+    current_background = None
+    if isinstance(previous_quality.get("input_refs"), dict):
+        current_background = _state_artifact(
+            store, previous_quality["input_refs"]["background"]
+        )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
         if action["action"] == "split":
@@ -998,8 +1118,31 @@ def _execute_legacy_round(
         input_dir=graph_path.parent, output_dir=output_dir,
     )
     output_graph = output_dir / "component-graph.json"
+    rebuild_actions = [
+        action for action in plan["actions"]
+        if action["action"] == "rebuild_background"
+    ]
+    if rebuild_actions:
+        module = importlib.import_module("image_to_ppt")
+        prepared = module.load_component_layers(
+            reconstruction / "initial/prepared_page.json"
+        )
+        current_background = _rebuild_canvas_background(
+            source_path=source,
+            current_background_path=(
+                current_background
+                if current_background is not None
+                else Path(prepared["background_original_path"])
+            ),
+            graph=next_graph,
+            graph_dir=output_dir,
+            text_mask_path=Path(prepared["_text_mask_path"]),
+            margin_ratio=rebuild_actions[0]["parameters"]["margin_ratio"],
+            output_path=output_dir / "background-rebuilt.png",
+        )
     refs = _quality_assets(
-        store, page_id, next_graph, output_dir, output_dir
+        store, page_id, next_graph, output_dir, output_dir,
+        background_path_override=current_background,
     )
     execution = {
         "schema_version": 1, "page_id": page_id,
@@ -1333,8 +1476,7 @@ def _accepted_slide_data(
         reconstructed_image = np.asarray(image.convert("RGB")).copy()
     with Image.open(io.BytesIO(asset_payloads["text_mask"])) as image:
         text_mask = np.asarray(image.convert("L")) > 0
-    owner_count = np.zeros(text_mask.shape, dtype=np.uint16)
-    component_masks = []
+    loaded_components = []
     for component_id in final_ids:
         node = by_id[component_id]
         mask_path = (graph_path.parent / Path(node["mask"])).resolve()
@@ -1348,8 +1490,15 @@ def _accepted_slide_data(
             mask = np.asarray(image.convert("L")) > 0
         if mask.shape != text_mask.shape:
             raise ValueError("final component mask dimensions differ")
+        loaded_components.append((node, mask))
+    effective_masks = _assign_text_regions_to_component_masks(
+        [mask for _, mask in loaded_components], text_mask
+    )
+    owner_count = np.zeros(text_mask.shape, dtype=np.uint16)
+    component_masks = []
+    for (node, _), mask in zip(loaded_components, effective_masks, strict=True):
         owner_count += mask
-        component_masks.append((node, mask & ~text_mask))
+        component_masks.append((node, mask))
     if np.any(owner_count > 1):
         raise ValueError("final component masks violate unique ownership")
     components = []

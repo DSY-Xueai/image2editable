@@ -104,7 +104,7 @@ image2editable run execute runs/pptx-job
 }
 ```
 
-组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 可使用候选子组件关联的父 ID。既定十类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/collapse_to_parent`，不添加未知字段。
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十二类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。
 
 PPTX 的整页截图候选先使用决策路由：
 
@@ -119,7 +119,7 @@ image2editable decision record runs/pptx-job \
 
 每次先查看 `run next` 返回的绝对 `image_path`。只有图片覆盖大部分页面、包含标题/多个文字区/图表或卡片等完整页面结构，且明显不是照片、Logo、头像或装饰素材时，才记录 `replace + full_slide_screenshot`。证据冲突或不确定时记录 `preserve` 或 `ambiguous`；不要为了提高拆分数量抬高置信度。
 
-组件计划必须以视觉整体为单位：科研图、表格只是示例，不得按固定类型写死；不要把本属一个整体的组件无依据拆碎。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`，页面级质量门仍会检查丢弃后是否缺失内容。OCR 文字以冻结的 `text_XXXX` 只读节点出现，只能作为 `attach_text` 的第二对象。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
+组件计划必须以视觉整体为单位：科研图、表格只是示例，不得按固定类型写死；不要把本属一个整体的组件无依据拆碎。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`；若碎片包含父组件缺失的真实像素，使用 `absorb_into_parent` 将它们并回完整父组件，禁止同时保留重叠对象。仅当外缘画布颜色一致且证据显示背景残影时使用 `rebuild_background`，`margin_ratio` 必须在 `(0, 0.1]`。OCR 文字以冻结的 `text_XXXX` 只读节点出现，只能作为 `attach_text` 的第二对象；文字区域由去字后的组件底色承接，不能挖透明文字框。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
 
 Runtime 只有在 `confidence >= 0.92` 时才重建完整截图。通过门禁后只原位替换命中的截图对象；既有原生文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生。未通过页面保留原截图并给出 warning，不伪装成可编辑组件。
 

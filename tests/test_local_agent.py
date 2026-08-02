@@ -355,12 +355,16 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         "retry_with_points",
         "attach_text",
         "collapse_to_parent",
+        "rebuild_background",
+        "absorb_into_parent",
     }
     assert "untrusted" in local_agent_worker.SYSTEM_PROMPT.casefold()
     assert "JSON" in local_agent_worker.SYSTEM_PROMPT
     for required_rule in (
         'split parameters: {"parts"',
         'expand/shrink parameters: {"margin_ratio"',
+        'rebuild_background parameters: {"margin_ratio"',
+        'absorb_into_parent parameters: {}',
         'retry_with_box parameters: {"box"',
         'retry_with_points parameters: {"positive"',
         '"negative"',

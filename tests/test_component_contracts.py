@@ -21,6 +21,8 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     [
         ("accept", ["component_0001"], {}),
         ("discard", ["component_0001"], {}),
+        ("rebuild_background", ["component_0001"], {"margin_ratio": 0.01}),
+        ("absorb_into_parent", ["parent_0001", "component_0001"], {}),
         ("merge", ["component_0001", "component_0002"], {}),
         ("split", ["component_0001"], {"parts": 2}),
         ("expand", ["component_0001"], {"margin_ratio": 0.01}),

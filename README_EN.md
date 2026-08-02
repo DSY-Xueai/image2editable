@@ -196,7 +196,7 @@ image2editable convert input.pptx -o preserved.pptx
 image2editable doctor
 ```
 
-For Host, the Skill loops through `run execute → agent next → visually inspect all evidence → agent record → run execute` until completion or the five-round page limit. Passed components are frozen. Failed child fragments collapse to a complete parent; if the parent still fails, the original page is retained with `preserved_with_warning`. The Runtime never reports success by clearing all components.
+For Host, the Skill loops through `run execute → agent next → visually inspect all evidence → agent record → run execute` until completion or the five-round page limit. Passed components are frozen. The Agent can absorb redundant overlapping fragments into one complete parent and can explicitly rebuild residual background only when the outer canvas is sufficiently uniform. Text-clean component fill is restored beneath editable text instead of cutting transparent OCR rectangles. If the parent still fails, the original page is retained with `preserved_with_warning`. The Runtime never reports success by clearing all components.
 
 For PPTX input, existing native text, shapes, tables, charts, notes, z-order, unmatched images, and unmatched slides are preserved. Reconstructed components are normally movable transparent image objects; arbitrary conversion into native vectors or SmartArt is not promised.
 

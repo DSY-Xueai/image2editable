@@ -578,7 +578,7 @@ def _strict_quality_report(component_id: str, accepted: bool) -> dict:
         "exterior_shadow_pixels": 0, "exterior_alpha_pixels": 0,
         "orphan_residual_pixels": 0, "text_support_pixels": 0,
         "text_duplicate_ratio": 0.0, "ownership_out_of_bounds_pixels": 0,
-        "parent_coverage_ratio": 1.0,
+        "parent_coverage_ratio": 1.0, "component_overlap_pixels": 0,
         "parent_child_double": False, "noise_l1": 0.0, "local_contrast": 1.0,
         "edge_width_px": 1, "text_halo_px": 1,
         "adaptive_pixel_tolerance": 3.0, "hard_pixel_tolerance": 3.0,
@@ -676,6 +676,48 @@ def test_execute_discard_inactivates_redundant_candidate(tmp_path: Path) -> None
     by_id = {node["id"]: node for node in result["nodes"]}
     assert by_id["left"]["state"] == "inactive"
     assert by_id["right"]["state"] == "pending"
+
+
+def test_execute_background_rebuild_action_preserves_component_graph(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+
+    result = execute_component_actions(
+        image, graph,
+        [_action("rebuild_background", ["left", "right"], {"margin_ratio": 0.01})],
+        sam_runner=None, input_dir=input_dir,
+        output_dir=tmp_path / "round-background",
+    )
+
+    assert result == graph
+
+
+def test_execute_absorb_unions_visuals_into_one_parent(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    parent = next(node for node in graph["nodes"] if node["id"] == "parent")
+    parent_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    parent_mask[0, 0] = 255
+    parent_path = input_dir / parent["mask"]
+    Image.fromarray(parent_mask).save(parent_path)
+    parent["mask_sha256"] = hashlib.sha256(parent_path.read_bytes()).hexdigest()
+    parent["bbox"] = [0, 0, 1, 1]
+
+    result = execute_component_actions(
+        image, graph,
+        [
+            _action("absorb_into_parent", ["parent", "left", "right"]),
+            _action("rebuild_background", ["left"], {"margin_ratio": 0.01}),
+        ],
+        sam_runner=None, input_dir=input_dir,
+        output_dir=tmp_path / "round-absorb",
+    )
+
+    by_id = {node["id"]: node for node in result["nodes"]}
+    absorbed = np.asarray(Image.open(
+        tmp_path / "round-absorb" / by_id["parent"]["mask"]
+    )) > 0
+    assert int(absorbed.sum()) == 33
+    assert by_id["parent"]["state"] == "pending"
+    assert by_id["left"]["state"] == by_id["right"]["state"] == "inactive"
 
 
 def test_frozen_mask_keeps_nonstandard_relative_path(tmp_path: Path) -> None:
