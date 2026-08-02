@@ -617,13 +617,15 @@ def _build_initial_page_session(
         text_id = item["id"]
         mask_target = masks_root / f"{text_id}.png"
         mask = Image.new("L", page_size, 0)
-        left, top, right, bottom = item["box"]
-        ImageDraw.Draw(mask).rectangle(
-            (left, top, right - 1, bottom - 1),
-            fill=255,
-        )
-        mask.save(mask_target)
-        mask.close()
+        try:
+            left, top, right, bottom = item["box"]
+            ImageDraw.Draw(mask).rectangle(
+                (left, top, right - 1, bottom - 1),
+                fill=255,
+            )
+            mask.save(mask_target)
+        finally:
+            mask.close()
         nodes.append({
             "id": text_id, "kind": "text", "parent_id": None,
             "state": "frozen", "mask": f"masks/{mask_target.name}",
@@ -797,7 +799,7 @@ def _render_component_evidence(
                     mask = keep_node(image.convert("L"))
                 if mask.size != source.size:
                     raise ValueError("component evidence mask dimensions differ")
-                color = colors[index % len(colors)]
+                color = colors[int(node["z_index"]) % len(colors)]
                 alpha = keep_node(mask.point(lambda value: value * 96 // 255))
                 render_mask = keep_node(ImageChops.subtract(mask, text_mask))
                 color_layer = keep_node(Image.new("RGB", source.size, color))

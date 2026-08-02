@@ -1007,6 +1007,57 @@ def test_initial_page_session_closes_grayscale_when_bbox_raises(
     assert id(converted_images[0]) in closed_image_ids
 
 
+def test_initial_page_session_closes_text_mask_when_save_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (20, 10), "white").save(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    prepared_root = reconstruction / "initial"
+    prepared_root.mkdir(parents=True)
+    component_mask = prepared_root / "component-mask.png"
+    Image.new("L", (20, 10), 255).save(component_mask)
+    created_images = []
+    closed_image_ids = set()
+    real_new = Image.new
+    real_close = Image.Image.close
+
+    def tracked_new(*args, **kwargs):
+        image = real_new(*args, **kwargs)
+        created_images.append(image)
+        return image
+
+    def tracked_close(image):
+        closed_image_ids.add(id(image))
+        real_close(image)
+
+    def failing_save(image, *args, **kwargs):
+        assert image.getpixel((2, 1)) == 255
+        raise RuntimeError("controlled text mask save failure")
+
+    monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *a, **k: None)
+    monkeypatch.setattr(Image, "new", tracked_new)
+    monkeypatch.setattr(Image.Image, "close", tracked_close)
+    monkeypatch.setattr(Image.Image, "save", failing_save)
+
+    with pytest.raises(RuntimeError, match="controlled text mask save failure"):
+        legacy._build_initial_page_session(
+            RunStore.open(run_dir),
+            "page_001",
+            {
+                "original_image_path": str(source),
+                "_element_mask_paths": [str(component_mask)],
+                "components": [{"z_index": 0}],
+                "text_items": [{"text": "T", "box": [2, 1, 1, 1]}],
+            },
+            reconstruction,
+        )
+
+    assert len(created_images) == 1
+    assert id(created_images[0]) in closed_image_ids
+
+
 def test_component_evidence_closes_loaded_images_when_mask_validation_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1113,6 +1164,149 @@ def test_component_evidence_closes_node_images_before_rendering_next_node(
         output_dir=tmp_path,
         text_items=[],
     )
+
+
+def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruction(
+    tmp_path: Path
+) -> None:
+    size = (200, 100)
+    overlap = (190, 90)
+    non_text = (0, 0)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    supplied_path = tmp_path / "supplied.png"
+    text_mask_path = tmp_path / "text-mask.png"
+    parent_mask_path = tmp_path / "parent-mask.png"
+    child_mask_path = tmp_path / "child-mask.png"
+    Image.new("RGB", size, (1, 2, 3)).save(source_path)
+    Image.new("RGB", size, "black").save(background_path)
+    Image.new("RGB", size, (9, 8, 7)).save(supplied_path)
+    mask = Image.new("L", size, 0)
+    mask.putpixel(overlap, 255)
+    mask.save(text_mask_path)
+    mask.close()
+    mask = Image.new("L", size, 0)
+    mask.putpixel(non_text, 255)
+    mask.putpixel(overlap, 255)
+    mask.save(child_mask_path)
+    mask.save(parent_mask_path)
+    mask.close()
+    graph = {"nodes": [
+        {
+            "id": "parent_0001", "kind": "parent", "parent_id": None,
+            "state": "inactive", "mask": parent_mask_path.name,
+            "mask_sha256": hashlib.sha256(parent_mask_path.read_bytes()).hexdigest(),
+            "bbox": [0, 0, 191, 91], "z_index": 0, "text_ids": [],
+        },
+        {
+            "id": "component_0001", "kind": "child",
+            "parent_id": "parent_0001", "state": "pending",
+            "mask": child_mask_path.name,
+            "mask_sha256": hashlib.sha256(child_mask_path.read_bytes()).hexdigest(),
+            "bbox": [0, 0, 191, 91], "z_index": 0, "text_ids": [],
+        },
+    ]}
+    initial_dir = tmp_path / "initial-evidence"
+    later_dir = tmp_path / "later-evidence"
+    initial_dir.mkdir()
+    later_dir.mkdir()
+
+    initial = legacy._render_component_evidence(
+        source_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        text_mask_path=text_mask_path,
+        background_path=background_path,
+        reconstructed_path=None,
+        output_dir=initial_dir,
+        text_items=[],
+    )
+    later = legacy._render_component_evidence(
+        source_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        text_mask_path=text_mask_path,
+        background_path=background_path,
+        reconstructed_path=supplied_path,
+        output_dir=later_dir,
+        text_items=[],
+    )
+
+    with Image.open(initial["numbered-masks.png"]) as numbered:
+        assert numbered.getpixel(overlap) != (1, 2, 3)
+    with Image.open(initial["ownership.png"]) as ownership:
+        assert ownership.getpixel(overlap) == (24, 24, 24)
+    with Image.open(initial["reconstructed.png"]) as reconstructed:
+        assert reconstructed.getpixel(overlap) == (0, 0, 0)
+    with Image.open(later["reconstructed.png"]) as reconstructed:
+        assert reconstructed.getpixel(non_text) == (9, 8, 7)
+        assert reconstructed.getpixel(overlap) == (9, 8, 7)
+
+
+def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
+    tmp_path: Path
+) -> None:
+    size = (400, 100)
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    text_mask_path = tmp_path / "text-mask.png"
+    Image.new("RGB", size, "white").save(source_path)
+    Image.new("RGB", size, "black").save(background_path)
+    Image.new("L", size, 0).save(text_mask_path)
+    nodes = []
+    sample_points = []
+    for index in range(4):
+        parent_id = f"parent_{index + 1:04d}"
+        component_id = f"component_{index + 1:04d}"
+        parent_mask_path = tmp_path / f"parent-mask-{index}.png"
+        child_mask_path = tmp_path / f"child-mask-{index}.png"
+        left = index * 100 + 5
+        mask = Image.new("L", size, 0)
+        ImageDraw.Draw(mask).rectangle((left, 5, left + 80, 85), fill=255)
+        mask.save(parent_mask_path)
+        mask.save(child_mask_path)
+        mask.close()
+        nodes.extend((
+            {
+                "id": parent_id, "kind": "parent", "parent_id": None,
+                "state": "inactive", "mask": parent_mask_path.name,
+                "mask_sha256": hashlib.sha256(
+                    parent_mask_path.read_bytes()
+                ).hexdigest(),
+                "bbox": [left, 5, left + 81, 86], "z_index": index,
+                "text_ids": [],
+            },
+            {
+                "id": component_id, "kind": "child", "parent_id": parent_id,
+                "state": "pending", "mask": child_mask_path.name,
+                "mask_sha256": hashlib.sha256(
+                    child_mask_path.read_bytes()
+                ).hexdigest(),
+                "bbox": [left, 5, left + 81, 86], "z_index": index,
+                "text_ids": [],
+            },
+        ))
+        sample_points.append((left + 5, 75))
+
+    evidence = legacy._render_component_evidence(
+        source_path=source_path,
+        graph={"nodes": nodes},
+        graph_dir=tmp_path,
+        text_mask_path=text_mask_path,
+        background_path=background_path,
+        reconstructed_path=None,
+        output_dir=tmp_path,
+        text_items=[],
+    )
+
+    with Image.open(evidence["ownership.png"]) as ownership:
+        colors = [ownership.getpixel(point) for point in sample_points]
+    assert colors == [
+        (255, 80, 80),
+        (70, 180, 255),
+        (90, 220, 120),
+        (255, 190, 60),
+    ]
 
 
 def test_initial_page_session_reserves_disk_before_writing_evidence(
