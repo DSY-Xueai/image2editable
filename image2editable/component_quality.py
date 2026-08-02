@@ -33,6 +33,7 @@ _METRIC_FIELDS = frozenset({
     "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio",
     "alpha_duplicate_ratio", "exterior_shadow_pixels", "exterior_alpha_pixels",
     "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
+    "parent_coverage_ratio",
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
     "adaptive_pixel_tolerance", "hard_pixel_tolerance",
@@ -204,6 +205,7 @@ def component_metrics(
     calibration: PageCalibration,
     *,
     component_mask: np.ndarray,
+    parent_mask: np.ndarray | None = None,
     text_mask: np.ndarray,
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
@@ -214,6 +216,16 @@ def component_metrics(
     shape = source_rgb.shape[:2]
     support, outside = _project_component_mask(component_mask, shape)
     support_pixels = int(np.count_nonzero(support))
+    parent_coverage_ratio = 1.0
+    if parent_mask is not None:
+        parent_support, _ = _project_component_mask(parent_mask, shape)
+        parent_support &= ~context.text
+        child_support = support & ~context.text
+        parent_pixels = int(np.count_nonzero(parent_support))
+        if parent_pixels:
+            parent_coverage_ratio = float(
+                np.count_nonzero(child_support & parent_support) / parent_pixels
+            )
     adaptive_tolerance = max(
         3.0,
         calibration.noise_l1 * 4.0 + calibration.local_contrast * 0.08,
@@ -297,6 +309,7 @@ def component_metrics(
         "orphan_residual_pixels": int(np.count_nonzero(ambiguous_exterior)),
         "text_support_pixels": int(np.count_nonzero(text_support)),
         "text_duplicate_ratio": _ratio(text_ghost, int(np.count_nonzero(text_support))),
+        "parent_coverage_ratio": parent_coverage_ratio,
         "ownership_out_of_bounds_pixels": outside,
         "parent_child_double": parent_child_double,
         "noise_l1": calibration.noise_l1,
@@ -317,6 +330,7 @@ def evaluate_component(
     calibration: PageCalibration,
     *,
     component_mask: np.ndarray,
+    parent_mask: np.ndarray | None = None,
     text_mask: np.ndarray,
     page_checks: dict | None = None,
     agent_confidence: float | None = None,
@@ -325,7 +339,8 @@ def evaluate_component(
 ) -> dict:
     metrics = component_metrics(
         source, background, reconstructed, node, graph, calibration,
-        component_mask=component_mask, text_mask=text_mask, _page_context=_page_context,
+        component_mask=component_mask, parent_mask=parent_mask,
+        text_mask=text_mask, _page_context=_page_context,
     )
     violations = []
     hard_pixel_ratio = max(
@@ -351,6 +366,8 @@ def evaluate_component(
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:
         violations.append("out_of_bounds")
+    if node.get("kind") == "child" and metrics["parent_coverage_ratio"] < 0.25:
+        violations.append("incomplete_child")
     native_state = _check_state(page_checks, "protected_native_overlap")
     if native_state == "unknown":
         violations.append("protected_native_overlap_unknown")

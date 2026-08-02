@@ -298,6 +298,7 @@ _COMPONENT_ACTION_FIELDS = frozenset(
 )
 _ACTION_PARAMETERS = {
     "accept": frozenset(),
+    "discard": frozenset(),
     "merge": frozenset(),
     "split": frozenset({"parts"}),
     "expand": frozenset({"margin_ratio"}),
@@ -308,7 +309,7 @@ _ACTION_PARAMETERS = {
     "collapse_to_parent": frozenset(),
 }
 _SINGLE_OBJECT_ACTIONS = frozenset(
-    {"accept", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
+    {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
 )
 
 
@@ -396,6 +397,14 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
     if not isinstance(actions, list):
         raise ValueError("component plan actions must be a list")
     known_ids = set(request["candidate_ids"]) | set(request["frozen_ids"])
+    collapsible_parent_ids = set()
+    if graph is not None:
+        candidate_ids = set(request["candidate_ids"])
+        collapsible_parent_ids = {
+            node["parent_id"]
+            for node in graph["nodes"]
+            if node.get("id") in candidate_ids and node.get("parent_id") is not None
+        }
     touched = set()
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
@@ -408,7 +417,11 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             not isinstance(object_ids, list) or not object_ids
             or any(type(value) is not str for value in object_ids)
             or len(object_ids) != len(set(object_ids))
-            or any(value not in known_ids for value in object_ids)
+            or any(
+                value not in known_ids
+                and not (name == "collapse_to_parent" and value in collapsible_parent_ids)
+                for value in object_ids
+            )
         ):
             raise ValueError("component action object_ids are invalid")
         if (

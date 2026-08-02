@@ -152,9 +152,26 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 
 #### Unified Runtime (P1)
 
+Component reconstruction has two mutually exclusive Agent Providers. The Provider is frozen when a Run is created and never changes through an automatic fallback:
+
+- `host` (default) uses the current vision-capable Codex, Claude Code, or equivalent host. It downloads no additional component-decision model. The host must support vision, local-file reads, tool calls, and structured JSON.
+- `local` uses a user-approved local vision model. The Runtime performs at most five repair rounds per page in isolated subprocesses and stays offline during conversion.
+
+Both Providers currently have `experimental` stability because real-file acceptance has not been completed for both paths. Host services may receive diagnostic images; use fully offline Local for sensitive content. A model cache only avoids repeated model downloads—it is not a semantic decision cache. Every image and page is analyzed again, and split decisions are never reused across unrelated images.
+
+Never hard-code a Local model. Inspect the versioned catalog and current hardware first:
+
 ```bash
-# Images and directories continue through the existing editable-PPTX pipeline
-image2editable convert input.png -o output.pptx --slide-size 16:9
+image2editable models recommend --json
+image2editable models status
+```
+
+If the recommended model is not installed, explain its model ID, revision, stability, resource requirements, and cache location, then obtain explicit user authorization before running `image2editable models install agent`. Host does not probe, load, or download the Local model.
+
+```bash
+# Images, PDFs, and screenshot-based PPTX files can use either Provider
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider host
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
 
 # Convert a PDF directly, or prepare it and request one detail rerender per page before execution
 image2editable convert input.pdf -o output.pptx --slide-size 16:9
@@ -164,7 +181,7 @@ image2editable run execute runs/pdf-job
 image2editable run recover runs/pdf-job
 
 # PPTX P2.1: prepare high-confidence candidates, inspect image_path, then record the Agent decision
-image2editable prepare input.pptx --run-dir runs/pptx-job
+image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
 image2editable run next runs/pptx-job
 image2editable decision record runs/pptx-job \
   --page page_001 --object 7 \
@@ -179,13 +196,17 @@ image2editable convert input.pptx -o preserved.pptx
 image2editable doctor
 ```
 
+For Host, the Skill loops through `run execute → agent next → visually inspect all evidence → agent record → run execute` until completion or the five-round page limit. Passed components are frozen. Failed child fragments collapse to a complete parent; if the parent still fails, the original page is retained with `preserved_with_warning`. The Runtime never reports success by clearing all components.
+
+For PPTX input, existing native text, shapes, tables, charts, notes, z-order, unmatched images, and unmatched slides are preserved. Reconstructed components are normally movable transparent image objects; arbitrary conversion into native vectors or SmartArt is not promised.
+
 The Unified CLI calls its positional inputs `sources`. It accepts image files/directories, one PDF, or one PPTX. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
 
 `run recover` only resumes an orphaned task whose execution lock is gone; it does not terminate an active conversion process.
 
 PDF pages are rendered adaptively and then reuse the existing image-to-editable-PPTX pipeline. The standard target is 200 DPI. Small pages are raised to a 1200 px short-edge floor without exceeding 300 DPI; every render is capped at a 6000 px long edge and 24 MP. An Agent or user may call `render-detail` once per page to rerender it with a 300 DPI target. PDF pages with the same physical aspect ratio can be combined into a ratio-preserving multi-slide PPTX. With mixed aspect ratios, `original` produces one output per page while a uniform 16:9 version remains available. Layout is always scaled uniformly, with no non-uniform stretching.
 
-For PPTX inputs, the Runtime read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe images covering at least 80% of a slide are candidates. P2.1 extracts each candidate's original bytes and gives the Agent bound hashes, coverage, edge gaps, and native-object counts. Only `replace + full_slide_screenshot + confidence >= 0.92` enters the later shadow-run queue; photos, logos, decorative assets, and uncertain cases are preserved without asking the user about every object. Execution still produces a byte-identical PPTX copy. OCR/reconstruction, shadow QA, and in-place OOXML replacement are not connected yet.
+For PPTX inputs, the Runtime read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe images covering at least 80% of a slide are candidates. The Agent receives bound hashes, coverage, edge gaps, and native-object counts. Only `replace + full_slide_screenshot + confidence >= 0.92` enters component reconstruction; photos, logos, decorative assets, and uncertain cases are preserved without asking the user about every object. A candidate is replaced in place only after component quality gates and PPTX reopen checks pass; otherwise its original screenshot is retained with a warning.
 
 Python 3.10–3.12 is supported; `doctor` now checks PDFium as well.
 

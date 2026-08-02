@@ -1309,6 +1309,57 @@ def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
     ]
 
 
+def test_quality_reconstruction_excludes_editable_text_pixels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    text_mask = tmp_path / "text-mask.png"
+    mask_dir = tmp_path / "graph/masks"
+    mask_dir.mkdir(parents=True)
+    component_mask = mask_dir / "component.png"
+    Image.new("RGB", (4, 4), "red").save(source)
+    Image.new("RGB", (4, 4), "white").save(background)
+    Image.new("L", (4, 4), 255).save(component_mask)
+    mask = Image.new("L", (4, 4), 0)
+    mask.putpixel((1, 1), 255)
+    mask.save(text_mask)
+    mask.close()
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    prepared = {
+        "original_image_path": str(source),
+        "background_original_path": str(background),
+        "_text_mask_path": str(text_mask),
+        "text_items": [{"text": "editable"}],
+    }
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return prepared
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule,
+    )
+    output_dir = run_dir / "pages/page_001/reconstruction/quality"
+    output_dir.mkdir(parents=True)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/component.png",
+        "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+
+    refs = legacy._quality_assets(
+        store, "page_001", graph, mask_dir.parent, output_dir,
+    )
+
+    with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
+        assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
+        assert reconstructed.getpixel((1, 1)) == (255, 255, 255)
+
+
 def test_initial_page_session_reserves_disk_before_writing_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

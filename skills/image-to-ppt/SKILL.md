@@ -60,6 +60,8 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
 
+Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。两种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
+
 只有用户要求离线/自托管 Agent 时才选择 `local`。不要硬编码模型；先读取当前电脑配置和版本化目录：
 
 ```bash
@@ -68,6 +70,8 @@ image2editable models status
 ```
 
 推荐结果必须 `compatible=true`，状态必须 `installed=true` 且 `valid=true`。若未安装，先向用户说明推荐模型、revision、`experimental/stable` 状态、内存/显存和磁盘结论；只有取得明确下载授权后才运行 `image2editable models install agent`。转换期间不会自动下载，也不自动回退到 Host。
+
+模型缓存只复用已下载权重，不缓存图片语义判断。每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分结果。
 
 Local 运行由 Runtime 内部串行完成：
 
@@ -89,6 +93,8 @@ image2editable run execute runs/pptx-job
 
 第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及八项绝对证据路径。逐张查看源图、编号掩码、OCR overlay、ownership、当前重建和差异图，再生成绑定当前 `request_sha256` 的严格 `component_plan`；记录并继续执行，直到完成或 Runtime 安全回退。
 
+每页最多 5 个重修批次。已通过组件冻结；失败子组件折叠为完整父组件，父组件仍失败时保留原页并报告 `preserved_with_warning`。不得用清空组件换取成功。重建组件通常是透明图片对象，不承诺把任意图形转换为原生矢量或 SmartArt。
+
 ```json
 {
   "schema_version": 1,
@@ -98,7 +104,7 @@ image2editable run execute runs/pptx-job
 }
 ```
 
-组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中存在的 ID 和既定九类动作，不添加未知字段。
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 可使用候选子组件关联的父 ID。既定十类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/collapse_to_parent`，不添加未知字段。
 
 PPTX 的整页截图候选先使用决策路由：
 
@@ -113,7 +119,7 @@ image2editable decision record runs/pptx-job \
 
 每次先查看 `run next` 返回的绝对 `image_path`。只有图片覆盖大部分页面、包含标题/多个文字区/图表或卡片等完整页面结构，且明显不是照片、Logo、头像或装饰素材时，才记录 `replace + full_slide_screenshot`。证据冲突或不确定时记录 `preserve` 或 `ambiguous`；不要为了提高拆分数量抬高置信度。
 
-组件计划必须以视觉整体为单位：科研图、表格只是示例，不得按固定类型写死；不要把本属一个整体的组件无依据拆碎。OCR 文字以冻结的 `text_XXXX` 只读节点出现，只能作为 `attach_text` 的第二对象。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
+组件计划必须以视觉整体为单位：科研图、表格只是示例，不得按固定类型写死；不要把本属一个整体的组件无依据拆碎。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`，页面级质量门仍会检查丢弃后是否缺失内容。OCR 文字以冻结的 `text_XXXX` 只读节点出现，只能作为 `attach_text` 的第二对象。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
 
 Runtime 只有在 `confidence >= 0.92` 时才重建完整截图。通过门禁后只原位替换命中的截图对象；既有原生文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生。未通过页面保留原截图并给出 warning，不伪装成可编辑组件。
 

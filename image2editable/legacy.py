@@ -914,6 +914,10 @@ def _quality_assets(
         source = np.asarray(image.convert("RGB")).copy()
     with Image.open(background_path) as image:
         background = np.asarray(image.convert("RGB")).copy()
+    with Image.open(text_mask_path) as image:
+        text_mask = np.asarray(image.convert("L")) > 0
+    if text_mask.shape != source.shape[:2]:
+        raise ValueError("quality text mask dimensions differ")
     reconstructed = background.copy()
     for node in graph["nodes"]:
         if node["kind"] == "text" or node["state"] not in {
@@ -925,7 +929,8 @@ def _quality_assets(
             raise ValueError("execution graph mask sha256 mismatch")
         with Image.open(mask_path) as image:
             mask = np.asarray(image.convert("L")) > 0
-        reconstructed[mask] = source[mask]
+        render_mask = mask & ~text_mask
+        reconstructed[render_mask] = source[render_mask]
     assets = {
         "background": output_dir / "background.png",
         "reconstructed": output_dir / "reconstructed.png",

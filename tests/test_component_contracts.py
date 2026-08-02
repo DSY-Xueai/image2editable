@@ -20,6 +20,7 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     ("action", "object_ids", "parameters"),
     [
         ("accept", ["component_0001"], {}),
+        ("discard", ["component_0001"], {}),
         ("merge", ["component_0001", "component_0002"], {}),
         ("split", ["component_0001"], {"parts": 2}),
         ("expand", ["component_0001"], {"margin_ratio": 0.01}),
@@ -177,6 +178,17 @@ def test_component_plan_rejects_attach_text_to_pending_text() -> None:
             request=request,
             graph=graph,
         )
+
+
+def test_component_plan_allows_collapse_to_parent_of_requested_child() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].remove("parent_a")
+
+    plan = _plan(request, "collapse_to_parent", ["parent_a"])
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
 
 
 def _plan_contract_fixture() -> tuple[dict, dict]:

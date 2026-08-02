@@ -364,6 +364,34 @@ def test_small_component_full_duplicate_still_fails_hard_gate() -> None:
     assert "duplicate_pixels" in report["violations"]
 
 
+def test_sparse_child_fails_against_its_text_excluded_parent() -> None:
+    case = _synthetic_quality_case()
+    parent_mask = case["component_mask"].copy()
+    child_mask = np.zeros_like(parent_mask)
+    child_mask[20:24, 24:28] = True
+    case["component_mask"] = child_mask
+    case["node"]["kind"] = "child"
+    case["node"]["parent_id"] = "parent_0001"
+    case["graph"]["nodes"].append({
+        "id": "parent_0001", "kind": "parent", "parent_id": None,
+        "state": "inactive", "mask": "masks/parent_0001.png",
+        "mask_sha256": "b" * 64, "bbox": [16, 12, 48, 36],
+        "z_index": 1, "text_ids": [],
+    })
+    calibration = calibrate_page(case["source"], case["text_mask"])
+
+    report = evaluate_component(
+        case["source"], case["background"], case["reconstructed"],
+        case["node"], case["graph"], calibration,
+        component_mask=child_mask, parent_mask=parent_mask,
+        text_mask=case["text_mask"],
+        page_checks={"protected_native_overlap": "pass"},
+    )
+
+    assert report["metrics"]["parent_coverage_ratio"] < 0.25
+    assert "incomplete_child" in report["violations"]
+
+
 def test_generic_internal_duplicate_is_not_misclassified_as_shadow_or_alpha() -> None:
     case = _synthetic_quality_case()
     duplicate = np.zeros(case["component_mask"].shape, dtype=bool)

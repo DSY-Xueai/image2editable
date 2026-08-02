@@ -156,6 +156,8 @@ cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
 - `host`（默认）：直接使用当前 Codex、Claude Code 等宿主 AI，不下载额外的组件决策模型。宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；Runtime 会通过一次视觉能力握手后，逐轮请求组件计划。
 - `local`（实验性）：使用用户显式安装的本地视觉模型，Runtime 在隔离子进程中自动完成每页最多五轮计划与质量门禁。转换期间严格离线，不会自动下载模型。
 
+两种 Provider 当前均为 `experimental`，尚未完成真实文件双模式验收。Host 可能把诊断图交给宿主服务处理；敏感内容应选择完全离线的 Local。模型文件缓存只减少重复下载，不缓存图片语义判断；每张图片、每一页都重新分析，不跨图片复用拆分决策。
+
 Local 模式不要硬编码模型名。先让 Skill/Agent 读取当前电脑配置和版本化模型目录：
 
 ```bash
@@ -164,6 +166,8 @@ image2editable models status
 ```
 
 只有推荐结果兼容、状态为已安装且有效时才能直接使用 Local。未安装时必须先向用户说明模型、revision、实验性状态和资源要求，并取得明确授权后执行 `image2editable models install agent`；Host 模式不执行模型探测或下载。两种模式共享相同的组件动作、最多五轮限制、确定性执行和质量门禁，互不读取对方的握手、计划或模型状态。
+
+Host 由 Skill 循环执行 `run execute → agent next → 查看八项诊断证据 → agent record → run execute`，直到完成或每页达到 5 轮。已通过组件立即冻结；不稳定子组件折叠为完整父组件，父组件仍失败时保留原页并标记 `preserved_with_warning`，不会用清空组件换取成功。重建组件通常是可移动的透明图片对象；项目不承诺把任意图形转换为原生矢量或 SmartArt。
 
 ```bash
 # 图片、PDF 和图片版 PPTX 均可选择 Host 或 Local

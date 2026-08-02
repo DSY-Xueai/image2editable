@@ -102,6 +102,8 @@ def execute_component_actions(
             if nodes[object_ids[0]]["state"] != "pending":
                 raise ValueError("accept requires a pending component")
             nodes[object_ids[0]]["state"] = "pending_gate"
+        elif name == "discard":
+            nodes[object_ids[0]]["state"] = "inactive"
         elif name == "attach_text":
             visual, text = object_ids
             nodes[visual]["text_ids"] = sorted(set(nodes[visual]["text_ids"] + [text]))

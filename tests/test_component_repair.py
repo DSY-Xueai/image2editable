@@ -141,6 +141,96 @@ def test_local_plan_is_hash_bound_and_recorded_without_host_state(
     assert not (store.root / "host_capabilities.json").exists()
 
 
+def test_execution_refreshes_candidates_after_discard(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.store import RunStore
+
+    evidence_root = Path(page_session["reconstruction_dir"]) / "evidence-source"
+    graph_path = evidence_root / "component-graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    for component_id, z_index in (("candidate_c", 2), ("candidate_d", 3)):
+        candidate = dict(next(
+            node for node in graph["nodes"] if node["id"] == "candidate_b"
+        ))
+        candidate.update({
+            "id": component_id, "mask": f"masks/{component_id}.png",
+            "z_index": z_index,
+        })
+        mask_path = evidence_root / candidate["mask"]
+        shutil.copyfile(evidence_root / "masks/candidate_b.png", mask_path)
+        candidate["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+        graph["nodes"].append(candidate)
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    page_session["provider"] = "local"
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=3,
+    )
+    advance_component_repair(store, "page_001")
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("discard", ["candidate_b"])],
+    }
+    record_local_component_plan(store, "page_001", plan=plan)
+    output_dir = request_path.parents[2] / "execution-01"
+    next_graph = execute_component_actions(
+        np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
+        sam_runner=None, input_dir=request_path.parent, output_dir=output_dir,
+    )
+    next_graph_path = output_dir / "component-graph.json"
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": hashlib.sha256(
+            (request_path.parent / "component-graph.json").read_bytes()
+        ).hexdigest(),
+        "output_graph_sha256": hashlib.sha256(next_graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1,
+        "quality_input_refs": _quality_input_refs(output_dir, store),
+    }
+    execution_path = output_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    state = record_component_execution(
+        store, "page_001", execution_path=execution_path,
+        output_graph_path=next_graph_path,
+    )
+
+    assert state["candidate_ids"] == ["candidate_c", "candidate_d"]
+    assert next(
+        node for node in next_graph["nodes"] if node["id"] == "candidate_b"
+    )["state"] == "inactive"
+
+    passed = _strict_quality_report("candidate_c", True)["component_reports"][0]
+    failed = _strict_quality_report("candidate_d", False)["component_reports"][0]
+    monkeypatch.setattr(
+        component_repair, "evaluate_component_quality_round",
+        lambda *args, **kwargs: {
+            "accepted": False,
+            "violations": [
+                "missing_edge", "pptx_reopen_unknown", "visual_difference",
+            ],
+            "component_reports": [passed, failed],
+            "visual_metrics": {"mae": 30.0, "p95": 60.0, "changed_ratio": 0.2},
+            "checks": {"pptx_reopen": "unknown"},
+        },
+    )
+    record_component_quality(store, "page_001")
+    advance_component_repair(store, "page_001")
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert sorted(state["frozen"]) == ["candidate_c", "frozen_a"]
+    assert state["failed_ids"] == ["candidate_d"]
+
+
 def test_execution_quality_freeze_reaches_ready_for_assembly(
     page_session: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -488,6 +578,7 @@ def _strict_quality_report(component_id: str, accepted: bool) -> dict:
         "exterior_shadow_pixels": 0, "exterior_alpha_pixels": 0,
         "orphan_residual_pixels": 0, "text_support_pixels": 0,
         "text_duplicate_ratio": 0.0, "ownership_out_of_bounds_pixels": 0,
+        "parent_coverage_ratio": 1.0,
         "parent_child_double": False, "noise_l1": 0.0, "local_contrast": 1.0,
         "edge_width_px": 1, "text_halo_px": 1,
         "adaptive_pixel_tolerance": 3.0, "hard_pixel_tolerance": 3.0,
@@ -572,6 +663,19 @@ def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path
     assert by_id["left"]["state"] == "pending_gate"
     assert by_id["frozen"] == next(node for node in graph["nodes"] if node["id"] == "frozen")
     assert (output / "component-graph.json").is_file()
+
+
+def test_execute_discard_inactivates_redundant_candidate(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+
+    result = execute_component_actions(
+        image, graph, [_action("discard", ["left"])], sam_runner=None,
+        input_dir=input_dir, output_dir=tmp_path / "round-discard",
+    )
+
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["left"]["state"] == "inactive"
+    assert by_id["right"]["state"] == "pending"
 
 
 def test_frozen_mask_keeps_nonstandard_relative_path(tmp_path: Path) -> None:

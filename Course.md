@@ -36,7 +36,7 @@
 - Local Provider 已接入统一组件状态机：Runtime 在内部完成“生成请求 → 单轮本地视觉推理 → 严格记录计划 → 确定性执行/门禁”的循环，不进入 Host 的公开 `awaiting_agent`，也不读取 Host 握手、会话或计划。
 - 初轮和后续轮次不再用源图冒充诊断证据：`numbered-masks.png` 显示彩色组件掩码与准确 ID，`ocr-overlay.png` 显示稳定 `text_XXXX`、逐项 OCR box/text，`ownership.png` 显示独占像素归属，`reconstructed.png` 与 `difference.png` 来自当前确定性重建；证据图改为分批保存释放，避免六张整页 RGB 图同时常驻内存。
 - 每个重修轮次启动一个独立 `local_agent_worker` 子进程；视觉模型只在 worker 内惰性加载，结束或超时后以进程退出作为 RAM/VRAM 释放边界。模型与处理器均使用已确认 snapshot 和 `local_files_only=True`，同时启用 Hugging Face/Transformers 离线环境，不会在转换中下载模型。
-- worker 只允许九种既定动作；请求、八项证据和组件图重新校验路径与 SHA-256，生成计划先在 worker 校验，再由父进程使用与 Host 相同的严格 Schema/组件图校验器复核并原子记录。
+- worker 只允许十种既定动作；请求、八项证据和组件图重新校验路径与 SHA-256，生成计划先在 worker 校验，再由父进程使用与 Host 相同的严格 Schema/组件图校验器复核并原子记录。
 - 本地计划按页面、轮次和请求 hash 持久化且不可覆盖；相同计划可恢复，不同计划拒绝。最多五个页面级批量重修轮次、冻结规则、父子互斥、父组件/原页回退和质量门禁继续由共同状态机控制，Local Agent 无权放宽。
 - OCR 文字以冻结、只读的 text 节点进入真实组件图，不参与视觉组件质量计数；`attach_text` 只允许待修视觉节点引用冻结文字节点，其他动作不能修改文字节点。原始 `text_items` 继续进入最终可编辑 PPTX，而不是只画在诊断图上。
 - 硬件与依赖推荐在一次性 `models recommend --json` 子进程中执行，避免 PyTorch/CUDA 常驻转换主进程；除总 RAM/VRAM 外也检查当前可用 RAM/VRAM。标称 16GB RAM/8GB VRAM 目标按至少 15 GiB 总 RAM、8 GiB 总 VRAM、6 GiB 可用 RAM、6.5 GiB 可用 VRAM 判定，避免 Windows 可见容量换算造成永久误拒绝。
@@ -47,6 +47,14 @@
 - `README.md` 与 `skills/image-to-ppt/SKILL.md` 已同步 Host/Local 两种用法：Host 复用具备视觉能力的 Codex/Claude 等宿主，Local 必须先按实时硬件推荐并取得明确下载授权；两者在单个 Run 内互斥且不共享私有状态。
 - 当前只完成 mock/契约验收，没有下载或真实加载模型，Local 状态继续为 `experimental`；`models status` 显示 `installed=false`。`attach_text` 契约定向回归为 `61 passed`，最终全量回归为 `1319 passed, 20 skipped`。
 
+## P2.3 Task 13 进行中
+
+- README、英文 README 和 PPTX Skill 已补充双 Provider、每页 5 轮、`preserved_with_warning`、敏感内容、逐图重新判断及透明图片组件边界；新增通用内容/输入类型验收清单契约，定向回归 `4 passed`。
+- 真实 Host PNG 已完成 R1–R3 诊断：Prepared Page v2 现同时保存完整父掩码与文字排除后的语义子掩码；运行图和八项证据使用真实父子层级，重建图按当前活动掩码合成并扣除原始 OCR 区域，文字框浅灰残影已消失。
+- Agent 动作新增 `discard`，可停用被完整对象覆盖的冗余/碎片候选；`collapse_to_parent` 可操作请求子组件关联的完整父 ID。动作后从输出图刷新候选 ID，merge/split/discard 不再把已停用旧 ID带入质量门。
+- 质量重建、诊断证据和最终 PPT 统一扣除文字掩码；页面仍有失败对象时，已通过的组件立即冻结。新增父子完整性门：扣除文字后子掩码覆盖完整父掩码不足 25% 时触发 `incomplete_child`，防止把灯泡、图标或复杂绘图碎片误报为完整组件。
+- R3 保留为失败诊断：旧规则曾冻结 112 像素的灯泡碎片，不篡改冻结状态。下一步新建 R4 从头验收同一 PNG，再串行验收三页 PDF、原生 `test1.pptx` 和混合 `混合.pptx`。本轮全量回归为 `1353 passed, 20 skipped`，`git diff --check` 通过。
+
 ## 当前项目状态
 
 - 当前分支：`codex/agent-runtime-foundation`；只保留本地提交，不推送、不合并 `main`。
@@ -55,7 +63,7 @@
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
 - P2.3 Task 10 已接通 PPTX 获批候选 → 组件状态机 → 已验收 donor → OOXML 原位替换；未通过质量门禁的页面保留原截图并给出 warning。
-- P2.3 Task 12 已接通隔离的 Local 推理；Host 模式仍完全不依赖本地模型。Local 尚未下载实际模型或通过真实文件验收，因此仍为实验性。
+- P2.3 Task 13 正在执行真实 PNG/PDF/PPTX 验收；Host 模式仍完全不依赖本地模型。R3 暴露的数据链与质量门缺陷已修复，待 R4 从干净状态复验；Local 尚未下载实际模型或通过真实文件验收，因此仍为实验性。
 
 ## P2.2 既有行为
 
@@ -116,12 +124,12 @@
 - challenge metadata 仅保存 Schema、图片路径、PNG 哈希和 challenge ID，不保存答案、nonce 或可复现布局的随机状态。形状、颜色和数量只在生成时从安全随机源选择；另有 128-bit 高熵视觉盐只写入 PNG 底部保留像素，不单独持久化且被答案观察器明确忽略，使公开 36 种无盐模板无法按 SHA 枚举。验证端先用 Task 4 Run integrity key 认证 PNG 哈希/ID，先拒绝非 240×120 图片，再独立解析已绑定 PNG 像素得到答案。即使同权限 Agent 读取 metadata 与 key，也不能脱离视觉图像推导答案；已有 challenge 时 key 缺失、损坏或被替换均 fail closed。PNG 与 metadata 在唯一 staging 目录内完整验证后整目录发布，写入/rename 故障清理自有 staging 后可重试，并发 next 复用同一完整发布。
 - capability response 必须严格匹配当前 Run challenge 的形状、颜色和数量，成功后原子记录 challenge ID、图片哈希和能力集合；图片、OCR 与诊断内容均明确视为不可信数据，不能覆盖 Schema、用户请求或质量门禁。
 - 握手通过后只使用 Task 4 的 HMAC 安全 loader 读取当前组件请求，并返回绝对请求/证据路径；请求继续绑定 Provider、页面、轮次、请求哈希和当前组件 ID。
-- `image2editable agent record RUN_DIR --plan PLAN.json` 在首次写入和半提交恢复前均先校验当前请求 SHA；同时读取 Task 4 已认证组件图，严格校验动作对象数量与真实 kind/parent 角色。`attach_text` 只接受 visual→text，`collapse_to_parent` 只接受 parent，child merge 只能同父级；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、跨角色/跨父级及冲突动作均拒绝。
+- `image2editable agent record RUN_DIR --plan PLAN.json` 在首次写入和半提交恢复前均先校验当前请求 SHA；同时读取 Task 4 已认证组件图，严格校验动作对象数量与真实 kind/parent 角色。`attach_text` 只接受 visual→text，`collapse_to_parent` 可操作候选子组件关联的完整 parent，child merge 只能同父级；过期哈希、错误 Provider/轮次/页面、未知或冻结对象、跨角色/跨父级及冲突动作均拒绝。
 - Agent next/record 与执行、恢复共用同一把 Run OS lease；`next` 最多有界等待 30 秒并在单一临界区内读取或发布 challenge，跨平台并发调用只会加载同一个完整结果，超时明确失败；`record` 仍非阻塞拒绝并发。计划以临时文件加排他链接原子发布，重复或并发记录不能覆盖。若计划已发布但状态切换中断，仅同一份且重新严格验证通过的计划可补完 `awaiting_agent → prepared`，不同计划和已恢复后的重复提交仍拒绝。
 
 ## P2.3 Task 6 本轮变更
 
-- 新增九类严格组件动作执行：接受、合并、真实连通域拆分、按页面短边比例扩张/收缩、SAM 框/点提示重试、文字归属以及折叠到父组件；执行器只做确定性变换，不自行通过质量门禁。
+- 新增十类严格组件动作执行：接受、丢弃冗余候选、合并、真实连通域拆分、按页面短边比例扩张/收缩、SAM 框/点提示重试、文字归属以及折叠到父组件；执行器只做确定性变换，不自行通过质量门禁。动作执行后从真实输出图刷新下一轮候选 ID，merge/split/discard 不再把已停用的旧 ID 带入质量门。
 - `accept` 只把 `pending` 转为仍参与渲染的 `pending_gate`；后续质量门禁决定 `frozen/failed`。冻结节点的结构与掩码保持不变，合并源和折叠后的后代转为 `inactive`。
 - 每轮写入新的组件图与逐文件哈希掩码目录，以原子 no-replace 方式发布，已存在输出不覆盖；失败不发布正式轮次，异常 staging 不再按可替换路径移动或递归删除。SAM 提示通过最长 600 秒的独立 worker 子进程执行，并校验返回掩码尺寸与非空性。
 - 主脚本与 Skill 镜像已同步 `component_contracts.py`、`visual_segment.py`、`fg_extract.py` 和 `sam_worker.py`。

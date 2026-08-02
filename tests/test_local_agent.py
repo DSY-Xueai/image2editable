@@ -346,6 +346,7 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
     ) in calls
     assert set(local_agent_worker.ALLOWED_ACTIONS) == {
         "accept",
+        "discard",
         "merge",
         "split",
         "expand",

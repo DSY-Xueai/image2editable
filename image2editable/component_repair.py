@@ -414,6 +414,12 @@ def record_component_execution(
         updated["current_round"] = dict(state["current_round"])
         updated["current_round"]["execution_ref"] = execution_ref
         updated["graph_ref"] = graph_ref
+        updated["candidate_ids"] = sorted(
+            node["id"] for node in after["nodes"]
+            if node["kind"] != "text"
+            and node["state"] in {"pending", "pending_gate"}
+        )
+        updated["failed_ids"] = list(updated["candidate_ids"])
         updated["phase"] = "actions_executed"
         updated["last_normalized_plan_sha256"] = normalized
         updated["round_history"] = list(state["round_history"]) + [{
@@ -809,7 +815,8 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
         item["component_id"] for item in report["component_reports"]
         if item.get("accepted") is True and not item.get("violations")
     }
-    if page_violations:
+    failed = sorted(set(state["candidate_ids"]) - accepted)
+    if page_violations and not failed:
         accepted.clear()
     failed = sorted(set(state["candidate_ids"]) - accepted)
     graph_payload = _load_state_artifact(
@@ -1078,8 +1085,16 @@ def evaluate_component_quality_round(
         graph_root,
         Path(trusted_root),
     )
+    nodes_by_id = {node["id"]: node for node in validated["nodes"]}
+    mask_nodes = list(active_visual)
+    loaded_ids = {node["id"] for node in mask_nodes}
+    for node in candidates:
+        parent_id = node.get("parent_id")
+        if parent_id is not None and parent_id not in loaded_ids:
+            mask_nodes.append(nodes_by_id[parent_id])
+            loaded_ids.add(parent_id)
     masks = {}
-    for node in active_visual:
+    for node in mask_nodes:
         component_id = node["id"]
         mask_path = graph_root / node["mask"]
         current = graph_root
@@ -1099,7 +1114,7 @@ def evaluate_component_quality_round(
         masks[node["id"]] = component_mask
     page_context = _prepare_page_quality_context(
         source, background, reconstructed, text_mask,
-        component_masks=list(masks.values()),
+        component_masks=[masks[node["id"]] for node in active_visual],
     )
     for node in candidates:
         component_id = node["id"]
@@ -1113,6 +1128,7 @@ def evaluate_component_quality_round(
             validated,
             calibration,
             component_mask=component_mask,
+            parent_mask=masks.get(node.get("parent_id")),
             text_mask=text_mask,
             page_checks=page_checks,
             agent_confidence=agent_confidence_by_id.get(component_id),
