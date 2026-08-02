@@ -1,5 +1,6 @@
 # --- Project patterns ---
 .worktrees/
+/.superpowers/
 /runs/
 .tmp-pytest/
 .pytest_cache/
