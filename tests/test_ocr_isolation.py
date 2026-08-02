@@ -993,8 +993,10 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         element_masks,
         text_mask,
         large_inpainter=None,
+        text_clean_image=None,
     ):
         assert callable(large_inpainter)
+        assert text_clean_image is None
         background_calls.append("clean")
         return large_inpainter(image, np.ones(image.shape[:2], dtype=np.uint8))
 
@@ -1218,6 +1220,7 @@ def test_ocr_worker_sets_omp_before_lazy_paddle_import_without_torch() -> None:
 def test_ocr_product_and_skill_mirrors_match() -> None:
     root = Path(__file__).resolve().parents[1]
     script_names = [
+        "bg_model.py",
         "fg_extract.py",
         "lama_inpaint.py",
         "lama_worker.py",

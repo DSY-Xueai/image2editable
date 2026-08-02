@@ -2041,7 +2041,7 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
     monkeypatch.setattr(
         image_to_ppt,
         "build_clean_background",
-        lambda *args: source.copy(),
+        lambda *args, **kwargs: source.copy(),
     )
 
     def fake_export(*args, **kwargs):
@@ -2330,6 +2330,34 @@ def test_background_repair_does_not_blur_unmasked_pixels() -> None:
     )
 
     assert np.array_equal(repaired[exclude_mask == 0], img[exclude_mask == 0])
+
+
+def test_clean_background_restores_trusted_text_pixels_after_component_inpaint() -> None:
+    import numpy as np
+
+    source = np.zeros((20, 30, 3), dtype=np.uint8)
+    component_mask = np.full((20, 30), 255, dtype=np.uint8)
+    text_mask = np.zeros((20, 30), dtype=np.uint8)
+    text_mask[6:14, 8:22] = 255
+    text_clean = source.copy()
+    text_clean[text_mask > 0] = np.arange(
+        np.count_nonzero(text_mask) * 3,
+        dtype=np.uint8,
+    ).reshape(-1, 3)
+
+    def gray_inpaint(image, mask):
+        return np.full_like(image, 127)
+
+    cleaned = bg_model.build_clean_background(
+        source,
+        [component_mask],
+        text_mask,
+        large_inpainter=gray_inpaint,
+        text_clean_image=text_clean,
+    )
+
+    assert np.array_equal(cleaned[text_mask > 0], text_clean[text_mask > 0])
+    assert np.all(cleaned[text_mask == 0] == 127)
 
 
 def test_white_text_on_colored_bar_is_cleaned_to_bar_color() -> None:
@@ -3855,7 +3883,7 @@ def test_deferred_mask_paths_are_lossless_and_hold_no_arrays(
     monkeypatch.setattr(
         image_to_ppt,
         "build_clean_background",
-        lambda *args: source.copy(),
+        lambda *args, **kwargs: source.copy(),
     )
     monkeypatch.setattr(
         image_to_ppt,

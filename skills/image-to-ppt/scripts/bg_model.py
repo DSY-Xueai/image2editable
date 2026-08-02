@@ -491,10 +491,19 @@ def build_clean_background(
     element_masks: list[np.ndarray],
     text_mask: np.ndarray,
     large_inpainter=None,
+    text_clean_image: np.ndarray | None = None,
 ) -> np.ndarray:
     """Remove visual elements and text from an image."""
     removal = build_removal_mask(element_masks, text_mask)
-    return repair_masked_background(img, removal, large_inpainter)
+    repaired = repair_masked_background(img, removal, large_inpainter)
+    if text_clean_image is None:
+        return repaired
+
+    trusted = np.asarray(text_clean_image)
+    if trusted.shape != repaired.shape:
+        raise ValueError("text-clean image must match the source image shape")
+    repaired[text_mask > 0] = trusted[text_mask > 0]
+    return repaired
 
 
 def build_removal_mask(
