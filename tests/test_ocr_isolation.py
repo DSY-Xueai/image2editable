@@ -463,13 +463,21 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         events.append(("visual", Path(path), dict(text_analysis)))
         component_dir = target / "components"
         mask_dir = target / "element-masks"
+        semantic_mask_dir = target / "semantic-masks"
         component_dir.mkdir()
         mask_dir.mkdir()
+        semantic_mask_dir.mkdir()
         component_path = component_dir / "component.png"
         element_mask_path = mask_dir / "0000.png"
+        semantic_mask_path = semantic_mask_dir / "0000.png"
         background_path = target / "background-original.png"
         Image.new("RGBA", (3, 3), "red").save(component_path)
-        Image.new("L", (20, 10), 0).save(element_mask_path)
+        element_mask = np.zeros((10, 20), dtype=np.uint8)
+        element_mask[2:5, 2:5] = 255
+        semantic_mask = np.zeros((10, 20), dtype=np.uint8)
+        semantic_mask[1:6, 1:6] = 255
+        Image.fromarray(element_mask, mode="L").save(element_mask_path)
+        Image.fromarray(semantic_mask, mode="L").save(semantic_mask_path)
         Image.new("RGB", (20, 10), "white").save(background_path)
         Image.new("L", (20, 10), 0).save(target / "background-removal-mask.png")
         Image.new("RGB", (20, 10), "black").save(
@@ -500,6 +508,7 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
             "_work_dir": str(target),
             "_text_mask_path": text_analysis["mask_path"],
             "_element_mask_paths": [str(element_mask_path)],
+            "_semantic_mask_paths": [str(semantic_mask_path)],
         }
 
     monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
@@ -537,6 +546,8 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         for record in [
             manifest["assets"]["source_image"],
             manifest["assets"]["ocr_mask"],
+            manifest["assets"]["element_masks"][0],
+            manifest["assets"]["semantic_masks"][0],
             manifest["assets"]["background_original"],
             manifest["components"][0]["asset"],
         ]
