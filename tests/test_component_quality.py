@@ -85,12 +85,33 @@ def test_broad_container_mask_does_not_bridge_independent_leaf_clusters() -> Non
 
 def test_nearby_nonoverlapping_edge_fragments_form_one_leaf_cluster() -> None:
     masks = [
-        _mask((30, 40), (8, 4, 14, 14)),
-        _mask((30, 40), (8, 16, 14, 26)),
+        _mask((30, 40), (5, 3, 20, 18)),
+        _mask((30, 40), (10, 19, 13, 27)),
     ]
     calibration = component_quality.PageCalibration(0.0, 1.0, 2, 1, 20)
 
     assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 1
+
+
+def test_gap_fragment_does_not_bridge_two_complete_leaf_clusters() -> None:
+    masks = [
+        _mask((30, 40), (5, 2, 20, 14)),
+        _mask((30, 40), (7, 15, 17, 17)),
+        _mask((30, 40), (5, 18, 20, 30)),
+    ]
+    calibration = component_quality.PageCalibration(0.0, 1.0, 2, 1, 20)
+
+    assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 2
+
+
+def test_adjacent_complete_rectangles_form_independent_leaf_clusters() -> None:
+    masks = [
+        _mask((30, 40), (5, 3, 15, 13)),
+        _mask((30, 40), (5, 14, 15, 24)),
+    ]
+    calibration = component_quality.PageCalibration(0.0, 1.0, 2, 1, 20)
+
+    assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 2
 
 
 def test_offset_shadow_forms_one_leaf_cluster() -> None:

@@ -399,6 +399,17 @@ def record_component_execution(
             )
             if _hash_bound_file(mask_path, store.root) != node["mask_sha256"]:
                 raise ValueError(f"component execution mask hash mismatch: {node['id']}")
+        _validate_inactive_source_provenance(
+            store.root,
+            before=before,
+            after=after,
+            before_graph_path=store.root / Path(
+                *PurePosixPath(state["graph_ref"]["path"]).parts
+            ),
+            after_graph_path=store.root / Path(
+                *PurePosixPath(graph_ref["path"]).parts
+            ),
+        )
         plan = json.loads(_load_state_artifact(
             store.root, state["current_round"]["plan_ref"]
         ).decode("utf-8"))
@@ -434,6 +445,43 @@ def record_component_execution(
         validate_component_repair_state(updated)
         store.write_json(relative, updated)
         return updated
+
+
+def _validate_inactive_source_provenance(
+    root: Path,
+    *,
+    before: dict,
+    after: dict,
+    before_graph_path: Path,
+    after_graph_path: Path,
+) -> None:
+    before_by_id = {node["id"]: node for node in before["nodes"]}
+    for node in after["nodes"]:
+        original = before_by_id.get(node["id"])
+        if node["state"] != "inactive" or original is None:
+            continue
+        if any(
+            node[field] != original[field]
+            for field in ("mask", "mask_sha256", "bbox")
+        ):
+            raise ValueError(
+                f"inactive source provenance changed: {node['id']}"
+            )
+        before_mask = before_graph_path.parent / Path(
+            *PurePosixPath(original["mask"]).parts
+        )
+        after_mask = after_graph_path.parent / Path(
+            *PurePosixPath(node["mask"]).parts
+        )
+        before_digest = _hash_bound_file(before_mask, root)
+        after_digest = _hash_bound_file(after_mask, root)
+        if (
+            before_digest != original["mask_sha256"]
+            or after_digest != before_digest
+        ):
+            raise ValueError(
+                f"inactive source provenance changed: {node['id']}"
+            )
 
 
 def record_component_quality(

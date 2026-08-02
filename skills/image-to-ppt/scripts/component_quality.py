@@ -169,6 +169,28 @@ def absorbed_leaf_cluster_count(
                 left_root = find(left)
                 right_root = find(right)
                 parents[right_root] = left_root
+    gap_candidates = []
+    for left in range(len(summaries)):
+        for right in range(left + 1, len(summaries)):
+            if not _gap_fragment_pair(summaries[left], summaries[right], calibration):
+                continue
+            fragment, primary = (
+                (left, right)
+                if summaries[left].area < summaries[right].area
+                else (right, left)
+            )
+            gap_candidates.append((fragment, primary))
+    attached_fragments = set()
+    for fragment, primary in sorted(
+        gap_candidates, key=lambda pair: summaries[pair[1]].area, reverse=True
+    ):
+        if fragment in attached_fragments or primary in attached_fragments:
+            continue
+        fragment_root = find(fragment)
+        primary_root = find(primary)
+        if fragment_root != primary_root:
+            parents[fragment_root] = primary_root
+        attached_fragments.add(fragment)
     return len({find(index) for index in range(len(summaries))})
 
 
@@ -206,16 +228,33 @@ def _same_absorbed_entity(
         <= max(radius * 3, max(lx2 - lx1, rx2 - rx1) * 0.5)
     ):
         return True
-    horizontal_gap = max(rx1 - lx2, lx1 - rx2, 0)
-    vertical_gap = max(ry1 - ly2, ly1 - ry2, 0)
-    vertical_overlap = max(0, min(ly2, ry2) - max(ly1, ry1))
-    horizontal_overlap = max(0, min(lx2, rx2) - max(lx1, rx1))
+    return False
+
+
+def _gap_fragment_pair(
+    left: _AbsorbedMaskSummary,
+    right: _AbsorbedMaskSummary,
+    calibration: PageCalibration,
+) -> bool:
+    smaller, larger = (
+        (left, right) if left.area < right.area else (right, left)
+    )
+    if smaller.area / larger.area > 0.35:
+        return False
+    sy1, sx1, sy2, sx2 = smaller.bbox
+    ly1, lx1, ly2, lx2 = larger.bbox
+    height, width = sy2 - sy1, sx2 - sx1
+    if min(height, width) / max(height, width) > 0.4:
+        return False
+    radius = max(calibration.edge_width_px, calibration.text_halo_px)
+    horizontal_gap = max(sx1 - lx2, lx1 - sx2, 0)
+    vertical_gap = max(sy1 - ly2, ly1 - sy2, 0)
+    vertical_overlap = max(0, min(sy2, ly2) - max(sy1, ly1))
+    horizontal_overlap = max(0, min(sx2, lx2) - max(sx1, lx1))
     return (
-        0 < horizontal_gap <= radius
-        and vertical_overlap / min(ly2 - ly1, ry2 - ry1) >= 0.5
+        0 < horizontal_gap <= radius and vertical_overlap / height >= 0.5
     ) or (
-        0 < vertical_gap <= radius
-        and horizontal_overlap / min(lx2 - lx1, rx2 - rx1) >= 0.5
+        0 < vertical_gap <= radius and horizontal_overlap / width >= 0.5
     )
 
 

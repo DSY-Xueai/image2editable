@@ -727,6 +727,7 @@ def _execute_composite_quality_round(
     *,
     action: dict,
     shape: tuple[int, int],
+    before_execution_record=None,
     before_quality=None,
 ) -> tuple[dict, dict]:
     request = load_component_agent_request(request_path)
@@ -773,6 +774,12 @@ def _execute_composite_quality_round(
     }
     execution_path = execution_dir / "execution.json"
     execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    if before_execution_record is not None:
+        before_execution_record(graph_path)
+        execution["output_graph_sha256"] = hashlib.sha256(
+            graph_path.read_bytes()
+        ).hexdigest()
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
     record_component_execution(
         store, "page_001", execution_path=execution_path,
         output_graph_path=graph_path,
@@ -794,6 +801,7 @@ def _record_composite_quality(
     left_box: tuple[int, int, int, int],
     right_box: tuple[int, int, int, int],
     action_name: str = "absorb_into_parent",
+    before_execution_record=None,
     before_quality=None,
 ) -> tuple[dict, dict, object, dict]:
     from image2editable.store import RunStore
@@ -853,6 +861,7 @@ def _record_composite_quality(
     report, freeze = _execute_composite_quality_round(
         store, request_path, graph,
         action=_action(action_name, object_ids), shape=shape,
+        before_execution_record=before_execution_record,
         before_quality=before_quality,
     )
     return report, freeze, store, page_session
@@ -867,6 +876,21 @@ def _box_mask(
     return mask
 
 
+def _rewrite_graph_mask_as(
+    graph_path: Path, source_id: str, replacement_id: str
+) -> None:
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    source_path = graph_path.parent / by_id[source_id]["mask"]
+    replacement_path = graph_path.parent / by_id[replacement_id]["mask"]
+    source_path.write_bytes(replacement_path.read_bytes())
+    by_id[source_id]["mask_sha256"] = hashlib.sha256(
+        source_path.read_bytes()
+    ).hexdigest()
+    by_id[source_id]["bbox"] = list(by_id[replacement_id]["bbox"])
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+
 def test_absorbing_independent_candidates_is_hard_over_merge_failure(
     page_session: dict,
 ) -> None:
@@ -879,6 +903,38 @@ def test_absorbing_independent_candidates_is_hard_over_merge_failure(
     assert parent["accepted"] is False
     assert freeze["failed_ids"] == ["parent"]
     assert "parent" not in freeze["frozen_ids"]
+
+
+def test_absorbing_adjacent_complete_rectangles_is_hard_over_merge_failure(
+    page_session: dict,
+) -> None:
+    report, freeze, _, _ = _record_composite_quality(
+        page_session, left_box=(5, 3, 15, 13), right_box=(5, 14, 15, 24)
+    )
+
+    parent = report["component_reports"][0]
+    assert "over_merged_component" in parent["violations"]
+    assert parent["accepted"] is False
+    assert freeze["failed_ids"] == ["parent"]
+    assert "parent" not in freeze["frozen_ids"]
+
+
+@pytest.mark.parametrize("action_name", ["absorb_into_parent", "merge", "collapse_to_parent"])
+def test_execution_rejects_rewritten_newly_inactive_source_mask(
+    page_session: dict,
+    action_name: str,
+) -> None:
+    def rewrite_source(graph_path: Path) -> None:
+        _rewrite_graph_mask_as(graph_path, "left", "right")
+
+    with pytest.raises(ValueError, match="source|provenance|inactive"):
+        _record_composite_quality(
+            page_session,
+            left_box=(2, 2, 8, 8),
+            right_box=(18, 28, 24, 34),
+            action_name=action_name,
+            before_execution_record=rewrite_source,
+        )
 
 
 def test_absorbing_overlapping_duplicate_masks_can_freeze_parent(
@@ -951,6 +1007,38 @@ def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
     assert "over_merged_component" in parent["violations"]
     assert second_freeze["failed_ids"] == ["parent"]
     assert "parent" not in second_freeze["frozen_ids"]
+
+
+def test_execution_rejects_rewritten_retained_inactive_source_mask(
+    page_session: dict,
+) -> None:
+    _, first_freeze, store, session = _record_composite_quality(
+        page_session,
+        left_box=(2, 2, 8, 8),
+        right_box=(18, 28, 24, 34),
+    )
+    assert first_freeze["failed_ids"] == ["parent"]
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session["evidence"]["component-graph.json"] = (
+        store.root / state["graph_ref"]["path"]
+    )
+    second_request = build_component_agent_request(session, repair_round=2)
+    record_next_component_request(
+        store, "page_001", request_path=second_request
+    )
+    advance_component_repair(store, "page_001")
+
+    with pytest.raises(ValueError, match="source|provenance|inactive"):
+        _execute_composite_quality_round(
+            store,
+            second_request,
+            load_component_agent_graph(second_request),
+            action=_action("accept", ["parent"]),
+            shape=(30, 40),
+            before_execution_record=lambda graph_path: _rewrite_graph_mask_as(
+                graph_path, "left", "right"
+            ),
+        )
 
 
 def test_quality_rejects_absorbed_mask_ancestor_replaced_during_read(
