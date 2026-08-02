@@ -502,7 +502,8 @@ def build_clean_background(
     trusted = np.asarray(text_clean_image)
     if trusted.shape != repaired.shape:
         raise ValueError("text-clean image must match the source image shape")
-    repaired[text_mask > 0] = trusted[text_mask > 0]
+    text_removal = build_removal_mask([], text_mask) > 0
+    repaired[text_removal] = trusted[text_removal]
     return repaired
 
 

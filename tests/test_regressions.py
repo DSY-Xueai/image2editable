@@ -2332,18 +2332,17 @@ def test_background_repair_does_not_blur_unmasked_pixels() -> None:
     assert np.array_equal(repaired[exclude_mask == 0], img[exclude_mask == 0])
 
 
-def test_clean_background_restores_trusted_text_pixels_after_component_inpaint() -> None:
+def test_clean_background_restores_trusted_text_dilation_after_component_inpaint() -> None:
     import numpy as np
 
     source = np.zeros((20, 30, 3), dtype=np.uint8)
     component_mask = np.full((20, 30), 255, dtype=np.uint8)
     text_mask = np.zeros((20, 30), dtype=np.uint8)
     text_mask[6:14, 8:22] = 255
-    text_clean = source.copy()
-    text_clean[text_mask > 0] = np.arange(
-        np.count_nonzero(text_mask) * 3,
-        dtype=np.uint8,
-    ).reshape(-1, 3)
+    text_removal = bg_model.build_removal_mask([], text_mask) > 0
+    text_halo = text_removal & (text_mask == 0)
+    text_clean = np.full_like(source, 23)
+    text_clean[text_removal] = [41, 73, 109]
 
     def gray_inpaint(image, mask):
         return np.full_like(image, 127)
@@ -2356,8 +2355,44 @@ def test_clean_background_restores_trusted_text_pixels_after_component_inpaint()
         text_clean_image=text_clean,
     )
 
-    assert np.array_equal(cleaned[text_mask > 0], text_clean[text_mask > 0])
-    assert np.all(cleaned[text_mask == 0] == 127)
+    assert np.any(text_halo)
+    np.testing.assert_array_equal(cleaned[text_halo], text_clean[text_halo])
+    np.testing.assert_array_equal(cleaned[text_removal], text_clean[text_removal])
+    assert np.all(cleaned[~text_removal] == 127)
+
+
+def test_clean_background_rejects_mismatched_trusted_text_clean_shape() -> None:
+    import numpy as np
+
+    source = np.zeros((12, 16, 3), dtype=np.uint8)
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="text-clean image must match"):
+        bg_model.build_clean_background(
+            source,
+            [],
+            text_mask,
+            text_clean_image=np.zeros((11, 16, 3), dtype=np.uint8),
+        )
+
+
+def test_clean_background_without_trusted_text_clean_keeps_inpaint_result() -> None:
+    import numpy as np
+
+    source = np.zeros((12, 16, 3), dtype=np.uint8)
+    component_mask = np.full(source.shape[:2], 255, dtype=np.uint8)
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[5:7, 7:9] = 255
+
+    cleaned = bg_model.build_clean_background(
+        source,
+        [component_mask],
+        text_mask,
+        large_inpainter=lambda image, mask: np.full_like(image, 127),
+        text_clean_image=None,
+    )
+
+    assert np.all(cleaned == 127)
 
 
 def test_white_text_on_colored_bar_is_cleaned_to_bar_color() -> None:
