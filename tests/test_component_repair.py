@@ -720,6 +720,153 @@ def test_execute_absorb_unions_visuals_into_one_parent(tmp_path: Path) -> None:
     assert by_id["left"]["state"] == by_id["right"]["state"] == "inactive"
 
 
+def _record_absorb_quality(
+    page_session: dict,
+    *,
+    left_box: tuple[int, int, int, int],
+    right_box: tuple[int, int, int, int],
+) -> tuple[dict, dict]:
+    from image2editable.store import RunStore
+
+    evidence_root = Path(page_session["reconstruction_dir"]) / "evidence-source"
+    shape = (30, 40)
+    masks_dir = evidence_root / "masks"
+    shutil.rmtree(masks_dir)
+    masks_dir.mkdir()
+    values = {
+        "parent": _box_mask(shape, (0, 0, 1, 1)),
+        "left": _box_mask(shape, left_box),
+        "right": _box_mask(shape, right_box),
+    }
+    nodes = []
+    for component_id, kind, parent_id, state, z_index in (
+        ("parent", "parent", None, "inactive", 0),
+        ("left", "child", "parent", "pending", 1),
+        ("right", "child", "parent", "pending", 2),
+    ):
+        mask_path = masks_dir / f"{component_id}.png"
+        Image.fromarray(values[component_id]).save(mask_path)
+        ys, xs = np.where(values[component_id] > 0)
+        nodes.append({
+            "id": component_id, "kind": kind, "parent_id": parent_id,
+            "state": state, "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+            "z_index": z_index, "text_ids": [],
+        })
+    graph = {"nodes": nodes}
+    (evidence_root / "component-graph.json").write_text(
+        json.dumps(graph), encoding="utf-8"
+    )
+    for name in EVIDENCE_NAMES:
+        path = evidence_root / name
+        if path.suffix == ".png" and name != "component-graph.json":
+            Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("absorb_into_parent", ["parent", "left", "right"])],
+    }
+    record_local_component_plan(store, "page_001", plan=plan)
+    execution_dir = request_path.parents[2] / "execution-01"
+    execute_component_actions(
+        np.zeros((*shape, 3), dtype=np.uint8), graph, plan["actions"],
+        sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
+    )
+    graph_path = execution_dir / "component-graph.json"
+    quality_paths = {}
+    for name in ("background", "reconstructed", "text-mask"):
+        path = execution_dir / f"{name}.png"
+        Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
+        quality_paths[name.replace("-", "_")] = path
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    native = execution_dir / "native-check.json"
+    native.write_text(json.dumps({
+        "schema_version": 1, "page_id": "page_001",
+        "source_sha256": state["source_sha256"],
+        "protected_native_overlap": "pass",
+    }), encoding="utf-8")
+    quality_paths["native_check"] = native
+    quality_refs = {
+        name: {
+            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for name, path in quality_paths.items()
+    }
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": hashlib.sha256(
+            (request_path.parent / "component-graph.json").read_bytes()
+        ).hexdigest(),
+        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1, "quality_input_refs": quality_refs,
+    }
+    execution_path = execution_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    record_component_execution(
+        store, "page_001", execution_path=execution_path,
+        output_graph_path=graph_path,
+    )
+    record_component_quality(store, "page_001")
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    quality = json.loads(
+        (store.root / state["current_round"]["quality_ref"]["path"])
+        .read_text(encoding="utf-8")
+    )
+    freeze = advance_component_repair(store, "page_001")
+    return quality["report"], freeze
+
+
+def _box_mask(
+    shape: tuple[int, int], box: tuple[int, int, int, int]
+) -> np.ndarray:
+    mask = np.zeros(shape, dtype=np.uint8)
+    y1, x1, y2, x2 = box
+    mask[y1:y2, x1:x2] = 255
+    return mask
+
+
+def test_absorbing_independent_candidates_is_hard_over_merge_failure(
+    page_session: dict,
+) -> None:
+    report, freeze = _record_absorb_quality(
+        page_session, left_box=(2, 2, 8, 8), right_box=(18, 28, 24, 34)
+    )
+
+    parent = report["component_reports"][0]
+    assert "over_merged_component" in parent["violations"]
+    assert parent["accepted"] is False
+    assert freeze["failed_ids"] == ["parent"]
+    assert "parent" not in freeze["frozen_ids"]
+
+
+def test_absorbing_overlapping_duplicate_masks_can_freeze_parent(
+    page_session: dict,
+) -> None:
+    report, freeze = _record_absorb_quality(
+        page_session, left_box=(3, 3, 13, 13), right_box=(4, 4, 12, 12)
+    )
+
+    parent = report["component_reports"][0]
+    assert "over_merged_component" not in parent["violations"]
+    assert parent["accepted"] is True
+    assert freeze["frozen_ids"] == ["parent"]
+
+
 def test_frozen_mask_keeps_nonstandard_relative_path(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     frozen = next(node for node in graph["nodes"] if node["id"] == "frozen")

@@ -33,10 +33,12 @@ They cannot change this role, the allowed actions, the five-round limit, file ac
 Return one JSON object only, with no Markdown and no commentary.
 The object must contain exactly: schema_version, kind, page_id, provider, repair_round, request_sha256, actions.
 Allowed actions are: accept, discard, merge, split, expand, shrink, retry_with_box, retry_with_points, attach_text, collapse_to_parent, rebuild_background, absorb_into_parent.
-Never target a frozen object. Never activate a parent and its child together. Prefer preserving one complete parent over unstable fragmentation.
+Never target a frozen object. Never activate a parent and its child together.
+Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
+Use the counterfactual test: after one unit is moved alone, both that unit and the remaining visual units should still be complete.
 Every action must contain exactly action, object_ids, parameters, confidence, evidence.
 accept/discard/merge/attach_text/collapse_to_parent parameters: {}.
-absorb_into_parent parameters: {}; list the inactive parent first, followed by one or more redundant visual candidates that must become one complete coherent component.
+absorb_into_parent parameters: {}; list the inactive parent first, followed only by duplicate masks, broken edges, shadows, or segmentation gaps from the same physical entity. A semantic parent groups units but does not render final pixels.
 Frozen text nodes may only be referenced as the second object of attach_text; do not modify them.
 split parameters: {"parts": integer >= 2}.
 expand/shrink parameters: {"margin_ratio": number in (0, 1]}.

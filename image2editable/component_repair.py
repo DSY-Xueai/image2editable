@@ -689,13 +689,14 @@ def _recompute_quality_artifact(
     import cv2
     import numpy as np
 
-    request_payload = _load_state_artifact(
+    _load_state_artifact(
         store.root, state["current_round"]["request_ref"]
     )
-    request = json.loads(request_payload.decode("utf-8"))
-    request_dir = store.root / Path(
+    request_path = store.root / Path(
         *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
-    ).parent
+    )
+    request = load_component_agent_request(request_path)
+    request_dir = request_path.parent
     source_path = request_dir / request["evidence"]["source.png"]["path"]
     source_ref, source_payload = _artifact_reference(
         store.root, source_path, "component quality source"
@@ -726,6 +727,36 @@ def _recompute_quality_artifact(
         decode("reconstructed", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
     )
     text_mask = decode("text_mask", cv2.IMREAD_GRAYSCALE)
+    over_merged_component_ids = set()
+    if filename == "component-quality.json":
+        from image2editable.component_quality import (
+            absorbed_leaf_cluster_count,
+            calibrate_page,
+        )
+        from scripts.visual_segment import _read_action_mask
+
+        calibration = calibrate_page(source, text_mask)
+        input_graph = load_component_agent_graph(request_path)
+        plan = json.loads(_load_state_artifact(
+            store.root, state["current_round"]["plan_ref"]
+        ).decode("utf-8"))
+        validate_component_plan(plan, request=request, graph=input_graph)
+        input_nodes = {node["id"]: node for node in input_graph["nodes"]}
+        for action in plan["actions"]:
+            if action["action"] != "absorb_into_parent":
+                continue
+            target_id, *absorbed_ids = action["object_ids"]
+            absorbed_masks = []
+            for component_id in absorbed_ids:
+                node = input_nodes[component_id]
+                mask, _ = _read_action_mask(
+                    request_dir / Path(*PurePosixPath(node["mask"]).parts),
+                    source.shape[:2],
+                    node["mask_sha256"],
+                )
+                absorbed_masks.append(mask)
+            if absorbed_leaf_cluster_count(absorbed_masks, calibration) > 1:
+                over_merged_component_ids.add(target_id)
     graph_payload = _load_state_artifact(
         store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
     )
@@ -746,6 +777,7 @@ def _recompute_quality_artifact(
         text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
+        over_merged_component_ids=over_merged_component_ids,
     )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
@@ -1054,6 +1086,7 @@ def evaluate_component_quality_round(
     expected_component_ids: list[str],
     previous_reports: dict | None = None,
     agent_confidence_by_id: dict | None = None,
+    over_merged_component_ids: set[str] | None = None,
 ) -> dict:
     from image2editable.component_quality import (
         calibrate_page,
@@ -1067,6 +1100,7 @@ def evaluate_component_quality_round(
     calibration = calibrate_page(source, text_mask)
     previous_reports = previous_reports or {}
     agent_confidence_by_id = agent_confidence_by_id or {}
+    over_merged_component_ids = over_merged_component_ids or set()
     reports = []
     active_visual = [
         node for node in validated["nodes"]
@@ -1134,6 +1168,7 @@ def evaluate_component_quality_round(
             page_checks=page_checks,
             agent_confidence=agent_confidence_by_id.get(component_id),
             previous_metrics=previous.get("metrics"),
+            over_merged_component=component_id in over_merged_component_ids,
             _page_context=page_context,
         ))
     return evaluate_page_quality(

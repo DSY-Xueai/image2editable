@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import image2editable.component_quality as component_quality
+
 from image2editable.component_quality import (
     calibrate_page,
     evaluate_component,
@@ -28,6 +30,44 @@ def _mask(shape: tuple[int, int], box: tuple[int, int, int, int]) -> np.ndarray:
     y1, x1, y2, x2 = box
     mask[y1:y2, x1:x2] = 255
     return mask
+
+
+def _leaf_calibration(min_component_pixels: int = 20) -> component_quality.PageCalibration:
+    return component_quality.PageCalibration(0.0, 1.0, 1, 1, min_component_pixels)
+
+
+def test_spatially_independent_absorbed_candidates_form_multiple_leaf_clusters() -> None:
+    masks = [
+        _mask((30, 40), (2, 2, 8, 8)),
+        _mask((30, 40), (18, 28, 24, 34)),
+    ]
+
+    assert component_quality.absorbed_leaf_cluster_count(
+        masks, _leaf_calibration()
+    ) == 2
+
+
+def test_overlapping_or_contained_duplicate_masks_form_one_leaf_cluster() -> None:
+    masks = [
+        _mask((30, 40), (3, 3, 8, 8)),
+        _mask((30, 40), (4, 4, 8, 9)),
+        _mask((30, 40), (3, 3, 7, 8)),
+    ]
+
+    assert component_quality.absorbed_leaf_cluster_count(
+        masks, _leaf_calibration()
+    ) == 1
+
+
+def test_fragment_below_page_noise_floor_does_not_add_leaf_cluster() -> None:
+    masks = [
+        _mask((30, 40), (3, 3, 11, 11)),
+        _mask((30, 40), (20, 30, 22, 32)),
+    ]
+
+    assert component_quality.absorbed_leaf_cluster_count(
+        masks, _leaf_calibration(min_component_pixels=20)
+    ) == 1
 
 
 def test_strict_quality_report_rejects_empty_metrics() -> None:

@@ -20,6 +20,14 @@ from image2editable.component_repair import (
 )
 
 
+def test_local_prompt_requires_independently_movable_leaf_components() -> None:
+    prompt = local_agent_worker.SYSTEM_PROMPT
+
+    assert "semantic relationship does not justify merging" in prompt
+    assert "independently moved" in prompt
+    assert "Prefer preserving one complete parent" not in prompt
+
+
 def _request_path(tmp_path: Path) -> Path:
     reconstruction = tmp_path / "pages" / "page_001" / "reconstruction"
     evidence_root = reconstruction / "evidence-source"

@@ -121,6 +121,43 @@ def calibrate_page(source: np.ndarray, text_mask: np.ndarray) -> PageCalibration
     return PageCalibration(noise_l1, local_contrast, edge_width_px, text_halo_px, min_component_pixels)
 
 
+def absorbed_leaf_cluster_count(
+    masks: list[np.ndarray], calibration: PageCalibration
+) -> int:
+    """Count independently movable entities among masks absorbed into a parent."""
+    if not isinstance(calibration, PageCalibration):
+        raise ValueError("calibration must be PageCalibration")
+    active = []
+    shape = None
+    for mask in masks:
+        array = _numeric_mask(mask, "absorbed mask")
+        if shape is None:
+            shape = array.shape
+        elif array.shape != shape:
+            raise ValueError("absorbed masks must share one page shape")
+        support = array if array.dtype == np.bool_ else array > 0
+        if int(np.count_nonzero(support)) >= calibration.min_component_pixels:
+            active.append(support)
+    parents = list(range(len(active)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    for left in range(len(active)):
+        left_pixels = int(np.count_nonzero(active[left]))
+        for right in range(left + 1, len(active)):
+            intersection = int(np.count_nonzero(active[left] & active[right]))
+            smaller = min(left_pixels, int(np.count_nonzero(active[right])))
+            if intersection / smaller >= 0.5:
+                left_root = find(left)
+                right_root = find(right)
+                parents[right_root] = left_root
+    return len({find(index) for index in range(len(active))})
+
+
 def _check_state(checks: dict | None, name: str) -> str:
     if checks is None or name not in checks:
         return "unknown"
@@ -426,6 +463,7 @@ def evaluate_component(
     page_checks: dict | None = None,
     agent_confidence: float | None = None,
     previous_metrics: dict | None = None,
+    over_merged_component: bool = False,
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
     metrics = component_metrics(
@@ -461,6 +499,8 @@ def evaluate_component(
         violations.append("out_of_bounds")
     if node.get("kind") == "child" and metrics["parent_coverage_ratio"] < 0.25:
         violations.append("incomplete_child")
+    if over_merged_component:
+        violations.append("over_merged_component")
     native_state = _check_state(page_checks, "protected_native_overlap")
     if native_state == "unknown":
         violations.append("protected_native_overlap_unknown")
