@@ -636,6 +636,8 @@ def _finalize_slide_quality(
     lang: str,
     _resource_isolation: bool = False,
 ) -> dict:
+    slide_data = slide_data.copy()
+    slide_data.pop("_semantic_mask_paths", None)
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
     text_clean_path_value = slide_data.pop("_text_clean_path", None)
@@ -2001,18 +2003,13 @@ def _load_component_layer_state(
         loaded_assets["text_clean"] = _load_prepared_asset(
             work_dir, text_clean, "text_clean"
         )
-    element_mask_paths = [
-        _load_prepared_asset(work_dir, record, "element mask")
-        for record in assets["element_masks"]
-    ]
-    semantic_mask_paths = (
-        [
-            _load_prepared_asset(work_dir, record, "semantic mask")
-            for record in assets["semantic_masks"]
+    element_mask_paths = []
+    semantic_mask_paths = None
+    if schema_version == 1:
+        element_mask_paths = [
+            _load_prepared_asset(work_dir, record, "element mask")
+            for record in assets["element_masks"]
         ]
-        if schema_version == 2
-        else None
-    )
     components = []
     for record in manifest["components"]:
         components.append({
@@ -2022,34 +2019,42 @@ def _load_component_layer_state(
             ),
         })
 
-    if semantic_mask_paths is not None:
-        expected_shape = (dimensions["img_height"], dimensions["img_width"])
+    if schema_version == 2:
+        semantic_mask_paths = []
+        expected_size = (dimensions["img_width"], dimensions["img_height"])
         for index, (child_record, parent_record) in enumerate(
             zip(assets["element_masks"], assets["semantic_masks"])
         ):
-            _, child_content = _read_prepared_asset_bytes(
+            child_path, child_content = _read_prepared_asset_bytes(
                 work_dir,
                 child_record,
                 "element mask",
             )
-            _, parent_content = _read_prepared_asset_bytes(
+            parent_path, parent_content = _read_prepared_asset_bytes(
                 work_dir,
                 parent_record,
                 "semantic mask",
             )
+            element_mask_paths.append(str(child_path))
+            semantic_mask_paths.append(str(parent_path))
             try:
-                with Image.open(io.BytesIO(child_content)) as stored_child:
+                with (
+                    Image.open(io.BytesIO(child_content)) as stored_child,
+                    Image.open(io.BytesIO(parent_content)) as stored_parent,
+                ):
+                    if (
+                        stored_child.size != expected_size
+                        or stored_parent.size != expected_size
+                    ):
+                        raise ValueError(
+                            f"prepared page mask pair {index} dimensions are invalid"
+                        )
                     child_mask = np.asarray(stored_child.convert("L")).copy()
-                with Image.open(io.BytesIO(parent_content)) as stored_parent:
                     parent_mask = np.asarray(stored_parent.convert("L")).copy()
             except OSError as exc:
                 raise ValueError(
                     f"prepared page mask pair {index} is invalid"
                 ) from exc
-            if child_mask.shape != expected_shape or parent_mask.shape != expected_shape:
-                raise ValueError(
-                    f"prepared page mask pair {index} dimensions are invalid"
-                )
             if not np.any(child_mask) or not np.any(parent_mask):
                 raise ValueError(
                     f"prepared page mask pair {index} must be non-empty"

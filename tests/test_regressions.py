@@ -3980,8 +3980,8 @@ def test_deferred_mask_paths_preserve_quality_error_message(
         "quality failed; mae=1.234, p95=9.877, "
         f"diagnostics={(tmp_path / 'diagnostics').resolve()}"
     )
-    assert "_text_mask_path" not in slide_data
-    assert "_element_mask_paths" not in slide_data
+    assert slide_data["_text_mask_path"] == str(text_mask_path)
+    assert slide_data["_element_mask_paths"] == []
 
 
 def test_visual_difference_flags_sparse_visible_artifacts() -> None:
@@ -4573,11 +4573,16 @@ def test_final_quality_excludes_only_editable_text_glyphs(
         "_element_mask_paths": [],
     }
 
-    image_to_ppt._finalize_slide_quality(slide_data, "en")
+    semantic_mask_paths = [str(tmp_path / "semantic-mask.png")]
+    slide_data["_semantic_mask_paths"] = semantic_mask_paths
+
+    result = image_to_ppt._finalize_slide_quality(slide_data, "en")
 
     assert captured_masks[0][0, 0] == 0
     assert captured_masks[0][9, 9] == 255
     assert captured_masks[0][5, 15] == 0
+    assert "_semantic_mask_paths" not in result
+    assert slide_data["_semantic_mask_paths"] == semantic_mask_paths
 
 
 def test_bold_estimation_handles_light_text_on_dark_background() -> None:
@@ -4907,6 +4912,18 @@ def test_final_quality_rejects_when_clean_background_keeps_component_imprint(
         "build_widescreen_background",
         lambda image, **kwargs: (image.copy(), 0, 0, "identity"),
     )
+    captured_residual = {}
+    real_has_background_residual = image_to_ppt.has_background_residual
+
+    def capture_background_residual(metrics):
+        captured_residual.update(metrics)
+        return real_has_background_residual(metrics)
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "has_background_residual",
+        capture_background_residual,
+    )
     slide_data = {
         "background_original_path": str(background_path),
         "background_widescreen_path": str(background_path),
@@ -4933,7 +4950,7 @@ def test_final_quality_rejects_when_clean_background_keeps_component_imprint(
     ):
         image_to_ppt._finalize_slide_quality(slide_data, "en")
     assert slide_data["components"]
-    assert slide_data["background_residual"]["retained_edge_ratio"] > 0.8
+    assert captured_residual["retained_edge_ratio"] > 0.8
     assert "quality_fallback" not in slide_data
 
 
@@ -5166,6 +5183,24 @@ def _write_prepared_manifest(state_path: Path, manifest: dict) -> None:
     state_path.with_name("prepared_page.sha256").write_bytes(
         f"{state_hash}\n".encode("ascii"),
     )
+
+
+def _replace_prepared_mask_asset(
+    prepared: dict,
+    work_dir: Path,
+    asset_name: str,
+    *,
+    size: tuple[int, int],
+    color: int,
+) -> tuple[Path, str]:
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    record = manifest["assets"][asset_name][0]
+    asset_path = work_dir / record["path"]
+    Image.new("L", size, color).save(asset_path)
+    record["sha256"] = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+    _write_prepared_manifest(state_path, manifest)
+    return state_path, record["path"]
 
 
 @pytest.mark.parametrize("write_fails", [False, True])
@@ -5548,6 +5583,104 @@ def test_load_component_layers_v2_rejects_child_outside_parent(
         image_to_ppt.load_component_layers(state_path)
 
 
+@pytest.mark.parametrize("asset_name", ["element_masks", "semantic_masks"])
+def test_load_component_layers_v2_rejects_empty_masks_with_one_read(
+    tmp_path: Path,
+    monkeypatch,
+    asset_name: str,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path, target_path = _replace_prepared_mask_asset(
+        prepared,
+        work_dir,
+        asset_name,
+        size=(16, 10),
+        color=0,
+    )
+    real_read = image_to_ppt._read_prepared_asset_bytes
+    target_reads = 0
+
+    def track_target_reads(asset_work_dir, record, label):
+        nonlocal target_reads
+        if record["path"] == target_path:
+            target_reads += 1
+        return real_read(asset_work_dir, record, label)
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_read_prepared_asset_bytes",
+        track_target_reads,
+    )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        image_to_ppt.load_component_layers(state_path)
+
+    assert target_reads == 1
+
+
+@pytest.mark.parametrize("asset_name", ["element_masks", "semantic_masks"])
+def test_load_component_layers_v2_rejects_wrong_size_before_convert(
+    tmp_path: Path,
+    monkeypatch,
+    asset_name: str,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path, _ = _replace_prepared_mask_asset(
+        prepared,
+        work_dir,
+        asset_name,
+        size=(17, 10),
+        color=255,
+    )
+    real_convert = Image.Image.convert
+
+    def reject_wrong_size_convert(image, *args, **kwargs):
+        if image.size != (16, 10):
+            pytest.fail("wrong-size mask reached convert")
+        return real_convert(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "convert", reject_wrong_size_convert)
+
+    with pytest.raises(ValueError, match="dimensions"):
+        image_to_ppt.load_component_layers(state_path)
+
+
+def test_load_component_layers_v2_validates_authenticated_mask_bytes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    target_path = manifest["assets"]["element_masks"][0]["path"]
+    replacement_path = work_dir / "replacement-child.png"
+    replacement = image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8)
+    replacement[9, 15] = 255
+    Image.fromarray(replacement, mode="L").save(replacement_path)
+    real_read = image_to_ppt._read_prepared_asset_bytes
+    target_reads = 0
+
+    def replace_after_authenticated_read(asset_work_dir, record, label):
+        nonlocal target_reads
+        owned, content = real_read(asset_work_dir, record, label)
+        if record["path"] == target_path:
+            target_reads += 1
+            if target_reads == 1:
+                os.replace(replacement_path, owned)
+        return owned, content
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_read_prepared_asset_bytes",
+        replace_after_authenticated_read,
+    )
+
+    restored = image_to_ppt.load_component_layers(state_path)
+
+    assert target_reads == 1
+    assert restored["_element_mask_paths"][0] == str(work_dir / target_path)
+
+
 def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     tmp_path: Path,
     monkeypatch,
@@ -5714,6 +5847,7 @@ def test_load_component_layers_rejects_hardlinked_owned_file(
         ("source_image", None),
         ("ocr_mask", None),
         ("element_masks", 0),
+        ("semantic_masks", 0),
         ("background_original", None),
         ("background_removal_mask", None),
         ("background_difference", None),
@@ -6152,20 +6286,20 @@ def test_agent_managed_finalize_rejects_asset_replaced_after_load_validation(
     owned_target = Path(target_path(prepared))
     replacement_path = work_dir / f"replacement-{target_label.replace(' ', '-')}.png"
     Image.new(mode, size, color).save(replacement_path)
-    real_load_asset = image_to_ppt._load_prepared_asset
+    real_read_asset = image_to_ppt._read_prepared_asset_bytes
     replaced = False
 
     def replace_after_validation(asset_work_dir, record, label):
         nonlocal replaced
-        loaded_path = real_load_asset(asset_work_dir, record, label)
-        if label == target_label and Path(loaded_path) == owned_target and not replaced:
+        loaded_path, content = real_read_asset(asset_work_dir, record, label)
+        if label == target_label and loaded_path == owned_target and not replaced:
             replaced = True
             os.replace(replacement_path, owned_target)
-        return loaded_path
+        return loaded_path, content
 
     monkeypatch.setattr(
         image_to_ppt,
-        "_load_prepared_asset",
+        "_read_prepared_asset_bytes",
         replace_after_validation,
     )
     monkeypatch.setattr(
