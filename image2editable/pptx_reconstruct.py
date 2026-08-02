@@ -11,8 +11,13 @@ from pathlib import Path
 from pathlib import PurePosixPath
 
 import image_to_ppt
-from PIL import Image, ImageChops
+from PIL import Image
 from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.util import Pt
 
 
 def build_reconstruction_donor(
@@ -291,7 +296,7 @@ def build_reconstruction_donor_from_result(
             mask = Image.open(io.BytesIO(mask_payload)).convert("L")
             if mask.size != reconstructed.size:
                 raise ValueError("component result mask dimensions differ")
-            alpha = mask if raster_text_preserved else ImageChops.subtract(mask, text_mask)
+            alpha = mask
             bbox = alpha.getbbox()
             if bbox is None:
                 raise ValueError("accepted component mask is empty")
@@ -323,7 +328,7 @@ def build_reconstruction_donor_from_result(
                 int((right - left) / width * donor_presentation.slide_width),
                 int((bottom - top) / height * donor_presentation.slide_height),
             )
-            text_shape.text_frame.text = item["text"]
+            _style_reconstruction_textbox(text_shape, item)
         data["components"] = component_manifest
         data["text_items"] = text_items
         data["assets"] = list(data.get("assets", [])) + [
@@ -360,6 +365,40 @@ def build_reconstruction_donor_from_result(
         output, donor_stream.getvalue(), reuse_identical=False
     )
     return manifest
+
+
+def _style_reconstruction_textbox(text_shape, item: dict) -> None:
+    text_frame = text_shape.text_frame
+    text_frame.word_wrap = False
+    text_frame.margin_left = 0
+    text_frame.margin_right = 0
+    text_frame.margin_top = 0
+    text_frame.margin_bottom = 0
+    text_frame.vertical_anchor = MSO_VERTICAL_ANCHOR.MIDDLE
+    text_frame.clear()
+    paragraph = text_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = item.get("text", "")
+    font_name = item.get("font") or "Microsoft YaHei"
+    run.font.name = font_name
+    run_properties = run._r.get_or_add_rPr()
+    for tag in ("a:latin", "a:ea"):
+        node = run_properties.find(qn(tag))
+        if node is None:
+            node = OxmlElement(tag)
+            run_properties.append(node)
+        node.set("typeface", font_name)
+    run.font.size = Pt(item.get("font_size", 12))
+    run.font.bold = item.get("bold", False)
+    color = str(item.get("color", "#000000")).lstrip("#")
+    if len(color) != 6:
+        color = "000000"
+    run.font.color.rgb = RGBColor.from_string(color)
+    paragraph.alignment = {
+        0: PP_ALIGN.LEFT,
+        1: PP_ALIGN.CENTER,
+        2: PP_ALIGN.RIGHT,
+    }.get(item.get("align", 1), PP_ALIGN.CENTER)
 
 
 def _is_run_ref(value: object) -> bool:

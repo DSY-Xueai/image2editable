@@ -531,6 +531,8 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
             raise ValueError("absorb_into_parent requires parent first")
         if any(node.get("kind") == "text" for node in selected[1:]):
             raise ValueError("absorb_into_parent cannot absorb text kind")
+        if any(node.get("state") != "pending" for node in selected[1:]):
+            raise ValueError("absorb_into_parent requires pending absorbed components")
         return
     if any(node.get("kind") == "text" for node in selected):
         raise ValueError("component action cannot target text kind")

@@ -307,3 +307,95 @@ def test_native_component_result_hash_and_graph_escape_fail_closed(tmp_path):
             expected_result_sha256=hashlib.sha256(result.read_bytes()).hexdigest(),
             run_root=run,
         )
+
+
+def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path):
+    import hashlib
+
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
+
+    from image2editable.pptx_reconstruct import build_reconstruction_donor_from_result
+
+    run = tmp_path / "run"
+    accepted = run / "pages/page_001/reconstruction/accepted"
+    masks = accepted / "masks"
+    masks.mkdir(parents=True)
+    source = accepted / "source.png"
+    background = accepted / "background.png"
+    reconstructed = accepted / "reconstructed.png"
+    text_mask = accepted / "text-mask.png"
+    native = accepted / "native.json"
+    mask = masks / "component_0001.png"
+    Image.new("RGB", (4, 4), "white").save(source)
+    Image.new("RGB", (4, 4), "white").save(background)
+    Image.new("RGB", (4, 4), "red").save(reconstructed)
+    Image.new("L", (4, 4), 0).save(text_mask)
+    with Image.open(text_mask) as image:
+        image.putpixel((1, 1), 255)
+        image.save(text_mask)
+    Image.new("L", (4, 4), 255).save(mask)
+    native.write_text("{}", encoding="utf-8")
+
+    def ref(path: Path) -> dict:
+        return {
+            "path": path.relative_to(run).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    graph = {
+        "nodes": [{
+            "id": "component_0001", "kind": "parent", "parent_id": None,
+            "state": "frozen", "mask": "masks/component_0001.png",
+            "mask_sha256": ref(mask)["sha256"], "bbox": [0, 0, 4, 4],
+            "z_index": 0, "text_ids": [],
+        }]
+    }
+    graph_path = accepted / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    source_sha = ref(source)["sha256"]
+    result = {
+        "provider": "host", "source_sha256": source_sha,
+        "final_component_ids": ["component_0001"],
+        "graph_ref": ref(graph_path),
+        "accepted_asset_refs": {
+            "source": ref(source), "background": ref(background),
+            "reconstructed": ref(reconstructed), "text_mask": ref(text_mask),
+            "native_check": ref(native),
+        },
+        "text_items": [{
+            "text": "优点", "box": [1, 1, 2, 1], "font_size": 14.5,
+            "font": "Microsoft YaHei", "bold": True,
+            "color": "#F5FAF6", "align": 1,
+        }],
+    }
+    result_path = run / "pages/page_001/reconstruction/component_result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    donor = tmp_path / "donor.pptx"
+    work = tmp_path / "work"
+
+    build_reconstruction_donor_from_result(
+        result_path, donor, work,
+        source_screenshot_sha256=source_sha,
+        provider="host",
+        expected_result_sha256=hashlib.sha256(result_path.read_bytes()).hexdigest(),
+        run_root=run,
+    )
+
+    with Image.open(work / "component-component_0001.png") as component:
+        assert component.getchannel("A").getpixel((1, 1)) == 255
+    presentation = Presentation(donor)
+    text_frame = presentation.slides[0].shapes[-1].text_frame
+    paragraph = text_frame.paragraphs[0]
+    run_text = paragraph.runs[0]
+    assert text_frame.word_wrap is False
+    assert text_frame.margin_left == text_frame.margin_right == 0
+    assert text_frame.margin_top == text_frame.margin_bottom == 0
+    assert text_frame.vertical_anchor == MSO_VERTICAL_ANCHOR.MIDDLE
+    assert paragraph.alignment == PP_ALIGN.CENTER
+    assert run_text.text == "优点"
+    assert run_text.font.name == "Microsoft YaHei"
+    assert run_text.font.size.pt == 14.5
+    assert run_text.font.bold is True
+    assert str(run_text.font.color.rgb) == "F5FAF6"

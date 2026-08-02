@@ -3,7 +3,7 @@
 ## P2.3 Task 9 已完成
 
 - 图片/PDF 页面已接入统一组件状态机：每页只初始化一次，Host 等待时安全退出，恢复时不重复初始分层；多页 PDF 严格串行。
-- 最终组装只读取状态机验收后的背景、重建图、文字掩码、组件图和逐文件 SHA-256；组件 alpha 扣除文字掩码以避免重影。
+- 最终组装只读取状态机验收后的背景、重建图、文字掩码、组件图和逐文件 SHA-256；组件 RGB 使用已去字的 `text-clean` 像素，alpha 保留完整组件掩码，避免文字框挖洞和原文字重影。
 - `preserved_with_warning` 明确使用完整源图且不输出伪可编辑组件或文字，并写入降级警告。
 - PPTX 先写同目录临时文件，实际重新打开并核对页数后再以 no-replace 方式发布；交付记录写入 `pptx_reopen=pass`。
 - 组装 accepted assets 与 component masks 使用已验签 bytes 快照；多 variant 先全部 staging/reopen 通过，再 no-replace 发布，发布异常会清理本轮已发布目标。
@@ -13,7 +13,7 @@
 ## P2.3 Task 10 已完成
 
 - 截图型 PPTX 的获批页面先进入共同组件状态机；Host 等待期间不创建 donor、不发布 PPTX，也不会提前启动 OCR/CV worker。
-- 整页截图使用确定性完整父组件初始化，避免仅为进入 Agent 边界就占用约 1 GiB 的视觉/OCR 子进程；后续仍由 Agent 在最多五轮内决定拆分、修复、合并或回退。
+- 获批的整页截图与图片/PDF 共用真实 OCR、CV 和语义父子组件初始化；Agent 在最多五轮内按每页证据决定拆分、修复、合并或回退，不再用单一整页父组件冒充语义分层。
 - `ready_for_assembly` 只允许从已验签 `component_result.json` 读取组件图、掩码、重建图、文字掩码和文字对象；donor 组装不重新执行 CV/OCR/Agent。
 - 每个冻结视觉节点生成独立图片对象；可靠 `text_items` 生成文字框。没有可靠文字时明确记录 `raster_text_preserved`，不删除原图文字或伪装成可编辑文字。
 - result、graph、source、mask 和 accepted assets 均校验 Run 内相对路径、SHA-256、普通文件身份、硬链接/符号链接/重解析点与读取中变化；donor 组件、manifest 和 PPTX 使用 no-clobber 发布。
@@ -47,13 +47,14 @@
 - `README.md` 与 `skills/image-to-ppt/SKILL.md` 已同步 Host/Local 两种用法：Host 复用具备视觉能力的 Codex/Claude 等宿主，Local 必须先按实时硬件推荐并取得明确下载授权；两者在单个 Run 内互斥且不共享私有状态。
 - 当前只完成 mock/契约验收，没有下载或真实加载模型，Local 状态继续为 `experimental`；`models status` 显示 `installed=false`。`attach_text` 契约定向回归为 `61 passed`，最终全量回归为 `1319 passed, 20 skipped`。
 
-## P2.3 Task 13 进行中
+## P2.3 Task 13 已完成
 
 - README、英文 README 和 PPTX Skill 已补充双 Provider、每页 5 轮、`preserved_with_warning`、敏感内容、逐图重新判断及透明图片组件边界；新增通用内容/输入类型验收清单契约，定向回归 `4 passed`。
 - 真实 Host PNG 已推进到 R6：Agent 将表格、页脚和标题各自的重叠碎片通过 `absorb_into_parent` 合并为三个完整父组件；任意活动视觉掩码发生像素重叠时触发 `component_overlap`，阻止不安全冻结和最终组装失败。
 - 新增 Agent 显式 `rebuild_background`：只在页面外缘颜色足够一致时，按页面短边比例扩张活动组件与文字联合掩码并重建画布；每页仍最多五个重修批次，后续轮次沿用已认证背景，不缓存跨图片语义判断。
-- 质量重建和最终组件使用 Prepared Page v2 的 `text-clean` 像素；OCR 连通区域按至少 45% 覆盖率唯一归属给最匹配父组件，避免透明文字框、白块、浅灰残影和原文字重影。文字残影门只统计相对局部底色的真实文字墨迹，不再把彩色组件底色误判为 ghost。
-- R6 已输出原比例与 16:9 PPTX，并由 PowerPoint COM 重新打开和渲染；单页包含 29 个原生可编辑文字对象、3 个完整前景父组件和 1 个背景图，服务器、终端、图标、表格线与页脚均完整。本轮全量回归为 `1364 passed, 20 skipped`。下一步串行验收三页 PDF、原生 `test1.pptx` 和混合 `混合.pptx`。
+- 质量重建和最终组件使用 Prepared Page v2 的 `text-clean` 像素；OCR 连通区域按至少 45% 覆盖率唯一归属给最匹配父组件，避免透明文字框、白块、浅灰残影和原文字重影。文字残影门使用稠密文字核心的局部中值底色与非文字环带双路径，不再把彩色标题条或组件底色误判为 ghost；整页距离变换和三通道中值滤波每页只执行一次，候选组件复用单一 `text_ink` 布尔图。
+- PPTX donor 现在应用 OCR 字号、字体、中日韩字体映射、粗细、颜色和对齐；文字框零边距、垂直居中且不自动换行。组件 alpha 不再扣除矩形文字掩码，彩色标题条和卡片底色不会留下透明白洞。
+- 真实 PNG、三页 PDF、两页图片版 `test1.pptx` 和原生/图片混合 `混合.pptx` 已完成 Host 验收；两种 PPTX 均由 PowerPoint COM 实际重开，混合文件未命中页面逐字节保持不变。最终全量回归为 `1372 passed, 20 skipped`，主脚本与 Skill 镜像 SHA-256 一致。
 
 ## 当前项目状态
 
@@ -63,7 +64,7 @@
 - PPTX 先只读扫描原生对象；只有 Agent 高置信确认的整页截图候选进入重建，其余文字、形状、表格、图表、备注和未命中页面保持原生。
 - P2.2 已接通：Agent 决策 → 串行 CV 重建 → OOXML 原位替换 → 结构校验 → 单页安全回退。
 - P2.3 Task 10 已接通 PPTX 获批候选 → 组件状态机 → 已验收 donor → OOXML 原位替换；未通过质量门禁的页面保留原截图并给出 warning。
-- P2.3 Task 13 正在执行真实 PNG/PDF/PPTX 验收；Host 模式仍完全不依赖本地模型。R3 暴露的数据链与质量门缺陷已修复，待 R4 从干净状态复验；Local 尚未下载实际模型或通过真实文件验收，因此仍为实验性。
+- P2.3 Task 13 的真实 PNG/PDF/PPTX Host 验收和全量回归已完成；Host 模式完全不依赖本地模型。真实验收暴露的父组件组装、残影门误报、文字样式丢失和透明白洞均已修复；Local 尚未下载实际模型或通过真实文件验收，因此仍为实验性。
 
 ## P2.2 既有行为
 
@@ -187,11 +188,12 @@ image2editable run execute runs/pptx-job
 
 ## 真实文件验收
 
-- `test1.pptx`：两页真实 prepare/decision/Host handshake/两轮计划/质量门禁/父组件回退/PPTX 重开均完成。受控验收计划只重复 `accept` 完整父组件，不能证明语义拆分质量，因此两页按设计进入 `preserved_with_warning`，未误报可编辑，也未启动旧 CV donor。
-  - 输出：`tmp/task10-real-acceptance-20260802-v3/test1-run/final/output.pptx`
-  - 源与输出 SHA-256 均为 `03415ac5973a91e5b0d462a796690f618267ff1c05b4eb00d5f7ab20fa92ae80`。
-- `混合.pptx`：3 页、0 个合格整页截图候选；原生 shape ID、对象 XML hash、z-order、备注、页数和尺寸全部一致。
-  - 输出：`tmp/task10-real-acceptance-20260802-v3/mixed-run/final/output.pptx`
+- `test1.pptx`：两页都通过真实共享 OCR/CV 初始化、Host Agent 语义重组、质量门禁和 OOXML 原位替换。第 1 页由 32 个候选重组为 3 个完整父组件并在第 1 批通过；第 2 页由 21 个候选重组为 3 个父组件，在修正彩色标题条的文字残影误报后于第 3 批通过。
+  - 验收输出：`tmp/task13-host-test1-style-qa-r1/output.pptx`；第 1 页为 3 个图片组件与 35 个可编辑文字框，第 2 页为 3 个图片组件与 26 个可编辑文字框。
+  - PowerPoint COM 重开和 1600×900 PNG 导出通过；白色 OCR 方块、浅灰文字栅格残影、组件缺失、Graph RAG 横向拥挤和底部总结裁切均未再出现。OCR 原始识别仍可能造成空格与个别粗细差异，后续按文字样式精修处理，不回退为栅格文字。
+  - 资源策略保持单页串行；第 1 页冷启动约 331 秒，页间短时进程交接峰值约 2.9 GiB，随后降至约 1.9 GiB，第 2 页复用热缓存后仅需数秒。资源峰值尚未完全解决，不能并行启动多个重型页面。
+- `混合.pptx`：当前代码复验为 3 页、78 个原生对象、0 个合格整页截图候选；输出与源文件逐字节相同，PowerPoint COM 重开为 3 页、960×540。
+  - 输出：`tmp/task13-host-mixed-r4/final/output.pptx`
   - 源与输出 SHA-256 均为 `bb7b11d24f9db74f0a31a52809bfbaa46ca275f4a49085a3e0a1fbe8668ecc0d`。
 - `research_layout_demo_3pages.pdf` 已完成 3 页真实 Host Agent 分层、语义父组件重组、背景重建、质量门禁、最终组装及 PowerPoint 原生重开/PNG 渲染验收；副标题、表格/科研图、流程卡完整，无浅灰栅格残影、白色 OCR 方块、组件重影或右侧灰尾。
   - 输出：`tmp/task13-host-pdf-r3/final/output_original.pptx`、`tmp/task13-host-pdf-r3/final/output_16x9.pptx`。
@@ -201,11 +203,11 @@ image2editable run execute runs/pptx-job
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–12 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护、本地模型管理、Local Provider 隔离推理，以及双 Provider 的 README/Skill 使用说明。Task 13 已完成真实 PNG 与三页 PDF 验收，下一步复验图片版 `test1.pptx` 和原生/图片混合 `混合.pptx`。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–13 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护、本地模型管理、Local Provider 隔离推理、双 Provider 文档及真实 PNG/PDF/PPTX 验收。
 - 本地模型目录目前仍为 `revision=main`、`stability=experimental`；Task 12 没有下载模型。只有取得用户明确下载授权并完成 Task 13 的真实图片、PDF、图片版 PPTX 验收后，才固定验收 commit 并调整稳定性。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
 - 普通与 Agent 转换均不再把整页清空组件作为成功结果；不稳定组件按组件失败，由 Task 8 重修或折叠到完整父组件。
 - OCR 未识别的符号会完整保留在底图中，而不是冒险生成错误文字对象。
-- 实测单页 PDF 重型转换的 Python 工作集合计约 2.2 GiB；截图型 PPTX 的确定性 Agent 入口不启动 OCR/CV，不能证明语义拆分时会安全 warning，而不会为追求通过率生成伪可编辑对象。
+- 实测 PDF 重型页约 2.2 GiB，截图型 PPTX 冷启动页间交接峰值约 2.9 GiB；当前必须保持 `heavy_page_concurrency=1`，资源峰值仍是下一阶段的优化项。
 - 主脚本与 `skills/image-to-ppt/scripts/` 镜像必须保持 SHA-256 一致。

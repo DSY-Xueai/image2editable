@@ -38,6 +38,7 @@ def _install_component_e2e_boundaries(
     monkeypatch: pytest.MonkeyPatch,
     *,
     baked_background_pages: set[str] | None = None,
+    component_count: int = 1,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     prepared_pages: dict[str, dict[str, Any]] = {}
     initial_calls: list[str] = []
@@ -51,39 +52,53 @@ def _install_component_e2e_boundaries(
             page_id = work.parent.parent.name
             initial_calls.append(page_id)
             work.mkdir(parents=True)
+            with Image.open(source) as opened:
+                source_rgb = opened.convert("RGB")
+                width, height = source_rgb.size
             background = work / "background.png"
             difference = work / "difference.png"
             text_mask = work / "text-mask.png"
-            component_mask = work / "component-mask.png"
-            component = work / "component.png"
             if page_id in baked_background_pages:
-                Image.open(source).convert("RGB").save(background)
+                source_rgb.save(background)
             else:
-                Image.new("RGB", (32, 32), "black").save(background)
-            Image.new("RGB", (32, 32), "black").save(difference)
-            Image.new("L", (32, 32), 0).save(text_mask)
-            mask = Image.new("L", (32, 32), 0)
-            for y in range(8, 24):
-                for x in range(8, 24):
-                    mask.putpixel((x, y), 255)
-            mask.save(component_mask)
-            Image.new("RGBA", (16, 16), "white").save(component)
+                Image.new("RGB", (width, height), "black").save(background)
+            Image.new("RGB", (width, height), "black").save(difference)
+            Image.new("L", (width, height), 0).save(text_mask)
+            component_masks = []
+            components = []
+            for index in range(component_count):
+                if component_count == 1:
+                    left, top = width // 4, height // 4
+                    right, bottom = width * 3 // 4, height * 3 // 4
+                else:
+                    left, top = width * index // component_count, 0
+                    right, bottom = width * (index + 1) // component_count, height
+                component_mask = work / f"component-mask-{index:04d}.png"
+                mask = Image.new("L", (width, height), 0)
+                ImageDraw.Draw(mask).rectangle(
+                    (left, top, right - 1, bottom - 1), fill=255
+                )
+                mask.save(component_mask)
+                component_masks.append(str(component_mask))
+                component = work / f"component-{index:04d}.png"
+                source_rgb.crop((left, top, right, bottom)).convert("RGBA").save(component)
+                components.append({
+                    "path": str(component), "x": left, "y": top,
+                    "w": right - left, "h": bottom - top, "z_index": index,
+                })
             state_path = work / "prepared-page.json"
             state_path.write_text("{}", encoding="utf-8")
             prepared = {
                 "state_path": str(state_path),
-                "initial_component_count": 1,
+                "initial_component_count": component_count,
                 "original_image_path": str(Path(source).resolve()),
                 "background_original_path": str(background),
                 "background_difference_path": str(difference),
                 "_text_mask_path": str(text_mask),
-                "_element_mask_paths": [str(component_mask)],
-                "components": [{
-                    "path": str(component), "x": 8, "y": 8,
-                    "w": 16, "h": 16, "z_index": 0,
-                }],
-                "img_width": 32, "img_height": 32,
-                "canvas_width": 32, "canvas_height": 32,
+                "_element_mask_paths": component_masks,
+                "components": components,
+                "img_width": width, "img_height": height,
+                "canvas_width": width, "canvas_height": height,
                 "content_offset_x": 0, "content_offset_y": 0,
                 "text_items": [],
             }
@@ -2459,6 +2474,7 @@ def test_run_job_executes_agent_approved_shadow_plan(
         category="full_slide_screenshot",
         evidence=["complete slide layout"],
     )
+    _install_component_e2e_boundaries(monkeypatch)
     calls = []
 
     def fake_execute(store: RunStore, plans) -> dict[str, Any]:

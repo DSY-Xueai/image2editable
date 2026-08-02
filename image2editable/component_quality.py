@@ -24,6 +24,7 @@ class _PageQualityContext:
     background_delta: np.ndarray
     source_luma: np.ndarray
     text: np.ndarray
+    text_ink: np.ndarray
     exterior_owner_count: np.ndarray
     component_owner_count: np.ndarray
 
@@ -166,6 +167,7 @@ def _prepare_page_quality_context(
     reconstructed: np.ndarray,
     text_mask: np.ndarray,
     *,
+    calibration: PageCalibration,
     component_masks: list[np.ndarray] | None = None,
 ) -> _PageQualityContext:
     source_rgb = _rgb_image(source, None, "source")
@@ -178,6 +180,7 @@ def _prepare_page_quality_context(
     background_delta = np.max(
         np.abs(source_rgb.astype(np.int16) - background_rgb.astype(np.int16)), axis=2
     )
+    text = _exact_mask(text_mask, shape, "text mask")
     exterior_owner_count = np.zeros(shape, dtype=np.uint16)
     component_owner_count = np.zeros(shape, dtype=np.uint16)
     boundary_kernel = np.ones((3, 3), dtype=np.uint8)
@@ -194,10 +197,82 @@ def _prepare_page_quality_context(
         reconstruction_delta=reconstruction_delta,
         background_delta=background_delta,
         source_luma=cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32),
-        text=_exact_mask(text_mask, shape, "text mask"),
+        text=text,
+        text_ink=_text_ink_mask(source_rgb, text, calibration),
         exterior_owner_count=exterior_owner_count,
         component_owner_count=component_owner_count,
     )
+
+
+def _text_ink_mask(
+    source_rgb: np.ndarray,
+    text: np.ndarray,
+    calibration: PageCalibration,
+) -> np.ndarray:
+    shape = text.shape
+    text_radius = max(calibration.text_halo_px, calibration.edge_width_px)
+    text_kernel = np.ones((2 * text_radius + 1, 2 * text_radius + 1), dtype=np.uint8)
+    text_count, text_labels = cv2.connectedComponents(text.astype(np.uint8), 8)
+    ink_threshold = max(12.0, calibration.noise_l1 * 4.0)
+    dense_core = cv2.distanceTransform(
+        text.astype(np.uint8), cv2.DIST_L2, 5
+    ) >= 3.0
+    dense_text = (
+        cv2.dilate(dense_core.astype(np.uint8), np.ones((5, 5), dtype=np.uint8))
+        > 0
+    ) & text
+    local_kernel_size = min(31, 2 * text_radius + 1)
+    local_delta = np.zeros(shape, dtype=np.uint8)
+    for channel in range(3):
+        local_background = cv2.medianBlur(
+            source_rgb[:, :, channel], local_kernel_size
+        )
+        local_delta = np.maximum(
+            local_delta,
+            cv2.absdiff(source_rgb[:, :, channel], local_background),
+        )
+    local_ink = local_delta > ink_threshold
+    text_ink = np.zeros(shape, dtype=bool)
+    for label in range(1, text_count):
+        region = text_labels == label
+        ring = cv2.dilate(region.astype(np.uint8), text_kernel) > 0
+        ring &= ~region
+        ys, xs = np.where(region)
+        y1, y2 = int(ys.min()), int(ys.max()) + 1
+        x1, x2 = int(xs.min()), int(xs.max()) + 1
+        samples = source_rgb[ring]
+        if not len(samples):
+            samples = source_rgb[region]
+        local_fill = np.median(samples.astype(np.float32), axis=0)
+        local_region = region[y1:y2, x1:x2]
+        candidate = np.zeros(local_region.shape, dtype=np.uint8)
+        candidate[local_region] = (
+            np.max(
+                np.abs(source_rgb[region].astype(np.float32) - local_fill),
+                axis=1,
+            ) > ink_threshold
+        )
+        dense_region = local_region & dense_text[y1:y2, x1:x2]
+        candidate[dense_region] = local_ink[y1:y2, x1:x2][dense_region]
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+        for component_label in range(1, count):
+            component = labels == component_label
+            component_width = int(stats[component_label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[component_label, cv2.CC_STAT_HEIGHT])
+            crosses_vertically = (
+                np.any(component[0])
+                and np.any(component[-1])
+                and component_width <= max(3, round(candidate.shape[1] * 0.2))
+            )
+            crosses_horizontally = (
+                np.any(component[:, 0])
+                and np.any(component[:, -1])
+                and component_height <= max(3, round(candidate.shape[0] * 0.2))
+            )
+            if crosses_vertically or crosses_horizontally:
+                candidate[component] = 0
+        text_ink[y1:y2, x1:x2] |= candidate > 0
+    return text_ink
 
 
 def component_metrics(
@@ -214,7 +289,8 @@ def component_metrics(
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
     context = _page_context or _prepare_page_quality_context(
-        source, background, reconstructed, text_mask
+        source, background, reconstructed, text_mask,
+        calibration=calibration,
     )
     source_rgb = context.source_rgb
     shape = source_rgb.shape[:2]
@@ -289,50 +365,9 @@ def component_metrics(
     text_support = context.text & (
         cv2.dilate(support.astype(np.uint8), text_kernel) > 0
     )
-    text_ink = np.zeros(shape, dtype=bool)
-    text_count, text_labels = cv2.connectedComponents(
-        context.text.astype(np.uint8), 8
-    )
-    ink_threshold = max(12.0, calibration.noise_l1 * 4.0)
-    source_float = source_rgb.astype(np.float32)
-    for label in range(1, text_count):
-        region = text_labels == label
-        ring = cv2.dilate(region.astype(np.uint8), text_kernel) > 0
-        ring &= ~region
-        samples = source_rgb[ring]
-        if not len(samples):
-            samples = source_rgb[region]
-        local_fill = np.median(samples.astype(np.float32), axis=0)
-        candidate = np.zeros(shape, dtype=np.uint8)
-        candidate[region] = (
-            np.max(np.abs(source_float[region] - local_fill), axis=1)
-            > ink_threshold
-        )
-        ys, xs = np.where(region)
-        y1, y2 = int(ys.min()), int(ys.max()) + 1
-        x1, x2 = int(xs.min()), int(xs.max()) + 1
-        local = candidate[y1:y2, x1:x2]
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(local, 8)
-        for component_label in range(1, count):
-            component = labels == component_label
-            component_width = int(stats[component_label, cv2.CC_STAT_WIDTH])
-            component_height = int(stats[component_label, cv2.CC_STAT_HEIGHT])
-            crosses_vertically = (
-                np.any(component[0])
-                and np.any(component[-1])
-                and component_width <= max(3, round(local.shape[1] * 0.2))
-            )
-            crosses_horizontally = (
-                np.any(component[:, 0])
-                and np.any(component[:, -1])
-                and component_height <= max(3, round(local.shape[0] * 0.2))
-            )
-            if crosses_vertically or crosses_horizontally:
-                local[component] = 0
-        text_ink[y1:y2, x1:x2] |= local > 0
     text_ghost = (
         text_support
-        & text_ink
+        & context.text_ink
         & (background_delta > hard_tolerance)
         & (reconstruction_delta <= hard_tolerance)
     )

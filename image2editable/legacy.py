@@ -444,16 +444,12 @@ def initialize_legacy_page(
         return {"status": "already_initialized", "page_id": page_id}
     manifest = store.read_json("job_manifest.json")
     source = _source_path(store, page_id)
-    page_request = store.read_json(Path("pages") / page_id / "page_request.json")
-    if _is_full_page_candidate(page_request):
-        prepared = _prepare_full_page_layers(source, reconstruction / "initial")
-    else:
-        prepared = importlib.import_module("image_to_ppt").prepare_component_layers(
-            source,
-            reconstruction / "initial",
-            lang=manifest["options"]["lang"],
-            resource_isolation=True,
-        )
+    prepared = importlib.import_module("image_to_ppt").prepare_component_layers(
+        source,
+        reconstruction / "initial",
+        lang=manifest["options"]["lang"],
+        resource_isolation=True,
+    )
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
     )
@@ -464,89 +460,6 @@ def initialize_legacy_page(
         _lease=_lease,
     )
     return {"status": "initialized", "page_id": page_id}
-
-
-def _is_full_page_candidate(request: dict[str, Any]) -> bool:
-    return (
-        request.get("full_page_candidate") is True
-        and type(request.get("slide_coverage")) is float
-        and request["slide_coverage"] == 1.0
-    )
-
-
-def _prepare_full_page_layers(source: Path, work_dir: Path) -> dict[str, Any]:
-    """Create a deterministic one-parent layer for an approved full-page image."""
-    work_dir.mkdir(parents=True, exist_ok=False)
-    with Image.open(source) as opened:
-        rgb = opened.convert("RGB")
-        rgba = opened.convert("RGBA")
-        width, height = rgb.size
-        rgb.save(work_dir / "source-image.png")
-        rgb.save(work_dir / "background-original.png")
-        rgb.save(work_dir / "background-16x9.png")
-        Image.new("L", (width, height), 0).save(work_dir / "source-text-mask.png")
-        Image.new("L", (width, height), 255).save(work_dir / "element-mask-0001.png")
-        Image.new("L", (width, height), 255).save(work_dir / "background-removal-mask.png")
-        Image.new("RGB", (width, height), (0, 0, 0)).save(work_dir / "background-difference.png")
-        rgba.save(work_dir / "component-0001.png")
-
-    def asset(path: str) -> dict[str, str]:
-        payload = (work_dir / path).read_bytes()
-        return {"path": path, "sha256": hashlib.sha256(payload).hexdigest()}
-
-    component = {
-        "asset": asset("component-0001.png"),
-        "metadata": {
-            "x": 0, "y": 0, "w": width, "h": height,
-            "area": width * height, "z_index": 0,
-        },
-    }
-    prepared_manifest = {
-        "schema_version": 1,
-        "phase": "initial_layers",
-        "resource_isolation": True,
-        "initial_component_count": 1,
-        "components": [component],
-        "text_items": [],
-        "dimensions": {
-            "img_width": width, "img_height": height,
-            "canvas_width": width, "canvas_height": height,
-            "content_offset_x": 0, "content_offset_y": 0,
-            "widescreen_background_method": "identity",
-        },
-        "assets": {
-            "source_image": asset("source-image.png"),
-            "ocr_mask": asset("source-text-mask.png"),
-            "text_clean": None,
-            "element_masks": [asset("element-mask-0001.png")],
-            "background_original": asset("background-original.png"),
-            "background_widescreen": asset("background-16x9.png"),
-            "background_removal_mask": asset("background-removal-mask.png"),
-            "background_difference": asset("background-difference.png"),
-        },
-    }
-    payload = json.dumps(
-        prepared_manifest, ensure_ascii=False, indent=2
-    ).encode("utf-8")
-    (work_dir / "prepared_page.json").write_bytes(payload)
-    (work_dir / "prepared_page.sha256").write_bytes(
-        (hashlib.sha256(payload).hexdigest() + "\n").encode("ascii")
-    )
-    return {
-        "original_image_path": work_dir / "source-image.png",
-        "background_original_path": work_dir / "background-original.png",
-        "background_difference_path": work_dir / "background-difference.png",
-        "_text_mask_path": work_dir / "source-text-mask.png",
-        "_element_mask_paths": [work_dir / "element-mask-0001.png"],
-        "components": [{
-            "path": work_dir / "component-0001.png",
-            "x": 0, "y": 0, "w": width, "h": height,
-            "area": width * height, "z_index": 0,
-        }],
-        "initial_component_count": 1,
-    }
-
-
 def _build_initial_page_session(
     store: RunStore, page_id: str, prepared: dict, reconstruction: Path
 ) -> dict:

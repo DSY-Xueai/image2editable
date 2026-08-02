@@ -205,6 +205,26 @@ def test_component_plan_allows_absorb_into_authenticated_inactive_parent() -> No
     ) is plan
 
 
+def test_component_plan_rejects_inactive_secondary_parent_absorption() -> None:
+    request, graph = _plan_contract_fixture()
+    for parent_id in ("parent_a", "parent_b"):
+        request["candidate_ids"].remove(parent_id)
+        next(node for node in graph["nodes"] if node["id"] == parent_id)[
+            "state"
+        ] = "inactive"
+    request["candidate_ids"].remove("child_b")
+    plan = _plan(
+        request,
+        "absorb_into_parent",
+        ["parent_b", "parent_a", "visual"],
+    )
+
+    with pytest.raises(ValueError, match="pending"):
+        component_contracts.validate_component_plan(
+            plan, request=request, graph=graph,
+        )
+
+
 def _plan_contract_fixture() -> tuple[dict, dict]:
     ids = ["visual", "visual2", "text", "parent_a", "parent_b", "child_a", "child_b"]
     request = {"schema_version": 1, "page_id": "page_001", "provider": "host",

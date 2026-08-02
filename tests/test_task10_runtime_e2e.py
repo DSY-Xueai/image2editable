@@ -63,7 +63,7 @@ def test_task10_pptx_approval_is_the_only_page_request_gate(tmp_path: Path) -> N
     assert Path(approved_run / request["source"]).is_file()
 
 
-def test_full_page_candidate_initializes_without_cv_worker(
+def test_full_page_candidate_uses_shared_cv_component_layers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = Path(__file__).parents[1] / "test1.pptx"
@@ -84,29 +84,31 @@ def test_full_page_candidate_initializes_without_cv_worker(
         evidence=["full-slide screenshot"],
     )
 
-    def fail_cv_import(name: str):
-        raise AssertionError(f"full-page initialization invoked CV module: {name}")
-
-    monkeypatch.setattr("image2editable.legacy.importlib.import_module", fail_cv_import)
+    from test_runtime_execution import _install_component_e2e_boundaries
+    _, initial_calls, _ = _install_component_e2e_boundaries(
+        monkeypatch, component_count=2
+    )
     store = RunStore.open(run_dir)
     with ExecutionLease(run_dir / "execution.lock", run_root=run_dir) as lease:
         result = initialize_legacy_page(store, "page_001", _lease=lease)
 
     assert result["status"] == "initialized"
+    assert initial_calls == ["page_001"]
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
     assert state["phase"] == "request_published"
     request_ref = state["current_round"]["request_ref"]
     request_path = run_dir / request_ref["path"]
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    assert request["candidate_ids"] == ["component_0001"]
+    assert request["candidate_ids"] == ["component_0001", "component_0002"]
     graph = json.loads(
         (request_path.parent / request["evidence"]["component-graph.json"]["path"]).read_text(
             encoding="utf-8"
         )
     )
-    assert graph["nodes"][0]["kind"] == "parent"
-    mask = request_path.parent / graph["nodes"][0]["mask"]
-    assert hashlib.sha256(mask.read_bytes()).hexdigest() == graph["nodes"][0]["mask_sha256"]
+    assert [node["kind"] for node in graph["nodes"]] == ["parent", "parent"]
+    for node in graph["nodes"]:
+        mask = request_path.parent / node["mask"]
+        assert hashlib.sha256(mask.read_bytes()).hexdigest() == node["mask_sha256"]
 
 
 def test_test1_two_page_component_state_to_shadow_output(
@@ -116,6 +118,8 @@ def test_test1_two_page_component_state_to_shadow_output(
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
+    from test_runtime_execution import _install_component_e2e_boundaries
+    _install_component_e2e_boundaries(monkeypatch)
     for page_id in ("page_001", "page_002"):
         page = run_dir / "pages" / page_id
         candidate = json.loads((page / "agent_request.json").read_text())[
@@ -220,12 +224,14 @@ def test_test1_two_page_component_state_to_shadow_output(
 
 
 def test_only_approved_page_is_initialized_before_host_boundary(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = Path(__file__).parents[1] / "test1.pptx"
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
+    from test_runtime_execution import _install_component_e2e_boundaries
+    _install_component_e2e_boundaries(monkeypatch)
     page = run_dir / "pages" / "page_001"
     candidate = json.loads((page / "agent_request.json").read_text())["candidates"][0]
     record_decision(
@@ -278,6 +284,8 @@ def test_full_page_second_round_reuses_bound_source_snapshot(
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
+    from test_runtime_execution import _install_component_e2e_boundaries
+    _install_component_e2e_boundaries(monkeypatch)
     candidate = json.loads(
         (run_dir / "pages/page_001/agent_request.json").read_text(
             encoding="utf-8"

@@ -1114,6 +1114,7 @@ def evaluate_component_quality_round(
         masks[node["id"]] = component_mask
     page_context = _prepare_page_quality_context(
         source, background, reconstructed, text_mask,
+        calibration=calibration,
         component_masks=[masks[node["id"]] for node in active_visual],
     )
     for node in candidates:

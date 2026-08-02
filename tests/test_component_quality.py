@@ -414,11 +414,12 @@ def test_nonhierarchical_component_overlap_fails_quality_gate() -> None:
         "z_index": 1, "text_ids": [],
     })
     module = importlib.import_module("image2editable.component_quality")
+    calibration = calibrate_page(case["source"], case["text_mask"])
     context = module._prepare_page_quality_context(
         case["source"], case["background"], case["reconstructed"],
-        case["text_mask"], component_masks=[case["component_mask"], other],
+        case["text_mask"], calibration=calibration,
+        component_masks=[case["component_mask"], other],
     )
-    calibration = calibrate_page(case["source"], case["text_mask"])
 
     report = evaluate_component(
         case["source"], case["background"], case["reconstructed"],
@@ -504,21 +505,75 @@ def test_structural_divider_crossing_text_box_is_not_a_text_ghost() -> None:
     assert "text_ghost" not in _evaluate_synthetic(case)["violations"]
 
 
+def test_solid_colored_header_fill_is_not_a_text_ghost() -> None:
+    import cv2
+    from image2editable.component_quality import PageCalibration
+
+    shape = (120, 320)
+    source = np.full((*shape, 3), 245, dtype=np.uint8)
+    component_mask = np.zeros(shape, dtype=bool)
+    component_mask[50:110, 170:310] = True
+    fill = np.array([29, 140, 57], dtype=np.uint8)
+    source[component_mask] = fill
+    cv2.putText(
+        source, "GOOD", (190, 94), cv2.FONT_HERSHEY_SIMPLEX,
+        1.1, (255, 255, 255), 2, cv2.LINE_AA,
+    )
+    text_mask = np.zeros(shape, dtype=bool)
+    text_mask[54:107, 187:276] = True
+    text_mask[5:54, 20:230] = True
+    background = np.full_like(source, 245)
+    reconstructed = background.copy()
+    reconstructed[component_mask] = fill
+    node = {
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/component_0001.png",
+        "mask_sha256": "a" * 64, "bbox": [170, 50, 310, 110],
+        "z_index": 0, "text_ids": [],
+    }
+
+    report = evaluate_component(
+        source, background, reconstructed, node, {"nodes": [node]},
+        PageCalibration(0.0, 1.0, 16, 16, 20),
+        component_mask=component_mask, text_mask=text_mask,
+        page_checks={"protected_native_overlap": "pass"},
+    )
+
+    assert "text_ghost" not in report["violations"]
+
+
 def test_internal_page_context_reuses_full_page_conversions(monkeypatch) -> None:
     case = _synthetic_quality_case()
     module = importlib.import_module("image2editable.component_quality")
     original = module._rgb_image
+    original_median = module.cv2.medianBlur
+    original_distance = module.cv2.distanceTransform
     calls = []
+    median_calls = 0
+    distance_calls = 0
+    calibration = calibrate_page(case["source"], case["text_mask"])
 
     def counted(*args, **kwargs):
         calls.append(args[2])
         return original(*args, **kwargs)
 
+    def counted_median(*args, **kwargs):
+        nonlocal median_calls
+        median_calls += 1
+        return original_median(*args, **kwargs)
+
+    def counted_distance(*args, **kwargs):
+        nonlocal distance_calls
+        distance_calls += 1
+        return original_distance(*args, **kwargs)
+
     monkeypatch.setattr(module, "_rgb_image", counted)
+    monkeypatch.setattr(module.cv2, "medianBlur", counted_median)
+    monkeypatch.setattr(module.cv2, "distanceTransform", counted_distance)
     context = module._prepare_page_quality_context(
-        case["source"], case["background"], case["reconstructed"], case["text_mask"]
+        case["source"], case["background"], case["reconstructed"],
+        case["text_mask"], calibration=calibration,
     )
-    calibration = calibrate_page(case["source"], case["text_mask"])
     for component_id in ("component_0001", "component_0002"):
         node = dict(case["node"], id=component_id)
         evaluate_component(
@@ -528,6 +583,8 @@ def test_internal_page_context_reuses_full_page_conversions(monkeypatch) -> None
             page_checks={"protected_native_overlap": "pass"}, _page_context=context,
         )
     assert calls == ["source", "background", "reconstructed"]
+    assert median_calls == 3
+    assert distance_calls == 1
 
 
 def test_exterior_shadow_requires_unique_boundary_attribution() -> None:
@@ -541,7 +598,7 @@ def test_exterior_shadow_requires_unique_boundary_attribution() -> None:
     module = importlib.import_module("image2editable.component_quality")
     context = module._prepare_page_quality_context(
         case["source"], case["background"], case["reconstructed"],
-        case["text_mask"],
+        case["text_mask"], calibration=calibration,
         component_masks=[case["component_mask"]],
     )
     report = evaluate_component(
@@ -574,7 +631,7 @@ def test_ambiguous_exterior_residual_is_page_level_orphan() -> None:
     calibration = calibrate_page(source, text)
     module = importlib.import_module("image2editable.component_quality")
     context = module._prepare_page_quality_context(
-        source, background, reconstructed, text,
+        source, background, reconstructed, text, calibration=calibration,
         component_masks=[left, right],
     )
     graph = {"nodes": []}
