@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pptx import Presentation
 
@@ -759,7 +759,7 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     assert calls == {"prepare": 1, "request": 1, "state": 1}
 
 
-def test_initial_page_session_builds_authenticated_parent_graph(
+def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
     tmp_path: Path
 ) -> None:
     source = tmp_path / "source.png"
@@ -830,6 +830,235 @@ def test_initial_page_session_builds_authenticated_parent_graph(
     with Image.open(evidence["reconstructed.png"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (0, 0, 0)
         assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
+
+
+def test_initial_page_session_v2_builds_parent_child_graph_and_excludes_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (20, 10), (1, 2, 3)).save(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    prepared_root = reconstruction / "initial"
+    prepared_root.mkdir(parents=True)
+    background = prepared_root / "background.png"
+    difference = prepared_root / "difference.png"
+    text_mask = prepared_root / "text-mask.png"
+    component = prepared_root / "component.png"
+    component_mask = prepared_root / "component-mask.png"
+    semantic_mask = prepared_root / "semantic-mask.png"
+    Image.new("RGB", (20, 10), "black").save(background)
+    Image.new("RGB", (20, 10), "black").save(difference)
+    mask = Image.new("L", (20, 10), 0)
+    mask.putpixel((3, 2), 255)
+    mask.save(text_mask)
+    mask.close()
+    Image.new("RGBA", (4, 3), (10, 20, 30, 255)).save(component)
+    mask = Image.new("L", (20, 10), 0)
+    mask.putpixel((2, 1), 255)
+    mask.putpixel((3, 2), 255)
+    mask.save(component_mask)
+    mask.close()
+    mask = Image.new("L", (20, 10), 0)
+    ImageDraw.Draw(mask).rectangle((1, 0, 4, 3), fill=255)
+    mask.save(semantic_mask)
+    mask.close()
+    prepared = {
+        "state_path": str(prepared_root / "prepared-page.json"),
+        "initial_component_count": 1,
+        "original_image_path": str(source),
+        "background_original_path": str(background),
+        "background_difference_path": str(difference),
+        "_text_mask_path": str(text_mask),
+        "_element_mask_paths": [str(component_mask)],
+        "_semantic_mask_paths": [str(semantic_mask)],
+        "components": [{
+            "path": str(component), "x": 2, "y": 1, "w": 2, "h": 2,
+            "z_index": 0,
+        }],
+        "text_items": [{"text": "T", "box": [3, 2, 1, 1]}],
+    }
+    reserve_node_counts = []
+    monkeypatch.setattr(
+        legacy,
+        "_ensure_component_disk_reserve",
+        lambda *args, **kwargs: reserve_node_counts.append(kwargs["node_count"]),
+    )
+
+    session = legacy._build_initial_page_session(
+        store, "page_001", prepared, reconstruction
+    )
+
+    assert reserve_node_counts == [3]
+    with Image.open(session["evidence"]["reconstructed.png"]) as reconstructed:
+        assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
+        assert reconstructed.getpixel((3, 2)) == (0, 0, 0)
+    graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
+    parent, child, text = graph["nodes"]
+    assert parent["id"] == "parent_0001"
+    assert parent["kind"] == "parent"
+    assert parent["state"] == "inactive"
+    assert parent["parent_id"] is None
+    assert parent["bbox"] == [1, 0, 5, 4]
+    assert child["id"] == "component_0001"
+    assert child["kind"] == "child"
+    assert child["state"] == "pending"
+    assert child["parent_id"] == "parent_0001"
+    assert child["bbox"] == [2, 1, 4, 3]
+    assert text["id"] == "text_0001"
+    assert text["kind"] == "text"
+    assert text["state"] == "frozen"
+    graph_root = Path(session["evidence"]["component-graph.json"]).parent
+    assert (graph_root / parent["mask"]).read_bytes() == semantic_mask.read_bytes()
+    assert (graph_root / child["mask"]).read_bytes() == component_mask.read_bytes()
+    for node in graph["nodes"]:
+        mask_path = graph_root / node["mask"]
+        assert hashlib.sha256(mask_path.read_bytes()).hexdigest() == node["mask_sha256"]
+    request_path = legacy.build_component_agent_request(session, repair_round=1)
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request["candidate_ids"] == ["component_0001"]
+    assert request["frozen_ids"] == ["text_0001"]
+
+
+def test_initial_page_session_v2_requires_matching_semantic_mask_count(
+    tmp_path: Path
+) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    difference = tmp_path / "difference.png"
+    text_mask = tmp_path / "text-mask.png"
+    for path in (source, background, difference):
+        Image.new("RGB", (20, 10), "black").save(path)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="semantic mask count"):
+        legacy._build_initial_page_session(
+            RunStore.open(run_dir),
+            "page_001",
+            {
+                "original_image_path": str(source),
+                "background_original_path": str(background),
+                "background_difference_path": str(difference),
+                "_text_mask_path": str(text_mask),
+                "_element_mask_paths": [],
+                "_semantic_mask_paths": [str(text_mask)],
+                "components": [],
+                "text_items": [],
+            },
+            reconstruction,
+        )
+
+
+def test_component_evidence_closes_loaded_images_when_mask_validation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    text_mask = tmp_path / "text-mask.png"
+    mask_path = tmp_path / "component-mask.png"
+    Image.new("RGB", (20, 10), "white").save(source)
+    Image.new("RGB", (20, 10), "black").save(background)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    Image.new("L", (20, 10), 255).save(mask_path)
+    copied_images = []
+    closed_image_ids = set()
+    real_copy = Image.Image.copy
+    real_close = Image.Image.close
+
+    def tracked_copy(image):
+        copied = real_copy(image)
+        copied_images.append(copied)
+        return copied
+
+    def tracked_close(image):
+        closed_image_ids.add(id(image))
+        real_close(image)
+
+    monkeypatch.setattr(Image.Image, "copy", tracked_copy)
+    monkeypatch.setattr(Image.Image, "close", tracked_close)
+
+    with pytest.raises(ValueError, match="mask sha256 mismatch"):
+        legacy._render_component_evidence(
+            source_path=source,
+            graph={"nodes": [{
+                "id": "component_0001", "kind": "parent", "parent_id": None,
+                "state": "pending", "mask": mask_path.name,
+                "mask_sha256": "0" * 64, "bbox": [0, 0, 20, 10],
+                "z_index": 0, "text_ids": [],
+            }]},
+            graph_dir=tmp_path,
+            text_mask_path=text_mask,
+            background_path=background,
+            reconstructed_path=None,
+            output_dir=tmp_path,
+            text_items=[],
+        )
+
+    assert copied_images
+    missing = [id(image) for image in copied_images if id(image) not in closed_image_ids]
+    assert not missing, (len(copied_images), len(closed_image_ids), missing)
+
+
+def test_component_evidence_closes_node_images_before_rendering_next_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    text_mask = tmp_path / "text-mask.png"
+    Image.new("RGB", (20, 10), "white").save(source)
+    Image.new("RGB", (20, 10), "black").save(background)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    nodes = []
+    for index in range(2):
+        mask_path = tmp_path / f"component-mask-{index}.png"
+        Image.new("L", (20, 10), 255).save(mask_path)
+        nodes.append({
+            "id": f"component_{index + 1:04d}", "kind": "parent",
+            "parent_id": None, "state": "pending", "mask": mask_path.name,
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [0, 0, 20, 10], "z_index": index, "text_ids": [],
+        })
+    copied_images = []
+    closed_image_ids = set()
+    real_copy = Image.Image.copy
+    real_close = Image.Image.close
+    real_sha256_file = legacy.sha256_file
+    mask_checks = 0
+
+    def tracked_copy(image):
+        copied = real_copy(image)
+        copied_images.append(copied)
+        return copied
+
+    def tracked_close(image):
+        closed_image_ids.add(id(image))
+        real_close(image)
+
+    def checked_sha256_file(path):
+        nonlocal mask_checks
+        mask_checks += 1
+        if mask_checks == 2:
+            assert id(copied_images[-1]) in closed_image_ids
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(Image.Image, "copy", tracked_copy)
+    monkeypatch.setattr(Image.Image, "close", tracked_close)
+    monkeypatch.setattr(legacy, "sha256_file", checked_sha256_file)
+
+    legacy._render_component_evidence(
+        source_path=source,
+        graph={"nodes": nodes},
+        graph_dir=tmp_path,
+        text_mask_path=text_mask,
+        background_path=background,
+        reconstructed_path=None,
+        output_dir=tmp_path,
+        text_items=[],
+    )
 
 
 def test_initial_page_session_reserves_disk_before_writing_evidence(

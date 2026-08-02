@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import ctypes
 import hashlib
 import importlib
@@ -553,10 +553,20 @@ def _build_initial_page_session(
     with Image.open(prepared["original_image_path"]) as image:
         page_size = image.size
     text_items = _component_text_items(prepared.get("text_items", []), page_size)
+    masks = prepared["_element_mask_paths"]
+    semantic_masks = prepared.get("_semantic_mask_paths")
+    components = prepared["components"]
+    if len(masks) != len(components):
+        raise ValueError("prepared component and mask counts differ")
+    if semantic_masks is not None and len(semantic_masks) != len(components):
+        raise ValueError("prepared semantic mask count differs from component count")
     _ensure_component_disk_reserve(
         reconstruction,
         Path(prepared["original_image_path"]),
-        node_count=len(prepared["components"]) + len(text_items),
+        node_count=(
+            len(components) * (2 if semantic_masks is not None else 1)
+            + len(text_items)
+        ),
         repair_round=1,
     )
     evidence_root = reconstruction / "evidence-source"
@@ -568,28 +578,39 @@ def _build_initial_page_session(
     evidence = {"source.png": source_target}
 
     nodes = []
-    masks = prepared["_element_mask_paths"]
-    components = prepared["components"]
-    if len(masks) != len(components):
-        raise ValueError("prepared component and mask counts differ")
     for index, (mask_source, component) in enumerate(
         zip(masks, components, strict=True), start=1
     ):
         component_id = f"component_{index:04d}"
-        mask_target = masks_root / f"{component_id}.png"
-        shutil.copyfile(mask_source, mask_target)
-        with Image.open(mask_target) as image:
-            bbox = image.convert("L").getbbox()
-        if bbox is None:
-            raise ValueError(f"prepared component mask is empty: {component_id}")
-        left, top, right, bottom = bbox
-        nodes.append({
-            "id": component_id, "kind": "parent", "parent_id": None,
-            "state": "pending", "mask": f"masks/{mask_target.name}",
-            "mask_sha256": sha256_file(mask_target),
-            "bbox": [left, top, right, bottom],
-            "z_index": component.get("z_index", index - 1), "text_ids": [],
-        })
+        if semantic_masks is None:
+            mask_nodes = ((component_id, "parent", None, "pending", mask_source),)
+        else:
+            parent_id = f"parent_{index:04d}"
+            mask_nodes = (
+                (parent_id, "parent", None, "inactive", semantic_masks[index - 1]),
+                (component_id, "child", parent_id, "pending", mask_source),
+            )
+        for node_id, kind, parent_id, state, node_mask_source in mask_nodes:
+            mask_target = masks_root / f"{node_id}.png"
+            shutil.copyfile(node_mask_source, mask_target)
+            with Image.open(mask_target) as image:
+                if image.size != page_size:
+                    raise ValueError(
+                        f"prepared component mask dimensions differ: {node_id}"
+                    )
+                grayscale = image.convert("L")
+                bbox = grayscale.getbbox()
+                grayscale.close()
+            if bbox is None:
+                raise ValueError(f"prepared component mask is empty: {node_id}")
+            left, top, right, bottom = bbox
+            nodes.append({
+                "id": node_id, "kind": kind, "parent_id": parent_id,
+                "state": state, "mask": f"masks/{mask_target.name}",
+                "mask_sha256": sha256_file(mask_target),
+                "bbox": [left, top, right, bottom],
+                "z_index": component.get("z_index", index - 1), "text_ids": [],
+            })
     for index, item in enumerate(text_items, start=1):
         text_id = item["id"]
         mask_target = masks_root / f"{text_id}.png"
@@ -721,123 +742,127 @@ def _render_component_evidence(
     output_dir: Path,
     text_items: list[dict],
 ) -> dict[str, Path]:
-    with Image.open(source_path) as image:
-        source = image.convert("RGB").copy()
-    if reconstructed_path is None:
-        with Image.open(background_path) as image:
-            reconstructed = image.convert("RGB").copy()
-        if reconstructed.size != source.size:
-            raise ValueError("component evidence background dimensions differ")
-    else:
-        with Image.open(reconstructed_path) as image:
-            reconstructed = image.convert("RGB").copy()
-        if reconstructed.size != source.size:
-            raise ValueError("component evidence reconstruction dimensions differ")
+    with ExitStack() as images:
+        def keep(image: Image.Image) -> Image.Image:
+            images.callback(image.close)
+            return image
 
-    numbered = source.copy()
-    ownership = Image.new("RGB", source.size, (24, 24, 24))
-    numbered_draw = ImageDraw.Draw(numbered)
-    ownership_draw = ImageDraw.Draw(ownership)
-    colors = (
-        (255, 80, 80),
-        (70, 180, 255),
-        (90, 220, 120),
-        (255, 190, 60),
-        (190, 100, 255),
-        (60, 220, 210),
-    )
-    for index, node in enumerate(graph["nodes"]):
-        if node["kind"] == "text" or node["state"] not in {
-            "pending",
-            "pending_gate",
-            "frozen",
-        }:
-            continue
-        mask_path = graph_dir / Path(node["mask"])
-        if sha256_file(mask_path) != node["mask_sha256"]:
-            raise ValueError("component evidence mask sha256 mismatch")
-        with Image.open(mask_path) as image:
-            mask = image.convert("L").copy()
-        if mask.size != source.size:
-            raise ValueError("component evidence mask dimensions differ")
-        color = colors[index % len(colors)]
-        alpha = mask.point(lambda value: value * 96 // 255)
-        color_layer = Image.new("RGB", source.size, color)
-        numbered.paste(color_layer, (0, 0), alpha)
-        ownership.paste(color_layer, (0, 0), mask)
+        with Image.open(source_path) as image:
+            source = keep(image.convert("RGB"))
+        with Image.open(text_mask_path) as image:
+            text_mask = keep(image.convert("L"))
+        if text_mask.size != source.size:
+            raise ValueError("component evidence text mask dimensions differ")
         if reconstructed_path is None:
-            reconstructed.paste(source, (0, 0), mask)
-        left, top, right, bottom = node["bbox"]
-        label_at = ((left + right) // 2, (top + bottom) // 2)
-        for draw in (numbered_draw, ownership_draw):
-            draw.text(
-                label_at,
-                node["id"],
-                fill="white",
-                stroke_width=2,
-                stroke_fill="black",
-                anchor="mm",
-            )
-        color_layer.close()
-        alpha.close()
-        mask.close()
+            with Image.open(background_path) as image:
+                reconstructed = keep(image.convert("RGB"))
+            if reconstructed.size != source.size:
+                raise ValueError("component evidence background dimensions differ")
+        else:
+            with Image.open(reconstructed_path) as image:
+                reconstructed = keep(image.convert("RGB"))
+            if reconstructed.size != source.size:
+                raise ValueError("component evidence reconstruction dimensions differ")
 
-    paths = {}
-    for name, evidence_image in (
-        ("numbered-masks.png", numbered),
-        ("ownership.png", ownership),
-    ):
-        path = output_dir / name
-        evidence_image.save(path)
-        evidence_image.close()
-        paths[name] = path
+        numbered = keep(source.copy())
+        ownership = keep(Image.new("RGB", source.size, (24, 24, 24)))
+        numbered_draw = ImageDraw.Draw(numbered)
+        ownership_draw = ImageDraw.Draw(ownership)
+        colors = (
+            (255, 80, 80),
+            (70, 180, 255),
+            (90, 220, 120),
+            (255, 190, 60),
+            (190, 100, 255),
+            (60, 220, 210),
+        )
+        for index, node in enumerate(graph["nodes"]):
+            if node["kind"] == "text" or node["state"] not in {
+                "pending",
+                "pending_gate",
+                "frozen",
+            }:
+                continue
+            mask_path = graph_dir / Path(node["mask"])
+            if sha256_file(mask_path) != node["mask_sha256"]:
+                raise ValueError("component evidence mask sha256 mismatch")
+            with ExitStack() as node_images:
+                def keep_node(image: Image.Image) -> Image.Image:
+                    node_images.callback(image.close)
+                    return image
 
-    with Image.open(text_mask_path) as image:
-        text_mask = image.convert("L").copy()
-    if text_mask.size != source.size:
-        raise ValueError("component evidence text mask dimensions differ")
-    ocr_overlay = source.copy()
-    text_color = Image.new("RGB", source.size, (255, 225, 0))
-    text_alpha = text_mask.point(lambda value: value * 112 // 255)
-    ocr_overlay.paste(text_color, (0, 0), text_alpha)
-    text_color.close()
-    text_alpha.close()
-    ocr_draw = ImageDraw.Draw(ocr_overlay)
-    ocr_draw.text(
-        (4, 4),
-        "OCR/TEXT MASK",
-        fill="white",
-        stroke_width=2,
-        stroke_fill="black",
-    )
-    for item in text_items:
-        left, top, right, bottom = item["box"]
-        ocr_draw.rectangle((left, top, right, bottom), outline=(255, 225, 0), width=2)
-        label = f'{item["id"]}: {item["text"].replace(chr(10), " ")[:40]}'
+                with Image.open(mask_path) as image:
+                    mask = keep_node(image.convert("L"))
+                if mask.size != source.size:
+                    raise ValueError("component evidence mask dimensions differ")
+                color = colors[index % len(colors)]
+                alpha = keep_node(mask.point(lambda value: value * 96 // 255))
+                render_mask = keep_node(ImageChops.subtract(mask, text_mask))
+                color_layer = keep_node(Image.new("RGB", source.size, color))
+                numbered.paste(color_layer, (0, 0), alpha)
+                ownership.paste(color_layer, (0, 0), render_mask)
+                if reconstructed_path is None:
+                    reconstructed.paste(source, (0, 0), render_mask)
+                left, top, right, bottom = node["bbox"]
+                label_at = ((left + right) // 2, (top + bottom) // 2)
+                for draw in (numbered_draw, ownership_draw):
+                    draw.text(
+                        label_at,
+                        node["id"],
+                        fill="white",
+                        stroke_width=2,
+                        stroke_fill="black",
+                        anchor="mm",
+                    )
+
+        paths = {}
+        for name, evidence_image in (
+            ("numbered-masks.png", numbered),
+            ("ownership.png", ownership),
+        ):
+            path = output_dir / name
+            evidence_image.save(path)
+            paths[name] = path
+
+        ocr_overlay = keep(source.copy())
+        text_color = keep(Image.new("RGB", source.size, (255, 225, 0)))
+        text_alpha = keep(text_mask.point(lambda value: value * 112 // 255))
+        ocr_overlay.paste(text_color, (0, 0), text_alpha)
+        ocr_draw = ImageDraw.Draw(ocr_overlay)
         ocr_draw.text(
-            (left, max(0, top - 12)),
-            label,
+            (4, 4),
+            "OCR/TEXT MASK",
             fill="white",
             stroke_width=2,
             stroke_fill="black",
         )
-    ocr_path = output_dir / "ocr-overlay.png"
-    ocr_overlay.save(ocr_path)
-    ocr_overlay.close()
-    text_mask.close()
-    paths["ocr-overlay.png"] = ocr_path
+        for item in text_items:
+            left, top, right, bottom = item["box"]
+            ocr_draw.rectangle(
+                (left, top, right, bottom), outline=(255, 225, 0), width=2
+            )
+            label = f'{item["id"]}: {item["text"].replace(chr(10), " ")[:40]}'
+            ocr_draw.text(
+                (left, max(0, top - 12)),
+                label,
+                fill="white",
+                stroke_width=2,
+                stroke_fill="black",
+            )
+        ocr_path = output_dir / "ocr-overlay.png"
+        ocr_overlay.save(ocr_path)
+        paths["ocr-overlay.png"] = ocr_path
 
-    difference = ImageOps.autocontrast(ImageChops.difference(source, reconstructed))
-    for name, evidence_image in (
-        ("reconstructed.png", reconstructed),
-        ("difference.png", difference),
-    ):
-        path = output_dir / name
-        evidence_image.save(path)
-        evidence_image.close()
-        paths[name] = path
-    source.close()
-    return paths
+        raw_difference = keep(ImageChops.difference(source, reconstructed))
+        difference = keep(ImageOps.autocontrast(raw_difference))
+        for name, evidence_image in (
+            ("reconstructed.png", reconstructed),
+            ("difference.png", difference),
+        ):
+            path = output_dir / name
+            evidence_image.save(path)
+            paths[name] = path
+        return paths
 
 
 def advance_legacy_page(
