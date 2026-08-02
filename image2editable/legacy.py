@@ -780,7 +780,7 @@ def _render_component_evidence(
             (190, 100, 255),
             (60, 220, 210),
         )
-        for index, node in enumerate(graph["nodes"]):
+        for node in graph["nodes"]:
             if node["kind"] == "text" or node["state"] not in {
                 "pending",
                 "pending_gate",
