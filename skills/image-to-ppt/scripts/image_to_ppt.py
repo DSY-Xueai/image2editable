@@ -191,8 +191,15 @@ def _build_text_cleanup_mask(
             dtype=np.float32,
         )
         region = source[y1:y2, x1:x2].astype(np.float32)
+        border_pixels = np.concatenate(
+            (region[0], region[-1], region[:, 0], region[:, -1]),
+            axis=0,
+        )
+        background = np.median(border_pixels, axis=0)
+        target_distance = float(np.linalg.norm(target - background))
+        color_tolerance = min(120.0, max(18.0, target_distance * 0.6))
         matching = (
-            np.linalg.norm(region - target, axis=2) <= 120.0
+            np.linalg.norm(region - target, axis=2) <= color_tolerance
         ).astype(np.uint8)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             matching,

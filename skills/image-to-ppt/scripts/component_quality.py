@@ -303,9 +303,33 @@ def component_metrics(
         if not len(samples):
             samples = source_rgb[region]
         local_fill = np.median(samples.astype(np.float32), axis=0)
-        text_ink[region] = np.max(
-            np.abs(source_float[region] - local_fill), axis=1
-        ) > ink_threshold
+        candidate = np.zeros(shape, dtype=np.uint8)
+        candidate[region] = (
+            np.max(np.abs(source_float[region] - local_fill), axis=1)
+            > ink_threshold
+        )
+        ys, xs = np.where(region)
+        y1, y2 = int(ys.min()), int(ys.max()) + 1
+        x1, x2 = int(xs.min()), int(xs.max()) + 1
+        local = candidate[y1:y2, x1:x2]
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(local, 8)
+        for component_label in range(1, count):
+            component = labels == component_label
+            component_width = int(stats[component_label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[component_label, cv2.CC_STAT_HEIGHT])
+            crosses_vertically = (
+                np.any(component[0])
+                and np.any(component[-1])
+                and component_width <= max(3, round(local.shape[1] * 0.2))
+            )
+            crosses_horizontally = (
+                np.any(component[:, 0])
+                and np.any(component[:, -1])
+                and component_height <= max(3, round(local.shape[0] * 0.2))
+            )
+            if crosses_vertically or crosses_horizontally:
+                local[component] = 0
+        text_ink[y1:y2, x1:x2] |= local > 0
     text_ghost = (
         text_support
         & text_ink

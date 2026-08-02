@@ -1419,6 +1419,69 @@ def test_agent_can_rebuild_uniform_canvas_under_active_components(
         assert rebuilt.getpixel((0, 0)) == (255, 255, 255)
 
 
+def test_background_rebuild_cleans_discarded_component_residual(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    component_mask = masks / "discarded.png"
+    Image.new("RGB", (40, 30), "white").save(source)
+    current_image = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(current_image).rectangle((12, 8, 27, 21), fill=(180, 180, 180))
+    current_image.save(current)
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((12, 8, 27, 21), fill=255)
+    mask.save(component_mask)
+    Image.new("L", (40, 30), 0).save(text_mask)
+    graph = {"nodes": [{
+        "id": "discarded", "kind": "parent", "parent_id": None,
+        "state": "inactive", "mask": "masks/discarded.png",
+        "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
+        "bbox": [12, 8, 28, 22], "z_index": 0, "text_ids": [],
+    }]}
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.01, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((20, 15)) == (255, 255, 255)
+
+
+def test_background_rebuild_does_not_expand_text_box_into_neighbor_content(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+    source_image = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(source_image).rectangle((16, 12, 18, 14), fill="blue")
+    source_image.save(source)
+    source_image.save(current)
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((12, 12, 14, 14), fill=255)
+    mask.save(text_mask)
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        graph={"nodes": []}, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.1, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((16, 13)) == (0, 0, 255)
+
+
 def test_background_rebuild_rejects_nonuniform_canvas_border(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     current = tmp_path / "current.png"

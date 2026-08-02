@@ -1197,7 +1197,8 @@ def _build_text_ink_mask(
             continue
 
         region = gray[y:y + h, x:x + w]
-        if float(np.std(region)) < 8.0:
+        low, high = np.percentile(region, (2, 98))
+        if float(high - low) < 8.0:
             continue
 
         thresh, _ = cv2.threshold(

@@ -4240,6 +4240,35 @@ def test_text_cleanup_mask_covers_glyphs_without_masking_the_whole_ocr_box() -> 
     assert np.count_nonzero(cleanup) < np.count_nonzero(text_mask) * 0.5
 
 
+def test_text_cleanup_mask_keeps_sparse_low_variance_glyphs() -> None:
+    import cv2
+    import numpy as np
+
+    source = np.full((30, 40, 3), [19, 95, 167], dtype=np.uint8)
+    cv2.putText(
+        source,
+        "3.1",
+        (2, 21),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (16, 61, 104),
+        1,
+        cv2.LINE_AA,
+    )
+    text_mask = np.full((30, 40), 255, dtype=np.uint8)
+
+    assert float(np.std(cv2.cvtColor(source, cv2.COLOR_RGB2GRAY))) < 8.0
+    cleanup = image_to_ppt._build_text_cleanup_mask(
+        source,
+        text_mask,
+        [{"box": [0, 0, 40, 30], "text": "3.1", "color": "#103d68"}],
+    )
+
+    glyphs = cv2.cvtColor(source, cv2.COLOR_RGB2GRAY) < 70
+    assert np.count_nonzero(cleanup[glyphs]) >= np.count_nonzero(glyphs) * 0.9
+    assert np.count_nonzero(cleanup) < np.count_nonzero(text_mask) * 0.6
+
+
 def test_text_cleanup_preserves_non_glyph_background_pixels() -> None:
     import cv2
     import numpy as np

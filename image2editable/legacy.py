@@ -918,15 +918,14 @@ def _rebuild_canvas_background(
     with Image.open(current_background_path) as image:
         current = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
-        repair = np.asarray(image.convert("L")) > 0
-    if source.shape != current.shape or repair.shape != source.shape[:2]:
+        text_repair = np.asarray(image.convert("L")) > 0
+    if source.shape != current.shape or text_repair.shape != source.shape[:2]:
         raise ValueError("background rebuild input dimensions differ")
 
     graph_root = graph_dir.resolve()
+    visual_repair = np.zeros(text_repair.shape, dtype=bool)
     for node in graph["nodes"]:
-        if node["kind"] == "text" or node["state"] not in {
-            "pending", "pending_gate", "frozen"
-        }:
+        if node["kind"] == "text":
             continue
         mask_path = (graph_dir / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(graph_root):
@@ -935,16 +934,18 @@ def _rebuild_canvas_background(
             raise ValueError("background rebuild mask sha256 mismatch")
         with Image.open(mask_path) as image:
             mask = np.asarray(image.convert("L")) > 0
-        if mask.shape != repair.shape:
+        if mask.shape != text_repair.shape:
             raise ValueError("background rebuild mask dimensions differ")
-        repair |= mask
+        visual_repair |= mask
 
-    height, width = repair.shape
+    height, width = text_repair.shape
     radius = max(1, round(min(height, width) * margin_ratio))
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
     )
-    repair = cv2.dilate(repair.astype(np.uint8), kernel) > 0
+    repair = text_repair | (
+        cv2.dilate(visual_repair.astype(np.uint8), kernel) > 0
+    )
     border_width = max(2, round(min(height, width) * 0.03))
     border = np.zeros(repair.shape, dtype=bool)
     border[:border_width] = True

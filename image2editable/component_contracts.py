@@ -400,12 +400,17 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
         raise ValueError("component plan actions must be a list")
     known_ids = set(request["candidate_ids"]) | set(request["frozen_ids"])
     collapsible_parent_ids = set()
+    recoverable_parent_ids = set()
     if graph is not None:
         candidate_ids = set(request["candidate_ids"])
         collapsible_parent_ids = {
             node["parent_id"]
             for node in graph["nodes"]
             if node.get("id") in candidate_ids and node.get("parent_id") is not None
+        }
+        recoverable_parent_ids = {
+            node["id"] for node in graph["nodes"]
+            if node.get("kind") == "parent" and node.get("state") == "inactive"
         }
     touched = set()
     background_rebuilds = 0
@@ -429,6 +434,11 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                 and not (
                     name in {"collapse_to_parent", "absorb_into_parent"}
                     and value in collapsible_parent_ids
+                )
+                and not (
+                    name == "absorb_into_parent"
+                    and value == object_ids[0]
+                    and value in recoverable_parent_ids
                 )
                 for value in object_ids
             )

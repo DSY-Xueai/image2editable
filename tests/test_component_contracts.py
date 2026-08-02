@@ -193,6 +193,18 @@ def test_component_plan_allows_collapse_to_parent_of_requested_child() -> None:
     ) is plan
 
 
+def test_component_plan_allows_absorb_into_authenticated_inactive_parent() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].remove("parent_b")
+    request["candidate_ids"].remove("child_b")
+    next(node for node in graph["nodes"] if node["id"] == "parent_b")["state"] = "inactive"
+    plan = _plan(request, "absorb_into_parent", ["parent_b", "visual"])
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
 def _plan_contract_fixture() -> tuple[dict, dict]:
     ids = ["visual", "visual2", "text", "parent_a", "parent_b", "child_a", "child_b"]
     request = {"schema_version": 1, "page_id": "page_001", "provider": "host",

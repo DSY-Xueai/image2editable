@@ -492,6 +492,18 @@ def test_clean_component_fill_inside_text_box_is_not_a_text_ghost() -> None:
     assert "text_ghost" not in _evaluate_synthetic(case)["violations"]
 
 
+def test_structural_divider_crossing_text_box_is_not_a_text_ghost() -> None:
+    case = _synthetic_quality_case()
+    text = case["text_mask"]
+    case["source"][text] = 186
+    divider = np.zeros_like(text)
+    divider[20:24, 38:40] = True
+    case["source"][divider] = 20
+    case["reconstructed"][divider] = 20
+
+    assert "text_ghost" not in _evaluate_synthetic(case)["violations"]
+
+
 def test_internal_page_context_reuses_full_page_conversions(monkeypatch) -> None:
     case = _synthetic_quality_case()
     module = importlib.import_module("image2editable.component_quality")

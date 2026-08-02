@@ -142,6 +142,8 @@
 - 页面视觉差异只作为总门禁，不能触发 `components=[]` 或 text-only 成功；组件/文字重叠改为组件级失败报告，组件继续保留给后续重修。
 - `protected_native_overlap` 与 `pptx_reopen` 采用严格 `pass/fail/unknown`，缺失或 `unknown` 均失败；Task 8/最终组装负责接入真实检查事实，本阶段不伪造通过结果。
 - 质量门禁读取组件图声明的掩码并复核哈希、目录身份和链接属性，拒绝越界、`..` 语义路径、链接祖先、读取中替换及组件 ID/数量不一致。
+- 文字重影检测会排除贯穿 OCR 框两侧的细长结构线，避免把表格/矩阵边界误判为残字；稀疏低方差文字改用 2%–98% 局部对比检测，并按文字色与背景色距离自适应约束清理范围。
+- 背景重建会清理认证组件图内包括 `inactive/discarded` 在内的全部视觉遮罩；视觉 margin 只扩张组件遮罩，不扩张 OCR 文字框，避免丢弃对象残留灰尾或标题清理吞掉邻近副标题。多轮 `absorb_into_parent` 只允许恢复同一认证图中的 inactive 父组件作为首个目标。
 
 ## P2.3 Task 8 本轮变更
 
@@ -191,12 +193,15 @@ image2editable run execute runs/pptx-job
 - `混合.pptx`：3 页、0 个合格整页截图候选；原生 shape ID、对象 XML hash、z-order、备注、页数和尺寸全部一致。
   - 输出：`tmp/task10-real-acceptance-20260802-v3/mixed-run/final/output.pptx`
   - 源与输出 SHA-256 均为 `bb7b11d24f9db74f0a31a52809bfbaa46ca275f4a49085a3e0a1fbe8668ecc0d`。
-- `research_layout_demo_3pages.pdf` 已完成 3 页低资源渲染、输入准备和页面请求检查；本轮不重复执行约 2.2 GiB 的重型分层，避免再次占满用户内存。
+- `research_layout_demo_3pages.pdf` 已完成 3 页真实 Host Agent 分层、语义父组件重组、背景重建、质量门禁、最终组装及 PowerPoint 原生重开/PNG 渲染验收；副标题、表格/科研图、流程卡完整，无浅灰栅格残影、白色 OCR 方块、组件重影或右侧灰尾。
+  - 输出：`tmp/task13-host-pdf-r3/final/output_original.pptx`、`tmp/task13-host-pdf-r3/final/output_16x9.pptx`。
+  - 原生对象统计：第 1 页 25 个对象（11 图片组件、14 文字框），第 2 页 11 个对象（7 图片组件、4 文字框），第 3 页 29 个对象（6 图片组件、23 文字框）。
+  - 资源策略保持 `heavy_page_concurrency=1`；重型进程实测峰值约 2.26 GiB，未并行处理其他文件，结束后无 Python 转换进程残留。
 - 验收记录：`tmp/task10-real-acceptance-20260802-v3/acceptance_summary.json`；目录约 85.7 MB，结束后无视觉、OCR 或 SAM 子进程残留。
 
 ## 当前注意事项
 
-- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–12 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护、本地模型管理、Local Provider 隔离推理，以及双 Provider 的 README/Skill 使用说明。下一阶段是 Task 13 的真实模型与真实图片、PDF、图片版/混合 PPTX 验收。
+- P2.3 通用组件 Agent 重建设计已确认并写入 `docs/superpowers/specs/2026-07-31-component-agent-reconstruction-design.md`；Task 1–12 已完成统一运行时、最多五轮重修、最终组装、截图型 PPTX 原生对象保护、本地模型管理、Local Provider 隔离推理，以及双 Provider 的 README/Skill 使用说明。Task 13 已完成真实 PNG 与三页 PDF 验收，下一步复验图片版 `test1.pptx` 和原生/图片混合 `混合.pptx`。
 - 本地模型目录目前仍为 `revision=main`、`stability=experimental`；Task 12 没有下载模型。只有取得用户明确下载授权并完成 Task 13 的真实图片、PDF、图片版 PPTX 验收后，才固定验收 commit 并调整稳定性。
 - Agent 只自动执行 `replace + full_slide_screenshot + confidence >= 0.92`；不确定候选继续保留。
 - 每页最多记录一个自动替换决策；旧运行若存在同页双批准，会按单页 `preserved_with_warning` 回退。
