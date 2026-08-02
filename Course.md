@@ -3,7 +3,8 @@
 ## 叶组件优先与过度合并门禁（本轮）
 
 - 当前状态：组件计划按可独立移动的最小完整视觉单元处理；本轮仅完成规则与确定性质量门禁，未运行真实 OCR、SAM、模型重建或 `test1.pptx` 验收。
-- 本轮变更：`absorb_into_parent` 仅允许同一物理实体的重复掩码、碎边、阴影或分割缺口；质量重算从当前哈希绑定请求读取原始 masks，空间独立的多个叶簇会给目标父组件加入硬失败 `over_merged_component`，重复/包含掩码和低于页面噪声下限的碎片不触发。
+- 本轮变更：`absorb_into_parent` 仅允许同一物理实体的重复掩码、碎边、阴影或分割缺口；质量重算从当前哈希绑定输出图复核 active 组件覆盖的 inactive 源 masks，空间独立的多个叶簇会给 absorb/merge/collapse 及后续未改变组件持续加入硬失败 `over_merged_component`，只有不再覆盖多个独立源叶的新 mask 才能解除。
+- 几何与资源：叶簇使用紧 bbox crop、预存面积和 bbox 快速跳过；宽容器不能传递桥接独立叶，近邻碎边/偏移阴影/小缺口可按页面校准聚合，小页面不再受固定 20 像素噪声下限影响。mask 读取后复核完整祖先目录身份，拒绝 symlink/junction/reparse 替换。
 - 关键文件：`image2editable/component_quality.py`、`image2editable/component_repair.py`、`image2editable/local_agent_worker.py`、`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_quality.py` 及对应测试。
 - 运行入口保持不变：Host 使用 `image2editable agent next/record`，Local 使用 `--agent-provider local`；每页仍最多五批并复用既有父组件/页面降级流程。
 - 注意：未实现计划中的后续 Task 2；此前真实文件验收记录属于旧门禁的历史结果，不能视为本轮叶组件规则的真实验收。

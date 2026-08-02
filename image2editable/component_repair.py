@@ -727,36 +727,12 @@ def _recompute_quality_artifact(
         decode("reconstructed", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
     )
     text_mask = decode("text_mask", cv2.IMREAD_GRAYSCALE)
-    over_merged_component_ids = set()
     if filename == "component-quality.json":
-        from image2editable.component_quality import (
-            absorbed_leaf_cluster_count,
-            calibrate_page,
-        )
-        from scripts.visual_segment import _read_action_mask
-
-        calibration = calibrate_page(source, text_mask)
         input_graph = load_component_agent_graph(request_path)
         plan = json.loads(_load_state_artifact(
             store.root, state["current_round"]["plan_ref"]
         ).decode("utf-8"))
         validate_component_plan(plan, request=request, graph=input_graph)
-        input_nodes = {node["id"]: node for node in input_graph["nodes"]}
-        for action in plan["actions"]:
-            if action["action"] != "absorb_into_parent":
-                continue
-            target_id, *absorbed_ids = action["object_ids"]
-            absorbed_masks = []
-            for component_id in absorbed_ids:
-                node = input_nodes[component_id]
-                mask, _ = _read_action_mask(
-                    request_dir / Path(*PurePosixPath(node["mask"]).parts),
-                    source.shape[:2],
-                    node["mask_sha256"],
-                )
-                absorbed_masks.append(mask)
-            if absorbed_leaf_cluster_count(absorbed_masks, calibration) > 1:
-                over_merged_component_ids.add(target_id)
     graph_payload = _load_state_artifact(
         store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
     )
@@ -777,7 +753,6 @@ def _recompute_quality_artifact(
         text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
-        over_merged_component_ids=over_merged_component_ids,
     )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
@@ -1088,14 +1063,15 @@ def evaluate_component_quality_round(
     agent_confidence_by_id: dict | None = None,
     over_merged_component_ids: set[str] | None = None,
 ) -> dict:
+    import numpy as np
+
     from image2editable.component_quality import (
+        absorbed_leaf_cluster_count,
         calibrate_page,
         evaluate_component,
         evaluate_page_quality,
         _prepare_page_quality_context,
     )
-    from scripts.visual_segment import _read_action_mask
-
     validated = validate_component_graph(graph)
     calibration = calibrate_page(source, text_mask)
     previous_reports = previous_reports or {}
@@ -1129,23 +1105,47 @@ def evaluate_component_quality_round(
             loaded_ids.add(parent_id)
     masks = {}
     for node in mask_nodes:
-        component_id = node["id"]
-        mask_path = graph_root / node["mask"]
-        current = graph_root
-        mask_parent_chain = []
-        for part in PurePosixPath(node["mask"]).parts[:-1]:
-            current = current / part
-            parent_status = current.lstat()
-            if _is_link_or_reparse(parent_status) or not stat.S_ISDIR(parent_status.st_mode):
-                raise ValueError("component quality mask parent must be a plain directory")
-            mask_parent_chain.append((current, _directory_identity(parent_status)))
-        component_mask, _ = _read_action_mask(
-            mask_path,
-            source.shape[:2],
-            node["mask_sha256"],
+        masks[node["id"]] = _load_quality_graph_mask(
+            node, graph_root=graph_root, trusted_chain=directory_chain,
+            shape=source.shape[:2],
         )
-        _require_directory_chain_identity(directory_chain + mask_parent_chain)
-        masks[node["id"]] = component_mask
+    def related_inactive_sources(target: dict):
+        target_mask = masks[target["id"]]
+        tx1, ty1, tx2, ty2 = target["bbox"]
+        for source_node in validated["nodes"]:
+            if source_node["kind"] == "text" or source_node["state"] != "inactive":
+                continue
+            ancestor_id = source_node.get("parent_id")
+            is_descendant = False
+            while ancestor_id is not None:
+                if ancestor_id == target["id"]:
+                    is_descendant = True
+                    break
+                ancestor_id = nodes_by_id[ancestor_id].get("parent_id")
+            if not is_descendant and source_node.get("parent_id") != target.get("parent_id"):
+                continue
+            sx1, sy1, sx2, sy2 = source_node["bbox"]
+            ix1, iy1 = max(tx1, sx1), max(ty1, sy1)
+            ix2, iy2 = min(tx2, sx2), min(ty2, sy2)
+            if ix1 >= ix2 or iy1 >= iy2:
+                continue
+            source_mask = _load_quality_graph_mask(
+                source_node, graph_root=graph_root, trusted_chain=directory_chain,
+                shape=source.shape[:2],
+            )
+            source_area = int(np.count_nonzero(source_mask))
+            covered = int(np.count_nonzero(
+                source_mask[iy1:iy2, ix1:ix2]
+                & target_mask[iy1:iy2, ix1:ix2]
+            ))
+            if covered / max(source_area, 1) >= 0.8:
+                yield source_mask
+
+    for node in candidates:
+        if absorbed_leaf_cluster_count(
+            related_inactive_sources(node), calibration
+        ) > 1:
+            over_merged_component_ids.add(node["id"])
     page_context = _prepare_page_quality_context(
         source, background, reconstructed, text_mask,
         calibration=calibration,
@@ -1178,6 +1178,31 @@ def evaluate_component_quality_round(
         expected_component_ids=expected_component_ids,
         initial_component_count=initial_component_count,
     )
+
+
+def _load_quality_graph_mask(
+    node: dict,
+    *,
+    graph_root: Path,
+    trusted_chain: list[tuple[Path, tuple[int, int, int, int]]],
+    shape: tuple[int, int],
+):
+    from scripts.visual_segment import _read_action_mask
+
+    mask_path = graph_root / node["mask"]
+    current = graph_root
+    mask_parent_chain = []
+    for part in PurePosixPath(node["mask"]).parts[:-1]:
+        current = current / part
+        parent_status = current.lstat()
+        if _is_link_or_reparse(parent_status) or not stat.S_ISDIR(parent_status.st_mode):
+            raise ValueError("component quality mask parent must be a plain directory")
+        mask_parent_chain.append((current, _directory_identity(parent_status)))
+    component_mask, _ = _read_action_mask(
+        mask_path, shape, node["mask_sha256"]
+    )
+    _require_directory_chain_identity(trusted_chain + mask_parent_chain)
+    return component_mask
 
 
 def _snapshot_quality_directory_chain(

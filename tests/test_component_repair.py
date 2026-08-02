@@ -720,12 +720,82 @@ def test_execute_absorb_unions_visuals_into_one_parent(tmp_path: Path) -> None:
     assert by_id["left"]["state"] == by_id["right"]["state"] == "inactive"
 
 
-def _record_absorb_quality(
+def _execute_composite_quality_round(
+    store,
+    request_path: Path,
+    graph: dict,
+    *,
+    action: dict,
+    shape: tuple[int, int],
+    before_quality=None,
+) -> tuple[dict, dict]:
+    request = load_component_agent_request(request_path)
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": request["repair_round"],
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [action],
+    }
+    record_local_component_plan(store, "page_001", plan=plan)
+    execution_dir = request_path.parents[2] / f"execution-{request['repair_round']:02d}"
+    execute_component_actions(
+        np.zeros((*shape, 3), dtype=np.uint8), graph, plan["actions"],
+        sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
+    )
+    graph_path = execution_dir / "component-graph.json"
+    quality_paths = {}
+    for name in ("background", "reconstructed", "text-mask"):
+        path = execution_dir / f"{name}.png"
+        Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
+        quality_paths[name.replace("-", "_")] = path
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    native = execution_dir / "native-check.json"
+    native.write_text(json.dumps({
+        "schema_version": 1, "page_id": "page_001",
+        "source_sha256": state["source_sha256"],
+        "protected_native_overlap": "pass",
+    }), encoding="utf-8")
+    quality_paths["native_check"] = native
+    quality_refs = {
+        name: {
+            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for name, path in quality_paths.items()
+    }
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "repair_round": request["repair_round"],
+        "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": request["graph_sha256"],
+        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1, "quality_input_refs": quality_refs,
+    }
+    execution_path = execution_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    record_component_execution(
+        store, "page_001", execution_path=execution_path,
+        output_graph_path=graph_path,
+    )
+    if before_quality is not None:
+        before_quality()
+    record_component_quality(store, "page_001")
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    quality = json.loads(
+        (store.root / state["current_round"]["quality_ref"]["path"])
+        .read_text(encoding="utf-8")
+    )
+    return quality["report"], advance_component_repair(store, "page_001")
+
+
+def _record_composite_quality(
     page_session: dict,
     *,
     left_box: tuple[int, int, int, int],
     right_box: tuple[int, int, int, int],
-) -> tuple[dict, dict]:
+    action_name: str = "absorb_into_parent",
+    before_quality=None,
+) -> tuple[dict, dict, object, dict]:
     from image2editable.store import RunStore
 
     evidence_root = Path(page_session["reconstruction_dir"]) / "evidence-source"
@@ -738,6 +808,8 @@ def _record_absorb_quality(
         "left": _box_mask(shape, left_box),
         "right": _box_mask(shape, right_box),
     }
+    if action_name == "collapse_to_parent":
+        values["parent"] = np.maximum(values["left"], values["right"])
     nodes = []
     for component_id, kind, parent_id, state, z_index in (
         ("parent", "parent", None, "inactive", 0),
@@ -773,62 +845,17 @@ def _record_absorb_quality(
         store, "page_001", request_path=request_path, initial_component_count=2,
     )
     advance_component_repair(store, "page_001")
-    plan = {
-        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
-        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-        "actions": [_action("absorb_into_parent", ["parent", "left", "right"])],
-    }
-    record_local_component_plan(store, "page_001", plan=plan)
-    execution_dir = request_path.parents[2] / "execution-01"
-    execute_component_actions(
-        np.zeros((*shape, 3), dtype=np.uint8), graph, plan["actions"],
-        sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
+    object_ids = {
+        "absorb_into_parent": ["parent", "left", "right"],
+        "collapse_to_parent": ["parent"],
+        "merge": ["left", "right"],
+    }[action_name]
+    report, freeze = _execute_composite_quality_round(
+        store, request_path, graph,
+        action=_action(action_name, object_ids), shape=shape,
+        before_quality=before_quality,
     )
-    graph_path = execution_dir / "component-graph.json"
-    quality_paths = {}
-    for name in ("background", "reconstructed", "text-mask"):
-        path = execution_dir / f"{name}.png"
-        Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
-        quality_paths[name.replace("-", "_")] = path
-    state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    native = execution_dir / "native-check.json"
-    native.write_text(json.dumps({
-        "schema_version": 1, "page_id": "page_001",
-        "source_sha256": state["source_sha256"],
-        "protected_native_overlap": "pass",
-    }), encoding="utf-8")
-    quality_paths["native_check"] = native
-    quality_refs = {
-        name: {
-            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
-        for name, path in quality_paths.items()
-    }
-    execution = {
-        "schema_version": 1, "page_id": "page_001", "provider": "local",
-        "repair_round": 1, "request_sha256": plan["request_sha256"],
-        "input_graph_sha256": hashlib.sha256(
-            (request_path.parent / "component-graph.json").read_bytes()
-        ).hexdigest(),
-        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
-        "executable_action_count": 1, "quality_input_refs": quality_refs,
-    }
-    execution_path = execution_dir / "execution.json"
-    execution_path.write_text(json.dumps(execution), encoding="utf-8")
-    record_component_execution(
-        store, "page_001", execution_path=execution_path,
-        output_graph_path=graph_path,
-    )
-    record_component_quality(store, "page_001")
-    state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    quality = json.loads(
-        (store.root / state["current_round"]["quality_ref"]["path"])
-        .read_text(encoding="utf-8")
-    )
-    freeze = advance_component_repair(store, "page_001")
-    return quality["report"], freeze
+    return report, freeze, store, page_session
 
 
 def _box_mask(
@@ -843,7 +870,7 @@ def _box_mask(
 def test_absorbing_independent_candidates_is_hard_over_merge_failure(
     page_session: dict,
 ) -> None:
-    report, freeze = _record_absorb_quality(
+    report, freeze, _, _ = _record_composite_quality(
         page_session, left_box=(2, 2, 8, 8), right_box=(18, 28, 24, 34)
     )
 
@@ -857,7 +884,7 @@ def test_absorbing_independent_candidates_is_hard_over_merge_failure(
 def test_absorbing_overlapping_duplicate_masks_can_freeze_parent(
     page_session: dict,
 ) -> None:
-    report, freeze = _record_absorb_quality(
+    report, freeze, _, _ = _record_composite_quality(
         page_session, left_box=(3, 3, 13, 13), right_box=(4, 4, 12, 12)
     )
 
@@ -865,6 +892,112 @@ def test_absorbing_overlapping_duplicate_masks_can_freeze_parent(
     assert "over_merged_component" not in parent["violations"]
     assert parent["accepted"] is True
     assert freeze["frozen_ids"] == ["parent"]
+
+
+@pytest.mark.parametrize(
+    ("action_name", "target_id"),
+    [("merge", "merge_0001"), ("collapse_to_parent", "parent")],
+)
+def test_other_composite_actions_reject_independent_leaf_candidates(
+    page_session: dict,
+    action_name: str,
+    target_id: str,
+) -> None:
+    report, freeze, _, _ = _record_composite_quality(
+        page_session,
+        left_box=(2, 2, 8, 8),
+        right_box=(18, 28, 24, 34),
+        action_name=action_name,
+    )
+
+    target = next(
+        item for item in report["component_reports"]
+        if item["component_id"] == target_id
+    )
+    assert "over_merged_component" in target["violations"]
+    assert freeze["failed_ids"] == [target_id]
+    assert target_id not in freeze["frozen_ids"]
+
+
+def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
+    page_session: dict,
+) -> None:
+    _, first_freeze, store, session = _record_composite_quality(
+        page_session,
+        left_box=(2, 2, 8, 8),
+        right_box=(18, 28, 24, 34),
+    )
+    assert first_freeze["failed_ids"] == ["parent"]
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session["evidence"]["component-graph.json"] = (
+        store.root / state["graph_ref"]["path"]
+    )
+    second_request = build_component_agent_request(session, repair_round=2)
+    record_next_component_request(
+        store, "page_001", request_path=second_request
+    )
+    advance_component_repair(store, "page_001")
+    graph = load_component_agent_graph(second_request)
+
+    report, second_freeze = _execute_composite_quality_round(
+        store,
+        second_request,
+        graph,
+        action=_action("accept", ["parent"]),
+        shape=(30, 40),
+    )
+
+    parent = report["component_reports"][0]
+    assert "over_merged_component" in parent["violations"]
+    assert second_freeze["failed_ids"] == ["parent"]
+    assert "parent" not in second_freeze["frozen_ids"]
+
+
+def test_quality_rejects_absorbed_mask_ancestor_replaced_during_read(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.visual_segment as visual_segment
+
+    real_read = visual_segment._read_action_mask
+    real_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    replaced_root = None
+
+    class ReparseStatus:
+        def __init__(self, wrapped: os.stat_result) -> None:
+            self._wrapped = wrapped
+            self.st_file_attributes = (
+                getattr(wrapped, "st_file_attributes", 0) | reparse_flag
+            )
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._wrapped, name)
+
+    def install_swap() -> None:
+        def swap_then_read(path: Path, *args, **kwargs):
+            nonlocal replaced_root
+            if replaced_root is None:
+                replaced_root = Path(path).parents[1]
+            return real_read(path, *args, **kwargs)
+
+        def flagged_lstat(path: Path) -> object:
+            status = real_lstat(path)
+            return ReparseStatus(status) if path == replaced_root else status
+
+        monkeypatch.setattr(visual_segment, "_read_action_mask", swap_then_read)
+        monkeypatch.setattr(Path, "lstat", flagged_lstat)
+
+    with pytest.raises((RuntimeError, ValueError), match="directory|identity|unsafe|reparse"):
+        _record_composite_quality(
+            page_session,
+            left_box=(2, 2, 8, 8),
+            right_box=(18, 28, 24, 34),
+            before_quality=install_swap,
+        )
+    assert replaced_root is not None
+    reconstruction = Path(page_session["reconstruction_dir"])
+    assert not list(reconstruction.rglob("component-quality.json"))
 
 
 def test_frozen_mask_keeps_nonstandard_relative_path(tmp_path: Path) -> None:

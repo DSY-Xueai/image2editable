@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import hashlib
+import weakref
 
 import numpy as np
 import pytest
@@ -68,6 +69,69 @@ def test_fragment_below_page_noise_floor_does_not_add_leaf_cluster() -> None:
     assert component_quality.absorbed_leaf_cluster_count(
         masks, _leaf_calibration(min_component_pixels=20)
     ) == 1
+
+
+def test_broad_container_mask_does_not_bridge_independent_leaf_clusters() -> None:
+    masks = [
+        _mask((30, 40), (3, 3, 9, 9)),
+        _mask((30, 40), (18, 28, 24, 34)),
+        _mask((30, 40), (1, 1, 27, 37)),
+    ]
+
+    assert component_quality.absorbed_leaf_cluster_count(
+        masks, _leaf_calibration()
+    ) == 3
+
+
+def test_nearby_nonoverlapping_edge_fragments_form_one_leaf_cluster() -> None:
+    masks = [
+        _mask((30, 40), (8, 4, 14, 14)),
+        _mask((30, 40), (8, 16, 14, 26)),
+    ]
+    calibration = component_quality.PageCalibration(0.0, 1.0, 2, 1, 20)
+
+    assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 1
+
+
+def test_offset_shadow_forms_one_leaf_cluster() -> None:
+    masks = [
+        _mask((30, 40), (5, 5, 15, 15)),
+        _mask((30, 40), (5, 10, 15, 20)),
+    ]
+    calibration = component_quality.PageCalibration(0.0, 1.0, 2, 1, 20)
+
+    assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 1
+
+
+def test_small_page_calibration_keeps_far_valid_small_leaf_masks() -> None:
+    source = np.zeros((30, 40, 3), dtype=np.uint8)
+    calibration = calibrate_page(source, np.zeros(source.shape[:2], dtype=np.uint8))
+    masks = [
+        _mask(source.shape[:2], (2, 2, 4, 4)),
+        _mask(source.shape[:2], (24, 34, 26, 36)),
+    ]
+
+    assert calibration.min_component_pixels == 1
+    assert component_quality.absorbed_leaf_cluster_count(masks, calibration) == 2
+
+
+def test_leaf_clustering_releases_full_page_masks_while_consuming_iterator() -> None:
+    references: list[weakref.ReferenceType[np.ndarray]] = []
+    live_counts = []
+
+    def masks():
+        for index in range(12):
+            live_counts.append(sum(reference() is not None for reference in references))
+            mask = np.zeros((512, 512), dtype=bool)
+            start = index * 16
+            mask[4:12, start:start + 8] = True
+            references.append(weakref.ref(mask))
+            yield mask
+
+    assert component_quality.absorbed_leaf_cluster_count(
+        masks(), _leaf_calibration(min_component_pixels=1)
+    ) == 12
+    assert max(live_counts) <= 2
 
 
 def test_strict_quality_report_rejects_empty_metrics() -> None:

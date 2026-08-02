@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import cv2
@@ -27,6 +28,13 @@ class _PageQualityContext:
     text_ink: np.ndarray
     exterior_owner_count: np.ndarray
     component_owner_count: np.ndarray
+
+
+@dataclass(frozen=True)
+class _AbsorbedMaskSummary:
+    bbox: tuple[int, int, int, int]
+    crop: np.ndarray
+    area: int
 
 
 _CHECK_STATES = frozenset({"pass", "fail", "unknown"})
@@ -117,17 +125,17 @@ def calibrate_page(source: np.ndarray, text_mask: np.ndarray) -> PageCalibration
         text_halo_px,
         int(round(max(noise_l1, 1.0) ** 0.5)),
     )
-    min_component_pixels = max(20, int(round(image.shape[0] * image.shape[1] * 1e-5)))
+    min_component_pixels = max(1, int(round(image.shape[0] * image.shape[1] * 1e-5)))
     return PageCalibration(noise_l1, local_contrast, edge_width_px, text_halo_px, min_component_pixels)
 
 
 def absorbed_leaf_cluster_count(
-    masks: list[np.ndarray], calibration: PageCalibration
+    masks: Iterable[np.ndarray], calibration: PageCalibration
 ) -> int:
     """Count independently movable entities among masks absorbed into a parent."""
     if not isinstance(calibration, PageCalibration):
         raise ValueError("calibration must be PageCalibration")
-    active = []
+    summaries = []
     shape = None
     for mask in masks:
         array = _numeric_mask(mask, "absorbed mask")
@@ -136,9 +144,16 @@ def absorbed_leaf_cluster_count(
         elif array.shape != shape:
             raise ValueError("absorbed masks must share one page shape")
         support = array if array.dtype == np.bool_ else array > 0
-        if int(np.count_nonzero(support)) >= calibration.min_component_pixels:
-            active.append(support)
-    parents = list(range(len(active)))
+        area = int(np.count_nonzero(support))
+        if area < calibration.min_component_pixels:
+            continue
+        ys, xs = np.nonzero(support)
+        y1, y2 = int(ys.min()), int(ys.max()) + 1
+        x1, x2 = int(xs.min()), int(xs.max()) + 1
+        summaries.append(_AbsorbedMaskSummary(
+            (y1, x1, y2, x2), support[y1:y2, x1:x2].copy(), area
+        ))
+    parents = list(range(len(summaries)))
 
     def find(index: int) -> int:
         while parents[index] != index:
@@ -146,16 +161,62 @@ def absorbed_leaf_cluster_count(
             index = parents[index]
         return index
 
-    for left in range(len(active)):
-        left_pixels = int(np.count_nonzero(active[left]))
-        for right in range(left + 1, len(active)):
-            intersection = int(np.count_nonzero(active[left] & active[right]))
-            smaller = min(left_pixels, int(np.count_nonzero(active[right])))
-            if intersection / smaller >= 0.5:
+    for left in range(len(summaries)):
+        for right in range(left + 1, len(summaries)):
+            if _same_absorbed_entity(
+                summaries[left], summaries[right], calibration
+            ):
                 left_root = find(left)
                 right_root = find(right)
                 parents[right_root] = left_root
-    return len({find(index) for index in range(len(active))})
+    return len({find(index) for index in range(len(summaries))})
+
+
+def _same_absorbed_entity(
+    left: _AbsorbedMaskSummary,
+    right: _AbsorbedMaskSummary,
+    calibration: PageCalibration,
+) -> bool:
+    ly1, lx1, ly2, lx2 = left.bbox
+    ry1, rx1, ry2, rx2 = right.bbox
+    iy1, ix1 = max(ly1, ry1), max(lx1, rx1)
+    iy2, ix2 = min(ly2, ry2), min(lx2, rx2)
+    intersection = 0
+    if iy1 < iy2 and ix1 < ix2:
+        left_crop = left.crop[iy1 - ly1:iy2 - ly1, ix1 - lx1:ix2 - lx1]
+        right_crop = right.crop[iy1 - ry1:iy2 - ry1, ix1 - rx1:ix2 - rx1]
+        intersection = int(np.count_nonzero(left_crop & right_crop))
+    left_cover = intersection / left.area
+    right_cover = intersection / right.area
+    if left_cover >= 0.8 and right_cover >= 0.8:
+        return True
+    smaller, larger = sorted((left.area, right.area))
+    if max(left_cover, right_cover) >= 0.95 and smaller / larger >= 0.5:
+        return True
+    radius = max(calibration.edge_width_px, calibration.text_halo_px)
+    left_center = ((ly1 + ly2) / 2, (lx1 + lx2) / 2)
+    right_center = ((ry1 + ry2) / 2, (rx1 + rx2) / 2)
+    similar_scale = smaller / larger >= 0.67
+    if (
+        similar_scale
+        and intersection / smaller >= 0.4
+        and abs(left_center[0] - right_center[0])
+        <= max(radius * 3, max(ly2 - ly1, ry2 - ry1) * 0.5)
+        and abs(left_center[1] - right_center[1])
+        <= max(radius * 3, max(lx2 - lx1, rx2 - rx1) * 0.5)
+    ):
+        return True
+    horizontal_gap = max(rx1 - lx2, lx1 - rx2, 0)
+    vertical_gap = max(ry1 - ly2, ly1 - ry2, 0)
+    vertical_overlap = max(0, min(ly2, ry2) - max(ly1, ry1))
+    horizontal_overlap = max(0, min(lx2, rx2) - max(lx1, rx1))
+    return (
+        0 < horizontal_gap <= radius
+        and vertical_overlap / min(ly2 - ly1, ry2 - ry1) >= 0.5
+    ) or (
+        0 < vertical_gap <= radius
+        and horizontal_overlap / min(lx2 - lx1, rx2 - rx1) >= 0.5
+    )
 
 
 def _check_state(checks: dict | None, name: str) -> str:
@@ -369,7 +430,7 @@ def component_metrics(
     baseline_luma = float(cv2.cvtColor(
         np.asarray([[baseline]], dtype=np.uint8), cv2.COLOR_RGB2GRAY
     )[0, 0])
-    if support_pixels >= calibration.min_component_pixels:
+    if support_pixels >= max(20, calibration.min_component_pixels):
         duplicate &= np.abs(source_luma - baseline_luma) > 6.0
     duplicate_pixels, _ = _largest_region(duplicate)
     largest_inner_shadow, _ = _largest_region(
@@ -474,7 +535,8 @@ def evaluate_component(
     violations = []
     hard_pixel_ratio = max(
         0.01,
-        calibration.min_component_pixels / max(metrics["component_pixels"], 1),
+        max(20, calibration.min_component_pixels)
+        / max(metrics["component_pixels"], 1),
     )
     hard_pixel_ratio = min(1.0, hard_pixel_ratio)
     if metrics["shadow_duplicate_ratio"] >= hard_pixel_ratio:
