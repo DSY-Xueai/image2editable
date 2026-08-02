@@ -21,6 +21,7 @@ import argparse
 import base64
 import gc
 import hashlib
+import io
 import json
 import logging
 import math
@@ -584,16 +585,20 @@ def _compose_exported_components(
     return np.asarray(canvas.convert("RGB"))
 
 
-def _persist_element_masks(
+def _persist_visual_masks(
     work_dir: Path,
+    directory_name: str,
     masks: list[np.ndarray],
 ) -> list[str]:
-    masks_dir = (work_dir / "element-masks").resolve()
+    masks_dir = (work_dir / directory_name).resolve()
     masks_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for index, mask in enumerate(masks):
         mask_path = (masks_dir / f"{index:04d}.png").resolve()
-        Image.fromarray(np.asarray(mask)).save(mask_path)
+        Image.fromarray(
+            (np.asarray(mask) > 0).astype(np.uint8) * 255,
+            mode="L",
+        ).save(mask_path)
         paths.append(str(mask_path))
     return paths
 
@@ -1423,7 +1428,16 @@ def _process_image(
         str(background_difference_path),
         cv2.absdiff(img, clean_background),
     )
-    element_mask_paths = _persist_element_masks(work_dir, element_masks)
+    element_mask_paths = _persist_visual_masks(
+        work_dir,
+        "element-masks",
+        element_masks,
+    )
+    semantic_mask_paths = _persist_visual_masks(
+        work_dir,
+        "semantic-masks",
+        semantic_masks,
+    )
     slide_data = {
         "background_path": str(background_widescreen_path),
         "background_original_path": str(background_original_path),
@@ -1441,6 +1455,7 @@ def _process_image(
         "_work_dir": str(work_dir.resolve()),
         "_text_mask_path": str(text_mask_path),
         "_element_mask_paths": element_mask_paths,
+        "_semantic_mask_paths": semantic_mask_paths,
     }
     if text_clean_path is not None:
         slide_data["_text_clean_path"] = str(text_clean_path)
@@ -1449,7 +1464,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 1
+_PREPARED_PAGE_SCHEMA_VERSION = 2
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -1471,7 +1486,7 @@ _PREPARED_DIMENSION_FIELDS = {
     "content_offset_y",
     "widescreen_background_method",
 }
-_PREPARED_ASSET_FIELDS = {
+_PREPARED_ASSET_FIELDS_V1 = {
     "source_image",
     "ocr_mask",
     "text_clean",
@@ -1481,6 +1496,7 @@ _PREPARED_ASSET_FIELDS = {
     "background_removal_mask",
     "background_difference",
 }
+_PREPARED_ASSET_FIELDS_V2 = _PREPARED_ASSET_FIELDS_V1 | {"semantic_masks"}
 _PREPARED_COMPONENT_FIELDS = {"x", "y", "w", "h", "area", "z_index"}
 _PREPARED_TEXT_FIELDS = {
     "box",
@@ -1824,6 +1840,10 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
             _prepared_asset_record(work_dir, path, "element mask")
             for path in slide_data["_element_mask_paths"]
         ],
+        "semantic_masks": [
+            _prepared_asset_record(work_dir, path, "semantic mask")
+            for path in slide_data["_semantic_mask_paths"]
+        ],
         "background_original": _prepared_asset_record(
             work_dir,
             slide_data["background_original_path"],
@@ -1926,10 +1946,11 @@ def _load_component_layer_state(
         raise ValueError("prepared page state is invalid JSON") from exc
     if not isinstance(manifest, dict) or set(manifest) != _PREPARED_PAGE_FIELDS:
         raise ValueError("prepared page state fields are invalid")
-    if (
-        type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != _PREPARED_PAGE_SCHEMA_VERSION
-    ):
+    schema_version = manifest["schema_version"]
+    if type(schema_version) is not int or schema_version not in {
+        1,
+        _PREPARED_PAGE_SCHEMA_VERSION,
+    }:
         raise ValueError("prepared page schema_version is invalid")
     if manifest["phase"] != "initial_layers":
         raise ValueError("prepared page phase is invalid")
@@ -1945,10 +1966,24 @@ def _load_component_layer_state(
         raise ValueError("prepared page initial_component_count is invalid")
     dimensions = manifest["dimensions"]
     assets = manifest["assets"]
-    if not isinstance(assets, dict) or set(assets) != _PREPARED_ASSET_FIELDS:
+    expected_asset_fields = (
+        _PREPARED_ASSET_FIELDS_V2
+        if schema_version == 2
+        else _PREPARED_ASSET_FIELDS_V1
+    )
+    if not isinstance(assets, dict) or set(assets) != expected_asset_fields:
         raise ValueError("prepared page assets are invalid")
     if not isinstance(assets["element_masks"], list):
         raise ValueError("prepared page element masks are invalid")
+    if schema_version == 2:
+        if not isinstance(assets["semantic_masks"], list):
+            raise ValueError("prepared page semantic masks are invalid")
+        if not (
+            len(manifest["components"])
+            == len(assets["element_masks"])
+            == len(assets["semantic_masks"])
+        ):
+            raise ValueError("prepared page component and mask counts are inconsistent")
 
     loaded_assets = {
         key: _load_prepared_asset(work_dir, assets[key], key)
@@ -1970,6 +2005,14 @@ def _load_component_layer_state(
         _load_prepared_asset(work_dir, record, "element mask")
         for record in assets["element_masks"]
     ]
+    semantic_mask_paths = (
+        [
+            _load_prepared_asset(work_dir, record, "semantic mask")
+            for record in assets["semantic_masks"]
+        ]
+        if schema_version == 2
+        else None
+    )
     components = []
     for record in manifest["components"]:
         components.append({
@@ -1978,6 +2021,43 @@ def _load_component_layer_state(
                 work_dir, record["asset"], "component RGBA"
             ),
         })
+
+    if semantic_mask_paths is not None:
+        expected_shape = (dimensions["img_height"], dimensions["img_width"])
+        for index, (child_record, parent_record) in enumerate(
+            zip(assets["element_masks"], assets["semantic_masks"])
+        ):
+            _, child_content = _read_prepared_asset_bytes(
+                work_dir,
+                child_record,
+                "element mask",
+            )
+            _, parent_content = _read_prepared_asset_bytes(
+                work_dir,
+                parent_record,
+                "semantic mask",
+            )
+            try:
+                with Image.open(io.BytesIO(child_content)) as stored_child:
+                    child_mask = np.asarray(stored_child.convert("L")).copy()
+                with Image.open(io.BytesIO(parent_content)) as stored_parent:
+                    parent_mask = np.asarray(stored_parent.convert("L")).copy()
+            except OSError as exc:
+                raise ValueError(
+                    f"prepared page mask pair {index} is invalid"
+                ) from exc
+            if child_mask.shape != expected_shape or parent_mask.shape != expected_shape:
+                raise ValueError(
+                    f"prepared page mask pair {index} dimensions are invalid"
+                )
+            if not np.any(child_mask) or not np.any(parent_mask):
+                raise ValueError(
+                    f"prepared page mask pair {index} must be non-empty"
+                )
+            if np.any((child_mask > 0) & (parent_mask == 0)):
+                raise ValueError(
+                    f"prepared page child mask {index} must be inside its parent"
+                )
 
     loaded = {
         "phase": "initial_layers",
@@ -1998,6 +2078,11 @@ def _load_component_layer_state(
         "_work_dir": str(work_dir),
         "_text_mask_path": loaded_assets["ocr_mask"],
         "_element_mask_paths": element_mask_paths,
+        **(
+            {"_semantic_mask_paths": semantic_mask_paths}
+            if semantic_mask_paths is not None
+            else {}
+        ),
         **(
             {"_text_clean_path": loaded_assets["text_clean"]}
             if text_clean is not None

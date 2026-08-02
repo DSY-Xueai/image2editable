@@ -3908,16 +3908,21 @@ def test_deferred_mask_paths_are_lossless_and_hold_no_arrays(
 
     assert slide_data["_text_mask_path"] == str(text_mask_path.resolve())
     assert "_element_masks" not in slide_data
-    assert len(slide_data["_element_mask_paths"]) == 2
-    assert all(
-        Path(mask_path).is_absolute() and Path(mask_path).is_file()
-        for mask_path in slide_data["_element_mask_paths"]
-    )
+    assert "_semantic_masks" not in slide_data
+    for key in ("_element_mask_paths", "_semantic_mask_paths"):
+        assert len(slide_data[key]) == 2
+        assert all(
+            Path(mask_path).is_absolute() and Path(mask_path).is_file()
+            for mask_path in slide_data[key]
+        )
     assert not any(isinstance(value, np.ndarray) for value in slide_data.values())
-    for mask_path, expected in zip(slide_data["_element_mask_paths"], masks):
-        with Image.open(mask_path) as saved:
-            actual = np.asarray(saved)
-        assert np.array_equal(actual, expected)
+    for key in ("_element_mask_paths", "_semantic_mask_paths"):
+        for mask_path, expected in zip(slide_data[key], masks):
+            with Image.open(mask_path) as saved:
+                assert saved.mode == "L"
+                actual = np.asarray(saved)
+            assert set(np.unique(actual)) <= {0, 255}
+            assert np.array_equal(actual > 0, expected)
 
 
 def test_deferred_mask_paths_preserve_quality_error_message(
@@ -4989,6 +4994,21 @@ def test_final_quality_rejects_text_fallback_that_keeps_glyph_imprint(
         image_to_ppt._finalize_slide_quality(slide_data, "en")
 
 
+def test_persist_visual_masks_normalizes_binary_l_images(tmp_path: Path) -> None:
+    masks = [
+        image_to_ppt.np.asarray([[0, 1], [2, 0]], dtype=image_to_ppt.np.uint8),
+    ]
+
+    paths = image_to_ppt._persist_visual_masks(tmp_path, "semantic-masks", masks)
+
+    with Image.open(paths[0]) as stored:
+        assert stored.mode == "L"
+        assert image_to_ppt.np.array_equal(
+            image_to_ppt.np.asarray(stored),
+            image_to_ppt.np.asarray([[0, 255], [255, 0]], dtype=image_to_ppt.np.uint8),
+        )
+
+
 def _prepare_component_layers_fixture(
     tmp_path: Path,
     monkeypatch,
@@ -5026,17 +5046,31 @@ def _prepare_component_layers_fixture(
         assert Path(text_analysis["mask_path"]).is_file()
         components_dir = target / "components"
         masks_dir = target / "element-masks"
+        semantic_masks_dir = target / "semantic-masks"
         components_dir.mkdir()
         masks_dir.mkdir()
+        semantic_masks_dir.mkdir()
         component_paths = []
         mask_paths = []
+        semantic_mask_paths = []
         for index, color in enumerate(("red", "blue")):
             component_path = components_dir / f"component_{index:04d}.png"
             Image.new("RGBA", (4, 4), color).save(component_path)
             component_paths.append(component_path)
             mask_path = masks_dir / f"{index:04d}.png"
-            Image.new("L", (16, 10), 255 if index == 0 else 0).save(mask_path)
+            semantic_mask_path = semantic_masks_dir / f"{index:04d}.png"
+            element_mask = image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8)
+            semantic_mask = image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8)
+            if index == 0:
+                element_mask[1:5, 1:5] = 255
+                semantic_mask[0:6, 0:6] = 255
+            else:
+                element_mask[5:9, 10:15] = 255
+                semantic_mask[4:10, 9:16] = 255
+            Image.fromarray(element_mask, mode="L").save(mask_path)
+            Image.fromarray(semantic_mask, mode="L").save(semantic_mask_path)
             mask_paths.append(mask_path)
+            semantic_mask_paths.append(semantic_mask_path)
         background_path = target / "background-original.png"
         Image.new("RGB", (16, 10), "white").save(background_path)
         Image.new("L", (16, 10), 0).save(target / "background-removal-mask.png")
@@ -5074,6 +5108,7 @@ def _prepare_component_layers_fixture(
             "_text_mask_path": text_analysis["mask_path"],
             "_text_clean_path": str(text_clean_path),
             "_element_mask_paths": [str(mask) for mask in mask_paths],
+            "_semantic_mask_paths": [str(mask) for mask in semantic_mask_paths],
         }
 
     def fake_process(
@@ -5217,8 +5252,9 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["phase"] == "initial_layers"
+    assert len(manifest["assets"]["semantic_masks"]) == 2
     sidecar_path = work_dir / "prepared_page.sha256"
     assert sidecar_path.read_text(encoding="ascii") == (
         hashlib.sha256(Path(prepared["state_path"]).read_bytes()).hexdigest()
@@ -5471,10 +5507,63 @@ def test_load_component_layers_recovers_absolute_owned_paths(
         restored["_text_mask_path"],
         restored["_text_clean_path"],
         *restored["_element_mask_paths"],
+        *restored["_semantic_mask_paths"],
         *(component["path"] for component in restored["components"]),
     ]
     assert all(Path(value).is_absolute() for value in path_values)
     assert all(Path(value).is_relative_to(work_dir.resolve()) for value in path_values)
+
+
+def test_load_component_layers_v2_rejects_mismatched_mask_counts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    manifest["assets"]["semantic_masks"].pop()
+    _write_prepared_manifest(state_path, manifest)
+
+    with pytest.raises(ValueError, match="mask counts"):
+        image_to_ppt.load_component_layers(state_path)
+
+
+def test_load_component_layers_v2_rejects_child_outside_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    child_record = manifest["assets"]["element_masks"][0]
+    child_path = work_dir / child_record["path"]
+    with Image.open(child_path) as stored_child:
+        child = image_to_ppt.np.asarray(stored_child.convert("L")).copy()
+    child[9, 15] = 255
+    Image.fromarray(child, mode="L").save(child_path)
+    child_record["sha256"] = hashlib.sha256(child_path.read_bytes()).hexdigest()
+    _write_prepared_manifest(state_path, manifest)
+
+    with pytest.raises(ValueError, match="inside its parent"):
+        image_to_ppt.load_component_layers(state_path)
+
+
+def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == 2
+    manifest["schema_version"] = 1
+    manifest["assets"].pop("semantic_masks")
+    _write_prepared_manifest(state_path, manifest)
+
+    restored = image_to_ppt.load_component_layers(state_path)
+
+    assert len(restored["_element_mask_paths"]) == 2
+    assert "_semantic_mask_paths" not in restored
 
 
 def test_load_component_layers_does_not_create_missing_work_directory(
@@ -5828,6 +5917,7 @@ def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(
             prepared["_text_mask_path"],
             prepared["_text_clean_path"],
             *prepared["_element_mask_paths"],
+            *prepared["_semantic_mask_paths"],
             *(component["path"] for component in prepared["components"]),
         )
     }
@@ -5847,7 +5937,7 @@ def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(
         return real_load_rgb(path)
 
     def tracked_image_open(path, *args, **kwargs):
-        open_calls.append(Path(path))
+        open_calls.append(path)
         return real_image_open(path, *args, **kwargs)
 
     def fake_finalize(slide_data, lang, **kwargs):
@@ -5893,7 +5983,10 @@ def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(
     assert prepared["components"] == prepared_components
     assert cleanup_calls == ["close"]
     assert load_calls == []
-    assert open_calls == []
+    assert len(open_calls) == (
+        len(prepared["_element_mask_paths"])
+        + len(prepared["_semantic_mask_paths"])
+    )
     assert staged_paths
     staging_dirs = {path.parent for path in staged_paths}
     assert len(staging_dirs) == 1
