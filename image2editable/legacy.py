@@ -599,8 +599,10 @@ def _build_initial_page_session(
                         f"prepared component mask dimensions differ: {node_id}"
                     )
                 grayscale = image.convert("L")
-                bbox = grayscale.getbbox()
-                grayscale.close()
+                try:
+                    bbox = grayscale.getbbox()
+                finally:
+                    grayscale.close()
             if bbox is None:
                 raise ValueError(f"prepared component mask is empty: {node_id}")
             left, top, right, bottom = bbox

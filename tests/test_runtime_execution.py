@@ -953,6 +953,60 @@ def test_initial_page_session_v2_requires_matching_semantic_mask_count(
         )
 
 
+def test_initial_page_session_closes_grayscale_when_bbox_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (20, 10), "white").save(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    prepared_root = reconstruction / "initial"
+    prepared_root.mkdir(parents=True)
+    component_mask = prepared_root / "component-mask.png"
+    semantic_mask = prepared_root / "semantic-mask.png"
+    Image.new("L", (20, 10), 255).save(component_mask)
+    Image.new("L", (20, 10), 255).save(semantic_mask)
+    converted_images = []
+    closed_image_ids = set()
+    real_convert = Image.Image.convert
+    real_close = Image.Image.close
+
+    def tracked_convert(image, *args, **kwargs):
+        converted = real_convert(image, *args, **kwargs)
+        converted_images.append(converted)
+        return converted
+
+    def tracked_close(image):
+        closed_image_ids.add(id(image))
+        real_close(image)
+
+    def failing_getbbox(image):
+        raise RuntimeError("controlled bbox failure")
+
+    monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *a, **k: None)
+    monkeypatch.setattr(Image.Image, "convert", tracked_convert)
+    monkeypatch.setattr(Image.Image, "close", tracked_close)
+    monkeypatch.setattr(Image.Image, "getbbox", failing_getbbox)
+
+    with pytest.raises(RuntimeError, match="controlled bbox failure"):
+        legacy._build_initial_page_session(
+            RunStore.open(run_dir),
+            "page_001",
+            {
+                "original_image_path": str(source),
+                "_element_mask_paths": [str(component_mask)],
+                "_semantic_mask_paths": [str(semantic_mask)],
+                "components": [{"z_index": 0}],
+                "text_items": [],
+            },
+            reconstruction,
+        )
+
+    assert (reconstruction / "evidence-source/masks/parent_0001.png").is_file()
+    assert len(converted_images) == 1
+    assert id(converted_images[0]) in closed_image_ids
+
+
 def test_component_evidence_closes_loaded_images_when_mask_validation_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
