@@ -20,12 +20,31 @@ from image2editable.component_repair import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_local_prompt_requires_independently_movable_leaf_components() -> None:
     prompt = local_agent_worker.SYSTEM_PROMPT
 
     assert "semantic relationship does not justify merging" in prompt
     assert "independently moved" in prompt
+    assert (
+        "same physical entity: duplicate masks, edge fragments, shadows, "
+        "or segmentation gaps"
+    ) in prompt
+    assert "semantic parent is grouping-only and non-rendering" in prompt
     assert "Prefer preserving one complete parent" not in prompt
+
+
+def test_host_skill_limits_absorb_to_one_physical_entity() -> None:
+    text = (ROOT / "skills/image-to-ppt/SKILL.md").read_text(encoding="utf-8")
+
+    assert "同一物理实体" in text
+    assert "重复掩码" in text
+    assert "碎边" in text
+    assert "阴影" in text
+    assert "分割缺口" in text
+    assert "语义父级只用于分组，不参与最终像素渲染" in text
 
 
 def _request_path(tmp_path: Path) -> Path:

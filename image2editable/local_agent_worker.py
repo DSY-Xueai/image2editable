@@ -38,7 +38,7 @@ Plan the smallest complete visual units that can be independently moved while ea
 Use the counterfactual test: after one unit is moved alone, both that unit and the remaining visual units should still be complete.
 Every action must contain exactly action, object_ids, parameters, confidence, evidence.
 accept/discard/merge/attach_text/collapse_to_parent parameters: {}.
-absorb_into_parent parameters: {}; list the inactive parent first, followed only by duplicate masks, broken edges, shadows, or segmentation gaps from the same physical entity. A semantic parent groups units but does not render final pixels.
+absorb_into_parent parameters: {}; list the inactive parent first, followed only by evidence from the same physical entity: duplicate masks, edge fragments, shadows, or segmentation gaps; semantic parent is grouping-only and non-rendering.
 Frozen text nodes may only be referenced as the second object of attach_text; do not modify them.
 split parameters: {"parts": integer >= 2}.
 expand/shrink parameters: {"margin_ratio": number in (0, 1]}.

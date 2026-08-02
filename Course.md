@@ -7,6 +7,7 @@
 - 关键文件：`image2editable/component_quality.py`、`image2editable/component_repair.py`、`image2editable/local_agent_worker.py`、`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_quality.py` 及对应测试。
 - 运行入口保持不变：Host 使用 `image2editable agent next/record`，Local 使用 `--agent-provider local`；每页仍最多五批并复用既有父组件/页面降级流程。
 - 注意：未实现计划中的后续 Task 2；此前真实文件验收记录属于旧门禁的历史结果，不能视为本轮叶组件规则的真实验收。
+- 契约覆盖：已跟踪的 Local Agent 测试同时锁定 Local 提示词与 Host Skill 的同一物理实体、语义父级只分组不渲染规则。
 
 ## P2.3 Task 9 已完成
 
