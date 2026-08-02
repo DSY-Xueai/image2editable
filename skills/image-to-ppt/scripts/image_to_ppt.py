@@ -1289,6 +1289,7 @@ def _process_image(
             element_masks,
             text_cleanup_mask,
             text_clean_image=text_clean_image,
+            text_restore_mask=text_mask,
             **background_kwargs,
         )
         packed_masks = None
@@ -1358,6 +1359,7 @@ def _process_image(
                     element_masks,
                     text_cleanup_mask,
                     text_clean_image=text_clean_image,
+                    text_restore_mask=text_mask,
                     **background_kwargs,
                 )
             break
@@ -1392,6 +1394,7 @@ def _process_image(
         element_masks,
         text_cleanup_mask,
         text_clean_image=text_clean_image,
+        text_restore_mask=text_mask,
         **background_kwargs,
     )
     export_kwargs = {"semantic_masks": semantic_masks}

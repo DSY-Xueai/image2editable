@@ -1006,9 +1006,12 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         text_mask,
         large_inpainter=None,
         text_clean_image=None,
+        text_restore_mask=None,
     ):
         assert callable(large_inpainter)
         assert text_clean_image is None
+        assert text_restore_mask.shape == image.shape[:2]
+        assert not np.any(text_restore_mask)
         background_calls.append("clean")
         return large_inpainter(image, np.ones(image.shape[:2], dtype=np.uint8))
 

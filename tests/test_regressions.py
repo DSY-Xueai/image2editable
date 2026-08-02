@@ -2353,12 +2353,38 @@ def test_clean_background_restores_trusted_text_dilation_after_component_inpaint
         text_mask,
         large_inpainter=gray_inpaint,
         text_clean_image=text_clean,
+        text_restore_mask=None,
     )
 
     assert np.any(text_halo)
     np.testing.assert_array_equal(cleaned[text_halo], text_clean[text_halo])
     np.testing.assert_array_equal(cleaned[text_removal], text_clean[text_removal])
     assert np.all(cleaned[~text_removal] == 127)
+
+
+def test_clean_background_restores_independent_text_exclusion_mask() -> None:
+    import numpy as np
+
+    source = np.zeros((20, 30, 3), dtype=np.uint8)
+    component_mask = np.full(source.shape[:2], 255, dtype=np.uint8)
+    cleanup_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    cleanup_mask[8:12, 13:17] = 255
+    text_restore_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_restore_mask[5:15, 7:23] = 255
+    restore_region = bg_model.build_removal_mask([], text_restore_mask) > 0
+    text_clean = np.full_like(source, 37)
+
+    cleaned = bg_model.build_clean_background(
+        source,
+        [component_mask],
+        cleanup_mask,
+        large_inpainter=lambda image, mask: np.full_like(image, 127),
+        text_clean_image=text_clean,
+        text_restore_mask=text_restore_mask,
+    )
+
+    np.testing.assert_array_equal(cleaned[restore_region], text_clean[restore_region])
+    assert np.all(cleaned[~restore_region] == 127)
 
 
 def test_clean_background_rejects_mismatched_trusted_text_clean_shape() -> None:
@@ -2376,6 +2402,22 @@ def test_clean_background_rejects_mismatched_trusted_text_clean_shape() -> None:
         )
 
 
+def test_clean_background_rejects_mismatched_text_restore_mask_shape() -> None:
+    import numpy as np
+
+    source = np.zeros((12, 16, 3), dtype=np.uint8)
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+
+    with pytest.raises(ValueError, match="text restore mask must match"):
+        bg_model.build_clean_background(
+            source,
+            [],
+            text_mask,
+            text_clean_image=source.copy(),
+            text_restore_mask=np.zeros((11, 16), dtype=np.uint8),
+        )
+
+
 def test_clean_background_without_trusted_text_clean_keeps_inpaint_result() -> None:
     import numpy as np
 
@@ -2390,9 +2432,140 @@ def test_clean_background_without_trusted_text_clean_keeps_inpaint_result() -> N
         text_mask,
         large_inpainter=lambda image, mask: np.full_like(image, 127),
         text_clean_image=None,
+        text_restore_mask=np.zeros((1, 1), dtype=np.uint8),
     )
 
     assert np.all(cleaned == 127)
+
+
+def test_process_image_restores_raw_text_mask_after_each_component_inpaint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    source = np.full((20, 30, 3), 240, dtype=np.uint8)
+    image_path = tmp_path / "source.png"
+    Image.fromarray(source, mode="RGB").save(image_path)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    raw_text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    raw_text_mask[4:16, 5:25] = 255
+    text_mask_path = work_dir / "source-text-mask.png"
+    Image.fromarray(raw_text_mask, mode="L").save(text_mask_path)
+    cleanup_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    cleanup_mask[8:12, 13:17] = 255
+    text_clean = np.full_like(source, 229)
+    element_mask = np.zeros(source.shape[:2], dtype=bool)
+    element_mask[2:18, 3:27] = True
+    element = types.SimpleNamespace(
+        mask=element_mask,
+        semantic_mask=element_mask.copy(),
+    )
+    build_calls = []
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_build_text_ink_mask",
+        lambda *args, **kwargs: np.zeros(source.shape[:2], dtype=np.uint8),
+    )
+
+    def fake_cleanup(image, text_mask, text_items):
+        np.testing.assert_array_equal(text_mask, raw_text_mask)
+        return cleanup_mask.copy()
+
+    monkeypatch.setattr(image_to_ppt, "_build_text_cleanup_mask", fake_cleanup)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_repair_text_background",
+        lambda image, mask, **kwargs: text_clean,
+    )
+    monkeypatch.setattr(image_to_ppt, "generate_object_proposals", lambda *args: [])
+    monkeypatch.setattr(
+        image_to_ppt,
+        "generate_prompted_mask_candidates",
+        lambda *args: [],
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "generate_mask_candidates",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(image_to_ppt, "filter_prompt_free_candidates", lambda *args: [])
+    monkeypatch.setattr(
+        image_to_ppt,
+        "filter_unchanged_residual_candidates",
+        lambda *args: [],
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "reconcile_residual_candidates",
+        lambda *args: ([], 1),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "resolve_visual_elements",
+        lambda *args: [element],
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "recheck_visual_element_holes",
+        lambda *args: None,
+    )
+
+    def fake_build(
+        image,
+        element_masks,
+        positional_cleanup_mask,
+        large_inpainter=None,
+        text_clean_image=None,
+        text_restore_mask=None,
+    ):
+        build_calls.append(
+            (
+                positional_cleanup_mask.copy(),
+                None if text_restore_mask is None else text_restore_mask.copy(),
+                text_clean_image,
+            )
+        )
+        return source.copy()
+
+    monkeypatch.setattr(image_to_ppt, "build_clean_background", fake_build)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "export_visual_components",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_widescreen_background",
+        lambda background: (background.copy(), 0, 0, "identity"),
+    )
+
+    image_to_ppt._process_image(
+        image_path,
+        work_dir,
+        object_detector=object(),
+        mask_generator=object(),
+        lang="en",
+        text_analysis={
+            "items": [
+                {
+                    "box": [5, 4, 20, 12],
+                    "text": "Editable",
+                    "color": "#202020",
+                }
+            ],
+            "mask_path": str(text_mask_path),
+        },
+        defer_quality=True,
+    )
+
+    assert len(build_calls) == 3
+    for positional_cleanup, restore_mask, trusted_image in build_calls:
+        np.testing.assert_array_equal(positional_cleanup, cleanup_mask)
+        np.testing.assert_array_equal(restore_mask, raw_text_mask)
+        assert trusted_image is text_clean
 
 
 def test_white_text_on_colored_bar_is_cleaned_to_bar_color() -> None:
