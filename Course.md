@@ -50,6 +50,7 @@ image2editable models status
 - 本轮 TDD 红灯：新增门禁前，证据契约、隔离图参数、两个残影指标与 `editable_text_once` 共 6 项按预期失败；实现后对应定向测试通过。
 - 本轮六个目标测试文件最终结果：`481 passed, 9 skipped`；全量结果：`1407 passed, 20 skipped`。
 - 真实文件与 PowerPoint COM reopen 尚未在本轮新门禁下完成，不能沿用旧门禁的输出宣称本轮真实验收已通过。
+- `wsl和虚拟机对比.png` 已用 `image2editable prepare` 后串行执行 `image2editable run execute`；约 182.4 秒后安全停在第 1 批 `awaiting_plan` Host 决策边界。当前 25 个候选、29 个可靠文字项、0 个冻结组件；`component-isolation.png` 为 960×2160，SHA-256 `7c034d18651d1512ca2e19f19343326dd90aea621c65a29212f426121b1696a1`。运行目录 `tmp/task2-isolation-real-image-r1` 约 25.2 MiB，相关进程总工作集峰值约 2.45 GiB，停止后无残留 Python/OCR/SAM 进程。尚未形成最终渲染或 donor，不能写作验收通过。
 
 ## 当前注意事项
 
