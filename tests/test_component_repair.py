@@ -891,6 +891,21 @@ def _rewrite_graph_mask_as(
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
 
 
+def _rewrite_graph_source_role(graph_path: Path, source_id: str) -> None:
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    source = next(node for node in graph["nodes"] if node["id"] == source_id)
+    source["kind"] = "text"
+    source["parent_id"] = None
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+
+def _rewrite_graph_source_id(graph_path: Path, source_id: str) -> None:
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    source = next(node for node in graph["nodes"] if node["id"] == source_id)
+    source["id"] = f"{source_id}_changed"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+
 def test_absorbing_independent_candidates_is_hard_over_merge_failure(
     page_session: dict,
 ) -> None:
@@ -934,6 +949,37 @@ def test_execution_rejects_rewritten_newly_inactive_source_mask(
             right_box=(18, 28, 24, 34),
             action_name=action_name,
             before_execution_record=rewrite_source,
+        )
+
+
+@pytest.mark.parametrize("action_name", ["absorb_into_parent", "merge", "collapse_to_parent"])
+def test_execution_rejects_rewritten_newly_inactive_source_role(
+    page_session: dict,
+    action_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="source|provenance|inactive"):
+        _record_composite_quality(
+            page_session,
+            left_box=(2, 2, 8, 8),
+            right_box=(18, 28, 24, 34),
+            action_name=action_name,
+            before_execution_record=lambda graph_path: _rewrite_graph_source_role(
+                graph_path, "left"
+            ),
+        )
+
+
+def test_execution_rejects_rewritten_newly_inactive_source_id(
+    page_session: dict,
+) -> None:
+    with pytest.raises(ValueError, match="source|provenance|inactive|identity"):
+        _record_composite_quality(
+            page_session,
+            left_box=(2, 2, 8, 8),
+            right_box=(18, 28, 24, 34),
+            before_execution_record=lambda graph_path: _rewrite_graph_source_id(
+                graph_path, "left"
+            ),
         )
 
 
@@ -1037,6 +1083,38 @@ def test_execution_rejects_rewritten_retained_inactive_source_mask(
             shape=(30, 40),
             before_execution_record=lambda graph_path: _rewrite_graph_mask_as(
                 graph_path, "left", "right"
+            ),
+        )
+
+
+def test_execution_rejects_rewritten_retained_inactive_source_role(
+    page_session: dict,
+) -> None:
+    _, first_freeze, store, session = _record_composite_quality(
+        page_session,
+        left_box=(2, 2, 8, 8),
+        right_box=(18, 28, 24, 34),
+    )
+    assert first_freeze["failed_ids"] == ["parent"]
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session["evidence"]["component-graph.json"] = (
+        store.root / state["graph_ref"]["path"]
+    )
+    second_request = build_component_agent_request(session, repair_round=2)
+    record_next_component_request(
+        store, "page_001", request_path=second_request
+    )
+    advance_component_repair(store, "page_001")
+
+    with pytest.raises(ValueError, match="source|provenance|inactive"):
+        _execute_composite_quality_round(
+            store,
+            second_request,
+            load_component_agent_graph(second_request),
+            action=_action("accept", ["parent"]),
+            shape=(30, 40),
+            before_execution_record=lambda graph_path: _rewrite_graph_source_role(
+                graph_path, "left"
             ),
         )
 

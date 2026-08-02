@@ -456,13 +456,17 @@ def _validate_inactive_source_provenance(
     after_graph_path: Path,
 ) -> None:
     before_by_id = {node["id"]: node for node in before["nodes"]}
+    after_ids = {node["id"] for node in after["nodes"]}
+    if set(before_by_id) - after_ids:
+        raise ValueError("component source identity changed")
     for node in after["nodes"]:
         original = before_by_id.get(node["id"])
         if node["state"] != "inactive" or original is None:
             continue
         if any(
             node[field] != original[field]
-            for field in ("mask", "mask_sha256", "bbox")
+            for field in original
+            if field != "state"
         ):
             raise ValueError(
                 f"inactive source provenance changed: {node['id']}"
