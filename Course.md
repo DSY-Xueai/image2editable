@@ -14,6 +14,7 @@
 - 组件质量新增 `component_text_residual_ratio` 与 `component_text_residual`：在最终会发布的完整组件 alpha 内，匹配源字形的连通残留超过页面自适应像素下限即硬失败。
 - 背景质量新增 `background_text_residual_ratio` 与页级 `background_text_clean`：无组件、无文字的背景在 OCR 区仍保留相对局部底色可见的源字形时硬失败；页级检查避免通过清空组件绕过。
 - 合成质量新增 `editable_text_once`：存在可靠文字掩码时必须存在可编辑文字对象，且栅格层不得保留第二份字形。已删除 `raster_text_preserved` 成功分支，结果不再以栅格文字兜底。
+- OCR 通用噪声过滤现按置信度、字符组成、分隔符位置与重复、主体长度保留结构规范的技术标签，同时继续拒绝乱码、纯符号与无意义短串。
 - 组件文字、背景文字和合成检查复用 `_PageQualityContext` 的页级 RGB、差异、亮度与 text-ink 缓存；逐组件仅处理当前 mask/邻域和连通残留，不重复创建整页 float/blur/distance 数组。
 - 保留既有 `text_ghost` 兼容报告、`over_merged_component` 跨轮 sticky、merge/collapse 非活动来源 provenance、紧 bbox 低内存与 TOCTOU 门禁；Agent confidence 不能放宽任何硬失败。
 
@@ -23,9 +24,10 @@
 - 输入与 PPTX 原位替换：`image2editable/inputs.py`、`image2editable/pptx_reconstruct.py`
 - 组件证据与旧管线适配：`image2editable/legacy.py`
 - 组件契约、状态机与质量：`image2editable/component_contracts.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`
+- OCR 过滤与镜像：`scripts/text_detect.py`、`skills/image-to-ppt/scripts/text_detect.py`
 - Agent：`image2editable/host_agent.py`、`image2editable/local_agent.py`、`image2editable/local_agent_worker.py`
 - Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_contracts.py`、`skills/image-to-ppt/scripts/component_quality.py`
-- 主要测试：`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
+- 主要测试：`tests/test_ocr_isolation.py`、`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
 
 ## 运行入口
 
@@ -48,7 +50,8 @@ image2editable models status
 ## 验证事实
 
 - 本轮 TDD 红灯：新增门禁前，证据契约、隔离图参数、两个残影指标与 `editable_text_once` 共 6 项按预期失败；实现后对应定向测试通过。
-- 本轮六个目标测试文件最终结果：`481 passed, 9 skipped`；全量结果：`1407 passed, 20 skipped`。
+- OCR 过滤 TDD 红灯确认 `WSL/WSL2` 被误删且畸形/低置信标签被放行；通用规则实现后相关 OCR 定向测试通过。未重新运行真实转换。
+- 本轮六个目标测试文件最终结果：`481 passed, 9 skipped`；全量结果：`1409 passed, 20 skipped`。
 - 真实文件与 PowerPoint COM reopen 尚未在本轮新门禁下完成，不能沿用旧门禁的输出宣称本轮真实验收已通过。
 - `wsl和虚拟机对比.png` 已用 `image2editable prepare` 后串行执行 `image2editable run execute`；约 182.4 秒后安全停在第 1 批 `awaiting_plan` Host 决策边界。当前 25 个候选、29 个可靠文字项、0 个冻结组件；`component-isolation.png` 为 960×2160，SHA-256 `7c034d18651d1512ca2e19f19343326dd90aea621c65a29212f426121b1696a1`。运行目录 `tmp/task2-isolation-real-image-r1` 约 25.2 MiB，相关进程总工作集峰值约 2.45 GiB，停止后无残留 Python/OCR/SAM 进程。尚未形成最终渲染或 donor，不能写作验收通过。
 

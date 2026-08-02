@@ -75,7 +75,7 @@ def detect_text(
         return [], np.zeros((h, w), dtype=np.uint8)
 
     # Filter out noise lines (pure symbols, very short, etc.)
-    raw_boxes = _filter_noise(raw_boxes)
+    raw_boxes = _filter_noise(raw_boxes, confidence_threshold)
 
     # Clean up text (strip leading/trailing symbols)
     for rb in raw_boxes:
@@ -467,7 +467,9 @@ def _to_tesseract_lang(lang: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _filter_noise(boxes: list[dict]) -> list[dict]:
+def _filter_noise(
+    boxes: list[dict], confidence_threshold: float = 0.7
+) -> list[dict]:
     """Filter out OCR detections that are likely noise.
 
     Removes:
@@ -481,6 +483,9 @@ def _filter_noise(boxes: list[dict]) -> list[dict]:
 
         # Skip empty
         if not text:
+            continue
+
+        if float(b.get("confidence", 0.0)) < confidence_threshold:
             continue
 
         # Skip pure symbol/punctuation lines
@@ -502,6 +507,25 @@ def _filter_noise(boxes: list[dict]) -> list[dict]:
         if total > 0 and meaningful / total < 0.6:
             continue
 
+        technical_separators = "-_./"
+        has_technical_separator = any(c in technical_separators for c in text)
+        compact_label = all(
+            c.isalnum() or c in technical_separators for c in text
+        )
+        valid_technical_label = (
+            compact_label
+            and text[0].isalnum()
+            and text[-1].isalnum()
+            and not any(
+                left in technical_separators and right in technical_separators
+                for left, right in zip(text, text[1:])
+            )
+            and meaningful >= (4 if has_technical_separator else 2)
+        )
+
+        if has_technical_separator and compact_label and not valid_technical_label:
+            continue
+
         # Skip single-char lines that are common OCR artifacts
         if len(text) == 1 and not text.isalnum() and not ('\u4e00' <= text <= '\u9fff'):
             continue
@@ -513,7 +537,12 @@ def _filter_noise(boxes: list[dict]) -> list[dict]:
             upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
             has_cjk = any('\u4e00' <= c <= '\u9fff' for c in text)
             has_garbled_separator = any(c in text for c in ":;./\\")
-            if upper_ratio > 0.8 and has_garbled_separator and not has_cjk:
+            if (
+                upper_ratio > 0.8
+                and has_garbled_separator
+                and not has_cjk
+                and not valid_technical_label
+            ):
                 continue
 
         filtered.append(b)

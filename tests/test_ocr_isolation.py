@@ -235,6 +235,28 @@ def test_text_box_covers_every_quad_point() -> None:
     assert text_detect._poly_to_box(poly) == (1, 2, 13, 9)
 
 
+def test_filter_noise_keeps_high_confidence_technical_labels() -> None:
+    labels = ["WSL/WSL2", "API-V2", "GPU_0", "VS"]
+    boxes = [
+        {"box": (0, index * 20, 80, 16), "text": label, "confidence": 0.95}
+        for index, label in enumerate(labels)
+    ]
+
+    assert [box["text"] for box in text_detect._filter_noise(boxes)] == labels
+
+
+def test_filter_noise_rejects_malformed_or_low_confidence_labels() -> None:
+    boxes = [
+        {"box": (0, 0, 120, 16), "text": "MCOULE ST:SETMP", "confidence": 0.95},
+        {"box": (0, 20, 80, 16), "text": "GPU__0", "confidence": 0.95},
+        {"box": (0, 40, 30, 16), "text": "A-B", "confidence": 0.95},
+        {"box": (0, 60, 50, 16), "text": "API-", "confidence": 0.95},
+        {"box": (0, 80, 80, 16), "text": "API-V2", "confidence": 0.4},
+    ]
+
+    assert text_detect._filter_noise(boxes) == []
+
+
 def test_isolated_worker_failure_falls_back_to_tesseract(
     tmp_path: Path,
     monkeypatch,
