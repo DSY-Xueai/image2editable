@@ -541,17 +541,18 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
     assert events[1][1].is_relative_to(owned_root)
     assert Path(events[1][2]["mask_path"]).is_relative_to(owned_root)
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert all(
-        not Path(record["path"]).is_absolute()
-        for record in [
-            manifest["assets"]["source_image"],
-            manifest["assets"]["ocr_mask"],
-            manifest["assets"]["element_masks"][0],
-            manifest["assets"]["semantic_masks"][0],
-            manifest["assets"]["background_original"],
-            manifest["components"][0]["asset"],
-        ]
-    )
+    for record in [
+        manifest["assets"]["source_image"],
+        manifest["assets"]["ocr_mask"],
+        manifest["assets"]["element_masks"][0],
+        manifest["assets"]["semantic_masks"][0],
+        manifest["assets"]["background_original"],
+        manifest["components"][0]["asset"],
+    ]:
+        path = Path(record["path"])
+        assert not path.is_absolute()
+        assert ".." not in path.parts
+        assert (owned_root / path).resolve().is_relative_to(owned_root)
 
 
 def test_resource_safe_proposals_release_owned_detector(monkeypatch) -> None:
