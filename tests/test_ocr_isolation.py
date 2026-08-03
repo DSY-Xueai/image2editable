@@ -1393,11 +1393,15 @@ def test_root_and_skill_sam_worker_loads_local_tools_outside_repository(
     ]
     probe = (
         "import pathlib, sys; "
-        "sys.path.insert(0, sys.argv[1]); "
+        "worker = pathlib.Path(sys.argv[1]).resolve(); "
+        "local_root = str(worker.parent); "
+        "sys.path.insert(0, local_root); "
+        "sys.path.insert(0, str(pathlib.Path.cwd())); "
+        "sys.path.insert(0, str(worker)); "
         "import sam_worker; "
         "sam_worker._load_tools(); "
         "import scripts.worker_resources as resources; "
-        "expected = pathlib.Path(sys.argv[1], 'worker_resources.py').resolve(); "
+        "expected = pathlib.Path(worker, 'worker_resources.py').resolve(); "
         "assert pathlib.Path(resources.__file__).resolve() == expected"
     )
     for worker_root in worker_roots:
@@ -1426,10 +1430,14 @@ def test_root_and_skill_worker_modules_prefer_local_resources_outside_repository
     ]
     probe = (
         "import importlib, pathlib, sys; "
-        "sys.path.insert(0, sys.argv[1]); "
+        "worker = pathlib.Path(sys.argv[1]).resolve(); "
+        "local_root = str(worker.parent); "
+        "sys.path.insert(0, local_root); "
+        "sys.path.insert(0, str(pathlib.Path.cwd())); "
+        "sys.path.insert(0, str(worker)); "
         "importlib.import_module(sys.argv[2]); "
         "import scripts.worker_resources as resources; "
-        "expected = pathlib.Path(sys.argv[1], 'worker_resources.py').resolve(); "
+        "expected = pathlib.Path(worker, 'worker_resources.py').resolve(); "
         "assert pathlib.Path(resources.__file__).resolve() == expected"
     )
     for worker_root in worker_roots:

@@ -24,7 +24,9 @@ from PIL import Image
 import re
 
 _MODULE_ROOT = str(Path(__file__).resolve().parent.parent)
-if _MODULE_ROOT not in sys.path:
+if not sys.path or sys.path[0] != _MODULE_ROOT:
+    while _MODULE_ROOT in sys.path:
+        sys.path.remove(_MODULE_ROOT)
     sys.path.insert(0, _MODULE_ROOT)
 
 from scripts.worker_resources import run_isolated_worker
