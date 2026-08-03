@@ -836,6 +836,120 @@ def _validate_presentation_manifest(
     return manifest
 
 
+def _decode_quality_presentation_image(
+    payload: bytes,
+    *,
+    page_shape: tuple[int, int],
+    channels: int,
+    label: str,
+):
+    import cv2
+    import numpy as np
+
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError(f"{label} is not a PNG image")
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    expected_shape = page_shape if channels == 1 else (*page_shape, channels)
+    if image is None or image.dtype != np.uint8 or image.shape != expected_shape:
+        raise ValueError(f"{label} dimensions or dtype are invalid")
+    return image
+
+
+def _iter_quality_presentation_layers(
+    *,
+    run_root: Path,
+    reconstruction: Path,
+    manifest_path: Path,
+    source_sha256: str,
+    graph_sha256: str,
+    component_ids: list[str],
+    page_shape: tuple[int, int],
+):
+    import numpy as np
+    from image2editable.component_quality import _validate_underlay_metrics
+
+    manifest = _validate_presentation_manifest(
+        manifest_path,
+        reconstruction,
+        source_sha256=source_sha256,
+        graph_sha256=graph_sha256,
+        run_root=run_root,
+        expected_component_ids=component_ids,
+    )
+    max_bytes = max(1024 * 1024, page_shape[0] * page_shape[1] * 8)
+    for component in manifest["components"]:
+        arrays = {}
+        for name in (
+            "ownership_mask",
+            "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            reference = component[name]
+            path = run_root / Path(*PurePosixPath(reference["path"]).parts)
+            payload = _read_bound_file(
+                path,
+                reconstruction,
+                max_bytes=max_bytes,
+                label=f"component quality {name}",
+            )
+            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+                raise RuntimeError(
+                    f"presentation asset hash mismatch: "
+                    f"{component['component_id']}/{name}"
+                )
+            mask = _decode_quality_presentation_image(
+                payload,
+                page_shape=page_shape,
+                channels=1,
+                label=f"component quality {name}",
+            )
+            if not np.all((mask == 0) | (mask == 255)):
+                raise ValueError("presentation asset masks must be binary")
+            arrays[name] = mask == 255
+            del payload, mask
+
+        rgba_reference = component["rgba"]
+        rgba_path = run_root / Path(*PurePosixPath(rgba_reference["path"]).parts)
+        rgba_payload = _read_bound_file(
+            rgba_path,
+            reconstruction,
+            max_bytes=max_bytes,
+            label="component quality RGBA",
+        )
+        if hashlib.sha256(rgba_payload).hexdigest() != rgba_reference["sha256"]:
+            raise RuntimeError(
+                f"presentation asset hash mismatch: "
+                f"{component['component_id']}/rgba"
+            )
+        rgba = _decode_quality_presentation_image(
+            rgba_payload,
+            page_shape=page_shape,
+            channels=4,
+            label="component quality RGBA",
+        )
+        ownership = arrays["ownership_mask"]
+        alpha = arrays["presentation_alpha_mask"]
+        generated = arrays["generated_underlay_mask"]
+        if not np.all((rgba[:, :, 3] == 0) | (rgba[:, :, 3] == 255)):
+            raise ValueError("presentation RGBA alpha must be binary")
+        if np.any(ownership & generated):
+            raise ValueError(
+                "presentation ownership and generated underlay masks overlap"
+            )
+        if not np.array_equal(alpha, ownership | generated):
+            raise ValueError("presentation asset mask alpha union is invalid")
+        if not np.array_equal(rgba[:, :, 3] == 255, alpha):
+            raise ValueError("presentation RGBA alpha does not match alpha mask")
+        if np.any(rgba[~alpha, :3]):
+            raise ValueError("presentation transparent RGB must be zero")
+        yield {
+            "component_id": component["component_id"],
+            **arrays,
+            "metrics": _validate_underlay_metrics(component["metrics"]),
+        }
+        del rgba_payload, rgba, arrays
+
+
 def _presentation_component_ids(graph: dict) -> list[str]:
     validated = validate_component_graph(graph)
     return [
@@ -1025,6 +1139,18 @@ def _recompute_quality_artifact(
     )
     graph = json.loads(graph_payload.decode("utf-8"))
     graph_path = store.root / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
+    presentation_manifest_path = store.root / Path(
+        *PurePosixPath(quality_input_refs["presentation_manifest"]["path"]).parts
+    )
+    presentation_layers = _iter_quality_presentation_layers(
+        run_root=store.root,
+        reconstruction=store.root / "pages" / state["page_id"] / "reconstruction",
+        manifest_path=presentation_manifest_path,
+        source_sha256=state["source_sha256"],
+        graph_sha256=state["graph_ref"]["sha256"],
+        component_ids=_presentation_component_ids(graph),
+        page_shape=source.shape[:2],
+    )
     native = json.loads(_load_state_artifact(
         store.root, quality_input_refs["native_check"]
     ).decode("utf-8"))
@@ -1051,6 +1177,7 @@ def _recompute_quality_artifact(
         text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
+        presentation_layers=presentation_layers,
         text_items=native.get("text_items", []),
         contained_parent_pairs=contained_parent_pairs,
         approved_contained_parent_pairs=approved_contained_parent_pairs,
@@ -1392,6 +1519,7 @@ def evaluate_component_quality_round(
     over_merged_component_ids: set[str] | None = None,
     contained_parent_pairs: set[tuple[str, str]] | None = None,
     approved_contained_parent_pairs: set[tuple[str, str]] | None = None,
+    presentation_layers=None,
     text_items: list[dict] | None = None,
 ) -> dict:
     import numpy as np
@@ -1403,6 +1531,9 @@ def evaluate_component_quality_round(
         evaluate_component,
         evaluate_page_quality,
         resolve_visual_mask_ownership,
+        _strict_binary_mask,
+        _validate_presentation_mask_union,
+        _validate_underlay_metrics,
         _prepare_page_quality_context,
     )
     validated = validate_component_graph(graph)
@@ -1436,34 +1567,110 @@ def evaluate_component_quality_round(
         Path(trusted_root),
     )
     nodes_by_id = {node["id"]: node for node in validated["nodes"]}
-    mask_nodes = list(active_visual)
-    loaded_ids = {node["id"] for node in mask_nodes}
-    for node in candidates:
-        parent_id = node.get("parent_id")
-        if parent_id is not None and parent_id not in loaded_ids:
-            mask_nodes.append(nodes_by_id[parent_id])
-            loaded_ids.add(parent_id)
-    masks = {}
-    for node in mask_nodes:
-        masks[node["id"]] = _load_quality_graph_mask(
-            node, graph_root=graph_root, trusted_chain=directory_chain,
-            shape=source.shape[:2],
+    shape = source.shape[:2]
+    packed_layers = None
+    masks = None
+    if presentation_layers is None:
+        mask_nodes = list(active_visual)
+        loaded_ids = {node["id"] for node in mask_nodes}
+        for node in candidates:
+            parent_id = node.get("parent_id")
+            if parent_id is not None and parent_id not in loaded_ids:
+                mask_nodes.append(nodes_by_id[parent_id])
+                loaded_ids.add(parent_id)
+        masks = {}
+        for node in mask_nodes:
+            masks[node["id"]] = _load_quality_graph_mask(
+                node, graph_root=graph_root, trusted_chain=directory_chain,
+                shape=shape,
+            )
+        contained_parent_pairs.update(contained_active_parent_pairs(
+            active_visual, [masks[node["id"]] for node in active_visual]
+        ))
+        effective_masks = resolve_visual_mask_ownership(
+            active_visual, [masks[node["id"]] for node in active_visual]
         )
-    contained_parent_pairs.update(contained_active_parent_pairs(
-        active_visual, [masks[node["id"]] for node in active_visual]
-    ))
+        for node, mask in zip(active_visual, effective_masks, strict=True):
+            masks[node["id"]] = mask
+    else:
+        packed_layers = {}
+        layer_iterator = iter(presentation_layers)
+        for node in active_visual:
+            try:
+                layer = next(layer_iterator)
+            except StopIteration as error:
+                raise ValueError("presentation layer stream ended early") from error
+            if not isinstance(layer, dict) or set(layer) != {
+                "component_id", "ownership_mask", "presentation_alpha_mask",
+                "generated_underlay_mask", "metrics",
+            }:
+                raise ValueError("presentation quality layer fields are invalid")
+            if layer["component_id"] != node["id"]:
+                raise ValueError("presentation layer stream order does not match graph")
+            ownership = _strict_binary_mask(
+                layer["ownership_mask"], shape, "component ownership mask"
+            )
+            alpha = _strict_binary_mask(
+                layer["presentation_alpha_mask"], shape,
+                "presentation alpha mask",
+            )
+            generated = _strict_binary_mask(
+                layer["generated_underlay_mask"], shape,
+                "generated underlay mask",
+            )
+            _validate_presentation_mask_union(
+                ownership, alpha, generated, label="component presentation"
+            )
+            packed_layers[node["id"]] = {
+                "ownership_mask": np.packbits(ownership, axis=None).tobytes(),
+                "presentation_alpha_mask": np.packbits(alpha, axis=None).tobytes(),
+                "generated_underlay_mask": np.packbits(generated, axis=None).tobytes(),
+                "metrics": _validate_underlay_metrics(layer["metrics"]),
+                "ownership_pixels": int(np.count_nonzero(ownership)),
+            }
+            del layer, ownership, alpha, generated
+        try:
+            next(layer_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError("presentation layer stream has extra components")
+
+        def unpack(component_id: str, name: str):
+            packed = np.frombuffer(packed_layers[component_id][name], dtype=np.uint8)
+            return np.unpackbits(packed, count=shape[0] * shape[1]).reshape(shape).astype(bool)
+
+        parents = [
+            node for node in active_visual
+            if node["kind"] == "parent"
+            and packed_layers[node["id"]]["ownership_pixels"]
+        ]
+        for left_index, left in enumerate(parents):
+            left_mask = unpack(left["id"], "ownership_mask")
+            left_area = packed_layers[left["id"]]["ownership_pixels"]
+            for right in parents[left_index + 1:]:
+                right_area = packed_layers[right["id"]]["ownership_pixels"]
+                overlap = int(np.count_nonzero(
+                    left_mask & unpack(right["id"], "ownership_mask")
+                ))
+                if overlap / min(left_area, right_area) >= 0.95:
+                    contained_parent_pairs.add(tuple(sorted((
+                        left["id"], right["id"]
+                    ))))
+            del left_mask
+
     contained_parent_review_ids = {
         component_id
         for pair in contained_parent_pairs - approved_contained_parent_pairs
         for component_id in pair
     }
-    effective_masks = resolve_visual_mask_ownership(
-        active_visual, [masks[node["id"]] for node in active_visual]
-    )
-    for node, mask in zip(active_visual, effective_masks, strict=True):
-        masks[node["id"]] = mask
-    def related_inactive_sources(target: dict):
-        target_mask = masks[target["id"]]
+
+    def component_ownership(component_id: str):
+        if packed_layers is None:
+            return masks[component_id]
+        return unpack(component_id, "ownership_mask")
+
+    def related_inactive_sources(target: dict, target_mask):
         tx1, ty1, tx2, ty2 = target["bbox"]
         for source_node in validated["nodes"]:
             if source_node["kind"] == "text" or source_node["state"] != "inactive":
@@ -1488,14 +1695,20 @@ def evaluate_component_quality_round(
                 yield source_mask & target_mask
 
     for node in candidates:
+        target_mask = component_ownership(node["id"])
         if absorbed_leaf_cluster_count(
-            related_inactive_sources(node), calibration
+            related_inactive_sources(node, target_mask), calibration
         ) > 1:
             over_merged_component_ids.add(node["id"])
+        if packed_layers is not None:
+            del target_mask
     page_context = _prepare_page_quality_context(
         source, background, reconstructed, text_mask,
         calibration=calibration,
-        component_masks=[masks[node["id"]] for node in active_visual],
+        component_masks=(
+            component_ownership(node["id"])
+            for node in active_visual
+        ),
         text_items=text_items,
     )
     page_checks = dict(page_checks)
@@ -1527,8 +1740,44 @@ def evaluate_component_quality_round(
         )
     for node in candidates:
         component_id = node["id"]
-        component_mask = masks[component_id]
+        component_mask = component_ownership(component_id)
         previous = previous_reports.get(component_id, {})
+        presentation_kwargs = {}
+        if packed_layers is None:
+            parent_mask = masks.get(node.get("parent_id"))
+        else:
+            semantic_id = node.get("parent_id") or component_id
+            parent_mask = _load_quality_graph_mask(
+                nodes_by_id[semantic_id],
+                graph_root=graph_root,
+                trusted_chain=directory_chain,
+                shape=shape,
+            )
+            other_nodes = [
+                other for other in active_visual
+                if other["id"] != component_id
+            ]
+            presentation_kwargs = {
+                "presentation_alpha_mask": unpack(
+                    component_id, "presentation_alpha_mask"
+                ),
+                "generated_underlay_mask": unpack(
+                    component_id, "generated_underlay_mask"
+                ),
+                "underlay_metrics": packed_layers[component_id]["metrics"],
+                "other_component_masks": (
+                    unpack(other["id"], "ownership_mask")
+                    for other in other_nodes
+                ),
+                "other_presentation_alpha_masks": (
+                    unpack(other["id"], "presentation_alpha_mask")
+                    for other in other_nodes
+                ),
+                "other_generated_underlay_masks": (
+                    unpack(other["id"], "generated_underlay_mask")
+                    for other in other_nodes
+                ),
+            }
         reports.append(evaluate_component(
             source,
             background,
@@ -1537,7 +1786,8 @@ def evaluate_component_quality_round(
             validated,
             calibration,
             component_mask=component_mask,
-            parent_mask=masks.get(node.get("parent_id")),
+            parent_mask=parent_mask,
+            **presentation_kwargs,
             text_mask=text_mask,
             page_checks=page_checks,
             agent_confidence=agent_confidence_by_id.get(component_id),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import zip_longest
 
 import cv2
 import numpy as np
@@ -104,6 +105,11 @@ def contained_active_parent_pairs(
 
 
 _CHECK_STATES = frozenset({"pass", "fail", "unknown"})
+_UNDERLAY_METRIC_FIELDS = frozenset({
+    "boundary_color_mae",
+    "gradient_jump_p95",
+    "added_high_frequency_pixels",
+})
 _METRIC_FIELDS = frozenset({
     "component_pixels", "missing_pixels", "missing_ratio", "duplicate_pixels",
     "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio",
@@ -114,6 +120,9 @@ _METRIC_FIELDS = frozenset({
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
     "adaptive_pixel_tolerance", "hard_pixel_tolerance",
+    "generated_underlay_pixels", "underlay_out_of_bounds_pixels",
+    "underlay_boundary_color_mae", "underlay_gradient_jump_p95",
+    "underlay_added_high_frequency_pixels",
 })
 
 
@@ -755,6 +764,12 @@ def evaluate_component(
     *,
     component_mask: np.ndarray,
     parent_mask: np.ndarray | None = None,
+    presentation_alpha_mask: np.ndarray | None = None,
+    generated_underlay_mask: np.ndarray | None = None,
+    underlay_metrics: dict | None = None,
+    other_component_masks: Iterable[np.ndarray] = (),
+    other_presentation_alpha_masks: Iterable[np.ndarray] = (),
+    other_generated_underlay_masks: Iterable[np.ndarray] = (),
     text_mask: np.ndarray,
     page_checks: dict | None = None,
     agent_confidence: float | None = None,
@@ -763,11 +778,116 @@ def evaluate_component(
     contained_parent_review: bool = False,
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
+    source_shape = np.asarray(source).shape[:2]
+    presentation_values = (
+        presentation_alpha_mask,
+        generated_underlay_mask,
+        underlay_metrics,
+    )
+    if any(value is not None for value in presentation_values) and not all(
+        value is not None for value in presentation_values
+    ):
+        raise ValueError("component presentation inputs must be provided together")
+    if presentation_alpha_mask is None:
+        ownership, _ = _project_component_mask(component_mask, source_shape)
+        alpha = ownership
+        generated = np.zeros(source_shape, dtype=bool)
+        normalized_underlay_metrics = {
+            "boundary_color_mae": 0.0,
+            "gradient_jump_p95": 0.0,
+            "added_high_frequency_pixels": 0.0,
+        }
+    else:
+        ownership = _strict_binary_mask(
+            component_mask, source_shape, "component ownership mask"
+        )
+        alpha = _strict_binary_mask(
+            presentation_alpha_mask, source_shape, "presentation alpha mask"
+        )
+        generated = _strict_binary_mask(
+            generated_underlay_mask, source_shape, "generated underlay mask"
+        )
+        _validate_presentation_mask_union(
+            ownership, alpha, generated, label="component presentation"
+        )
+        normalized_underlay_metrics = _validate_underlay_metrics(
+            underlay_metrics
+        )
+
+    illegal_presentation_overlap = np.zeros(source_shape, dtype=bool)
+    missing = object()
+    for index, (other_owner_value, other_alpha_value, other_generated_value) in enumerate(
+        zip_longest(
+            other_component_masks,
+            other_presentation_alpha_masks,
+            other_generated_underlay_masks,
+            fillvalue=missing,
+        )
+    ):
+        if any(
+            value is missing
+            for value in (
+                other_owner_value,
+                other_alpha_value,
+                other_generated_value,
+            )
+        ):
+            raise ValueError("other component presentation input counts differ")
+        if presentation_alpha_mask is None:
+            raise ValueError(
+                "other presentation inputs require component presentation inputs"
+            )
+        other_owner = _strict_binary_mask(
+            other_owner_value, source_shape, f"other component {index} ownership mask"
+        )
+        other_alpha_mask = _strict_binary_mask(
+            other_alpha_value, source_shape,
+            f"other component {index} presentation alpha mask",
+        )
+        other_generated_mask = _strict_binary_mask(
+            other_generated_value, source_shape,
+            f"other component {index} generated underlay mask",
+        )
+        _validate_presentation_mask_union(
+            other_owner,
+            other_alpha_mask,
+            other_generated_mask,
+            label=f"other component {index} presentation",
+        )
+        illegal_presentation_overlap |= (
+            alpha
+            & other_alpha_mask
+            & ~(generated | other_generated_mask)
+        )
+
+    if parent_mask is None:
+        if np.any(generated):
+            raise ValueError("generated underlay requires a parent semantic mask")
+        underlay_outside = np.zeros(source_shape, dtype=bool)
+    else:
+        semantic_parent = _strict_binary_mask(
+            parent_mask, source_shape, "parent semantic mask"
+        )
+        underlay_outside = generated & ~semantic_parent
+
     metrics = component_metrics(
         source, background, reconstructed, node, graph, calibration,
         component_mask=component_mask, parent_mask=parent_mask,
         text_mask=text_mask, _page_context=_page_context,
     )
+    metrics.update({
+        "generated_underlay_pixels": int(np.count_nonzero(generated)),
+        "underlay_out_of_bounds_pixels": int(np.count_nonzero(underlay_outside)),
+        "underlay_boundary_color_mae": normalized_underlay_metrics[
+            "boundary_color_mae"
+        ],
+        "underlay_gradient_jump_p95": normalized_underlay_metrics[
+            "gradient_jump_p95"
+        ],
+        "underlay_added_high_frequency_pixels": normalized_underlay_metrics[
+            "added_high_frequency_pixels"
+        ],
+    })
     violations = []
     hard_pixel_ratio = max(
         0.01,
@@ -803,12 +923,29 @@ def evaluate_component(
         violations.append("alpha_halo")
     if metrics["parent_child_double"]:
         violations.append("parent_child_double")
-    if metrics["component_overlap_pixels"]:
+    if metrics["component_overlap_pixels"] or np.any(illegal_presentation_overlap):
         violations.append("component_overlap")
     if metrics["duplicate_ratio"] >= hard_pixel_ratio:
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:
         violations.append("out_of_bounds")
+    if metrics["underlay_out_of_bounds_pixels"]:
+        violations.append("underlay_out_of_bounds")
+    if (
+        metrics["underlay_boundary_color_mae"]
+        > metrics["hard_pixel_tolerance"] * 2
+    ):
+        violations.append("underlay_seam")
+    if (
+        metrics["underlay_gradient_jump_p95"]
+        > metrics["hard_pixel_tolerance"] * 4
+    ):
+        violations.append("underlay_gradient_break")
+    high_frequency_limit = max(
+        4, round(metrics["generated_underlay_pixels"] * 0.005)
+    )
+    if metrics["underlay_added_high_frequency_pixels"] > high_frequency_limit:
+        violations.append("underlay_patch")
     if node.get("kind") == "child" and metrics["parent_coverage_ratio"] < 0.25:
         violations.append("incomplete_child")
     if over_merged_component:
@@ -822,7 +959,14 @@ def evaluate_component(
         violations.append("protected_native_overlap")
     previous = previous_metrics or {}
     improvement = {}
-    for key in ("missing_ratio", "duplicate_ratio", "edge_missing_ratio", "shadow_duplicate_ratio", "alpha_duplicate_ratio", "text_duplicate_ratio", "component_text_residual_ratio", "background_text_residual_ratio"):
+    for key in (
+        "missing_ratio", "duplicate_ratio", "edge_missing_ratio",
+        "shadow_duplicate_ratio", "alpha_duplicate_ratio",
+        "text_duplicate_ratio", "component_text_residual_ratio",
+        "background_text_residual_ratio", "underlay_out_of_bounds_pixels",
+        "underlay_boundary_color_mae", "underlay_gradient_jump_p95",
+        "underlay_added_high_frequency_pixels",
+    ):
         if key not in previous:
             continue
         prior = float(previous[key])
@@ -971,6 +1115,51 @@ def _exact_mask(mask: object, shape: tuple[int, int], label: str) -> np.ndarray:
     if array.shape != shape:
         raise ValueError(f"{label} shape must match page shape")
     return array if array.dtype == np.bool_ else array > 0
+
+
+def _strict_binary_mask(
+    mask: object, shape: tuple[int, int], label: str
+) -> np.ndarray:
+    array = np.asarray(mask)
+    if array.ndim != 2 or array.dtype.kind not in "biu":
+        raise ValueError(f"{label} must be a two-dimensional binary mask")
+    if array.shape != shape:
+        raise ValueError(f"{label} shape must match page shape")
+    if array.dtype == np.bool_:
+        return array
+    binary_one = np.all((array == 0) | (array == 1))
+    binary_255 = np.all((array == 0) | (array == 255))
+    if not binary_one and not binary_255:
+        raise ValueError(f"{label} must contain binary values")
+    return array != 0
+
+
+def _validate_presentation_mask_union(
+    ownership: np.ndarray,
+    alpha: np.ndarray,
+    generated: np.ndarray,
+    *,
+    label: str,
+) -> None:
+    if np.any(ownership & generated):
+        raise ValueError(f"{label} ownership and generated masks overlap")
+    if not np.array_equal(alpha, ownership | generated):
+        raise ValueError(f"{label} alpha union is invalid")
+
+
+def _validate_underlay_metrics(value: object) -> dict[str, float]:
+    if not isinstance(value, dict) or set(value) != _UNDERLAY_METRIC_FIELDS:
+        raise ValueError("underlay metrics fields are invalid")
+    normalized = {}
+    for name, metric in value.items():
+        if (
+            type(metric) not in {int, float}
+            or not np.isfinite(metric)
+            or metric < 0
+        ):
+            raise ValueError("underlay metrics values must be finite and non-negative")
+        normalized[name] = float(metric)
+    return normalized
 
 
 def _project_component_mask(

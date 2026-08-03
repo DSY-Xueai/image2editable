@@ -526,6 +526,230 @@ def _evaluate_synthetic(case: dict, *, confidence: float = 0.95, previous_metric
     )
 
 
+def _clean_underlay_case() -> tuple[dict, np.ndarray, np.ndarray]:
+    case = _synthetic_quality_case()
+    semantic = case["component_mask"].copy()
+    generated = np.zeros_like(semantic)
+    generated[24:32, 24:32] = True
+    case["component_mask"] = semantic & ~generated
+    return case, semantic, generated
+
+
+def _underlay_metrics(**updates: float) -> dict[str, float]:
+    metrics = {
+        "boundary_color_mae": 0.0,
+        "gradient_jump_p95": 0.0,
+        "added_high_frequency_pixels": 0.0,
+    }
+    metrics.update(updates)
+    return metrics
+
+
+def _evaluate_underlay(
+    case: dict,
+    *,
+    parent_mask: np.ndarray,
+    generated: np.ndarray,
+    metrics: dict[str, float] | None = None,
+    confidence: float = 0.95,
+    other_masks: tuple[np.ndarray, ...] = (),
+    other_alphas: tuple[np.ndarray, ...] = (),
+    other_generated: tuple[np.ndarray, ...] = (),
+    page_context=None,
+) -> dict:
+    calibration = calibrate_page(case["source"], case["text_mask"])
+    ownership = case["component_mask"]
+    return evaluate_component(
+        case["source"], case["background"], case["reconstructed"],
+        case["node"], case["graph"], calibration,
+        component_mask=ownership,
+        parent_mask=parent_mask,
+        presentation_alpha_mask=ownership | generated,
+        generated_underlay_mask=generated,
+        underlay_metrics=metrics or _underlay_metrics(),
+        other_component_masks=other_masks,
+        other_presentation_alpha_masks=other_alphas,
+        other_generated_underlay_masks=other_generated,
+        text_mask=case["text_mask"],
+        page_checks={"protected_native_overlap": "pass"},
+        agent_confidence=confidence,
+        _page_context=page_context,
+    )
+
+
+def test_underlay_never_relaxes_real_ownership_overlap() -> None:
+    case, semantic, generated = _clean_underlay_case()
+    other = np.zeros_like(case["component_mask"])
+    other[14:18, 18:22] = True
+    module = importlib.import_module("image2editable.component_quality")
+    calibration = calibrate_page(case["source"], case["text_mask"])
+    context = module._prepare_page_quality_context(
+        case["source"], case["background"], case["reconstructed"],
+        case["text_mask"], calibration=calibration,
+        component_masks=[case["component_mask"], other],
+    )
+
+    report = _evaluate_underlay(
+        case,
+        parent_mask=semantic,
+        generated=generated,
+        confidence=1.0,
+        other_masks=(other,),
+        other_alphas=(other,),
+        other_generated=(np.zeros_like(other),),
+        page_context=context,
+    )
+
+    assert "component_overlap" in report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("current_generated", "other_generated", "expected_overlap"),
+    [
+        (True, False, False),
+        (False, False, True),
+        (True, True, False),
+    ],
+    ids=[
+        "parent-generated-child-ownership",
+        "neither-generated",
+        "both-generated",
+    ],
+)
+def test_presentation_overlap_requires_at_least_one_generated_underlay(
+    current_generated: bool,
+    other_generated: bool,
+    expected_overlap: bool,
+) -> None:
+    case, semantic, hole = _clean_underlay_case()
+    other_ownership = hole.copy() if not other_generated else np.zeros_like(hole)
+    current = hole.copy() if current_generated else np.zeros_like(hole)
+    if not current_generated:
+        case["component_mask"] |= hole
+    other_underlay = hole.copy() if other_generated else np.zeros_like(hole)
+    other_alpha = other_ownership | other_underlay
+
+    report = _evaluate_underlay(
+        case,
+        parent_mask=semantic,
+        generated=current,
+        other_masks=(other_ownership,),
+        other_alphas=(other_alpha,),
+        other_generated=(other_underlay,),
+    )
+
+    assert ("component_overlap" in report["violations"]) is expected_overlap
+
+
+def test_generated_underlay_outside_parent_semantic_mask_fails() -> None:
+    case, semantic, generated = _clean_underlay_case()
+    generated[4:6, 4:6] = True
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated,
+    )
+
+    assert report["metrics"]["generated_underlay_pixels"] == 68
+    assert report["metrics"]["underlay_out_of_bounds_pixels"] == 4
+    assert "underlay_out_of_bounds" in report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("metrics", "violation"),
+    [
+        (_underlay_metrics(boundary_color_mae=7.0), "underlay_seam"),
+        (_underlay_metrics(gradient_jump_p95=13.0), "underlay_gradient_break"),
+        (_underlay_metrics(added_high_frequency_pixels=5.0), "underlay_patch"),
+    ],
+)
+def test_striped_or_patchy_underlay_metrics_trigger_hard_gate(
+    metrics: dict[str, float], violation: str,
+) -> None:
+    case, semantic, generated = _clean_underlay_case()
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated, metrics=metrics,
+        confidence=1.0,
+    )
+
+    assert violation in report["violations"]
+
+
+def test_clean_gradient_underlay_reports_metrics_and_passes() -> None:
+    case, semantic, generated = _clean_underlay_case()
+    metrics = _underlay_metrics(
+        boundary_color_mae=2.0,
+        gradient_jump_p95=4.0,
+        added_high_frequency_pixels=0.0,
+    )
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated, metrics=metrics,
+    )
+
+    assert report["accepted"] is True
+    assert {
+        name: report["metrics"][name]
+        for name in (
+            "generated_underlay_pixels",
+            "underlay_out_of_bounds_pixels",
+            "underlay_boundary_color_mae",
+            "underlay_gradient_jump_p95",
+            "underlay_added_high_frequency_pixels",
+        )
+    } == {
+        "generated_underlay_pixels": 64,
+        "underlay_out_of_bounds_pixels": 0,
+        "underlay_boundary_color_mae": 2.0,
+        "underlay_gradient_jump_p95": 4.0,
+        "underlay_added_high_frequency_pixels": 0.0,
+    }
+
+
+def test_generated_underlay_cannot_hide_owned_glyph_residual() -> None:
+    case = _text_isolation_case()
+    glyph = case["text_mask"] & np.any(
+        case["source"] != (70, 125, 190), axis=2
+    )
+    case["reconstructed"][glyph] = case["source"][glyph]
+    semantic = np.ones_like(case["component_mask"])
+    generated = np.zeros_like(semantic)
+    generated[5:9, 5:9] = True
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated,
+    )
+
+    assert "component_text_residual" in report["violations"]
+
+
+@pytest.mark.parametrize("invalid", ["nonbinary", "alpha_union"])
+def test_underlay_masks_fail_closed_on_nonbinary_or_union_mismatch(
+    invalid: str,
+) -> None:
+    case, semantic, generated = _clean_underlay_case()
+    alpha = case["component_mask"] | generated
+    if invalid == "nonbinary":
+        generated = generated.astype(np.uint8) * 255
+        generated[24, 24] = 127
+    else:
+        alpha = alpha.copy()
+        alpha[24, 24] = False
+    calibration = calibrate_page(case["source"], case["text_mask"])
+
+    with pytest.raises(ValueError, match="binary|union"):
+        evaluate_component(
+            case["source"], case["background"], case["reconstructed"],
+            case["node"], case["graph"], calibration,
+            component_mask=case["component_mask"], parent_mask=semantic,
+            presentation_alpha_mask=alpha,
+            generated_underlay_mask=generated,
+            underlay_metrics=_underlay_metrics(),
+            text_mask=case["text_mask"],
+            page_checks={"protected_native_overlap": "pass"},
+        )
+
+
 @pytest.mark.parametrize("scale", [1, 2, 4])
 def test_gate_decision_is_stable_across_resolution_and_ocr_scale(scale: int) -> None:
     report = _evaluate_synthetic(_synthetic_quality_case(scale=scale, contrast=80))

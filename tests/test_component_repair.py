@@ -28,6 +28,7 @@ from image2editable.component_repair import (
     record_local_component_plan,
 )
 import image2editable.component_repair as component_repair
+import image2editable.component_quality as component_quality
 from scripts.fg_extract import _fill_component_underlay
 from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
@@ -583,7 +584,7 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
     assert preserved["status"] == "preserved_with_warning"
 
 
-def test_execution_quality_freeze_reaches_ready_for_assembly(
+def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     page_session: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from image2editable.host_agent import record_host_plan
@@ -626,6 +627,32 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     graph_path = execution_dir / "component-graph.json"
     graph_path.write_text(json.dumps(next_graph), encoding="utf-8")
     quality_input_refs = _quality_input_refs(execution_dir, store, graph_path)
+    manifest_path = store.root / quality_input_refs["presentation_manifest"]["path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first = manifest["components"][0]
+    exact_masks = {
+        "ownership_mask": np.array([[255, 0], [0, 0]], dtype=np.uint8),
+        "presentation_alpha_mask": np.array([[255, 255], [0, 0]], dtype=np.uint8),
+        "generated_underlay_mask": np.array([[0, 255], [0, 0]], dtype=np.uint8),
+    }
+    for name, array in exact_masks.items():
+        path = store.root / first[name]["path"]
+        Image.fromarray(array).save(path)
+        first[name]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    rgba_path = store.root / first["rgba"]["path"]
+    rgba = np.zeros((2, 2, 4), dtype=np.uint8)
+    rgba[:, :, 3] = exact_masks["presentation_alpha_mask"]
+    Image.fromarray(rgba, mode="RGBA").save(rgba_path)
+    first["rgba"]["sha256"] = hashlib.sha256(rgba_path.read_bytes()).hexdigest()
+    first["metrics"] = {
+        "boundary_color_mae": 1.25,
+        "gradient_jump_p95": 2.5,
+        "added_high_frequency_pixels": 0.0,
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    quality_input_refs["presentation_manifest"]["sha256"] = hashlib.sha256(
+        manifest_path.read_bytes()
+    ).hexdigest()
     execution = {
         "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": 1, "request_sha256": plan["request_sha256"],
@@ -642,9 +669,11 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     assert advance_component_repair(store, "page_001")["status"] == "needs_quality"
 
     observed_visual = {}
+    observed_layers = []
 
     def quality_evaluator(*args, **kwargs):
         observed_visual.update(kwargs["visual_metrics"])
+        observed_layers.extend(kwargs["presentation_layers"])
         return _strict_quality_report("candidate_b", True)
 
     monkeypatch.setattr(
@@ -652,6 +681,21 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     )
     record_component_quality(store, "page_001")
     assert observed_visual["mae"] > 0
+    assert [layer["component_id"] for layer in observed_layers] == [
+        "candidate_b", "frozen_a",
+    ]
+    assert np.array_equal(
+        observed_layers[0]["ownership_mask"], exact_masks["ownership_mask"] > 0
+    )
+    assert np.array_equal(
+        observed_layers[0]["presentation_alpha_mask"],
+        exact_masks["presentation_alpha_mask"] > 0,
+    )
+    assert np.array_equal(
+        observed_layers[0]["generated_underlay_mask"],
+        exact_masks["generated_underlay_mask"] > 0,
+    )
+    assert observed_layers[0]["metrics"] == first["metrics"]
     quality_state = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
@@ -2246,18 +2290,31 @@ def _write_test_presentation_manifest(
     if graph_path is not None:
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
         graph_sha256 = hashlib.sha256(graph_path.read_bytes()).hexdigest()
-        component_ids = [
-            node["id"] for node in graph["nodes"]
+        active_nodes = [
+            node for node in graph["nodes"]
             if node["kind"] != "text"
             and node["state"] in {"pending", "pending_gate", "frozen"}
         ]
+        raw_masks = []
+        for node in active_nodes:
+            with Image.open(graph_path.parent / node["mask"]) as image:
+                raw_masks.append(np.asarray(image.convert("L")) > 0)
+        ownership_masks = component_quality.resolve_visual_mask_ownership(
+            active_nodes, raw_masks
+        )
+        component_ids = [node["id"] for node in active_nodes]
+        ownership_by_id = dict(zip(component_ids, ownership_masks, strict=True))
     else:
         component_ids = []
+        ownership_by_id = {}
     assert graph_sha256 is not None
-    assets_dir = output_dir / "presentation-assets"
+    assets_dir = output_dir / f"presentation-assets-{graph_sha256[:12]}"
     assets_dir.mkdir(exist_ok=True)
     components = []
     for index, component_id in enumerate(component_ids, start=1):
+        ownership = ownership_by_id[component_id]
+        generated = np.zeros_like(ownership)
+        alpha = ownership | generated
         paths = {}
         for name in (
             "rgba", "ownership-mask", "presentation-alpha-mask",
@@ -2266,10 +2323,16 @@ def _write_test_presentation_manifest(
             path = assets_dir / f"{index:04d}-{name}.png"
             mode = "RGBA" if name == "rgba" else "L"
             if mode == "RGBA":
-                color = (0, 0, 0, 255)
+                array = np.zeros((*ownership.shape, 4), dtype=np.uint8)
+                array[:, :, 3] = alpha.astype(np.uint8) * 255
             else:
-                color = 0 if name == "generated-underlay-mask" else 255
-            Image.new(mode, (2, 2), color).save(path)
+                masks = {
+                    "ownership-mask": ownership,
+                    "presentation-alpha-mask": alpha,
+                    "generated-underlay-mask": generated,
+                }
+                array = masks[name].astype(np.uint8) * 255
+            Image.fromarray(array, mode=mode).save(path)
             paths[name.replace("-", "_")] = {
                 "path": path.relative_to(run_root).as_posix(),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
