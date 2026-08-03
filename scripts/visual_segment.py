@@ -201,6 +201,10 @@ def execute_component_actions(
             if proposed.shape != image.shape[:2] or not proposed.any():
                 raise VisualSegmentationError("SAM component retry returned an invalid mask")
             masks[component_id] = proposed
+            parent_id = nodes[component_id]["parent_id"]
+            if parent_id is not None and np.any(proposed & ~masks[parent_id]):
+                nodes[component_id]["kind"] = "parent"
+                nodes[component_id]["parent_id"] = None
         else:
             raise AssertionError(f"Unsupported component action: {name}")
     result["nodes"] = list(nodes.values())

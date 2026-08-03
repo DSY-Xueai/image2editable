@@ -2727,6 +2727,59 @@ def test_retry_box_maps_normalized_page_coordinates(tmp_path: Path) -> None:
     assert calls[0]["box"] == [4.0, 3.0, 12.0, 9.0]
 
 
+def test_retry_outside_original_semantic_parent_promotes_exact_mask_to_top_level(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    parent = next(node for node in graph["nodes"] if node["id"] == "parent")
+    parent_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    parent_mask[1:7, 1:7] = 255
+    parent_path = input_dir / parent["mask"]
+    Image.fromarray(parent_mask).save(parent_path)
+    parent["mask_sha256"] = hashlib.sha256(parent_path.read_bytes()).hexdigest()
+    parent["bbox"] = [1, 1, 7, 7]
+    proposed = np.zeros(image.shape[:2], dtype=bool)
+    proposed[8:11, 12:15] = True
+
+    output = tmp_path / "round-retry-detached"
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("retry_with_box", ["left"], {"box": [0.7, 0.6, 1.0, 1.0]})],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir,
+        output_dir=output,
+    )
+
+    retried = next(node for node in result["nodes"] if node["id"] == "left")
+    stored = np.asarray(Image.open(output / retried["mask"])) > 0
+    assert retried["kind"] == "parent"
+    assert retried["parent_id"] is None
+    assert retried["z_index"] == 1
+    assert np.array_equal(stored, proposed)
+
+
+def test_retry_inside_original_semantic_parent_keeps_child_relationship(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    proposed = np.zeros(image.shape[:2], dtype=bool)
+    proposed[3:6, 3:6] = True
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("retry_with_points", ["left"], {"positive": [[0.2, 0.3]], "negative": []})],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-retry-contained",
+    )
+
+    retried = next(node for node in result["nodes"] if node["id"] == "left")
+    assert retried["kind"] == "child"
+    assert retried["parent_id"] == "parent"
+
+
 def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> None:
     class Predictor:
         def set_image(self, image: np.ndarray) -> None:
