@@ -36,11 +36,12 @@ import numpy as np
 
 def _rounded_rectangle_mask(height: int, width: int) -> np.ndarray:
     mask = np.zeros((height, width), dtype=np.uint8)
-    cv2.rectangle(mask, (12, 8), (83, 55), 255, thickness=-1)
-    cv2.circle(mask, (12, 8), 10, 255, thickness=-1)
-    cv2.circle(mask, (83, 8), 10, 255, thickness=-1)
-    cv2.circle(mask, (12, 55), 10, 255, thickness=-1)
-    cv2.circle(mask, (83, 55), 10, 255, thickness=-1)
+    cv2.rectangle(mask, (22, 8), (73, 55), 255, thickness=-1)
+    cv2.rectangle(mask, (12, 18), (83, 45), 255, thickness=-1)
+    cv2.circle(mask, (22, 18), 10, 255, thickness=-1)
+    cv2.circle(mask, (73, 18), 10, 255, thickness=-1)
+    cv2.circle(mask, (22, 45), 10, 255, thickness=-1)
+    cv2.circle(mask, (73, 45), 10, 255, thickness=-1)
     return mask.astype(bool)
 
 
@@ -54,6 +55,16 @@ def _nearest_donor_fill(rgb: np.ndarray, hole: np.ndarray) -> np.ndarray:
         )]
         repaired[y, x] = rgb[donor_y, donor_x]
     return repaired
+
+
+def _interior_gradient_jump_p95(rgb: np.ndarray, hole: np.ndarray) -> float:
+    interior = cv2.erode(
+        hole.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ).astype(bool)
+    laplacian = np.max(np.abs(
+        cv2.Laplacian(rgb.astype(np.float32), cv2.CV_32F, ksize=1)
+    ), axis=2)
+    return float(np.percentile(laplacian[interior], 95))
 
 
 def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
@@ -109,9 +120,6 @@ def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
     child[16:48, 32:64] = True
     ownership = semantic & ~child
     legacy = _nearest_donor_fill(source, child)
-    legacy_mae = np.abs(
-        legacy[child].astype(np.int16) - source[child].astype(np.int16)
-    ).mean()
 
     layer = build_presentation_layer(
         source_rgb=source,
@@ -122,7 +130,11 @@ def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
         text_mask=np.zeros_like(child),
     )
 
-    assert legacy_mae > 5.0
+    legacy_jump = _interior_gradient_jump_p95(legacy, child)
+    new_jump = _interior_gradient_jump_p95(layer["rgb"], child)
+    assert legacy_jump > 30.0
+    assert new_jump <= 6.0
+    assert legacy_jump >= new_jump * 5.0
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
     assert layer["metrics"]["gradient_jump_p95"] <= 6.0
 
