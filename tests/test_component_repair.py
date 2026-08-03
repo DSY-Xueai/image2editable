@@ -34,6 +34,99 @@ from PIL import Image
 import numpy as np
 
 
+def _rounded_rectangle_mask(height: int, width: int) -> np.ndarray:
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.rectangle(mask, (12, 8), (83, 55), 255, thickness=-1)
+    cv2.circle(mask, (12, 8), 10, 255, thickness=-1)
+    cv2.circle(mask, (83, 8), 10, 255, thickness=-1)
+    cv2.circle(mask, (12, 55), 10, 255, thickness=-1)
+    cv2.circle(mask, (83, 55), 10, 255, thickness=-1)
+    return mask.astype(bool)
+
+
+def _nearest_donor_fill(rgb: np.ndarray, hole: np.ndarray) -> np.ndarray:
+    """The former nearest-donor strategy, retained only as a regression oracle."""
+    repaired = rgb.copy()
+    donors = np.argwhere(~hole)
+    for y, x in np.argwhere(hole):
+        donor_y, donor_x = donors[np.argmin(
+            (donors[:, 0] - y) ** 2 + (donors[:, 1] - x) ** 2
+        )]
+        repaired[y, x] = rgb[donor_y, donor_x]
+    return repaired
+
+
+def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 64, 96
+    y, x = np.mgrid[:height, :width]
+    source = np.dstack((2 * x, 2 * y, x + y)).astype(np.uint8)
+    text_clean = source.copy()
+    semantic = _rounded_rectangle_mask(height, width)
+    child = np.zeros((height, width), dtype=bool)
+    child[16:48, 32:64] = True
+    text = np.zeros((height, width), dtype=bool)
+    text[30:35, 20:32] = True
+    ownership = semantic & ~(child | text)
+    higher_z = child.copy()
+    text_clean[text] = (17, 31, 43)
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=ownership,
+        semantic_mask=semantic,
+        higher_layer_mask=higher_z,
+        text_mask=text,
+    )
+
+    assert set(layer) == {
+        "rgb", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask", "metrics",
+    }
+    assert np.array_equal(layer["ownership_mask"], ownership)
+    assert not np.any(layer["presentation_alpha_mask"] & ~semantic)
+    assert np.array_equal(
+        layer["generated_underlay_mask"],
+        semantic & ~ownership & (child | text),
+    )
+    assert np.all(layer["presentation_alpha_mask"][layer["generated_underlay_mask"]])
+    assert np.array_equal(layer["rgb"][text], text_clean[text])
+    assert layer["metrics"]["boundary_color_mae"] <= 3.0
+    assert layer["metrics"]["gradient_jump_p95"] <= 6.0
+    assert all(np.isfinite(value) for value in layer["metrics"].values())
+
+
+def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 64, 96
+    y, x = np.mgrid[:height, :width]
+    source = np.dstack((2 * x, 2 * y, x + y)).astype(np.uint8)
+    semantic = _rounded_rectangle_mask(height, width)
+    child = np.zeros((height, width), dtype=bool)
+    child[16:48, 32:64] = True
+    ownership = semantic & ~child
+    legacy = _nearest_donor_fill(source, child)
+    legacy_mae = np.abs(
+        legacy[child].astype(np.int16) - source[child].astype(np.int16)
+    ).mean()
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=ownership,
+        semantic_mask=semantic,
+        higher_layer_mask=child,
+        text_mask=np.zeros_like(child),
+    )
+
+    assert legacy_mae > 5.0
+    assert layer["metrics"]["boundary_color_mae"] <= 3.0
+    assert layer["metrics"]["gradient_jump_p95"] <= 6.0
+
+
 def test_advance_without_state_only_reports_needs_initialization(tmp_path: Path) -> None:
     from image2editable.inputs import prepare_image_job
     from image2editable.store import RunStore
