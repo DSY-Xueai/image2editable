@@ -28,6 +28,7 @@ from image2editable.component_repair import (
     record_local_component_plan,
 )
 import image2editable.component_repair as component_repair
+from scripts.fg_extract import _fill_component_underlay
 from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
 from PIL import Image
@@ -43,18 +44,6 @@ def _rounded_rectangle_mask(height: int, width: int) -> np.ndarray:
     cv2.circle(mask, (22, 45), 10, 255, thickness=-1)
     cv2.circle(mask, (73, 45), 10, 255, thickness=-1)
     return mask.astype(bool)
-
-
-def _nearest_donor_fill(rgb: np.ndarray, hole: np.ndarray) -> np.ndarray:
-    """The former nearest-donor strategy, retained only as a regression oracle."""
-    repaired = rgb.copy()
-    donors = np.argwhere(~hole)
-    for y, x in np.argwhere(hole):
-        donor_y, donor_x = donors[np.argmin(
-            (donors[:, 0] - y) ** 2 + (donors[:, 1] - x) ** 2
-        )]
-        repaired[y, x] = rgb[donor_y, donor_x]
-    return repaired
 
 
 def _interior_gradient_jump_p95(rgb: np.ndarray, hole: np.ndarray) -> float:
@@ -119,7 +108,9 @@ def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
     child = np.zeros((height, width), dtype=bool)
     child[16:48, 32:64] = True
     ownership = semantic & ~child
-    legacy = _nearest_donor_fill(source, child)
+    source_with_child = source.copy()
+    source_with_child[child] = (240, 20, 20)
+    legacy = _fill_component_underlay(source_with_child, child, ownership)
 
     layer = build_presentation_layer(
         source_rgb=source,
@@ -137,6 +128,134 @@ def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
     assert legacy_jump >= new_jump * 5.0
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
     assert layer["metrics"]["gradient_jump_p95"] <= 6.0
+
+
+def test_presentation_layer_metrics_ignore_visible_child_pixels() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 64, 96
+    y, x = np.mgrid[:height, :width]
+    parent_truth = np.dstack((2 * x, 2 * y, x + y)).astype(np.uint8)
+    semantic = _rounded_rectangle_mask(height, width)
+    child = np.zeros((height, width), dtype=bool)
+    child[16:48, 32:64] = True
+    ownership = semantic & ~child
+    source_with_child = parent_truth.copy()
+    source_with_child[child] = (240, 20, 20)
+    arguments = {
+        "ownership_mask": ownership,
+        "semantic_mask": semantic,
+        "higher_layer_mask": child,
+        "text_mask": np.zeros_like(child),
+    }
+
+    reference = build_presentation_layer(
+        source_rgb=parent_truth, text_clean_rgb=parent_truth, **arguments,
+    )
+    layer = build_presentation_layer(
+        source_rgb=source_with_child,
+        text_clean_rgb=source_with_child,
+        **arguments,
+    )
+
+    true_mae = np.abs(
+        layer["rgb"][child].astype(np.int16)
+        - parent_truth[child].astype(np.int16)
+    ).mean()
+    assert true_mae <= 8.0
+    assert layer["metrics"] == reference["metrics"]
+    assert layer["metrics"]["boundary_color_mae"] <= 3.0
+    assert layer["metrics"]["gradient_jump_p95"] <= 6.0
+
+
+def test_visual_fill_selects_smaller_lexicographic_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    y, x = np.mgrid[:9, :9]
+    source = np.dstack((2 * x, 2 * y, x + y)).astype(np.uint8)
+    semantic = np.ones((9, 9), dtype=bool)
+    hole = np.zeros((9, 9), dtype=bool)
+    hole[3:6, 3:6] = True
+
+    def fake_inpaint(
+        image: np.ndarray, mask: np.ndarray, radius: int, method: int,
+    ) -> np.ndarray:
+        candidate = image.copy()
+        if method == cv2.INPAINT_TELEA:
+            candidate[mask.astype(bool)] = 200
+        return candidate
+
+    monkeypatch.setattr(component_underlay.cv2, "inpaint", fake_inpaint)
+    layer = component_underlay.build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~hole,
+        semantic_mask=semantic,
+        higher_layer_mask=hole,
+        text_mask=np.zeros_like(hole),
+    )
+
+    assert np.array_equal(layer["rgb"][hole], source[hole])
+
+
+def test_visual_fill_exact_tie_keeps_telea(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.zeros((5, 5, 3), dtype=np.uint8)
+    semantic = np.ones((5, 5), dtype=bool)
+
+    def fake_inpaint(
+        image: np.ndarray, mask: np.ndarray, radius: int, method: int,
+    ) -> np.ndarray:
+        return np.full_like(image, 11 if method == cv2.INPAINT_TELEA else 22)
+
+    monkeypatch.setattr(component_underlay.cv2, "inpaint", fake_inpaint)
+    layer = component_underlay.build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=np.zeros((5, 5), dtype=bool),
+        semantic_mask=semantic,
+        higher_layer_mask=semantic,
+        text_mask=np.zeros_like(semantic),
+    )
+
+    assert np.all(layer["rgb"] == 11)
+    assert layer["metrics"] == {
+        "boundary_color_mae": 0.0,
+        "gradient_jump_p95": 0.0,
+        "added_high_frequency_pixels": 0.0,
+    }
+
+
+def test_visual_fill_never_changes_pixels_outside_hole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.arange(9 * 9 * 3, dtype=np.uint8).reshape(9, 9, 3)
+    semantic = np.ones((9, 9), dtype=bool)
+    hole = np.zeros((9, 9), dtype=bool)
+    hole[3:6, 3:6] = True
+
+    monkeypatch.setattr(
+        component_underlay.cv2,
+        "inpaint",
+        lambda image, mask, radius, method: np.full_like(image, 255),
+    )
+    layer = component_underlay.build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~hole,
+        semantic_mask=semantic,
+        higher_layer_mask=hole,
+        text_mask=np.zeros_like(hole),
+    )
+
+    assert np.array_equal(layer["rgb"][~hole], source[~hole])
 
 
 def test_advance_without_state_only_reports_needs_initialization(tmp_path: Path) -> None:
