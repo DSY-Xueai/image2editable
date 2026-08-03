@@ -15,6 +15,22 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     assert MAX_REPAIR_ROUNDS == 5
     assert "pending_gate" in component_contracts.COMPONENT_STATES
     assert "component-isolation.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
+    assert "presentation-manifest.json" in component_contracts.COMPONENT_EVIDENCE_NAMES
+
+
+def test_quality_input_contract_requires_presentation_manifest_ref() -> None:
+    refs = {
+        name: {"path": f"quality/{name}", "sha256": "a" * 64}
+        for name in (
+            "background", "reconstructed", "text_mask", "native_check",
+            "presentation_manifest",
+        )
+    }
+
+    assert component_contracts._validate_quality_input_refs(refs) is refs
+    refs.pop("presentation_manifest")
+    with pytest.raises(ValueError, match="quality input refs"):
+        component_contracts._validate_quality_input_refs(refs)
 
 
 @pytest.mark.parametrize(

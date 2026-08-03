@@ -8,7 +8,7 @@ import io
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import sys
@@ -31,6 +31,7 @@ from image2editable.component_repair import (
     record_next_component_request,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
+    _validate_presentation_manifest,
 )
 from image2editable.inputs import sha256_file
 from image2editable.store import RunStore
@@ -567,15 +568,26 @@ def _build_initial_page_session(
         encoding="utf-8",
     )
     evidence["quality-report.json"] = quality_path
+    presentation_manifest = _build_presentation_assets(
+        store,
+        source_path=source_target,
+        text_clean_path=Path(prepared.get(
+            "_text_clean_path", prepared["original_image_path"]
+        )),
+        graph_path=graph_path,
+        output_dir=evidence_root,
+    )
+    evidence["presentation-manifest.json"] = presentation_manifest
     evidence.update(
         _render_component_evidence(
             source_path=source_target,
             graph={"nodes": nodes},
-            graph_dir=evidence_root,
             text_mask_path=Path(prepared["_text_mask_path"]),
             background_path=Path(prepared["background_original_path"]),
-            text_clean_path=Path(prepared.get("_text_clean_path", prepared["original_image_path"])),
-            reconstructed_path=None,
+            presentation_manifest_path=presentation_manifest,
+            run_root=store.root,
+            reconstruction=reconstruction,
+            graph_sha256=sha256_file(graph_path),
             output_dir=evidence_root,
             text_items=text_items,
         )
@@ -654,15 +666,233 @@ def _ensure_component_disk_reserve(
         )
 
 
+def _build_presentation_assets(
+    store: RunStore,
+    *,
+    source_path: Path,
+    text_clean_path: Path,
+    graph_path: Path,
+    output_dir: Path,
+) -> Path:
+    import numpy as np
+
+    from image2editable.component_quality import resolve_visual_mask_ownership
+    from scripts.component_underlay import build_presentation_layer
+
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    with Image.open(source_path) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    with Image.open(text_clean_path) as image:
+        text_clean = np.asarray(image.convert("RGB")).copy()
+    if source.shape != text_clean.shape:
+        raise ValueError("presentation text-clean dimensions differ")
+
+    masks = {}
+    for node in graph["nodes"]:
+        mask_path = graph_path.parent / Path(node["mask"])
+        if sha256_file(mask_path) != node["mask_sha256"]:
+            raise ValueError("presentation graph mask sha256 mismatch")
+        with Image.open(mask_path) as image:
+            mask = np.asarray(image.convert("L")) > 0
+        if mask.shape != source.shape[:2]:
+            raise ValueError("presentation graph mask dimensions differ")
+        masks[node["id"]] = mask
+
+    active_nodes = _active_visual_nodes(graph)
+    ownership_masks = resolve_visual_mask_ownership(
+        active_nodes, [masks[node["id"]] for node in active_nodes]
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    for node in graph["nodes"]:
+        if node["kind"] == "text" and node["state"] == "frozen":
+            text_mask |= masks[node["id"]]
+
+    assets_dir = output_dir / "presentation-assets"
+    assets_dir.mkdir(exist_ok=False)
+    components = []
+    for index, (node, ownership) in enumerate(
+        zip(active_nodes, ownership_masks, strict=True), start=1
+    ):
+        semantic = (
+            masks[node["parent_id"]]
+            if node["parent_id"] is not None
+            else ownership
+        )
+        higher = np.zeros(source.shape[:2], dtype=bool)
+        for other, other_ownership in zip(
+            active_nodes, ownership_masks, strict=True
+        ):
+            if int(other["z_index"]) > int(node["z_index"]):
+                higher |= other_ownership
+        layer = build_presentation_layer(
+            source_rgb=source,
+            text_clean_rgb=text_clean,
+            ownership_mask=ownership,
+            semantic_mask=semantic,
+            higher_layer_mask=higher,
+            text_mask=text_mask,
+        )
+        paths = {
+            "rgba": assets_dir / f"{index:04d}-rgba.png",
+            "ownership_mask": assets_dir / f"{index:04d}-ownership-mask.png",
+            "presentation_alpha_mask": (
+                assets_dir / f"{index:04d}-presentation-alpha-mask.png"
+            ),
+            "generated_underlay_mask": (
+                assets_dir / f"{index:04d}-generated-underlay-mask.png"
+            ),
+        }
+        rgba = Image.fromarray(np.dstack((
+            layer["rgb"],
+            layer["presentation_alpha_mask"].astype(np.uint8) * 255,
+        )), mode="RGBA")
+        try:
+            rgba.save(paths["rgba"])
+        finally:
+            rgba.close()
+        for name in (
+            "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            image = Image.fromarray(layer[name].astype(np.uint8) * 255, mode="L")
+            try:
+                image.save(paths[name])
+            finally:
+                image.close()
+        metrics = {name: float(value) for name, value in layer["metrics"].items()}
+        if any(not math.isfinite(value) for value in metrics.values()):
+            raise ValueError("presentation metrics must be finite")
+        components.append({
+            "component_id": node["id"],
+            **{
+                name: {
+                    "path": path.resolve().relative_to(
+                        store.root.resolve()
+                    ).as_posix(),
+                    "sha256": sha256_file(path),
+                }
+                for name, path in paths.items()
+            },
+            "metrics": metrics,
+        })
+    manifest_path = output_dir / "presentation-manifest.json"
+    with manifest_path.open("x", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "source_sha256": sha256_file(source_path),
+            "graph_sha256": sha256_file(graph_path),
+            "components": components,
+        }, stream, ensure_ascii=False, indent=2, sort_keys=True)
+        stream.write("\n")
+    return manifest_path
+
+
+def _active_visual_nodes(graph: dict) -> list[dict]:
+    return [
+        node for node in graph["nodes"]
+        if node["kind"] != "text"
+        and node["state"] in {"pending", "pending_gate", "frozen"}
+    ]
+
+
+def _load_presentation_assets(
+    *,
+    run_root: Path,
+    reconstruction: Path,
+    manifest_path: Path,
+    source_sha256: str,
+    graph_sha256: str,
+    graph: dict,
+    page_size: tuple[int, int],
+) -> list[dict]:
+    import numpy as np
+
+    manifest = _validate_presentation_manifest(
+        manifest_path,
+        reconstruction,
+        source_sha256=source_sha256,
+        graph_sha256=graph_sha256,
+        run_root=run_root,
+        expected_component_ids=[
+            node["id"] for node in _active_visual_nodes(graph)
+        ],
+    )
+    layers = []
+    for component in manifest["components"]:
+        arrays = {}
+        for name, mode in (
+            ("rgba", "RGBA"),
+            ("ownership_mask", "L"),
+            ("presentation_alpha_mask", "L"),
+            ("generated_underlay_mask", "L"),
+        ):
+            reference = component[name]
+            path = run_root / Path(*PurePosixPath(reference["path"]).parts)
+            with Image.open(path) as image:
+                converted = image.convert(mode)
+                try:
+                    if converted.size != page_size:
+                        raise ValueError("presentation asset dimensions differ")
+                    arrays[name] = np.asarray(converted).copy()
+                finally:
+                    converted.close()
+        for name in (
+            "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            if not np.all((arrays[name] == 0) | (arrays[name] == 255)):
+                raise ValueError("presentation asset masks must be binary")
+        ownership = arrays["ownership_mask"] == 255
+        alpha = arrays["presentation_alpha_mask"] == 255
+        generated = arrays["generated_underlay_mask"] == 255
+        if np.any(ownership & generated):
+            raise ValueError(
+                "presentation ownership and generated underlay masks overlap"
+            )
+        if not np.array_equal(
+            arrays["rgba"][:, :, 3], arrays["presentation_alpha_mask"]
+        ):
+            raise ValueError("presentation RGBA alpha does not match alpha mask")
+        if not np.array_equal(alpha, ownership | generated):
+            raise ValueError("presentation asset masks do not match RGBA alpha")
+        layers.append({"component_id": component["component_id"], **arrays})
+    return layers
+
+
+def _composite_presentation_layers(
+    background: Image.Image,
+    graph: dict,
+    layers: list[dict],
+) -> Image.Image:
+    by_id = {layer["component_id"]: layer for layer in layers}
+    composited = background.convert("RGBA")
+    try:
+        active_nodes = _active_visual_nodes(graph)
+        indexed = {node["id"]: index for index, node in enumerate(active_nodes)}
+        for node in sorted(
+            active_nodes,
+            key=lambda item: (int(item["z_index"]), indexed[item["id"]]),
+        ):
+            overlay = Image.fromarray(by_id[node["id"]]["rgba"], mode="RGBA")
+            try:
+                composited.alpha_composite(overlay)
+            finally:
+                overlay.close()
+        return composited.convert("RGB")
+    finally:
+        composited.close()
+
+
 def _render_component_evidence(
     *,
     source_path: Path,
     graph: dict,
-    graph_dir: Path,
     text_mask_path: Path,
     background_path: Path,
-    text_clean_path: Path | None = None,
-    reconstructed_path: Path | None,
+    presentation_manifest_path: Path,
+    run_root: Path,
+    reconstruction: Path,
+    graph_sha256: str,
     output_dir: Path,
     text_items: list[dict],
 ) -> dict[str, Path]:
@@ -677,20 +907,23 @@ def _render_component_evidence(
             text_mask = keep(image.convert("L"))
         if text_mask.size != source.size:
             raise ValueError("component evidence text mask dimensions differ")
-        with Image.open(text_clean_path or source_path) as image:
-            text_clean = keep(image.convert("RGB"))
-        if text_clean.size != source.size:
-            raise ValueError("component evidence text-clean dimensions differ")
-        if reconstructed_path is None:
-            with Image.open(background_path) as image:
-                reconstructed = keep(image.convert("RGB"))
-            if reconstructed.size != source.size:
-                raise ValueError("component evidence background dimensions differ")
-        else:
-            with Image.open(reconstructed_path) as image:
-                reconstructed = keep(image.convert("RGB"))
-            if reconstructed.size != source.size:
-                raise ValueError("component evidence reconstruction dimensions differ")
+        with Image.open(background_path) as image:
+            background = keep(image.convert("RGB"))
+        if background.size != source.size:
+            raise ValueError("component evidence background dimensions differ")
+        layers = _load_presentation_assets(
+            run_root=run_root,
+            reconstruction=reconstruction,
+            manifest_path=presentation_manifest_path,
+            source_sha256=sha256_file(source_path),
+            graph_sha256=graph_sha256,
+            graph=graph,
+            page_size=source.size,
+        )
+        layer_by_id = {layer["component_id"]: layer for layer in layers}
+        reconstructed = keep(
+            _composite_presentation_layers(background, graph, layers)
+        )
 
         numbered = keep(source.copy())
         ownership = keep(Image.new("RGB", source.size, (24, 24, 24)))
@@ -704,14 +937,7 @@ def _render_component_evidence(
             (190, 100, 255),
             (60, 220, 210),
         )
-        isolation_nodes = [
-            node for node in graph["nodes"]
-            if node["kind"] != "text" and node["state"] in {
-                "pending",
-                "pending_gate",
-                "frozen",
-            }
-        ]
+        isolation_nodes = _active_visual_nodes(graph)
         columns = max(1, min(3, len(isolation_nodes)))
         rows = max(1, math.ceil(len(isolation_nodes) / columns))
         cell_width, cell_height, label_height = 320, 240, 24
@@ -720,28 +946,23 @@ def _render_component_evidence(
         ))
         isolation_draw = ImageDraw.Draw(isolation)
         for index, node in enumerate(isolation_nodes):
-            mask_path = graph_dir / Path(node["mask"])
-            if sha256_file(mask_path) != node["mask_sha256"]:
-                raise ValueError("component evidence mask sha256 mismatch")
+            layer = layer_by_id[node["id"]]
             with ExitStack() as node_images:
                 def keep_node(image: Image.Image) -> Image.Image:
                     node_images.callback(image.close)
                     return image
 
-                with Image.open(mask_path) as image:
-                    mask = keep_node(image.convert("L"))
-                if mask.size != source.size:
-                    raise ValueError("component evidence mask dimensions differ")
+                mask = keep_node(Image.fromarray(layer["ownership_mask"], mode="L"))
                 color = colors[int(node["z_index"]) % len(colors)]
                 alpha = keep_node(mask.point(lambda value: value * 96 // 255))
-                render_mask = keep_node(ImageChops.subtract(mask, text_mask))
-                bbox = mask.getbbox()
+                presentation = keep_node(
+                    Image.fromarray(layer["rgba"], mode="RGBA")
+                )
+                presentation_alpha = keep_node(presentation.getchannel("A"))
+                bbox = presentation_alpha.getbbox()
                 if bbox is None:
-                    raise ValueError("component evidence mask is empty")
-                clean_crop = keep_node(text_clean.crop(bbox))
-                isolated = keep_node(clean_crop.convert("RGBA"))
-                isolated_alpha = keep_node(mask.crop(bbox))
-                isolated.putalpha(isolated_alpha)
+                    raise ValueError("component presentation alpha is empty")
+                isolated = keep_node(presentation.crop(bbox))
                 isolated.thumbnail(
                     (cell_width - 16, cell_height - label_height - 16),
                     Image.Resampling.LANCZOS,
@@ -762,9 +983,7 @@ def _render_component_evidence(
                 )
                 color_layer = keep_node(Image.new("RGB", source.size, color))
                 numbered.paste(color_layer, (0, 0), alpha)
-                ownership.paste(color_layer, (0, 0), render_mask)
-                if reconstructed_path is None:
-                    reconstructed.paste(source, (0, 0), render_mask)
+                ownership.paste(color_layer, (0, 0), mask)
                 left, top, right, bottom = node["bbox"]
                 label_at = ((left + right) // 2, (top + bottom) // 2)
                 for draw in (numbered_draw, ownership_draw):
@@ -1065,7 +1284,6 @@ def _quality_assets(
 
     from image2editable.component_quality import (
         contained_active_parent_pairs,
-        resolve_visual_mask_ownership,
     )
 
     module = importlib.import_module("image_to_ppt")
@@ -1084,8 +1302,6 @@ def _quality_assets(
         source = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_clean_path) as image:
         text_clean = np.asarray(image.convert("RGB")).copy()
-    with Image.open(background_path) as image:
-        background = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_mask = np.asarray(image.convert("L")) > 0
     if text_mask.shape != source.shape[:2] or text_clean.shape != source.shape:
@@ -1095,7 +1311,6 @@ def _quality_assets(
     )
     text_clean_output = output_dir / "text-clean.png"
     Image.fromarray(text_clean, mode="RGB").save(text_clean_output)
-    reconstructed = background.copy()
     component_nodes = []
     component_masks = []
     for node in graph["nodes"]:
@@ -1113,19 +1328,39 @@ def _quality_assets(
     contained_parent_pairs = contained_active_parent_pairs(
         component_nodes, component_masks
     )
-    component_masks = resolve_visual_mask_ownership(
-        component_nodes, component_masks
+    graph_path = graph_dir / "component-graph.json"
+    presentation_manifest = _build_presentation_assets(
+        store,
+        source_path=source_path,
+        text_clean_path=text_clean_output,
+        graph_path=graph_path,
+        output_dir=output_dir,
     )
-    component_masks = _assign_text_regions_to_component_masks(
-        component_masks, text_mask, prepared.get("text_items", [])
-    )
-    for mask in component_masks:
-        reconstructed[mask] = text_clean[mask]
+    with Image.open(background_path) as image:
+        background_image = image.convert("RGB")
+    try:
+        layers = _load_presentation_assets(
+            run_root=store.root,
+            reconstruction=store.root / "pages" / page_id / "reconstruction",
+            manifest_path=presentation_manifest,
+            source_sha256=sha256_file(source_path),
+            graph_sha256=sha256_file(graph_path),
+            graph=graph,
+            page_size=background_image.size,
+        )
+        reconstructed_image = _composite_presentation_layers(
+            background_image, graph, layers
+        )
+    finally:
+        background_image.close()
+    reconstructed = np.asarray(reconstructed_image).copy()
+    reconstructed_image.close()
     assets = {
         "background": output_dir / "background.png",
         "reconstructed": output_dir / "reconstructed.png",
         "text_mask": output_dir / "text-mask.png",
         "native_check": output_dir / "native-check.json",
+        "presentation_manifest": presentation_manifest,
     }
     shutil.copyfile(background_path, assets["background"])
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
@@ -1286,7 +1521,6 @@ def _publish_next_legacy_request(
     evidence = {}
     copies = {
         "source.png": source,
-        "reconstructed.png": _state_artifact(store, refs["reconstructed"]),
         "component-graph.json": graph_path,
         "quality-report.json": quality_path,
     }
@@ -1294,22 +1528,39 @@ def _publish_next_legacy_request(
         target = evidence_root / name
         shutil.copyfile(source_path, target)
         evidence[name] = target
+    previous_manifest_path = _state_artifact(store, refs["presentation_manifest"])
+    execution = json.loads(_state_artifact(
+        store, state["current_round"]["execution_ref"]
+    ).read_text(encoding="utf-8"))
+    previous_manifest = _validate_presentation_manifest(
+        previous_manifest_path,
+        reconstruction,
+        source_sha256=state["source_sha256"],
+        graph_sha256=execution["output_graph_sha256"],
+    )
+    previous_manifest["graph_sha256"] = sha256_file(graph_path)
+    presentation_manifest = evidence_root / "presentation-manifest.json"
+    with presentation_manifest.open("x", encoding="utf-8") as stream:
+        json.dump(
+            previous_manifest,
+            stream,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        stream.write("\n")
+    evidence["presentation-manifest.json"] = presentation_manifest
     shutil.copytree(graph_path.parent / "masks", evidence_root / "masks")
     evidence.update(
         _render_component_evidence(
             source_path=evidence["source.png"],
             graph=graph,
-            graph_dir=evidence_root,
             text_mask_path=_state_artifact(store, refs["text_mask"]),
             background_path=_state_artifact(store, refs["background"]),
-            text_clean_path=(
-                graph_path.parent / "text-clean.png"
-                if (graph_path.parent / "text-clean.png").exists()
-                else Path(prepared.get(
-                    "_text_clean_path", prepared["original_image_path"]
-                ))
-            ),
-            reconstructed_path=evidence["reconstructed.png"],
+            presentation_manifest_path=evidence["presentation-manifest.json"],
+            run_root=store.root,
+            reconstruction=reconstruction,
+            graph_sha256=sha256_file(evidence["component-graph.json"]),
             output_dir=evidence_root,
             text_items=text_items,
         )

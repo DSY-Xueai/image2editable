@@ -16,7 +16,7 @@ import cv2
 from image2editable.component_repair import (
     EVIDENCE_NAMES,
     advance_component_repair,
-    build_component_agent_request,
+    build_component_agent_request as _build_component_agent_request,
     initialize_component_repair_state,
     load_component_agent_graph,
     load_component_agent_request,
@@ -435,6 +435,7 @@ def test_execution_refreshes_candidates_after_discard(
         graph["nodes"].append(candidate)
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
     page_session["provider"] = "local"
+    _refresh_test_presentation_manifest(page_session)
 
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
@@ -467,7 +468,9 @@ def test_execution_refreshes_candidates_after_discard(
         ).hexdigest(),
         "output_graph_sha256": hashlib.sha256(next_graph_path.read_bytes()).hexdigest(),
         "executable_action_count": 1,
-        "quality_input_refs": _quality_input_refs(output_dir, store),
+        "quality_input_refs": _quality_input_refs(
+            output_dir, store, next_graph_path
+        ),
     }
     execution_path = output_dir / "execution.json"
     execution_path.write_text(json.dumps(execution), encoding="utf-8")
@@ -549,7 +552,9 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
         ).hexdigest(),
         "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
         "executable_action_count": 2,
-        "quality_input_refs": _quality_input_refs(execution_dir, store),
+        "quality_input_refs": _quality_input_refs(
+            execution_dir, store, graph_path
+        ),
     }
     execution_path = execution_dir / "execution.json"
     execution_path.write_text(json.dumps(execution), encoding="utf-8")
@@ -618,9 +623,9 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     execution_dir = request_path.parents[2] / "execution-01"
     execution_dir.mkdir()
     shutil.copytree(request_path.parent / "masks", execution_dir / "masks")
-    quality_input_refs = _quality_input_refs(execution_dir, store)
     graph_path = execution_dir / "component-graph.json"
     graph_path.write_text(json.dumps(next_graph), encoding="utf-8")
+    quality_input_refs = _quality_input_refs(execution_dir, store, graph_path)
     execution = {
         "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": 1, "request_sha256": plan["request_sha256"],
@@ -655,7 +660,8 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
         .read_text(encoding="utf-8")
     )
     assert set(quality_artifact["input_refs"]) == {
-        "source", "background", "reconstructed", "text_mask", "native_check"
+        "source", "background", "reconstructed", "text_mask", "native_check",
+        "presentation_manifest",
     }
     assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
@@ -667,7 +673,8 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     assert state["result_ref"] is not None
     result = store.read_json("pages/page_001/reconstruction/component_result.json")
     assert set(result["accepted_asset_refs"]) == {
-        "source", "background", "reconstructed", "text_mask", "native_check"
+        "source", "background", "reconstructed", "text_mask", "native_check",
+        "presentation_manifest",
     }
 
 
@@ -739,6 +746,7 @@ def test_unowned_raster_text_page_violation_preserves_leaf_component_freeze(
     candidate_c["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
     graph["nodes"].append(candidate_c)
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
@@ -859,7 +867,9 @@ def _next_round_session(page_session: dict, store, quality: dict) -> dict:
     quality_path = Path(page_session["reconstruction_dir"]) / "round-02-quality.json"
     quality_path.write_text(json.dumps(quality), encoding="utf-8")
     evidence["quality-report.json"] = quality_path
-    return {**page_session, "provider": "local", "evidence": evidence}
+    session = {**page_session, "provider": "local", "evidence": evidence}
+    _refresh_test_presentation_manifest(session)
+    return session
 
 
 def test_initial_diagnostics_continue_through_real_round_two(
@@ -1103,7 +1113,7 @@ def test_intact_parent_gate_controls_fallback_result(
     )
     graph_path = fallback_dir / "component-graph.json"
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
-    quality_input_refs = _quality_input_refs(fallback_dir, store)
+    quality_input_refs = _quality_input_refs(fallback_dir, store, graph_path)
     record_parent_fallback_execution(
         store, "page_001", graph_path=graph_path,
         quality_input_refs=quality_input_refs,
@@ -1173,7 +1183,7 @@ def _strict_quality_report(component_id: str, accepted: bool) -> dict:
     }
 
 
-def _quality_input_refs(directory: Path, store) -> dict:
+def _quality_input_refs(directory: Path, store, graph_path: Path) -> dict:
     paths = {}
     for name in ("background", "reconstructed", "text-mask"):
         path = directory / f"{name}.png"
@@ -1188,6 +1198,12 @@ def _quality_input_refs(directory: Path, store) -> dict:
         "initial_diagnostics": [],
     }), encoding="utf-8")
     paths["native-check"] = native
+    paths["presentation-manifest"] = _write_test_presentation_manifest(
+        store.root,
+        directory,
+        source_sha256=state["source_sha256"],
+        graph_path=graph_path,
+    )
     return {
         name.replace("-", "_"): {
             "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
@@ -1237,10 +1253,13 @@ def test_quality_native_diagnostics_must_match_request_evidence(
     }), encoding="utf-8")
     request_path = request_dir / "component_agent_request.json"
     request_path.write_text("{}", encoding="utf-8")
-    request = {"evidence": {"quality-report.json": {
-        "path": "quality-report.json",
-        "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
-    }}}
+    request = {
+        "graph_sha256": "b" * 64,
+        "evidence": {"quality-report.json": {
+            "path": "quality-report.json",
+            "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
+        }},
+    }
     native = {
         "schema_version": 1, "page_id": "page_001",
         "source_sha256": source_sha, "protected_native_overlap": "pass",
@@ -1260,6 +1279,16 @@ def test_quality_native_diagnostics_must_match_request_evidence(
     refs["native_check"] = {
         "path": native_path.relative_to(store.root).as_posix(),
         "sha256": hashlib.sha256(native_path.read_bytes()).hexdigest(),
+    }
+    manifest_path = _write_test_presentation_manifest(
+        store.root,
+        request_dir,
+        source_sha256=source_sha,
+        graph_sha256=request["graph_sha256"],
+    )
+    refs["presentation_manifest"] = {
+        "path": manifest_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
     }
 
     with pytest.raises(ValueError, match="diagnostic|native"):
@@ -1410,6 +1439,12 @@ def _execute_composite_quality_round(
         "initial_diagnostics": initial_diagnostics or [],
     }), encoding="utf-8")
     quality_paths["native_check"] = native
+    quality_paths["presentation_manifest"] = _write_test_presentation_manifest(
+        store.root,
+        execution_dir,
+        source_sha256=state["source_sha256"],
+        graph_path=graph_path,
+    )
     quality_refs = {
         name: {
             "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
@@ -1432,6 +1467,16 @@ def _execute_composite_quality_round(
         execution["output_graph_sha256"] = hashlib.sha256(
             graph_path.read_bytes()
         ).hexdigest()
+        manifest_path = _write_test_presentation_manifest(
+            store.root,
+            execution_dir,
+            source_sha256=state["source_sha256"],
+            graph_path=graph_path,
+        )
+        execution["quality_input_refs"]["presentation_manifest"] = {
+            "path": manifest_path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
         execution_path.write_text(json.dumps(execution), encoding="utf-8")
     record_component_execution(
         store, "page_001", execution_path=execution_path,
@@ -1496,6 +1541,7 @@ def _record_composite_quality(
         if path.suffix == ".png" and name != "component-graph.json":
             Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
     page_session["provider"] = "local"
+    _refresh_test_presentation_manifest(page_session)
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
@@ -1736,6 +1782,7 @@ def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
     session["evidence"]["component-graph.json"] = (
         store.root / state["graph_ref"]["path"]
     )
+    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -1770,6 +1817,7 @@ def test_execution_rejects_rewritten_retained_inactive_source_mask(
     session["evidence"]["component-graph.json"] = (
         store.root / state["graph_ref"]["path"]
     )
+    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -1802,6 +1850,7 @@ def test_execution_rejects_rewritten_retained_inactive_source_role(
     session["evidence"]["component-graph.json"] = (
         store.root / state["graph_ref"]["path"]
     )
+    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -2186,6 +2235,89 @@ def page_session(tmp_path: Path) -> dict:
     return _make_page_session(tmp_path, "page_001")
 
 
+def _write_test_presentation_manifest(
+    run_root: Path,
+    output_dir: Path,
+    *,
+    source_sha256: str,
+    graph_path: Path | None = None,
+    graph_sha256: str | None = None,
+) -> Path:
+    if graph_path is not None:
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph_sha256 = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+        component_ids = [
+            node["id"] for node in graph["nodes"]
+            if node["kind"] != "text"
+            and node["state"] in {"pending", "pending_gate", "frozen"}
+        ]
+    else:
+        component_ids = []
+    assert graph_sha256 is not None
+    assets_dir = output_dir / "presentation-assets"
+    assets_dir.mkdir(exist_ok=True)
+    components = []
+    for index, component_id in enumerate(component_ids, start=1):
+        paths = {}
+        for name in (
+            "rgba", "ownership-mask", "presentation-alpha-mask",
+            "generated-underlay-mask",
+        ):
+            path = assets_dir / f"{index:04d}-{name}.png"
+            mode = "RGBA" if name == "rgba" else "L"
+            color = (0, 0, 0, 255) if mode == "RGBA" else 255
+            Image.new(mode, (2, 2), color).save(path)
+            paths[name.replace("-", "_")] = {
+                "path": path.relative_to(run_root).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        components.append({
+            "component_id": component_id,
+            **paths,
+            "metrics": {
+                "boundary_color_mae": 0.0,
+                "gradient_jump_p95": 0.0,
+                "added_high_frequency_pixels": 0.0,
+            },
+        })
+    manifest_path = output_dir / "presentation-manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1,
+        "source_sha256": source_sha256,
+        "graph_sha256": graph_sha256,
+        "components": components,
+    }), encoding="utf-8")
+    return manifest_path
+
+
+def _refresh_test_presentation_manifest(page_session: dict) -> None:
+    evidence = page_session["evidence"]
+    manifest_path = Path(evidence["presentation-manifest.json"])
+    graph_path = Path(evidence["component-graph.json"])
+    source_path = Path(evidence["source.png"])
+    if graph_path.stat().st_size > component_repair.GRAPH_JSON_LIMIT:
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    graph_sha256 = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    if (
+        manifest["source_sha256"] != source_sha256
+        or manifest["graph_sha256"] != graph_sha256
+    ):
+        _write_test_presentation_manifest(
+            Path(page_session["reconstruction_dir"]).parents[2],
+            manifest_path.parent,
+            source_sha256=source_sha256,
+            graph_path=graph_path,
+        )
+
+
+build_component_agent_request = _build_component_agent_request
+
+
 def _make_page_session(run_root: Path, page_id: str) -> dict:
     reconstruction = run_root / "pages" / page_id / "reconstruction"
     evidence_root = reconstruction / "evidence-source"
@@ -2215,6 +2347,13 @@ def _make_page_session(run_root: Path, page_id: str) -> dict:
         else:
             path.write_bytes((name + " data").encode())
         sources[name] = path
+    manifest_path = _write_test_presentation_manifest(
+        run_root,
+        evidence_root,
+        source_sha256=hashlib.sha256(sources["source.png"].read_bytes()).hexdigest(),
+        graph_path=sources["component-graph.json"],
+    )
+    sources["presentation-manifest.json"] = manifest_path
     return {
         "page_id": page_id,
         "provider": "host",
@@ -2232,6 +2371,82 @@ def test_build_request_hash_binds_every_evidence_file(page_session: dict) -> Non
     assert request["candidate_ids"] == ["candidate_b"]
     assert request["frozen_ids"] == ["frozen_a"]
     assert request_path.parent.name == "round-01"
+
+
+def test_presentation_asset_tamper_is_rejected_on_request_load(
+    page_session: dict,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    manifest = json.loads(
+        (request_path.parent / "presentation-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    run_root = request_path.parents[5]
+    asset = run_root / manifest["components"][0]["rgba"]["path"]
+    asset.write_bytes(asset.read_bytes() + b"tampered")
+
+    with pytest.raises(RuntimeError, match="presentation asset hash mismatch"):
+        load_component_agent_request(request_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "error"),
+    [
+        ("source_sha256", "presentation manifest source hash mismatch"),
+        ("graph_sha256", "presentation manifest graph hash mismatch"),
+    ],
+)
+def test_presentation_manifest_binds_request_source_and_graph_hashes(
+    page_session: dict,
+    field: str,
+    error: str,
+) -> None:
+    manifest_path = page_session["evidence"]["presentation-manifest.json"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[field] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match=error):
+        _build_component_agent_request(page_session, repair_round=1)
+
+
+@pytest.mark.parametrize("path", ["../rgba.png", "/rgba.png"])
+def test_presentation_manifest_rejects_asset_path_outside_run_root(
+    page_session: dict,
+    path: str,
+) -> None:
+    manifest_path = page_session["evidence"]["presentation-manifest.json"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["components"][0]["rgba"]["path"] = path
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="presentation asset path"):
+        _build_component_agent_request(page_session, repair_round=1)
+
+
+def test_presentation_manifest_components_must_match_active_graph_order(
+    page_session: dict,
+) -> None:
+    manifest_path = page_session["evidence"]["presentation-manifest.json"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["components"].reverse()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="components.*graph"):
+        _build_component_agent_request(page_session, repair_round=1)
+
+
+def test_presentation_manifest_rejects_boolean_schema_version(
+    page_session: dict,
+) -> None:
+    manifest_path = page_session["evidence"]["presentation-manifest.json"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version"):
+        _build_component_agent_request(page_session, repair_round=1)
 
 
 def test_validate_request_rejects_changed_overlay(page_session: dict) -> None:
@@ -2644,6 +2859,7 @@ def test_build_streams_large_evidence_in_bounded_reads(
 ) -> None:
     large = Path(page_session["evidence"]["source.png"])
     large.write_bytes(b"x" * (3 * 1024 * 1024 + 17))
+    _refresh_test_presentation_manifest(page_session)
     real_fdopen = os.fdopen
     read_sizes: list[int] = []
 

@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 import types
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -176,6 +176,63 @@ def _accept_action(component_id: str = "component_0001") -> dict[str, Any]:
         "confidence": 0.95,
         "evidence": ["component boundary is complete"],
     }
+
+
+def _assert_round_presentation_manifest(
+    run_dir: Path, page_id: str, repair_round: int
+) -> None:
+    round_dir = (
+        run_dir / "pages" / page_id / "reconstruction" / "agent"
+        / f"round-{repair_round:02d}"
+    )
+    request = json.loads(
+        (round_dir / "component_agent_request.json").read_text(encoding="utf-8")
+    )
+    assert "presentation-manifest.json" in request["evidence"]
+    manifest = json.loads(
+        (round_dir / "presentation-manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["source_sha256"] == request["source_sha256"]
+    assert manifest["graph_sha256"] == request["graph_sha256"]
+    assert set(manifest["components"][0]) == {
+        "component_id", "rgba", "ownership_mask",
+        "presentation_alpha_mask", "generated_underlay_mask", "metrics",
+    }
+    for component in manifest["components"]:
+        for name in (
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            reference = component[name]
+            assert set(reference) == {"path", "sha256"}
+            pure = PurePosixPath(reference["path"])
+            assert not pure.is_absolute()
+            assert ".." not in pure.parts
+            asset = run_dir / Path(*pure.parts)
+            assert asset.is_file()
+            assert asset.resolve().is_relative_to(run_dir.resolve())
+            assert hashlib.sha256(asset.read_bytes()).hexdigest() == reference["sha256"]
+
+
+def _build_test_presentation_manifest(
+    run_root: Path,
+    *,
+    source_path: Path,
+    text_clean_path: Path,
+    graph: dict,
+    graph_dir: Path,
+    output_dir: Path,
+) -> tuple[Path, str]:
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    manifest_path = legacy._build_presentation_assets(
+        types.SimpleNamespace(root=run_root),
+        source_path=source_path,
+        text_clean_path=text_clean_path,
+        graph_path=graph_path,
+        output_dir=output_dir,
+    )
+    return manifest_path, hashlib.sha256(graph_path.read_bytes()).hexdigest()
 
 
 def _local_receipt(tmp_path: Path) -> dict[str, object]:
@@ -426,6 +483,40 @@ def test_local_provider_runs_multiple_rounds_serially_without_pausing(
     assert (round_two / "ownership.png").read_bytes() != (
         round_two / "source.png"
     ).read_bytes()
+
+
+def test_host_component_rounds_publish_hash_bound_presentation_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(
+        monkeypatch,
+        baked_background_pages={"page_001"},
+    )
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="host",
+    )
+
+    first_wait = runtime.run_job(run_dir)
+    assert first_wait["status"] == "awaiting_agent"
+    _assert_round_presentation_manifest(run_dir, "page_001", 1)
+
+    _record_current_component_plan(
+        run_dir,
+        tmp_path / "round-1-plan.json",
+        [_accept_action()],
+    )
+    second_wait = runtime.run_job(run_dir)
+
+    assert second_wait["status"] == "awaiting_agent"
+    assert second_wait["repair_round"] == 2
+    _assert_round_presentation_manifest(run_dir, "page_001", 1)
+    _assert_round_presentation_manifest(run_dir, "page_001", 2)
 
 
 def test_next_round_disk_reserve_fails_before_evidence_publication(
@@ -960,7 +1051,7 @@ def test_initial_page_session_v2_builds_parent_child_graph_and_excludes_text(
     assert reserve_node_counts == [3]
     with Image.open(session["evidence"]["reconstructed.png"]) as reconstructed:
         assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
-        assert reconstructed.getpixel((3, 2)) == (0, 0, 0)
+        assert reconstructed.getpixel((3, 2)) == (1, 2, 3)
     graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
     parent, child, text = graph["nodes"]
     assert parent["id"] == "parent_0001"
@@ -1136,6 +1227,23 @@ def test_component_evidence_closes_loaded_images_when_mask_validation_fails(
     Image.new("RGB", (20, 10), "black").save(background)
     Image.new("L", (20, 10), 0).save(text_mask)
     Image.new("L", (20, 10), 255).save(mask_path)
+    graph = {"nodes": [{
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 20, 10], "z_index": 0, "text_ids": [],
+    }]}
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source,
+        text_clean_path=source,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rgba_path = tmp_path / manifest["components"][0]["rgba"]["path"]
+    rgba_path.write_bytes(rgba_path.read_bytes() + b"changed")
     copied_images = []
     closed_image_ids = set()
     real_copy = Image.Image.copy
@@ -1153,19 +1261,16 @@ def test_component_evidence_closes_loaded_images_when_mask_validation_fails(
     monkeypatch.setattr(Image.Image, "copy", tracked_copy)
     monkeypatch.setattr(Image.Image, "close", tracked_close)
 
-    with pytest.raises(ValueError, match="mask sha256 mismatch"):
+    with pytest.raises(RuntimeError, match="presentation asset hash mismatch"):
         legacy._render_component_evidence(
             source_path=source,
-            graph={"nodes": [{
-                "id": "component_0001", "kind": "parent", "parent_id": None,
-                "state": "pending", "mask": mask_path.name,
-                "mask_sha256": "0" * 64, "bbox": [0, 0, 20, 10],
-                "z_index": 0, "text_ids": [],
-            }]},
-            graph_dir=tmp_path,
+            graph=graph,
             text_mask_path=text_mask,
             background_path=background,
-            reconstructed_path=None,
+            presentation_manifest_path=manifest_path,
+            run_root=tmp_path,
+            reconstruction=tmp_path,
+            graph_sha256=graph_sha256,
             output_dir=tmp_path,
             text_items=[],
         )
@@ -1187,22 +1292,34 @@ def test_component_evidence_closes_node_images_before_rendering_next_node(
     nodes = []
     for index in range(2):
         mask_path = tmp_path / f"component-mask-{index}.png"
-        Image.new("L", (20, 10), 255).save(mask_path)
+        mask = Image.new("L", (20, 10), 0)
+        ImageDraw.Draw(mask).rectangle(
+            (index * 10, 0, index * 10 + 9, 9), fill=255
+        )
+        mask.save(mask_path)
+        mask.close()
         nodes.append({
             "id": f"component_{index + 1:04d}", "kind": "parent",
             "parent_id": None, "state": "pending", "mask": mask_path.name,
             "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
             "bbox": [0, 0, 20, 10], "z_index": index, "text_ids": [],
         })
+    graph = {"nodes": nodes}
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source,
+        text_clean_path=source,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
     copied_images = []
     closed_image_ids = set()
-    real_copy = Image.Image.copy
+    real_convert = Image.Image.convert
     real_close = Image.Image.close
-    real_sha256_file = legacy.sha256_file
-    mask_checks = 0
 
-    def tracked_copy(image):
-        copied = real_copy(image)
+    def tracked_convert(image, *args, **kwargs):
+        copied = real_convert(image, *args, **kwargs)
         copied_images.append(copied)
         return copied
 
@@ -1210,30 +1327,27 @@ def test_component_evidence_closes_node_images_before_rendering_next_node(
         closed_image_ids.add(id(image))
         real_close(image)
 
-    def checked_sha256_file(path):
-        nonlocal mask_checks
-        mask_checks += 1
-        if mask_checks == 2:
-            assert id(copied_images[-1]) in closed_image_ids
-        return real_sha256_file(path)
-
-    monkeypatch.setattr(Image.Image, "copy", tracked_copy)
+    monkeypatch.setattr(Image.Image, "convert", tracked_convert)
     monkeypatch.setattr(Image.Image, "close", tracked_close)
-    monkeypatch.setattr(legacy, "sha256_file", checked_sha256_file)
 
     legacy._render_component_evidence(
         source_path=source,
-        graph={"nodes": nodes},
-        graph_dir=tmp_path,
+        graph=graph,
         text_mask_path=text_mask,
         background_path=background,
-        reconstructed_path=None,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=graph_sha256,
         output_dir=tmp_path,
         text_items=[],
     )
 
+    assert copied_images
+    assert all(id(image) in closed_image_ids for image in copied_images)
 
-def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruction(
+
+def test_component_evidence_uses_exact_manifest_rgba_for_every_render(
     tmp_path: Path
 ) -> None:
     size = (200, 100)
@@ -1241,13 +1355,11 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
     non_text = (0, 0)
     source_path = tmp_path / "source.png"
     background_path = tmp_path / "background.png"
-    supplied_path = tmp_path / "supplied.png"
     text_mask_path = tmp_path / "text-mask.png"
     parent_mask_path = tmp_path / "parent-mask.png"
     child_mask_path = tmp_path / "child-mask.png"
     Image.new("RGB", size, (1, 2, 3)).save(source_path)
     Image.new("RGB", size, "black").save(background_path)
-    Image.new("RGB", size, (9, 8, 7)).save(supplied_path)
     text_clean_path = tmp_path / "text-clean.png"
     Image.new("RGB", size, (30, 40, 50)).save(text_clean_path)
     mask = Image.new("L", size, 0)
@@ -1279,26 +1391,36 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
     later_dir = tmp_path / "later-evidence"
     initial_dir.mkdir()
     later_dir.mkdir()
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=text_clean_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=initial_dir,
+    )
 
     initial = legacy._render_component_evidence(
         source_path=source_path,
         graph=graph,
-        graph_dir=tmp_path,
         text_mask_path=text_mask_path,
         background_path=background_path,
-        text_clean_path=text_clean_path,
-        reconstructed_path=None,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=graph_sha256,
         output_dir=initial_dir,
         text_items=[],
     )
     later = legacy._render_component_evidence(
         source_path=source_path,
         graph=graph,
-        graph_dir=tmp_path,
         text_mask_path=text_mask_path,
         background_path=background_path,
-        text_clean_path=text_clean_path,
-        reconstructed_path=supplied_path,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=graph_sha256,
         output_dir=later_dir,
         text_items=[],
     )
@@ -1306,12 +1428,12 @@ def test_component_evidence_preserves_full_numbered_mask_and_supplied_reconstruc
     with Image.open(initial["numbered-masks.png"]) as numbered:
         assert numbered.getpixel(overlap) != (1, 2, 3)
     with Image.open(initial["ownership.png"]) as ownership:
-        assert ownership.getpixel(overlap) == (24, 24, 24)
+        assert ownership.getpixel(overlap) != (24, 24, 24)
     with Image.open(initial["reconstructed.png"]) as reconstructed:
-        assert reconstructed.getpixel(overlap) == (0, 0, 0)
+        assert reconstructed.getpixel(overlap) == (30, 40, 50)
     with Image.open(later["reconstructed.png"]) as reconstructed:
-        assert reconstructed.getpixel(non_text) == (9, 8, 7)
-        assert reconstructed.getpixel(overlap) == (9, 8, 7)
+        assert reconstructed.getpixel(non_text) == (30, 40, 50)
+        assert reconstructed.getpixel(overlap) == (30, 40, 50)
     with Image.open(initial["component-isolation.png"]) as isolation:
         assert isolation.mode == "RGBA"
         pixels = np.asarray(isolation)
@@ -1364,14 +1486,25 @@ def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
             },
         ))
         sample_points.append((left + 5, 75))
+    graph = {"nodes": nodes}
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
 
     evidence = legacy._render_component_evidence(
         source_path=source_path,
-        graph={"nodes": nodes},
-        graph_dir=tmp_path,
+        graph=graph,
         text_mask_path=text_mask_path,
         background_path=background_path,
-        reconstructed_path=None,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=graph_sha256,
         output_dir=tmp_path,
         text_items=[],
     )
@@ -1384,6 +1517,49 @@ def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
         (90, 220, 120),
         (255, 190, 60),
     ]
+
+
+def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    mask = tmp_path / "mask.png"
+    Image.new("RGB", (4, 4), "red").save(source)
+    Image.new("L", (4, 4), 255).save(mask)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": mask.name,
+        "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source,
+        text_clean_path=source,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rgba_path = tmp_path / manifest["components"][0]["rgba"]["path"]
+    with Image.open(rgba_path) as opened:
+        rgba = opened.convert("RGBA")
+    rgba.putpixel((0, 0), (*rgba.getpixel((0, 0))[:3], 1))
+    rgba.save(rgba_path)
+    rgba.close()
+    manifest["components"][0]["rgba"]["sha256"] = hashlib.sha256(
+        rgba_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="binary|alpha"):
+        legacy._load_presentation_assets(
+            run_root=tmp_path,
+            reconstruction=tmp_path,
+            manifest_path=manifest_path,
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            graph_sha256=graph_sha256,
+            graph=graph,
+            page_size=(4, 4),
+        )
 
 
 def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
@@ -1444,6 +1620,9 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
         nested_mask: nested_mask.read_bytes(),
     }
     original_graph = json.loads(json.dumps(graph))
+    (mask_dir.parent / "component-graph.json").write_text(
+        json.dumps(graph), encoding="utf-8"
+    )
 
     refs = legacy._quality_assets(
         store, "page_001", graph, mask_dir.parent, output_dir,

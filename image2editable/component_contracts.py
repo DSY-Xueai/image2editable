@@ -21,6 +21,7 @@ COMPONENT_EVIDENCE_NAMES = frozenset(
         "difference.png",
         "component-graph.json",
         "quality-report.json",
+        "presentation-manifest.json",
     }
 )
 
@@ -247,7 +248,8 @@ def validate_component_repair_state(state: object) -> dict:
 
 def _validate_quality_input_refs(value: object) -> dict:
     if not isinstance(value, dict) or set(value) != {
-        "background", "reconstructed", "text_mask", "native_check"
+        "background", "reconstructed", "text_mask", "native_check",
+        "presentation_manifest",
     }:
         raise ValueError("component quality input refs are invalid")
     for reference in value.values():

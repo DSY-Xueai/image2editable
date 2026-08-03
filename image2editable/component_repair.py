@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
@@ -400,15 +401,17 @@ def record_component_execution(
         request_path = store.root / Path(
             *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
         )
-        _verify_quality_input_refs(
-            store, state, execution["quality_input_refs"],
-            request=load_component_agent_request(request_path),
-            request_path=request_path,
-        )
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
         ).decode("utf-8"))
         after = json.loads(graph_payload.decode("utf-8"))
+        _verify_quality_input_refs(
+            store, state, execution["quality_input_refs"],
+            request=load_component_agent_request(request_path),
+            request_path=request_path,
+            expected_graph_sha256=graph_ref["sha256"],
+            expected_component_ids=_presentation_component_ids(after),
+        )
         from image2editable.component_contracts import validate_graph_transition
         validate_graph_transition(before=before, after=after)
         for node in after["nodes"]:
@@ -640,6 +643,8 @@ def record_parent_fallback_execution(
             store, state, quality_input_refs,
             request=load_component_agent_request(request_path),
             request_path=request_path,
+            expected_graph_sha256=graph_ref["sha256"],
+            expected_component_ids=_presentation_component_ids(graph),
         )
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
@@ -738,11 +743,116 @@ def _artifact_reference(root: Path, path: Path, label: str) -> tuple[dict, bytes
     }, payload
 
 
+def _validate_presentation_manifest(
+    manifest_path: Path,
+    reconstruction: Path,
+    *,
+    source_sha256: str,
+    graph_sha256: str,
+    run_root: Path | None = None,
+    expected_component_ids: list[str] | None = None,
+) -> dict:
+    payload = _read_bound_file(
+        manifest_path,
+        reconstruction,
+        max_bytes=GRAPH_JSON_LIMIT,
+        label="presentation manifest JSON",
+    )
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("presentation manifest JSON is invalid") from error
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "schema_version", "source_sha256", "graph_sha256", "components"
+    }:
+        raise ValueError("presentation manifest fields are invalid")
+    if (
+        type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != 1
+    ):
+        raise ValueError("presentation manifest schema_version is invalid")
+    if manifest["source_sha256"] != source_sha256:
+        raise RuntimeError("presentation manifest source hash mismatch")
+    if manifest["graph_sha256"] != graph_sha256:
+        raise RuntimeError("presentation manifest graph hash mismatch")
+    components = manifest["components"]
+    if not isinstance(components, list):
+        raise ValueError("presentation manifest components are invalid")
+    component_ids = []
+    run_root = reconstruction.parents[2] if run_root is None else run_root
+    asset_fields = (
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    )
+    for component in components:
+        if not isinstance(component, dict) or set(component) != {
+            "component_id", *asset_fields, "metrics"
+        }:
+            raise ValueError("presentation manifest component fields are invalid")
+        component_id = component["component_id"]
+        if type(component_id) is not str or not component_id:
+            raise ValueError("presentation manifest component_id is invalid")
+        component_ids.append(component_id)
+        metrics = component["metrics"]
+        if (
+            not isinstance(metrics, dict)
+            or any(type(name) is not str or not name for name in metrics)
+            or any(
+                type(value) not in {int, float} or not math.isfinite(value)
+                for value in metrics.values()
+            )
+        ):
+            raise ValueError("presentation manifest metrics are invalid")
+        for field in asset_fields:
+            reference = component[field]
+            if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+                raise ValueError("presentation asset reference is invalid")
+            path = reference["path"]
+            if type(path) is not str or not path or "\\" in path or ":" in path:
+                raise ValueError("presentation asset path is invalid")
+            pure = PurePosixPath(path)
+            if pure.is_absolute() or ".." in pure.parts:
+                raise ValueError("presentation asset path is invalid")
+            asset_path = run_root / Path(*pure.parts)
+            try:
+                asset_path.relative_to(reconstruction)
+            except ValueError as error:
+                raise ValueError("presentation asset path is outside current page") from error
+            digest = reference["sha256"]
+            if (
+                type(digest) is not str
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError("presentation asset sha256 is invalid")
+            if _hash_bound_file(asset_path, reconstruction) != digest:
+                raise RuntimeError(
+                    f"presentation asset hash mismatch: {component_id}/{field}"
+                )
+    if len(component_ids) != len(set(component_ids)):
+        raise ValueError("presentation manifest component ids are duplicated")
+    if expected_component_ids is not None and component_ids != expected_component_ids:
+        raise ValueError("presentation manifest components do not match graph")
+    return manifest
+
+
+def _presentation_component_ids(graph: dict) -> list[str]:
+    validated = validate_component_graph(graph)
+    return [
+        node["id"] for node in validated["nodes"]
+        if node["kind"] != "text"
+        and node["state"] in {"pending", "pending_gate", "frozen"}
+    ]
+
+
 def _verify_quality_input_refs(
-    store, state: dict, refs: object, *, request: dict, request_path: Path
+    store, state: dict, refs: object, *, request: dict, request_path: Path,
+    expected_graph_sha256: str | None = None,
+    expected_component_ids: list[str] | None = None,
 ) -> dict:
     if not isinstance(refs, dict) or set(refs) != {
-        "background", "reconstructed", "text_mask", "native_check"
+        "background", "reconstructed", "text_mask", "native_check",
+        "presentation_manifest",
     }:
         raise ValueError("component quality input refs are invalid")
     for reference in refs.values():
@@ -795,6 +905,25 @@ def _verify_quality_input_refs(
     )
     if native["initial_diagnostics"] != expected:
         raise ValueError("component native diagnostics do not match request evidence")
+    manifest_path = store.root / Path(
+        *PurePosixPath(refs["presentation_manifest"]["path"]).parts
+    )
+    if expected_component_ids is None:
+        graph = json.loads(_load_state_artifact(
+            store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
+        ).decode("utf-8"))
+        expected_component_ids = _presentation_component_ids(graph)
+    _validate_presentation_manifest(
+        manifest_path,
+        store.root / "pages" / state["page_id"] / "reconstruction",
+        source_sha256=state["source_sha256"],
+        graph_sha256=(
+            expected_graph_sha256
+            or state.get("graph_ref", {}).get("sha256")
+            or request["graph_sha256"]
+        ),
+        expected_component_ids=expected_component_ids,
+    )
     return refs
 
 
@@ -1543,6 +1672,13 @@ def _build_component_agent_request_locked(
         graph_source = _contained_path(
             Path(sources["component-graph.json"]), reconstruction
         )
+        _validate_presentation_manifest(
+            staging / "presentation-manifest.json",
+            reconstruction,
+            source_sha256=records["source.png"]["sha256"],
+            graph_sha256=records["component-graph.json"]["sha256"],
+            expected_component_ids=_presentation_component_ids(graph),
+        )
         request = {
             "schema_version": 1,
             "page_id": page_id,
@@ -1729,6 +1865,13 @@ def load_component_agent_request(request_path: str | Path) -> dict:
         raise RuntimeError("Component graph evidence hash mismatch")
     graph = json.loads(graph_payload.decode("utf-8"))
     validate_component_graph(graph)
+    _validate_presentation_manifest(
+        round_dir / request["evidence"]["presentation-manifest.json"]["path"],
+        reconstruction,
+        source_sha256=request["source_sha256"],
+        graph_sha256=request["graph_sha256"],
+        expected_component_ids=_presentation_component_ids(graph),
+    )
     for node in graph["nodes"]:
         mask_path = round_dir / Path(*PurePosixPath(node["mask"]).parts)
         if _hash_bound_file(mask_path, reconstruction) != node["mask_sha256"]:

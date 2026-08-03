@@ -58,9 +58,37 @@ def _publish_request(run_dir: Path) -> Path:
             path.write_text(json.dumps(graph), encoding="utf-8")
         elif name == "quality-report.json":
             path.write_text('{"valid": false}', encoding="utf-8")
+        elif name == "presentation-manifest.json":
+            continue
         else:
             path.write_bytes(name.encode())
         evidence[name] = path
+    assets = evidence_root / "presentation-assets"
+    assets.mkdir()
+    references = {}
+    for name in (
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ):
+        path = assets / f"{name}.png"
+        path.write_bytes(name.encode())
+        references[name] = {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    manifest = evidence_root / "presentation-manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "source_sha256": hashlib.sha256(evidence["source.png"].read_bytes()).hexdigest(),
+        "graph_sha256": hashlib.sha256(
+            evidence["component-graph.json"].read_bytes()
+        ).hexdigest(),
+        "components": [{
+            "component_id": "candidate_1", **references,
+            "metrics": {"boundary_color_mae": 0.0},
+        }],
+    }), encoding="utf-8")
+    evidence["presentation-manifest.json"] = manifest
     request_path = build_component_agent_request({
         "page_id": "page_001", "provider": "host",
         "reconstruction_dir": reconstruction, "evidence": evidence,
