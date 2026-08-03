@@ -2621,8 +2621,52 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
 
 
 def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
+    import image_to_ppt
+
     store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
     output = tmp_path / "accepted-output.pptx"
+    initial = reconstruction / "initial"
+    initial.mkdir()
+    prepared_source = initial / "source.png"
+    prepared_background = initial / "background.png"
+    prepared_text_mask = initial / "text-mask.png"
+    prepared_removal_mask = initial / "removal-mask.png"
+    prepared_difference = initial / "difference.png"
+    Image.new("RGB", (16, 9), "white").save(prepared_source)
+    Image.new("RGB", (16, 9), "white").save(prepared_background)
+    Image.new("L", (16, 9), 0).save(prepared_text_mask)
+    Image.new("L", (16, 9), 0).save(prepared_removal_mask)
+    Image.new("RGB", (16, 9), "black").save(prepared_difference)
+    image_to_ppt._write_prepared_page({
+        "img_width": 16,
+        "img_height": 9,
+        "canvas_width": 16,
+        "canvas_height": 9,
+        "content_offset_x": 0,
+        "content_offset_y": 0,
+        "widescreen_background_method": "identity",
+        "original_image_path": str(prepared_source),
+        "background_original_path": str(prepared_background),
+        "background_widescreen_path": str(prepared_background),
+        "background_removal_mask_path": str(prepared_removal_mask),
+        "background_difference_path": str(prepared_difference),
+        "_text_mask_path": str(prepared_text_mask),
+        "_element_mask_paths": [],
+        "_semantic_mask_paths": [],
+        "_resource_isolation": False,
+        "_initial_diagnostics": [],
+        "components": [],
+        "text_items": [{
+            "box": [0, 2, 8, 4],
+            "text": "editable",
+            "font_size": 10.0,
+            "color": "#000000",
+            "bold": False,
+            "font": "Arial",
+            "align": 1,
+            "confidence": 1.0,
+        }],
+    }, initial)
     result["status"] = "ready_for_assembly"
     result_path = reconstruction / "component_result.json"
     result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -2645,32 +2689,9 @@ def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
 
 
 def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    from pptx.util import Inches
-
     store, reconstruction, output = _accepted_assembly_job(tmp_path)
-
-    class AcceptedImageModule:
-        @staticmethod
-        def load_component_layers(path):
-            return {"text_items": [{"text": "editable"}]}
-
-        @staticmethod
-        def _assemble_prepared_slide(slide_data, output_path, *args):
-            presentation = Presentation()
-            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-            slide.shapes.add_picture(
-                slide_data["components"][0]["path"], 0, 0, width=Inches(1)
-            )
-            text_box = slide.shapes.add_textbox(0, Inches(1), Inches(2), Inches(1))
-            text_box.text_frame.text = slide_data["text_items"][0]["text"]
-            presentation.save(output_path)
-            return str(output_path)
-
-    monkeypatch.setattr(
-        legacy.importlib, "import_module", lambda name: AcceptedImageModule
-    )
 
     outputs = legacy.assemble_legacy_results(store)
 
