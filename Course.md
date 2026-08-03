@@ -59,12 +59,12 @@ image2editable models status
 
 - 本轮 TDD 红灯覆盖多项 OCR 只取 max、部分已知文字导致整候选跳过、OCR 返回顺序变化、逐项 conflict bbox/ID、跨轮 diagnostics 删除/置空/替换、伪造空批次、整页 hash/RGB 副本和首轮视觉残留；32/96 上限另以 40/97 mutation 验证测试确实能捕获旧缺陷。
 - 最新核心回归为 `507 passed, 9 skipped`，历史回归与 Task10 E2E 为 `258 passed`，全量为 `1493 passed, 20 skipped`。prepared-page 继续兼容读取 v1/v2；独立代码复审确认原始遮罩恢复、页级失败拦截、pair 语义批准与重复计划保护均无未关闭的 Critical/Important。
-- `wsl和虚拟机对比.png` 的既有 r9 原始父遮罩实测只命中冗余 `parent_0004`、`parent_0006`，未命中完整表格 `parent_0002`、页脚 `parent_0005` 与 13 个独立图标。按新规则生成的验收候选含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；PowerPoint COM reopen 与原生渲染成功，隐藏文字后的图片层未见文字轮廓、浅灰残影或白色字形补丁。该候选用于验证根因与门禁，仍需新建 Run 复验自动 Agent 闭环后再视为该文件完整验收通过。
+- `wsl和虚拟机对比.png` 已用全新 r11 Run 完成 Host Agent 两批闭环：首批冻结 13 个独立图标，第二批依据精确包含关系保留完整表格 `parent_0002` 与独立页脚 `parent_0005`，丢弃冗余子区域 `parent_0004`、`parent_0006`。最终含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；原画幅与 16:9 均经 PowerPoint COM 重开和原生渲染，删除全部文字对象后重新保存、重开所得图片层仍保留完整图标与结构，未见文字轮廓、浅灰残影或白色字形补丁。
 - 真实 r3 已确认 targeted OCR 能把全页漏检的小型候选文字恢复为可编辑对象，同时暴露局部 crop 导致的字号放大；该字号回归已有通用自动化测试和修复，仍需重新生成真实输出后再宣称真实验收通过。
 
 ## 当前注意事项
 
 - 真实文件必须串行、一次一个文件/重型页面；监控内存和磁盘，结束后确认无残留 Python/OCR/SAM 进程。禁止下载模型。
-- 待自动闭环复验文件：`wsl和虚拟机对比.png`、`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
+- 待自动闭环复验文件：`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
 - `test1.pptx` 不得再把“每页 3 个整块父组件”视为成功条件；必须通过最小完整视觉单元和三层文字隔离门禁。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不得 force-add。
