@@ -11,16 +11,14 @@ import tempfile
 import numpy as np
 from PIL import Image
 
-try:
-    from scripts.worker_resources import run_isolated_worker
-except ModuleNotFoundError as error:
-    if error.name not in {"scripts", "scripts.worker_resources"}:
-        raise
-    from worker_resources import run_isolated_worker
+_MODULE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _MODULE_ROOT not in sys.path:
+    sys.path.insert(0, _MODULE_ROOT)
+
+from scripts.worker_resources import run_isolated_worker
 
 
 def _load_tools():
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from scripts.object_detect import ObjectProposal
     from scripts.visual_segment import (
         VisualElement,

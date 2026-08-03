@@ -1375,3 +1375,75 @@ def test_root_and_skill_workers_load_outside_repository(tmp_path: Path) -> None:
                 text=True,
             )
             assert completed.returncode == 0, completed.stderr
+
+
+def test_root_and_skill_sam_worker_loads_local_tools_outside_repository(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    external_scripts = tmp_path / "scripts"
+    external_scripts.mkdir()
+    (external_scripts / "__init__.py").write_text(
+        "SOURCE = 'external'\n",
+        encoding="utf-8",
+    )
+    worker_roots = [
+        root / "scripts",
+        root / "skills" / "image-to-ppt" / "scripts",
+    ]
+    probe = (
+        "import pathlib, sys; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "import sam_worker; "
+        "sam_worker._load_tools(); "
+        "import scripts.worker_resources as resources; "
+        "expected = pathlib.Path(sys.argv[1], 'worker_resources.py').resolve(); "
+        "assert pathlib.Path(resources.__file__).resolve() == expected"
+    )
+    for worker_root in worker_roots:
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, str(worker_root)],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_root_and_skill_worker_modules_prefer_local_resources_outside_repository(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    external_scripts = tmp_path / "scripts"
+    external_scripts.mkdir()
+    (external_scripts / "__init__.py").write_text(
+        "SOURCE = 'external'\n",
+        encoding="utf-8",
+    )
+    worker_roots = [
+        root / "scripts",
+        root / "skills" / "image-to-ppt" / "scripts",
+    ]
+    probe = (
+        "import importlib, pathlib, sys; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "importlib.import_module(sys.argv[2]); "
+        "import scripts.worker_resources as resources; "
+        "expected = pathlib.Path(sys.argv[1], 'worker_resources.py').resolve(); "
+        "assert pathlib.Path(resources.__file__).resolve() == expected"
+    )
+    for worker_root in worker_roots:
+        for module_name in ("text_detect", "lama_inpaint"):
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    probe,
+                    str(worker_root),
+                    module_name,
+                ],
+                cwd=tmp_path,
+                capture_output=True,
+                text=True,
+            )
+            assert completed.returncode == 0, completed.stderr

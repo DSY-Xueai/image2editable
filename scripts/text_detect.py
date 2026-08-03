@@ -23,12 +23,11 @@ from PIL import Image
 
 import re
 
-try:
-    from scripts.worker_resources import run_isolated_worker
-except ModuleNotFoundError as error:
-    if error.name not in {"scripts", "scripts.worker_resources"}:
-        raise
-    from worker_resources import run_isolated_worker
+_MODULE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _MODULE_ROOT not in sys.path:
+    sys.path.insert(0, _MODULE_ROOT)
+
+from scripts.worker_resources import run_isolated_worker
 
 logger = logging.getLogger(__name__)
 
