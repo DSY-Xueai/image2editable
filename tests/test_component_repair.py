@@ -205,30 +205,78 @@ def test_visual_fill_exact_tie_keeps_telea(
 ) -> None:
     from scripts import component_underlay
 
-    source = np.zeros((5, 5, 3), dtype=np.uint8)
+    source = np.full((5, 5, 3), 100, dtype=np.uint8)
     semantic = np.ones((5, 5), dtype=bool)
+    hole = np.zeros((5, 5), dtype=bool)
+    hole[2, 2] = True
+    ownership = semantic & ~hole
+    telea = source.copy()
+    telea[hole] = 90
+    navier_stokes = source.copy()
+    navier_stokes[hole] = 110
+
+    assert component_underlay._visual_metrics(
+        telea, source, ownership, hole,
+    ) == component_underlay._visual_metrics(
+        navier_stokes, source, ownership, hole,
+    )
 
     def fake_inpaint(
         image: np.ndarray, mask: np.ndarray, radius: int, method: int,
     ) -> np.ndarray:
-        return np.full_like(image, 11 if method == cv2.INPAINT_TELEA else 22)
+        return telea if method == cv2.INPAINT_TELEA else navier_stokes
 
     monkeypatch.setattr(component_underlay.cv2, "inpaint", fake_inpaint)
     layer = component_underlay.build_presentation_layer(
         source_rgb=source,
         text_clean_rgb=source,
-        ownership_mask=np.zeros((5, 5), dtype=bool),
+        ownership_mask=ownership,
         semantic_mask=semantic,
-        higher_layer_mask=semantic,
+        higher_layer_mask=hole,
         text_mask=np.zeros_like(semantic),
     )
 
-    assert np.all(layer["rgb"] == 11)
-    assert layer["metrics"] == {
-        "boundary_color_mae": 0.0,
-        "gradient_jump_p95": 0.0,
-        "added_high_frequency_pixels": 0.0,
-    }
+    assert np.all(layer["rgb"][hole] == 90)
+    assert np.array_equal(layer["rgb"][~hole], source[~hole])
+
+
+def test_visual_fill_handles_multiple_holes_near_page_edge() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.arange(3 * 7 * 3, dtype=np.uint8).reshape(3, 7, 3)
+    semantic = np.ones((3, 7), dtype=bool)
+    holes = np.zeros((3, 7), dtype=bool)
+    holes[1, 1] = True
+    holes[1, 4] = True
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~holes,
+        semantic_mask=semantic,
+        higher_layer_mask=holes,
+        text_mask=np.zeros_like(holes),
+    )
+
+    assert np.array_equal(layer["rgb"][~holes], source[~holes])
+    assert all(np.isfinite(value) for value in layer["metrics"].values())
+
+
+def test_presentation_layer_rejects_visual_hole_without_ownership_donor() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.zeros((5, 5, 3), dtype=np.uint8)
+    semantic = np.ones((5, 5), dtype=bool)
+
+    with pytest.raises(ValueError, match="visual hole.*ownership donor"):
+        build_presentation_layer(
+            source_rgb=source,
+            text_clean_rgb=source,
+            ownership_mask=np.zeros_like(semantic),
+            semantic_mask=semantic,
+            higher_layer_mask=semantic,
+            text_mask=np.zeros_like(semantic),
+        )
 
 
 def test_visual_fill_never_changes_pixels_outside_hole(

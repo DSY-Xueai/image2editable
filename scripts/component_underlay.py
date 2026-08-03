@@ -75,7 +75,9 @@ def _visual_metrics(
             continue
         i = candidate[iy[gradient_indices], ix[gradient_indices]].astype(np.int16)
         o = source[oy[gradient_indices], ox[gradient_indices]].astype(np.int16)
-        o2 = source[o2y[gradient_indices], o2x[gradient_indices]].astype(np.int16)
+        o2 = source[
+            outer_y[gradient_indices], outer_x[gradient_indices]
+        ].astype(np.int16)
         gradient_errors.append(np.mean(np.abs((i - o) - (o - o2)), axis=1))
 
     if not boundary_errors:
@@ -168,6 +170,8 @@ def build_presentation_layer(
 
     text_hole = semantic & ~ownership & text
     visual_hole = semantic & ~ownership & higher_layer & ~text_hole
+    if np.any(visual_hole) and not np.any(ownership):
+        raise ValueError("visual hole requires at least one visible ownership donor")
     generated = text_hole | visual_hole
     rgb = np.asarray(text_clean_rgb, dtype=np.uint8).copy()
     if np.any(visual_hole):
