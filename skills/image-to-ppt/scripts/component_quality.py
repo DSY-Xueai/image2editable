@@ -858,11 +858,12 @@ def evaluate_component(
         ],
     })
     violations = []
-    if presentation_alpha_mask is not None and (
+    empty_visual_component = presentation_alpha_mask is not None and (
         metrics["component_pixels"] == 0
         or not np.any(ownership)
         or not np.any(alpha)
-    ):
+    )
+    if empty_visual_component:
         violations.append("empty_component")
     hard_pixel_ratio = max(
         0.01,
@@ -933,6 +934,8 @@ def evaluate_component(
         violations.append("protected_native_overlap_unknown")
     elif native_state == "fail":
         violations.append("protected_native_overlap")
+    if empty_visual_component:
+        violations = ["empty_component"]
     previous = previous_metrics or {}
     improvement = {}
     for key in (

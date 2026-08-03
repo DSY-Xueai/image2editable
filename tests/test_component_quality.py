@@ -669,7 +669,33 @@ def test_exact_empty_component_cannot_pass_quality_gate(
         confidence=1.0,
     )
 
-    assert "empty_component" in report["violations"]
+    assert report["violations"] == ["empty_component"]
+    assert report["accepted"] is False
+
+
+def test_empty_child_with_generated_semantic_underlay_reports_only_empty() -> None:
+    case = _synthetic_quality_case()
+    ownership = np.zeros_like(case["component_mask"])
+    generated = np.zeros_like(ownership)
+    generated[20:24, 20:24] = True
+    case["component_mask"] = ownership
+    case["node"]["kind"] = "child"
+    case["node"]["parent_id"] = "parent_0001"
+    case["graph"]["nodes"].append({
+        "id": "parent_0001", "kind": "parent", "parent_id": None,
+        "state": "inactive", "mask": "masks/parent_0001.png",
+        "mask_sha256": "b" * 64, "bbox": [20, 20, 24, 24],
+        "z_index": -1, "text_ids": [],
+    })
+
+    report = _evaluate_underlay(
+        case, parent_mask=generated, generated=generated, confidence=1.0,
+    )
+
+    assert report["metrics"]["component_pixels"] == 0
+    assert report["metrics"]["generated_underlay_pixels"] > 0
+    assert report["metrics"]["parent_coverage_ratio"] == 0
+    assert report["violations"] == ["empty_component"]
     assert report["accepted"] is False
 
 
