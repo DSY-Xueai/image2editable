@@ -37,6 +37,7 @@ IO_CHUNK_SIZE = 1024 * 1024
 GRAPH_JSON_LIMIT = 16 * 1024 * 1024
 REQUEST_JSON_LIMIT = 4 * 1024 * 1024
 MARKER_JSON_LIMIT = 64 * 1024
+PRESENTATION_ASSET_LIMIT = 256 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 
 
@@ -565,15 +566,43 @@ def record_next_component_request(
         request_path = Path(request_path)
         request = load_component_agent_request(request_path)
         graph = load_component_agent_graph(request_path)
-        previous_request_path = store.root / Path(
-            *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
-        )
-        if _request_initial_diagnostics(
-            store, previous_request_path, state["source_sha256"]
-        ) != _request_initial_diagnostics(
-            store, request_path, state["source_sha256"]
+        if (
+            request["evidence"]["quality-report.json"]["sha256"]
+            != state["current_round"]["quality_ref"]["sha256"]
         ):
-            raise ValueError("next component request initial diagnostics changed")
+            raise ValueError(
+                "next component request does not reference previous quality"
+            )
+        previous_quality = json.loads(_load_state_artifact(
+            store.root,
+            state["current_round"]["quality_ref"],
+            max_bytes=GRAPH_JSON_LIMIT,
+        ).decode("utf-8"))
+        if (
+            not isinstance(previous_quality, dict)
+            or previous_quality.get("schema_version") != 1
+            or type(previous_quality.get("schema_version")) is not int
+            or previous_quality.get("page_id") != state["page_id"]
+            or previous_quality.get("provider") != state["provider"]
+            or previous_quality.get("repair_round") != state["repair_round"]
+            or previous_quality.get("request_sha256")
+            != state["current_round"]["request_ref"]["sha256"]
+            or previous_quality.get("quality_gate_version")
+            != state["quality_gate_version"]
+            or previous_quality.get("initial_component_count")
+            != state["initial_component_count"]
+        ):
+            raise ValueError("previous component quality artifact identity is invalid")
+        validate_initial_diagnostics(
+            previous_quality.get("initial_diagnostics"),
+            source_sha256=state["source_sha256"],
+        )
+        _previous_component_reports(
+            previous_quality,
+            state={**state, "repair_round": state["repair_round"] + 1},
+            request=request,
+            active_component_ids=_presentation_component_ids(graph),
+        )
         if (
             request["page_id"] != page_id
             or request["provider"] != state["provider"]
@@ -819,15 +848,40 @@ def _validate_presentation_manifest_payload(
                 or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise ValueError("presentation asset sha256 is invalid")
-            if _hash_bound_file(asset_path, reconstruction) != digest:
-                raise RuntimeError(
-                    f"presentation asset hash mismatch: {component_id}/{field}"
-                )
     if len(component_ids) != len(set(component_ids)):
         raise ValueError("presentation manifest component ids are duplicated")
     if expected_component_ids is not None and component_ids != expected_component_ids:
         raise ValueError("presentation manifest components do not match graph")
     return manifest
+
+
+def _verify_presentation_manifest_assets(
+    manifest: dict,
+    reconstruction: Path,
+    *,
+    run_root: Path | None = None,
+) -> None:
+    run_root = reconstruction.parents[2] if run_root is None else run_root
+    for component in manifest["components"]:
+        for field in (
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            reference = component[field]
+            asset_path = run_root / Path(
+                *PurePosixPath(reference["path"]).parts
+            )
+            payload = _read_bound_file(
+                asset_path,
+                reconstruction,
+                max_bytes=PRESENTATION_ASSET_LIMIT,
+                label=f"presentation asset {component['component_id']}/{field}",
+            )
+            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+                raise RuntimeError(
+                    f"presentation asset hash mismatch: "
+                    f"{component['component_id']}/{field}"
+                )
 
 
 def _validate_presentation_manifest(
@@ -845,7 +899,7 @@ def _validate_presentation_manifest(
         max_bytes=GRAPH_JSON_LIMIT,
         label="presentation manifest JSON",
     )
-    return _validate_presentation_manifest_payload(
+    manifest = _validate_presentation_manifest_payload(
         payload,
         reconstruction,
         source_sha256=source_sha256,
@@ -853,6 +907,12 @@ def _validate_presentation_manifest(
         run_root=run_root,
         expected_component_ids=expected_component_ids,
     )
+    _verify_presentation_manifest_assets(
+        manifest,
+        reconstruction,
+        run_root=run_root,
+    )
+    return manifest
 
 
 def _decode_quality_presentation_image(
@@ -967,18 +1027,124 @@ def _presentation_component_ids(graph: dict) -> list[str]:
     ]
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_artifact_reference(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        return False
+    path = value["path"]
+    if type(path) is not str or not path or "\\" in path or ":" in path:
+        return False
+    pure = PurePosixPath(path)
+    return not pure.is_absolute() and ".." not in pure.parts and _is_sha256(
+        value["sha256"]
+    )
+
+
+def _is_component_pair_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and all(
+            isinstance(pair, list)
+            and len(pair) == 2
+            and pair == sorted(set(pair))
+            and all(type(component_id) is str for component_id in pair)
+            for pair in value
+        )
+        and len(value) == len({tuple(pair) for pair in value})
+    )
+
+
 def _previous_component_reports(
-    quality_evidence: dict, *, active_visual_count: int,
+    quality_evidence: dict,
+    *,
+    state: dict,
+    request: dict,
+    active_component_ids: list[str],
 ) -> dict[str, dict]:
-    if "report" not in quality_evidence:
+    active_visual_count = len(active_component_ids)
+    if state["repair_round"] == 1:
+        if not isinstance(quality_evidence, dict) or set(quality_evidence) != {
+            "schema_version", "phase", "text_items",
+            "initial_diagnostics", "violations",
+        }:
+            raise ValueError("initial component quality evidence is invalid")
+        if (
+            quality_evidence["schema_version"] != 1
+            or type(quality_evidence["schema_version"]) is not int
+            or quality_evidence["phase"] != "initial_layers"
+            or not isinstance(quality_evidence["text_items"], list)
+            or not isinstance(quality_evidence["violations"], list)
+            or any(type(value) is not str for value in quality_evidence["violations"])
+        ):
+            raise ValueError("initial component quality evidence is invalid")
+        validate_initial_diagnostics(
+            quality_evidence["initial_diagnostics"],
+            source_sha256=state["source_sha256"],
+        )
         return {}
+    required_fields = {
+        "schema_version", "page_id", "provider", "repair_round",
+        "request_sha256", "input_graph_sha256", "quality_gate_version",
+        "expected_component_ids", "initial_component_count",
+        "initial_diagnostics", "contained_parent_pairs",
+        "approved_contained_parent_pairs", "input_refs", "report",
+    }
+    if (
+        not isinstance(quality_evidence, dict)
+        or not required_fields <= set(quality_evidence)
+        or not set(quality_evidence) <= required_fields | {"text_items"}
+    ):
+        raise ValueError("previous component quality artifact fields are invalid")
     expected_component_ids = quality_evidence.get("expected_component_ids")
     initial_component_count = quality_evidence.get("initial_component_count")
     if (
-        type(expected_component_ids) is not list
-        or type(initial_component_count) is not int
+        type(quality_evidence["schema_version"]) is not int
+        or quality_evidence["schema_version"] != 1
+        or quality_evidence["page_id"] != state["page_id"]
+        or quality_evidence["provider"] != state["provider"]
+        or quality_evidence["repair_round"] != state["repair_round"] - 1
+        or quality_evidence["quality_gate_version"] != state["quality_gate_version"]
+        or type(expected_component_ids) is not list
+        or len(expected_component_ids) != len(set(expected_component_ids))
+        or not set(expected_component_ids) <= set(active_component_ids)
+        or not set(request["candidate_ids"]) <= set(expected_component_ids)
+        or initial_component_count != state["initial_component_count"]
+        or not _is_sha256(quality_evidence["request_sha256"])
+        or not _is_sha256(quality_evidence["input_graph_sha256"])
+        or not _is_component_pair_list(
+            quality_evidence["contained_parent_pairs"]
+        )
+        or not _is_component_pair_list(
+            quality_evidence["approved_contained_parent_pairs"]
+        )
+        or not isinstance(quality_evidence["input_refs"], dict)
+        or set(quality_evidence["input_refs"]) != {
+            "source", "background", "reconstructed", "text_mask",
+            "native_check", "presentation_manifest",
+        }
+        or any(
+            not _is_artifact_reference(reference)
+            for reference in quality_evidence["input_refs"].values()
+        )
+        or quality_evidence["input_refs"]["source"]["sha256"]
+        != request["source_sha256"]
+        or (
+            "text_items" in quality_evidence
+            and not isinstance(quality_evidence["text_items"], list)
+        )
     ):
-        raise ValueError("previous component quality report metadata is invalid")
+        raise ValueError("previous component quality artifact identity is invalid")
+    validate_initial_diagnostics(
+        quality_evidence["initial_diagnostics"],
+        source_sha256=state["source_sha256"],
+    )
     from image2editable.component_quality import validate_component_quality_report
 
     report = validate_component_quality_report(
@@ -1076,23 +1242,6 @@ def _verify_quality_input_refs(
     return refs
 
 
-def _request_initial_diagnostics(
-    store, request_path: Path, source_sha256: str
-) -> list[dict]:
-    request = load_component_agent_request(request_path)
-    evidence = request["evidence"]["quality-report.json"]
-    quality_path = request_path.parent / evidence["path"]
-    quality_ref, quality_payload = _artifact_reference(
-        store.root, quality_path, "initial quality evidence"
-    )
-    if quality_ref["sha256"] != evidence["sha256"]:
-        raise RuntimeError("initial quality evidence hash mismatch")
-    quality = json.loads(quality_payload.decode("utf-8"))
-    diagnostics = quality.get("initial_diagnostics", [])
-    validate_initial_diagnostics(diagnostics, source_sha256=source_sha256)
-    return diagnostics
-
-
 def _approved_contained_parent_pairs(
     plan: dict, contained_parent_pairs: set[tuple[str, str]]
 ) -> set[tuple[str, str]]:
@@ -1187,7 +1336,9 @@ def _recompute_quality_artifact(
     native = json.loads(bound_quality_payloads["native_check"].decode("utf-8"))
     previous_reports = _previous_component_reports(
         quality_evidence,
-        active_visual_count=len(_presentation_component_ids(graph)),
+        state=state,
+        request=request,
+        active_component_ids=_presentation_component_ids(graph),
     )
     contained_parent_pairs = {
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
@@ -1789,10 +1940,6 @@ def evaluate_component_quality_round(
                 trusted_chain=directory_chain,
                 shape=shape,
             )
-            other_nodes = [
-                other for other in active_visual
-                if other["id"] != component_id
-            ]
             presentation_kwargs = {
                 "presentation_alpha_mask": unpack(
                     component_id, "presentation_alpha_mask"
@@ -1801,18 +1948,6 @@ def evaluate_component_quality_round(
                     component_id, "generated_underlay_mask"
                 ),
                 "underlay_metrics": packed_layers[component_id]["metrics"],
-                "other_component_masks": (
-                    unpack(other["id"], "ownership_mask")
-                    for other in other_nodes
-                ),
-                "other_presentation_alpha_masks": (
-                    unpack(other["id"], "presentation_alpha_mask")
-                    for other in other_nodes
-                ),
-                "other_generated_underlay_masks": (
-                    unpack(other["id"], "generated_underlay_mask")
-                    for other in other_nodes
-                ),
             }
         reports.append(evaluate_component(
             source,

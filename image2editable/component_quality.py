@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import zip_longest
 
 import cv2
 import numpy as np
@@ -117,7 +116,6 @@ _METRIC_FIELDS = frozenset({
     "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
     "component_text_residual_ratio", "background_text_residual_ratio",
     "parent_coverage_ratio", "component_overlap_pixels",
-    "presentation_overlap_pixels",
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
     "adaptive_pixel_tolerance", "hard_pixel_tolerance",
@@ -769,8 +767,6 @@ def evaluate_component(
     generated_underlay_mask: np.ndarray | None = None,
     underlay_metrics: dict | None = None,
     other_component_masks: Iterable[np.ndarray] = (),
-    other_presentation_alpha_masks: Iterable[np.ndarray] = (),
-    other_generated_underlay_masks: Iterable[np.ndarray] = (),
     text_mask: np.ndarray,
     page_checks: dict | None = None,
     agent_confidence: float | None = None,
@@ -815,25 +811,8 @@ def evaluate_component(
             underlay_metrics
         )
 
-    illegal_presentation_overlap = np.zeros(source_shape, dtype=bool)
-    missing = object()
-    for index, (other_owner_value, other_alpha_value, other_generated_value) in enumerate(
-        zip_longest(
-            other_component_masks,
-            other_presentation_alpha_masks,
-            other_generated_underlay_masks,
-            fillvalue=missing,
-        )
-    ):
-        if any(
-            value is missing
-            for value in (
-                other_owner_value,
-                other_alpha_value,
-                other_generated_value,
-            )
-        ):
-            raise ValueError("other component presentation input counts differ")
+    direct_ownership_overlap = np.zeros(source_shape, dtype=bool)
+    for index, other_owner_value in enumerate(other_component_masks):
         if presentation_alpha_mask is None:
             raise ValueError(
                 "other presentation inputs require component presentation inputs"
@@ -841,25 +820,7 @@ def evaluate_component(
         other_owner = _strict_binary_mask(
             other_owner_value, source_shape, f"other component {index} ownership mask"
         )
-        other_alpha_mask = _strict_binary_mask(
-            other_alpha_value, source_shape,
-            f"other component {index} presentation alpha mask",
-        )
-        other_generated_mask = _strict_binary_mask(
-            other_generated_value, source_shape,
-            f"other component {index} generated underlay mask",
-        )
-        _validate_presentation_mask_union(
-            other_owner,
-            other_alpha_mask,
-            other_generated_mask,
-            label=f"other component {index} presentation",
-        )
-        illegal_presentation_overlap |= (
-            alpha
-            & other_alpha_mask
-            & ~(generated | other_generated_mask)
-        )
+        direct_ownership_overlap |= ownership & other_owner
 
     if parent_mask is None:
         if np.any(generated):
@@ -876,10 +837,14 @@ def evaluate_component(
         component_mask=component_mask, parent_mask=parent_mask,
         text_mask=text_mask, _page_context=_page_context,
     )
+    if presentation_alpha_mask is not None:
+        context_overlap = np.zeros(source_shape, dtype=bool)
+        if _page_context is not None:
+            context_overlap = ownership & (_page_context.component_owner_count > 1)
+        metrics["component_overlap_pixels"] = int(np.count_nonzero(
+            context_overlap | direct_ownership_overlap
+        ))
     metrics.update({
-        "presentation_overlap_pixels": int(np.count_nonzero(
-            illegal_presentation_overlap
-        )),
         "generated_underlay_pixels": int(np.count_nonzero(generated)),
         "underlay_out_of_bounds_pixels": int(np.count_nonzero(underlay_outside)),
         "underlay_boundary_color_mae": normalized_underlay_metrics[
@@ -933,8 +898,6 @@ def evaluate_component(
         violations.append("parent_child_double")
     if metrics["component_overlap_pixels"]:
         violations.append("component_overlap")
-    if metrics["presentation_overlap_pixels"]:
-        violations.append("presentation_overlap")
     if metrics["duplicate_ratio"] >= hard_pixel_ratio:
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:
@@ -974,7 +937,6 @@ def evaluate_component(
         "shadow_duplicate_ratio", "alpha_duplicate_ratio",
         "text_duplicate_ratio", "component_text_residual_ratio",
         "background_text_residual_ratio", "underlay_out_of_bounds_pixels",
-        "presentation_overlap_pixels",
         "underlay_boundary_color_mae", "underlay_gradient_jump_p95",
         "underlay_added_high_frequency_pixels",
     ):

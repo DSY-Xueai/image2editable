@@ -750,11 +750,50 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
     state = initialize_component_repair_state(
         store, "page_001", request_path=first, initial_component_count=2,
     )
+
+    def bind_synthetic_quality(current: dict) -> dict:
+        quality_path = Path(page_session["reconstruction_dir"]) / (
+            f"synthetic-quality-{current['repair_round']:02d}.json"
+        )
+        quality_path.write_text(json.dumps({
+            "schema_version": 1,
+            "page_id": "page_001",
+            "provider": "host",
+            "repair_round": current["repair_round"],
+            "request_sha256": current["current_round"]["request_ref"]["sha256"],
+            "input_graph_sha256": current["graph_ref"]["sha256"],
+            "quality_gate_version": current["quality_gate_version"],
+            "expected_component_ids": ["candidate_b"],
+            "initial_component_count": 2,
+            "initial_diagnostics": [],
+            "contained_parent_pairs": [],
+            "approved_contained_parent_pairs": [],
+            "input_refs": {
+                **{
+                    name: current["current_round"]["request_ref"]
+                    for name in (
+                    "background", "reconstructed", "text_mask",
+                    "native_check", "presentation_manifest",
+                    )
+                },
+                "source": {
+                    "path": current["current_round"]["request_ref"]["path"],
+                    "sha256": current["source_sha256"],
+                },
+            },
+            "report": _strict_quality_report("candidate_b", False),
+        }), encoding="utf-8")
+        page_session["evidence"]["quality-report.json"] = quality_path
+        return {
+            "path": quality_path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
+        }
+
     state["phase"] = "freeze_committed"
     state["candidate_ids"] = state["failed_ids"] = ["candidate_b"]
     state["current_round"]["plan_ref"] = state["current_round"]["request_ref"]
     state["current_round"]["execution_ref"] = state["current_round"]["request_ref"]
-    state["current_round"]["quality_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["quality_ref"] = bind_synthetic_quality(state)
     store.write_json("pages/page_001/reconstruction/component_state.json", state)
     updated = state
     request_path = first
@@ -772,7 +811,7 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
         updated["phase"] = "freeze_committed"
         updated["current_round"]["plan_ref"] = updated["current_round"]["request_ref"]
         updated["current_round"]["execution_ref"] = updated["current_round"]["request_ref"]
-        updated["current_round"]["quality_ref"] = updated["current_round"]["request_ref"]
+        updated["current_round"]["quality_ref"] = bind_synthetic_quality(updated)
         store.write_json("pages/page_001/reconstruction/component_state.json", updated)
     assert not (first.parent.parent / "round-06").exists()
     with pytest.raises(RuntimeError, match="round 6|five"):
@@ -885,6 +924,8 @@ def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
     diagnostics = [_initial_unowned_diagnostic(source_sha256)]
     page_session["evidence"]["quality-report.json"].write_text(json.dumps({
         "schema_version": 1,
+        "phase": "initial_layers",
+        "text_items": [],
         "initial_diagnostics": diagnostics,
         "violations": ["unowned_raster_text"],
     }), encoding="utf-8")
@@ -899,7 +940,10 @@ def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
     )
     advance_component_repair(store, "page_001")
     failed = _strict_quality_report("candidate_b", False)
-    failed["violations"] = ["unowned_raster_text"]
+    failed["violations"] = sorted({
+        *failed["violations"], "unowned_raster_text",
+    })
+    failed["checks"]["unowned_raster_text"] = "fail"
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
         lambda *args, **kwargs: failed,
@@ -928,9 +972,7 @@ def _next_round_session(page_session: dict, store, quality: dict) -> dict:
     return session
 
 
-def test_real_round_two_uses_bound_previous_quality_for_improvement(
-    page_session: dict,
-) -> None:
+def _failed_underlay_round_one(page_session: dict):
     from image2editable.store import RunStore
 
     page_session["provider"] = "local"
@@ -959,11 +1001,24 @@ def test_real_round_two_uses_bound_previous_quality_for_improvement(
     assert first_freeze["failed_ids"] == ["candidate_b"]
     assert advance_component_repair(store, "page_001")["status"] == "needs_next_round"
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    first_quality = json.loads(
-        (store.root / state["current_round"]["quality_ref"]["path"])
-        .read_text(encoding="utf-8")
-    )
-    session = _next_round_session(page_session, store, first_quality)
+    return store, store.root / state["current_round"]["quality_ref"]["path"]
+
+
+def _real_next_round_session(page_session: dict, store, quality_path: Path) -> dict:
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    evidence = dict(page_session["evidence"])
+    evidence["component-graph.json"] = store.root / state["graph_ref"]["path"]
+    evidence["quality-report.json"] = quality_path
+    session = {**page_session, "provider": "local", "evidence": evidence}
+    _refresh_test_presentation_manifest(session)
+    return session
+
+
+def test_real_round_two_uses_bound_previous_quality_for_improvement(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    session = _real_next_round_session(page_session, store, quality_path)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(store, "page_001", request_path=second_request)
     advance_component_repair(store, "page_001")
@@ -980,16 +1035,63 @@ def test_real_round_two_uses_bound_previous_quality_for_improvement(
     assert candidate["improvement"]["underlay_boundary_color_mae"] == 1000.0
 
 
+def test_next_request_must_reference_the_state_quality_artifact(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    copied_quality = Path(page_session["reconstruction_dir"]) / "copied-quality.json"
+    copied_quality.write_bytes(quality_path.read_bytes() + b"\n")
+    session = _real_next_round_session(page_session, store, copied_quality)
+    second_request = build_component_agent_request(session, repair_round=2)
+
+    with pytest.raises(ValueError, match="previous quality"):
+        record_next_component_request(
+            store, "page_001", request_path=second_request,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["identity", "report", "input_ref", "pairs"],
+)
+def test_previous_quality_artifact_identity_is_strict(
+    page_session: dict,
+    mutation: str,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    if mutation == "identity":
+        quality["page_id"] = "wrong_page"
+    elif mutation == "report":
+        quality["report"] = {}
+    elif mutation == "input_ref":
+        quality["input_refs"]["background"]["path"] = 1
+    else:
+        quality["contained_parent_pairs"] = [["candidate_b"]]
+
+    with pytest.raises(
+        ValueError,
+        match="previous component quality artifact|component quality report",
+    ):
+        component_repair._previous_component_reports(
+            quality,
+            state={**state, "repair_round": 2},
+            request=request,
+            active_component_ids=["candidate_b", "frozen_a"],
+        )
+
+
 def test_initial_diagnostics_continue_through_real_round_two(
     page_session: dict,
     monkeypatch,
 ) -> None:
     store, diagnostics = _failed_diagnostic_round_one(page_session, monkeypatch)
-    session = _next_round_session(page_session, store, {
-        "schema_version": 1,
-        "initial_diagnostics": diagnostics,
-        "violations": ["unowned_raster_text"],
-    })
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    quality_path = store.root / state["current_round"]["quality_ref"]["path"]
+    session = _real_next_round_session(page_session, store, quality_path)
     request_path = build_component_agent_request(session, repair_round=2)
 
     state = record_next_component_request(
@@ -1029,7 +1131,7 @@ def test_next_round_rejects_deleted_or_replaced_initial_diagnostics(
     })
     request_path = build_component_agent_request(session, repair_round=2)
 
-    with pytest.raises(ValueError, match="diagnostic"):
+    with pytest.raises(ValueError, match="diagnostic|previous quality"):
         record_next_component_request(store, "page_001", request_path=request_path)
 
 
@@ -1040,11 +1142,9 @@ def test_round_two_execution_rejects_deleted_or_replaced_native_diagnostics(
     replacement: object,
 ) -> None:
     store, diagnostics = _failed_diagnostic_round_one(page_session, monkeypatch)
-    session = _next_round_session(page_session, store, {
-        "schema_version": 1,
-        "initial_diagnostics": diagnostics,
-        "violations": ["unowned_raster_text"],
-    })
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    quality_path = store.root / state["current_round"]["quality_ref"]["path"]
+    session = _real_next_round_session(page_session, store, quality_path)
     request_path = build_component_agent_request(session, repair_round=2)
     record_next_component_request(store, "page_001", request_path=request_path)
     advance_component_repair(store, "page_001")
@@ -1741,6 +1841,47 @@ def test_record_quality_rejects_exact_empty_presentation_component(
     assert freeze["failed_ids"] == ["candidate_b"]
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask", "rgba",
+    ],
+)
+def test_record_quality_rejects_post_execution_asset_tamper(
+    page_session: dict,
+    field: str,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    def tamper_after_execution_record() -> None:
+        state = store.read_json(
+            "pages/page_001/reconstruction/component_state.json"
+        )
+        execution = json.loads((
+            store.root / state["current_round"]["execution_ref"]["path"]
+        ).read_text(encoding="utf-8"))
+        manifest_ref = execution["quality_input_refs"]["presentation_manifest"]
+        manifest = json.loads((store.root / manifest_ref["path"]).read_text(
+            encoding="utf-8"
+        ))
+        asset_path = store.root / manifest["components"][0][field]["path"]
+        asset_path.write_bytes(asset_path.read_bytes() + b"tampered")
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"presentation asset hash mismatch: candidate_b/{field}",
+    ):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            before_quality=tamper_after_execution_record,
+        )
+
+
 def _record_composite_quality(
     page_session: dict,
     *,
@@ -2027,10 +2168,11 @@ def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
     )
     assert first_freeze["failed_ids"] == ["parent"]
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    session["evidence"]["component-graph.json"] = (
-        store.root / state["graph_ref"]["path"]
+    session = _real_next_round_session(
+        session,
+        store,
+        store.root / state["current_round"]["quality_ref"]["path"],
     )
-    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -2062,10 +2204,11 @@ def test_execution_rejects_rewritten_retained_inactive_source_mask(
     )
     assert first_freeze["failed_ids"] == ["parent"]
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    session["evidence"]["component-graph.json"] = (
-        store.root / state["graph_ref"]["path"]
+    session = _real_next_round_session(
+        session,
+        store,
+        store.root / state["current_round"]["quality_ref"]["path"],
     )
-    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -2095,10 +2238,11 @@ def test_execution_rejects_rewritten_retained_inactive_source_role(
     )
     assert first_freeze["failed_ids"] == ["parent"]
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    session["evidence"]["component-graph.json"] = (
-        store.root / state["graph_ref"]["path"]
+    session = _real_next_round_session(
+        session,
+        store,
+        store.root / state["current_round"]["quality_ref"]["path"],
     )
-    _refresh_test_presentation_manifest(session)
     second_request = build_component_agent_request(session, repair_round=2)
     record_next_component_request(
         store, "page_001", request_path=second_request
@@ -2610,7 +2754,13 @@ def _make_page_session(run_root: Path, page_id: str) -> dict:
         if name == "component-graph.json":
             path.write_text(json.dumps(graph), encoding="utf-8")
         elif name == "quality-report.json":
-            path.write_text('{"valid": false}', encoding="utf-8")
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "phase": "initial_layers",
+                "text_items": [],
+                "initial_diagnostics": [],
+                "violations": [],
+            }), encoding="utf-8")
         elif path.suffix == ".png":
             value = 255 if name == "source.png" else 0
             Image.fromarray(np.full((2, 2), value, dtype=np.uint8)).save(path)
@@ -2709,12 +2859,38 @@ def test_presentation_manifest_components_must_match_active_graph_order(
 
 def test_quality_layers_use_the_already_bound_manifest_payload(
     page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request_path = build_component_agent_request(page_session, repair_round=1)
     request = load_component_agent_request(request_path)
     manifest_path = request_path.parent / "presentation-manifest.json"
     reconstruction = Path(page_session["reconstruction_dir"])
     run_root = reconstruction.parents[2]
+    raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    asset_paths = {
+        (run_root / reference["path"]).resolve()
+        for component in raw_manifest["components"]
+        for name, reference in component.items()
+        if name in {
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        }
+    }
+    real_read = component_repair._read_bound_file
+    read_counts = {path: 0 for path in asset_paths}
+
+    def bounded_read(path, *args, **kwargs):
+        resolved = Path(path).resolve()
+        if resolved in read_counts:
+            read_counts[resolved] += 1
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(component_repair, "_read_bound_file", bounded_read)
+    monkeypatch.setattr(
+        component_repair,
+        "_hash_bound_file",
+        lambda *args, **kwargs: pytest.fail("quality must not unbounded-hash assets"),
+    )
     manifest = component_repair._validate_presentation_manifest_payload(
         manifest_path.read_bytes(),
         reconstruction,
@@ -2735,29 +2911,57 @@ def test_quality_layers_use_the_already_bound_manifest_payload(
     assert [layer["component_id"] for layer in layers] == [
         "candidate_b", "frozen_a",
     ]
+    assert set(read_counts.values()) == {1}
 
 
-def test_previous_component_reports_are_strictly_validated() -> None:
-    quality = {
-        "expected_component_ids": ["candidate_b"],
-        "initial_component_count": 1,
-        "report": _strict_quality_report("candidate_b", False),
+def test_request_presentation_asset_preflight_uses_bounded_reads(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = json.loads(
+        page_session["evidence"]["presentation-manifest.json"].read_text(
+            encoding="utf-8"
+        )
+    )
+    asset_paths = {
+        (Path(page_session["reconstruction_dir"]).parents[2] / reference["path"])
+        .resolve()
+        for component in manifest["components"]
+        for name, reference in component.items()
+        if name in {
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        }
     }
+    real_hash = component_repair._hash_bound_file
 
-    previous = component_repair._previous_component_reports(
-        quality, active_visual_count=1,
+    def reject_unbounded_asset_hash(path, reconstruction):
+        if Path(path).resolve() in asset_paths:
+            pytest.fail("request asset preflight must be bounded")
+        return real_hash(path, reconstruction)
+
+    monkeypatch.setattr(
+        component_repair, "_hash_bound_file", reject_unbounded_asset_hash,
     )
 
-    assert previous["candidate_b"]["metrics"]["component_pixels"] == 4
-    with pytest.raises(ValueError, match="component quality report"):
-        component_repair._previous_component_reports(
-            {**quality, "report": {}}, active_visual_count=1,
-        )
+    build_component_agent_request(page_session, repair_round=1)
 
 
-def test_round_one_without_previous_report_has_no_improvement_baseline() -> None:
+def test_round_one_initial_quality_schema_has_no_improvement_baseline() -> None:
     assert component_repair._previous_component_reports(
-        {"initial_diagnostics": []}, active_visual_count=1,
+        {
+            "schema_version": 1,
+            "phase": "initial_layers",
+            "text_items": [],
+            "initial_diagnostics": [],
+            "violations": [],
+        },
+        state={
+            "repair_round": 1,
+            "source_sha256": "a" * 64,
+        },
+        request={},
+        active_component_ids=["candidate_b"],
     ) == {}
 
 

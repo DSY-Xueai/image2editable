@@ -553,8 +553,6 @@ def _evaluate_underlay(
     metrics: dict[str, float] | None = None,
     confidence: float = 0.95,
     other_masks: tuple[np.ndarray, ...] = (),
-    other_alphas: tuple[np.ndarray, ...] = (),
-    other_generated: tuple[np.ndarray, ...] = (),
     page_context=None,
     previous_metrics: dict | None = None,
 ) -> dict:
@@ -569,8 +567,6 @@ def _evaluate_underlay(
         generated_underlay_mask=generated,
         underlay_metrics=metrics or _underlay_metrics(),
         other_component_masks=other_masks,
-        other_presentation_alpha_masks=other_alphas,
-        other_generated_underlay_masks=other_generated,
         text_mask=case["text_mask"],
         page_checks={"protected_native_overlap": "pass"},
         agent_confidence=confidence,
@@ -597,8 +593,6 @@ def test_underlay_never_relaxes_real_ownership_overlap() -> None:
         generated=generated,
         confidence=1.0,
         other_masks=(other,),
-        other_alphas=(other,),
-        other_generated=(np.zeros_like(other),),
         page_context=context,
     )
 
@@ -618,7 +612,7 @@ def test_underlay_never_relaxes_real_ownership_overlap() -> None:
         "both-generated",
     ],
 )
-def test_presentation_overlap_requires_at_least_one_generated_underlay(
+def test_exact_overlap_only_rejects_shared_ownership(
     current_generated: bool,
     other_generated: bool,
     expected_overlap: bool,
@@ -628,28 +622,20 @@ def test_presentation_overlap_requires_at_least_one_generated_underlay(
     current = hole.copy() if current_generated else np.zeros_like(hole)
     if not current_generated:
         case["component_mask"] |= hole
-    other_underlay = hole.copy() if other_generated else np.zeros_like(hole)
-    other_alpha = other_ownership | other_underlay
 
     report = _evaluate_underlay(
         case,
         parent_mask=semantic,
         generated=current,
         other_masks=(other_ownership,),
-        other_alphas=(other_alpha,),
-        other_generated=(other_underlay,),
-        previous_metrics={"presentation_overlap_pixels": 100},
     )
 
-    assert ("presentation_overlap" in report["violations"]) is expected_overlap
-    assert "component_overlap" not in report["violations"]
-    assert report["metrics"]["component_overlap_pixels"] == 0
+    assert ("component_overlap" in report["violations"]) is expected_overlap
     assert (
-        report["metrics"]["presentation_overlap_pixels"] > 0
+        report["metrics"]["component_overlap_pixels"] > 0
     ) is expected_overlap
-    assert report["improvement"]["presentation_overlap_pixels"] == (
-        100 - report["metrics"]["presentation_overlap_pixels"]
-    )
+    assert "presentation_overlap" not in report["violations"]
+    assert "presentation_overlap_pixels" not in report["metrics"]
 
 
 @pytest.mark.parametrize("kind", ["parent", "child"])
