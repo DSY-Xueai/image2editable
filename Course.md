@@ -38,6 +38,7 @@
 - Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_contracts.py`、`skills/image-to-ppt/scripts/component_quality.py`
 - 主要测试：`tests/test_targeted_ocr.py`、`tests/test_ocr_isolation.py`、`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
 - 已批准待实现设计：`docs/superpowers/specs/2026-08-03-dual-mask-component-underlay-design.md`
+- 已确认实施计划：`docs/superpowers/plans/2026-08-03-dual-mask-component-underlay.md`
 
 ## 运行入口
 
