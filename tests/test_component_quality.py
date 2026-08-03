@@ -556,6 +556,7 @@ def _evaluate_underlay(
     other_alphas: tuple[np.ndarray, ...] = (),
     other_generated: tuple[np.ndarray, ...] = (),
     page_context=None,
+    previous_metrics: dict | None = None,
 ) -> dict:
     calibration = calibrate_page(case["source"], case["text_mask"])
     ownership = case["component_mask"]
@@ -573,6 +574,7 @@ def _evaluate_underlay(
         text_mask=case["text_mask"],
         page_checks={"protected_native_overlap": "pass"},
         agent_confidence=confidence,
+        previous_metrics=previous_metrics,
         _page_context=page_context,
     )
 
@@ -636,9 +638,62 @@ def test_presentation_overlap_requires_at_least_one_generated_underlay(
         other_masks=(other_ownership,),
         other_alphas=(other_alpha,),
         other_generated=(other_underlay,),
+        previous_metrics={"presentation_overlap_pixels": 100},
     )
 
-    assert ("component_overlap" in report["violations"]) is expected_overlap
+    assert ("presentation_overlap" in report["violations"]) is expected_overlap
+    assert "component_overlap" not in report["violations"]
+    assert report["metrics"]["component_overlap_pixels"] == 0
+    assert (
+        report["metrics"]["presentation_overlap_pixels"] > 0
+    ) is expected_overlap
+    assert report["improvement"]["presentation_overlap_pixels"] == (
+        100 - report["metrics"]["presentation_overlap_pixels"]
+    )
+
+
+@pytest.mark.parametrize("kind", ["parent", "child"])
+@pytest.mark.parametrize("generated_only", [False, True])
+def test_exact_empty_component_cannot_pass_quality_gate(
+    kind: str,
+    generated_only: bool,
+) -> None:
+    case = _synthetic_quality_case()
+    ownership = np.zeros_like(case["component_mask"])
+    generated = np.zeros_like(ownership)
+    semantic = np.zeros_like(ownership)
+    if generated_only:
+        generated[20:24, 20:24] = True
+        semantic |= generated
+    case["component_mask"] = ownership
+    case["node"]["kind"] = kind
+    if kind == "child":
+        case["node"]["parent_id"] = "parent_0001"
+        case["graph"]["nodes"].append({
+            "id": "parent_0001", "kind": "parent", "parent_id": None,
+            "state": "inactive", "mask": "masks/parent_0001.png",
+            "mask_sha256": "b" * 64, "bbox": [0, 0, 64, 48],
+            "z_index": -1, "text_ids": [],
+        })
+
+    report = _evaluate_underlay(
+        case,
+        parent_mask=semantic,
+        generated=generated,
+        confidence=1.0,
+    )
+
+    assert "empty_component" in report["violations"]
+    assert report["accepted"] is False
+
+
+def test_legacy_empty_component_does_not_gain_exact_only_violation() -> None:
+    case = _synthetic_quality_case()
+    case["component_mask"] = np.zeros_like(case["component_mask"])
+
+    report = _evaluate_synthetic(case, confidence=1.0)
+
+    assert "empty_component" not in report["violations"]
 
 
 def test_generated_underlay_outside_parent_semantic_mask_fails() -> None:

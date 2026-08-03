@@ -743,8 +743,8 @@ def _artifact_reference(root: Path, path: Path, label: str) -> tuple[dict, bytes
     }, payload
 
 
-def _validate_presentation_manifest(
-    manifest_path: Path,
+def _validate_presentation_manifest_payload(
+    payload: bytes,
     reconstruction: Path,
     *,
     source_sha256: str,
@@ -752,12 +752,6 @@ def _validate_presentation_manifest(
     run_root: Path | None = None,
     expected_component_ids: list[str] | None = None,
 ) -> dict:
-    payload = _read_bound_file(
-        manifest_path,
-        reconstruction,
-        max_bytes=GRAPH_JSON_LIMIT,
-        label="presentation manifest JSON",
-    )
     try:
         manifest = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
@@ -836,6 +830,31 @@ def _validate_presentation_manifest(
     return manifest
 
 
+def _validate_presentation_manifest(
+    manifest_path: Path,
+    reconstruction: Path,
+    *,
+    source_sha256: str,
+    graph_sha256: str,
+    run_root: Path | None = None,
+    expected_component_ids: list[str] | None = None,
+) -> dict:
+    payload = _read_bound_file(
+        manifest_path,
+        reconstruction,
+        max_bytes=GRAPH_JSON_LIMIT,
+        label="presentation manifest JSON",
+    )
+    return _validate_presentation_manifest_payload(
+        payload,
+        reconstruction,
+        source_sha256=source_sha256,
+        graph_sha256=graph_sha256,
+        run_root=run_root,
+        expected_component_ids=expected_component_ids,
+    )
+
+
 def _decode_quality_presentation_image(
     payload: bytes,
     *,
@@ -859,23 +878,12 @@ def _iter_quality_presentation_layers(
     *,
     run_root: Path,
     reconstruction: Path,
-    manifest_path: Path,
-    source_sha256: str,
-    graph_sha256: str,
-    component_ids: list[str],
+    manifest: dict,
     page_shape: tuple[int, int],
 ):
     import numpy as np
     from image2editable.component_quality import _validate_underlay_metrics
 
-    manifest = _validate_presentation_manifest(
-        manifest_path,
-        reconstruction,
-        source_sha256=source_sha256,
-        graph_sha256=graph_sha256,
-        run_root=run_root,
-        expected_component_ids=component_ids,
-    )
     max_bytes = max(1024 * 1024, page_shape[0] * page_shape[1] * 8)
     for component in manifest["components"]:
         arrays = {}
@@ -959,23 +967,51 @@ def _presentation_component_ids(graph: dict) -> list[str]:
     ]
 
 
+def _previous_component_reports(
+    quality_evidence: dict, *, active_visual_count: int,
+) -> dict[str, dict]:
+    if "report" not in quality_evidence:
+        return {}
+    expected_component_ids = quality_evidence.get("expected_component_ids")
+    initial_component_count = quality_evidence.get("initial_component_count")
+    if (
+        type(expected_component_ids) is not list
+        or type(initial_component_count) is not int
+    ):
+        raise ValueError("previous component quality report metadata is invalid")
+    from image2editable.component_quality import validate_component_quality_report
+
+    report = validate_component_quality_report(
+        quality_evidence["report"],
+        expected_component_ids=expected_component_ids,
+        initial_component_count=initial_component_count,
+        active_visual_count=active_visual_count,
+    )
+    return {
+        component["component_id"]: component
+        for component in report["component_reports"]
+    }
+
+
 def _verify_quality_input_refs(
     store, state: dict, refs: object, *, request: dict, request_path: Path,
     expected_graph_sha256: str | None = None,
     expected_component_ids: list[str] | None = None,
-) -> dict:
+    return_bound_inputs: bool = False,
+):
     if not isinstance(refs, dict) or set(refs) != {
         "background", "reconstructed", "text_mask", "native_check",
         "presentation_manifest",
     }:
         raise ValueError("component quality input refs are invalid")
-    for reference in refs.values():
+    bound_payloads = {}
+    for name, reference in refs.items():
         if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
             raise ValueError("component quality input ref is invalid")
-        _load_state_artifact(store.root, reference, max_bytes=GRAPH_JSON_LIMIT)
-    native = json.loads(_load_state_artifact(
-        store.root, refs["native_check"]
-    ).decode("utf-8"))
+        bound_payloads[name] = _load_state_artifact(
+            store.root, reference, max_bytes=GRAPH_JSON_LIMIT
+        )
+    native = json.loads(bound_payloads["native_check"].decode("utf-8"))
     native_fields = {
         "schema_version", "page_id", "source_sha256", "protected_native_overlap",
         "initial_diagnostics",
@@ -1019,16 +1055,13 @@ def _verify_quality_input_refs(
     )
     if native["initial_diagnostics"] != expected:
         raise ValueError("component native diagnostics do not match request evidence")
-    manifest_path = store.root / Path(
-        *PurePosixPath(refs["presentation_manifest"]["path"]).parts
-    )
     if expected_component_ids is None:
         graph = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
         ).decode("utf-8"))
         expected_component_ids = _presentation_component_ids(graph)
-    _validate_presentation_manifest(
-        manifest_path,
+    manifest = _validate_presentation_manifest_payload(
+        bound_payloads["presentation_manifest"],
         store.root / "pages" / state["page_id"] / "reconstruction",
         source_sha256=state["source_sha256"],
         graph_sha256=(
@@ -1038,6 +1071,8 @@ def _verify_quality_input_refs(
         ),
         expected_component_ids=expected_component_ids,
     )
+    if return_bound_inputs:
+        return refs, bound_payloads, manifest, initial_quality
     return refs
 
 
@@ -1103,15 +1138,19 @@ def _recompute_quality_artifact(
     )
     if source_ref["sha256"] != state["source_sha256"]:
         raise RuntimeError("component quality source hash mismatch")
-    quality_input_refs = _verify_quality_input_refs(
-        store, state, quality_input_refs, request=request, request_path=request_path
+    (
+        quality_input_refs,
+        bound_quality_payloads,
+        presentation_manifest,
+        quality_evidence,
+    ) = _verify_quality_input_refs(
+        store, state, quality_input_refs, request=request, request_path=request_path,
+        return_bound_inputs=True,
     )
     input_refs = {"source": source_ref, **quality_input_refs}
     payloads = {"source": source_payload}
     for name in ("background", "reconstructed", "text_mask"):
-        payloads[name] = _load_state_artifact(
-            store.root, quality_input_refs[name], max_bytes=GRAPH_JSON_LIMIT
-        )
+        payloads[name] = bound_quality_payloads[name]
 
     def decode(name: str, flags: int):
         image = cv2.imdecode(np.frombuffer(payloads[name], dtype=np.uint8), flags)
@@ -1139,21 +1178,17 @@ def _recompute_quality_artifact(
     )
     graph = json.loads(graph_payload.decode("utf-8"))
     graph_path = store.root / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
-    presentation_manifest_path = store.root / Path(
-        *PurePosixPath(quality_input_refs["presentation_manifest"]["path"]).parts
-    )
     presentation_layers = _iter_quality_presentation_layers(
         run_root=store.root,
         reconstruction=store.root / "pages" / state["page_id"] / "reconstruction",
-        manifest_path=presentation_manifest_path,
-        source_sha256=state["source_sha256"],
-        graph_sha256=state["graph_ref"]["sha256"],
-        component_ids=_presentation_component_ids(graph),
+        manifest=presentation_manifest,
         page_shape=source.shape[:2],
     )
-    native = json.loads(_load_state_artifact(
-        store.root, quality_input_refs["native_check"]
-    ).decode("utf-8"))
+    native = json.loads(bound_quality_payloads["native_check"].decode("utf-8"))
+    previous_reports = _previous_component_reports(
+        quality_evidence,
+        active_visual_count=len(_presentation_component_ids(graph)),
+    )
     contained_parent_pairs = {
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
     }
@@ -1177,6 +1212,7 @@ def _recompute_quality_artifact(
         text_mask=text_mask, visual_metrics=visual_metrics, page_checks=checks,
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
+        previous_reports=previous_reports,
         presentation_layers=presentation_layers,
         text_items=native.get("text_items", []),
         contained_parent_pairs=contained_parent_pairs,

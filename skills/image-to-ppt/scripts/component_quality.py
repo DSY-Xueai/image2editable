@@ -117,6 +117,7 @@ _METRIC_FIELDS = frozenset({
     "orphan_residual_pixels", "text_support_pixels", "text_duplicate_ratio",
     "component_text_residual_ratio", "background_text_residual_ratio",
     "parent_coverage_ratio", "component_overlap_pixels",
+    "presentation_overlap_pixels",
     "ownership_out_of_bounds_pixels", "parent_child_double", "noise_l1",
     "local_contrast", "edge_width_px", "text_halo_px",
     "adaptive_pixel_tolerance", "hard_pixel_tolerance",
@@ -876,6 +877,9 @@ def evaluate_component(
         text_mask=text_mask, _page_context=_page_context,
     )
     metrics.update({
+        "presentation_overlap_pixels": int(np.count_nonzero(
+            illegal_presentation_overlap
+        )),
         "generated_underlay_pixels": int(np.count_nonzero(generated)),
         "underlay_out_of_bounds_pixels": int(np.count_nonzero(underlay_outside)),
         "underlay_boundary_color_mae": normalized_underlay_metrics[
@@ -889,6 +893,10 @@ def evaluate_component(
         ],
     })
     violations = []
+    if presentation_alpha_mask is not None and (
+        not np.any(ownership) or not np.any(alpha)
+    ):
+        violations.append("empty_component")
     hard_pixel_ratio = max(
         0.01,
         max(20, calibration.min_component_pixels)
@@ -923,8 +931,10 @@ def evaluate_component(
         violations.append("alpha_halo")
     if metrics["parent_child_double"]:
         violations.append("parent_child_double")
-    if metrics["component_overlap_pixels"] or np.any(illegal_presentation_overlap):
+    if metrics["component_overlap_pixels"]:
         violations.append("component_overlap")
+    if metrics["presentation_overlap_pixels"]:
+        violations.append("presentation_overlap")
     if metrics["duplicate_ratio"] >= hard_pixel_ratio:
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:
@@ -964,6 +974,7 @@ def evaluate_component(
         "shadow_duplicate_ratio", "alpha_duplicate_ratio",
         "text_duplicate_ratio", "component_text_residual_ratio",
         "background_text_residual_ratio", "underlay_out_of_bounds_pixels",
+        "presentation_overlap_pixels",
         "underlay_boundary_color_mae", "underlay_gradient_jump_p95",
         "underlay_added_high_frequency_pixels",
     ):
