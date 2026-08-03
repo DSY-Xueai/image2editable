@@ -2780,6 +2780,76 @@ def test_retry_inside_original_semantic_parent_keeps_child_relationship(
     assert retried["parent_id"] == "parent"
 
 
+def test_retry_outside_semantic_parent_builds_bound_presentation_assets(
+    tmp_path: Path,
+) -> None:
+    import types
+    from image2editable import legacy
+
+    image, graph, input_dir = _action_case(tmp_path)
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    by_id["right"]["state"] = "inactive"
+    by_id["frozen"]["state"] = "inactive"
+    parent_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    parent_mask[1:7, 1:7] = 255
+    parent_path = input_dir / by_id["parent"]["mask"]
+    Image.fromarray(parent_mask).save(parent_path)
+    by_id["parent"]["mask_sha256"] = hashlib.sha256(
+        parent_path.read_bytes()
+    ).hexdigest()
+    by_id["parent"]["bbox"] = [1, 1, 7, 7]
+    proposed = np.zeros(image.shape[:2], dtype=bool)
+    proposed[8:11, 12:15] = True
+    output = tmp_path / "round-retry-presentation"
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("retry_with_box", ["left"], {"box": [0.7, 0.6, 1.0, 1.0]})],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir,
+        output_dir=output,
+    )
+    retried = next(node for node in result["nodes"] if node["id"] == "left")
+    graph_path = output / "component-graph.json"
+    graph_payload = graph_path.read_bytes()
+    source = np.arange(12 * 16 * 3, dtype=np.uint8).reshape(12, 16, 3)
+    source_path = tmp_path / "source.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+
+    manifest_path = legacy._build_presentation_assets(
+        types.SimpleNamespace(root=tmp_path),
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph_path=graph_path,
+        output_dir=output,
+    )
+
+    assert graph_path.read_bytes() == graph_payload
+    assert retried["z_index"] == 1
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["graph_sha256"] == hashlib.sha256(graph_payload).hexdigest()
+    assert manifest["components"][0]["component_id"] == "left"
+    entry = manifest["components"][0]
+    decoded = {}
+    for name in (
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ):
+        reference = entry[name]
+        asset_path = tmp_path / Path(reference["path"])
+        payload = asset_path.read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == reference["sha256"]
+        with Image.open(asset_path) as stored:
+            decoded[name] = np.asarray(stored.convert(
+                "RGBA" if name == "rgba" else "L"
+            )).copy()
+    assert np.array_equal(decoded["ownership_mask"] > 0, proposed)
+    assert np.array_equal(decoded["presentation_alpha_mask"] > 0, proposed)
+    assert not np.any(decoded["generated_underlay_mask"])
+    assert np.array_equal(decoded["rgba"][:, :, 3] > 0, proposed)
+    assert np.array_equal(decoded["rgba"][proposed, :3], source[proposed])
+
+
 def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> None:
     class Predictor:
         def set_image(self, image: np.ndarray) -> None:
