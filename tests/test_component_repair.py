@@ -231,6 +231,81 @@ def test_execution_refreshes_candidates_after_discard(
     assert state["failed_ids"] == ["candidate_d"]
 
 
+def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    graph = load_component_agent_graph(request_path)
+    frozen_before = dict(next(
+        node for node in graph["nodes"] if node["id"] == "frozen_a"
+    ))
+    plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [
+            _action("discard", ["candidate_b"]),
+            _action(
+                "rebuild_background", ["candidate_b"], {"margin_ratio": 0.03}
+            ),
+        ],
+    }
+    record_local_component_plan(store, "page_001", plan=plan)
+    execution_dir = request_path.parents[2] / "execution-01"
+    next_graph = execute_component_actions(
+        np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
+        sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
+    )
+    graph_path = execution_dir / "component-graph.json"
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": hashlib.sha256(
+            (request_path.parent / "component-graph.json").read_bytes()
+        ).hexdigest(),
+        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 2,
+        "quality_input_refs": _quality_input_refs(execution_dir, store),
+    }
+    execution_path = execution_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    state = record_component_execution(
+        store, "page_001", execution_path=execution_path,
+        output_graph_path=graph_path,
+    )
+
+    assert state["phase"] == "actions_executed"
+    assert state["candidate_ids"] == []
+    state = record_component_quality(store, "page_001")
+    quality = json.loads(
+        (store.root / state["current_round"]["quality_ref"]["path"])
+        .read_text(encoding="utf-8")
+    )
+    assert quality["report"]["component_reports"] == []
+    assert quality["report"]["accepted"] is False
+    after = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert next(node for node in after["nodes"] if node["id"] == "frozen_a") == frozen_before
+    assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
+    frozen_after = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )["frozen"]
+    assert frozen_after == {"frozen_a": frozen_before["mask_sha256"]}
+    preserved = advance_component_repair(store, "page_001")
+    assert preserved["status"] == "preserved_with_warning"
+
+
 def test_execution_quality_freeze_reaches_ready_for_assembly(
     page_session: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -310,6 +385,7 @@ def test_execution_quality_freeze_reaches_ready_for_assembly(
     assert set(quality_artifact["input_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check"
     }
+    assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
     ready = advance_component_repair(store, "page_001")
     assert ready["status"] == "ready_for_assembly"
@@ -366,6 +442,233 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
     assert not (first.parent.parent / "round-06").exists()
     with pytest.raises(RuntimeError, match="round 6|five"):
         record_next_component_request(store, "page_001", request_path=request_path)
+
+
+@pytest.mark.parametrize(
+    ("candidate_c_accepted", "expected_frozen", "expected_failed"),
+    [
+        (False, ["candidate_b"], ["candidate_c"]),
+        (True, ["candidate_b", "candidate_c"], []),
+    ],
+)
+def test_unowned_raster_text_page_violation_preserves_leaf_component_freeze(
+    page_session: dict,
+    candidate_c_accepted: bool,
+    expected_frozen: list[str],
+    expected_failed: list[str],
+) -> None:
+    from image2editable.store import RunStore
+
+    graph_path = page_session["evidence"]["component-graph.json"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    candidate_c = _node("candidate_c", "pending", 2)
+    mask_path = graph_path.parent / "masks/candidate_c.png"
+    Image.fromarray(np.full((2, 2), 253, dtype=np.uint8)).save(mask_path)
+    candidate_c["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    graph["nodes"].append(candidate_c)
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    quality = {
+        "report": {
+            **_strict_quality_report("candidate_b", True),
+            "accepted": False,
+            "violations": ["unowned_raster_text"],
+            "component_reports": [
+                _strict_quality_report("candidate_b", True)["component_reports"][0],
+                _strict_quality_report(
+                    "candidate_c", candidate_c_accepted
+                )["component_reports"][0],
+            ],
+        }
+    }
+    quality_path = store.root / "sticky-quality.json"
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    state["phase"] = "quality_recorded"
+    state["plan_count"] = 1
+    state["current_round"]["plan_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["execution_ref"] = state["current_round"]["request_ref"]
+    state["current_round"]["quality_ref"] = {
+        "path": "sticky-quality.json",
+        "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
+    }
+    state["round_history"] = [{
+        "round": 1,
+        "plan_sha256": None,
+        "normalized_plan_sha256": None,
+        "execution_sha256": None,
+        "quality_sha256": None,
+        "frozen_ids": [],
+        "failed_ids": [],
+    }]
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+
+    outcome = component_repair._commit_component_freeze(
+        store, state, "page_001"
+    )
+
+    assert outcome["frozen_ids"] == expected_frozen
+    assert outcome["failed_ids"] == expected_failed
+    if not expected_failed:
+        preserved = advance_component_repair(store, "page_001")
+        assert preserved["status"] == "preserved_with_warning"
+        state = store.read_json(
+            "pages/page_001/reconstruction/component_state.json"
+        )
+        assert state["repair_round"] == 1
+        assert state["stop_reason"] == "unowned_raster_text"
+
+
+def _initial_unowned_diagnostic(source_sha256: str, *, text: str = "ny") -> dict:
+    return {
+        "kind": "unowned_raster_text",
+        "source_sha256": source_sha256,
+        "candidate_id": "candidate_0001_01",
+        "bbox": [0, 0, 2, 2],
+        "views": [
+            {"normalized_text": "nx", "confidence": 0.96},
+            {"normalized_text": text, "confidence": 0.95},
+        ],
+    }
+
+
+def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    source_sha256 = hashlib.sha256(
+        page_session["evidence"]["source.png"].read_bytes()
+    ).hexdigest()
+    diagnostics = [_initial_unowned_diagnostic(source_sha256)]
+    page_session["evidence"]["quality-report.json"].write_text(json.dumps({
+        "schema_version": 1,
+        "initial_diagnostics": diagnostics,
+        "violations": ["unowned_raster_text"],
+    }), encoding="utf-8")
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=1,
+    )
+    advance_component_repair(store, "page_001")
+    failed = _strict_quality_report("candidate_b", False)
+    failed["violations"] = ["unowned_raster_text"]
+    monkeypatch.setattr(
+        component_repair, "evaluate_component_quality_round",
+        lambda *args, **kwargs: failed,
+    )
+    graph = load_component_agent_graph(request_path)
+    _, freeze = _execute_composite_quality_round(
+        store, request_path, graph,
+        action=_action("accept", ["candidate_b"]), shape=(2, 2),
+        initial_diagnostics=diagnostics,
+    )
+    assert freeze["status"] == "freeze_committed"
+    assert freeze["failed_ids"] == ["candidate_b"]
+    assert advance_component_repair(store, "page_001")["status"] == "needs_next_round"
+    return store, diagnostics
+
+
+def _next_round_session(page_session: dict, store, quality: dict) -> dict:
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    evidence = dict(page_session["evidence"])
+    evidence["component-graph.json"] = store.root / state["graph_ref"]["path"]
+    quality_path = Path(page_session["reconstruction_dir"]) / "round-02-quality.json"
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    evidence["quality-report.json"] = quality_path
+    return {**page_session, "provider": "local", "evidence": evidence}
+
+
+def test_initial_diagnostics_continue_through_real_round_two(
+    page_session: dict,
+    monkeypatch,
+) -> None:
+    store, diagnostics = _failed_diagnostic_round_one(page_session, monkeypatch)
+    session = _next_round_session(page_session, store, {
+        "schema_version": 1,
+        "initial_diagnostics": diagnostics,
+        "violations": ["unowned_raster_text"],
+    })
+    request_path = build_component_agent_request(session, repair_round=2)
+
+    state = record_next_component_request(
+        store, "page_001", request_path=request_path
+    )
+    request = load_component_agent_request(request_path)
+    quality_path = request_path.parent / request["evidence"]["quality-report.json"]["path"]
+    assert json.loads(quality_path.read_text(encoding="utf-8"))[
+        "initial_diagnostics"
+    ] == diagnostics
+    assert state["repair_round"] == 2
+    advance_component_repair(store, "page_001")
+    graph = load_component_agent_graph(request_path)
+    _, freeze = _execute_composite_quality_round(
+        store, request_path, graph,
+        action=_action("accept", ["candidate_b"]), shape=(2, 2),
+        initial_diagnostics=diagnostics,
+    )
+    assert freeze["status"] == "freeze_committed"
+
+
+@pytest.mark.parametrize("replacement", [[], "replacement"])
+def test_next_round_rejects_deleted_or_replaced_initial_diagnostics(
+    page_session: dict,
+    monkeypatch,
+    replacement: object,
+) -> None:
+    store, diagnostics = _failed_diagnostic_round_one(page_session, monkeypatch)
+    next_diagnostics = (
+        [_initial_unowned_diagnostic(diagnostics[0]["source_sha256"], text="nz")]
+        if replacement == "replacement" else []
+    )
+    session = _next_round_session(page_session, store, {
+        "schema_version": 1,
+        "initial_diagnostics": next_diagnostics,
+        "violations": ["unowned_raster_text"] if next_diagnostics else [],
+    })
+    request_path = build_component_agent_request(session, repair_round=2)
+
+    with pytest.raises(ValueError, match="diagnostic"):
+        record_next_component_request(store, "page_001", request_path=request_path)
+
+
+@pytest.mark.parametrize("replacement", [[], "replacement"])
+def test_round_two_execution_rejects_deleted_or_replaced_native_diagnostics(
+    page_session: dict,
+    monkeypatch,
+    replacement: object,
+) -> None:
+    store, diagnostics = _failed_diagnostic_round_one(page_session, monkeypatch)
+    session = _next_round_session(page_session, store, {
+        "schema_version": 1,
+        "initial_diagnostics": diagnostics,
+        "violations": ["unowned_raster_text"],
+    })
+    request_path = build_component_agent_request(session, repair_round=2)
+    record_next_component_request(store, "page_001", request_path=request_path)
+    advance_component_repair(store, "page_001")
+    native_diagnostics = (
+        [_initial_unowned_diagnostic(diagnostics[0]["source_sha256"], text="nz")]
+        if replacement == "replacement" else []
+    )
+
+    with pytest.raises(ValueError, match="diagnostic"):
+        _execute_composite_quality_round(
+            store, request_path, load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]), shape=(2, 2),
+            initial_diagnostics=native_diagnostics,
+        )
 
 
 def test_agent_request_rejects_tampered_component_mask(page_session: dict) -> None:
@@ -610,6 +913,7 @@ def _quality_input_refs(directory: Path, store) -> dict:
         "schema_version": 1, "page_id": "page_001",
         "source_sha256": state["source_sha256"],
         "protected_native_overlap": "pass",
+        "initial_diagnostics": [],
     }), encoding="utf-8")
     paths["native-check"] = native
     return {
@@ -619,6 +923,81 @@ def _quality_input_refs(directory: Path, store) -> dict:
         }
         for name, path in paths.items()
     }
+
+
+@pytest.mark.parametrize(
+    "native_diagnostics",
+    [
+        None,
+        [],
+        [{"kind": "unowned_raster_text"}],
+        [{
+            "kind": "unowned_raster_text", "source_sha256": "a" * 64,
+            "candidate_id": "candidate_0002_01", "bbox": [1, 1, 3, 3],
+            "views": [
+                {"normalized_text": "x", "confidence": 0.96},
+                {"normalized_text": "z", "confidence": 0.95},
+            ],
+        }],
+    ],
+)
+def test_quality_native_diagnostics_must_match_request_evidence(
+    tmp_path: Path,
+    native_diagnostics,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    source_sha = "a" * 64
+    expected = [{
+        "kind": "unowned_raster_text", "source_sha256": source_sha,
+        "candidate_id": "candidate_0001_01", "bbox": [1, 1, 3, 3],
+        "views": [
+            {"normalized_text": "x", "confidence": 0.96},
+            {"normalized_text": "y", "confidence": 0.95},
+        ],
+    }]
+    request_dir = store.root / "request"
+    request_dir.mkdir(parents=True)
+    quality_path = request_dir / "quality-report.json"
+    quality_path.write_text(json.dumps({
+        "initial_diagnostics": expected,
+    }), encoding="utf-8")
+    request_path = request_dir / "component_agent_request.json"
+    request_path.write_text("{}", encoding="utf-8")
+    request = {"evidence": {"quality-report.json": {
+        "path": "quality-report.json",
+        "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
+    }}}
+    native = {
+        "schema_version": 1, "page_id": "page_001",
+        "source_sha256": source_sha, "protected_native_overlap": "pass",
+    }
+    if native_diagnostics is not None:
+        native["initial_diagnostics"] = native_diagnostics
+    refs = {}
+    for name in ("background", "reconstructed", "text_mask"):
+        path = request_dir / f"{name}.bin"
+        path.write_bytes(b"x")
+        refs[name] = {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+    native_path = request_dir / "native-check.json"
+    native_path.write_text(json.dumps(native), encoding="utf-8")
+    refs["native_check"] = {
+        "path": native_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(native_path.read_bytes()).hexdigest(),
+    }
+
+    with pytest.raises(ValueError, match="diagnostic|native"):
+        component_repair._verify_quality_input_refs(
+            store,
+            {"page_id": "page_001", "source_sha256": source_sha},
+            refs,
+            request=request,
+            request_path=request_path,
+        )
 
 
 def _action_case(tmp_path: Path) -> tuple[np.ndarray, dict, Path]:
@@ -729,6 +1108,7 @@ def _execute_composite_quality_round(
     shape: tuple[int, int],
     before_execution_record=None,
     before_quality=None,
+    initial_diagnostics: list[dict] | None = None,
 ) -> tuple[dict, dict]:
     request = load_component_agent_request(request_path)
     plan = {
@@ -755,6 +1135,7 @@ def _execute_composite_quality_round(
         "schema_version": 1, "page_id": "page_001",
         "source_sha256": state["source_sha256"],
         "protected_native_overlap": "pass",
+        "initial_diagnostics": initial_diagnostics or [],
     }), encoding="utf-8")
     quality_paths["native_check"] = native
     quality_refs = {
@@ -918,6 +1299,55 @@ def test_absorbing_independent_candidates_is_hard_over_merge_failure(
     assert parent["accepted"] is False
     assert freeze["failed_ids"] == ["parent"]
     assert "parent" not in freeze["frozen_ids"]
+
+
+def test_top_level_parent_ignores_unrelated_top_level_sources() -> None:
+    target = {"id": "target", "kind": "parent", "parent_id": None}
+    unrelated = {"id": "unrelated", "kind": "parent", "parent_id": None}
+    nodes_by_id = {node["id"]: node for node in (target, unrelated)}
+
+    assert component_repair._is_related_inactive_source(
+        target, unrelated, nodes_by_id
+    ) is False
+
+
+def test_contained_pair_approval_requires_explicit_cross_evidence() -> None:
+    pair = {("inner", "outer")}
+    actions = [
+        _action("accept", ["inner"]),
+        _action("accept", ["outer"]),
+    ]
+    actions[0]["confidence"] = 0.94
+    actions[1]["confidence"] = 0.93
+    for action in actions:
+        action["evidence"] = ["inner", "outer", "independent visual units"]
+
+    assert component_repair._approved_contained_parent_pairs(
+        {"actions": actions}, pair
+    ) == pair
+
+    actions[0]["evidence"] = ["inner only"]
+    assert component_repair._approved_contained_parent_pairs(
+        {"actions": actions}, pair
+    ) == set()
+
+
+def test_pair_approval_changes_normalized_plan_without_accepting_rewording() -> None:
+    actions = [_action("accept", ["inner"]), _action("accept", ["outer"])]
+    first = {"actions": json.loads(json.dumps(actions))}
+    approved = {"actions": json.loads(json.dumps(actions))}
+    reworded = {"actions": json.loads(json.dumps(actions))}
+    for action in approved["actions"]:
+        action["evidence"] = ["inner", "outer", "independent units"]
+    for action in reworded["actions"]:
+        action["evidence"] = ["different prose only"]
+
+    assert component_repair._normalized_plan_sha256(first) != (
+        component_repair._normalized_plan_sha256(approved)
+    )
+    assert component_repair._normalized_plan_sha256(first) == (
+        component_repair._normalized_plan_sha256(reworded)
+    )
 
 
 def test_absorbing_adjacent_complete_rectangles_is_hard_over_merge_failure(

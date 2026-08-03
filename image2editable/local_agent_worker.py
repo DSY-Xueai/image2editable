@@ -36,6 +36,8 @@ Allowed actions are: accept, discard, merge, split, expand, shrink, retry_with_b
 Never target a frozen object. Never activate a parent and its child together.
 Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
 Inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels.
+Treat glyph-shaped transparent holes or missing expected fills and lines as incomplete segmentation, not successful text removal. When the inactive parent restores the same complete visual unit, use collapse_to_parent while keeping independently movable higher-z components separate; never restore source glyph pixels.
+When quality reports contained_parent_review for contained parent candidates, use the exact contained_parent_pairs IDs from quality evidence and inspect both isolation cells. Choose one rendering owner when one is a duplicate subset. If both are genuinely independent, explicitly accept each at confidence >= 0.92 and include both exact pair IDs as separate strings in each action evidence; otherwise the review remains a hard failure.
 Use the counterfactual test: after one unit is moved alone, both that unit and the remaining visual units should still be complete.
 Every action must contain exactly action, object_ids, parameters, confidence, evidence.
 accept/discard/merge/attach_text/collapse_to_parent parameters: {}.

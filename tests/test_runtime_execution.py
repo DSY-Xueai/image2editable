@@ -1344,9 +1344,16 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     mask_dir = tmp_path / "graph/masks"
     mask_dir.mkdir(parents=True)
     component_mask = mask_dir / "component.png"
+    nested_mask = mask_dir / "nested.png"
     Image.new("RGB", (4, 4), "red").save(source)
     Image.new("RGB", (4, 4), "white").save(background)
     Image.new("L", (4, 4), 255).save(component_mask)
+    nested = Image.new("L", (4, 4), 0)
+    for x in (2, 3):
+        for y in (2, 3):
+            nested.putpixel((x, y), 255)
+    nested.save(nested_mask)
+    nested.close()
     mask = Image.new("L", (4, 4), 0)
     mask.putpixel((1, 1), 255)
     mask.save(text_mask)
@@ -1375,7 +1382,17 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
         "state": "pending_gate", "mask": "masks/component.png",
         "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
         "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }, {
+        "id": "nested", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/nested.png",
+        "mask_sha256": hashlib.sha256(nested_mask.read_bytes()).hexdigest(),
+        "bbox": [2, 2, 3, 3], "z_index": 1, "text_ids": [],
     }]}
+    original_masks = {
+        component_mask: component_mask.read_bytes(),
+        nested_mask: nested_mask.read_bytes(),
+    }
+    original_graph = json.loads(json.dumps(graph))
 
     refs = legacy._quality_assets(
         store, "page_001", graph, mask_dir.parent, output_dir,
@@ -1384,6 +1401,12 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
         assert reconstructed.getpixel((1, 1)) == (255, 0, 0)
+    native = json.loads(
+        (run_dir / refs["native_check"]["path"]).read_text(encoding="utf-8")
+    )
+    assert native["contained_parent_pairs"] == [["component", "nested"]]
+    assert graph == original_graph
+    assert all(path.read_bytes() == payload for path, payload in original_masks.items())
 
 
 def test_text_region_is_assigned_to_the_best_component_owner() -> None:
@@ -1401,6 +1424,82 @@ def test_text_region_is_assigned_to_the_best_component_owner() -> None:
     assert np.all(assigned[0][text])
     assert np.count_nonzero(assigned[1] & text) == 0
     assert np.count_nonzero(left & text) == 8
+
+
+def test_item_text_region_fills_a_containing_sparse_component() -> None:
+    text = np.zeros((12, 20), dtype=bool)
+    text[4:8, 5:7] = True
+    text[4:8, 9:11] = True
+    text[4:8, 13:15] = True
+    component = np.zeros_like(text)
+    component[2:10, 2] = True
+    component[2:10, 17] = True
+    component[2, 2:18] = True
+    component[9, 2:18] = True
+    component[4:8, 5:8] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [component], text, [{"box": [5, 4, 10, 4]}]
+    )
+
+    assert np.all(assigned[0][2:10, 3:17])
+
+
+def test_item_text_region_fills_text_hole_backed_by_surrounding_component() -> None:
+    text = np.zeros((12, 20), dtype=bool)
+    text[4:8, 5:7] = True
+    text[4:8, 9:11] = True
+    text[4:8, 13:15] = True
+    component = np.zeros_like(text)
+    component[2:10, 2:18] = True
+    component[text] = False
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [component], text, [{"box": [5, 4, 10, 4]}]
+    )
+
+    assert np.all(assigned[0][2:10, 3:17])
+
+
+def test_text_halo_scales_beyond_the_bounded_pixel_repair() -> None:
+    assert legacy._text_item_repair_padding_px(40) == 4
+    assert legacy._text_item_halo_px(40) == 12
+
+
+def test_item_text_region_does_not_steal_an_existing_nested_visual() -> None:
+    text = np.zeros((12, 20), dtype=bool)
+    text[4:8, 5:7] = True
+    text[4:8, 9:11] = True
+    text[4:8, 13:15] = True
+    container = np.zeros_like(text)
+    container[2:10, 2] = True
+    container[2:10, 17] = True
+    container[2, 2:18] = True
+    container[9, 2:18] = True
+    container[4:8, 5:8] = True
+    nested = np.zeros_like(text)
+    nested[5:7, 11:13] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [container, nested], text, [{"box": [5, 4, 10, 4]}]
+    )
+
+    assert np.all(assigned[0][4:8, 5:15] | nested[4:8, 5:15])
+    assert np.array_equal(assigned[1], nested)
+    assert not np.any(assigned[0] & assigned[1])
+
+
+def test_item_text_region_does_not_expand_a_partial_icon_owner() -> None:
+    text = np.zeros((12, 20), dtype=bool)
+    text[4:8, 5:15] = True
+    icon = np.zeros_like(text)
+    icon[4:8, 5:8] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [icon], text, [{"box": [5, 4, 10, 4]}]
+    )
+
+    assert np.array_equal(assigned[0], icon)
 
 
 def test_agent_can_rebuild_uniform_canvas_under_active_components(

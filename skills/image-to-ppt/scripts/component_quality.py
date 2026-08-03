@@ -26,6 +26,11 @@ class _PageQualityContext:
     source_luma: np.ndarray
     text: np.ndarray
     text_ink: np.ndarray
+    text_ink_neighborhood: np.ndarray
+    background_residual_text_ink: np.ndarray
+    reconstructed_residual_text_ink: np.ndarray
+    text_labels: np.ndarray
+    reconstructed_residual_region_counts: np.ndarray
     background_text_residual_ratio: float
     exterior_owner_count: np.ndarray
     component_owner_count: np.ndarray
@@ -36,6 +41,66 @@ class _AbsorbedMaskSummary:
     bbox: tuple[int, int, int, int]
     crop: np.ndarray
     area: int
+
+
+def resolve_visual_mask_ownership(
+    nodes: list[dict], masks: list[np.ndarray]
+) -> list[np.ndarray]:
+    if len(nodes) != len(masks):
+        raise ValueError("visual ownership node and mask counts differ")
+    if not masks:
+        return []
+    owned = [np.asarray(mask, dtype=bool).copy() for mask in masks]
+    shape = owned[0].shape
+    if any(mask.shape != shape for mask in owned):
+        raise ValueError("visual ownership mask dimensions differ")
+    claimed = np.zeros(shape, dtype=bool)
+    order = sorted(
+        range(len(owned)),
+        key=lambda index: (
+            int(nodes[index]["z_index"]),
+            -int(np.count_nonzero(owned[index])),
+            -index,
+        ),
+        reverse=True,
+    )
+    for index in order:
+        owned[index] &= ~claimed
+        claimed |= owned[index]
+    return owned
+
+
+def contained_active_parent_pairs(
+    nodes: list[dict], masks: list[np.ndarray]
+) -> set[tuple[str, str]]:
+    if len(nodes) != len(masks):
+        raise ValueError("contained parent node and mask counts differ")
+    if not masks:
+        return set()
+    prepared = [np.asarray(mask, dtype=bool) for mask in masks]
+    shape = prepared[0].shape
+    if any(mask.shape != shape for mask in prepared):
+        raise ValueError("contained parent mask dimensions differ")
+    parents = [
+        (index, int(np.count_nonzero(prepared[index])))
+        for index, node in enumerate(nodes)
+        if node.get("kind") == "parent" and np.any(prepared[index])
+    ]
+    pairs = set()
+    for left in range(len(parents)):
+        left_index, left_area = parents[left]
+        for right in range(left + 1, len(parents)):
+            right_index, right_area = parents[right]
+            overlap = int(np.count_nonzero(
+                prepared[left_index] & prepared[right_index]
+            ))
+            smaller_area = min(left_area, right_area)
+            if overlap / smaller_area < 0.95:
+                continue
+            pairs.add(tuple(sorted((
+                nodes[left_index]["id"], nodes[right_index]["id"]
+            ))))
+    return pairs
 
 
 _CHECK_STATES = frozenset({"pass", "fail", "unknown"})
@@ -57,6 +122,7 @@ def validate_component_quality_report(
     *,
     expected_component_ids: list[str],
     initial_component_count: int,
+    active_visual_count: int,
 ) -> dict:
     if not isinstance(report, dict) or set(report) != {
         "accepted", "violations", "component_reports", "visual_metrics", "checks"
@@ -99,6 +165,7 @@ def validate_component_quality_report(
         report["component_reports"], visual_metrics=report["visual_metrics"],
         page_checks=report["checks"], expected_component_ids=expected_component_ids,
         initial_component_count=initial_component_count,
+        active_visual_count=active_visual_count,
     )
     if rebuilt != report:
         raise ValueError("component quality page report is inconsistent")
@@ -286,6 +353,42 @@ def _largest_region(mask: np.ndarray) -> tuple[int, np.ndarray]:
     return int(stats[label, cv2.CC_STAT_AREA]), labels == label
 
 
+def _largest_text_region_pixels(residual: np.ndarray, text: np.ndarray) -> int:
+    count, labels = cv2.connectedComponents(
+        np.asarray(text, dtype=np.uint8), 8
+    )
+    if count <= 1 or not np.any(residual):
+        return 0
+    pixels = np.bincount(labels[np.asarray(residual, dtype=bool)], minlength=count)
+    return int(np.max(pixels[1:], initial=0))
+
+
+def _text_region_labels(
+    text: np.ndarray, text_items: list[dict] | None
+) -> tuple[int, np.ndarray]:
+    if not text_items:
+        return cv2.connectedComponents(text.astype(np.uint8), 8)
+    labels = np.zeros(text.shape, dtype=np.int32)
+    next_label = 1
+    height, width = text.shape
+    for item in text_items:
+        box = item.get("box") if isinstance(item, dict) else None
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x, y, box_width, box_height = (int(value) for value in box)
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(width, x + box_width), min(height, y + box_height)
+        if x1 >= x2 or y1 >= y2:
+            continue
+        local_labels = labels[y1:y2, x1:x2]
+        unassigned = text[y1:y2, x1:x2] & (local_labels == 0)
+        if not np.any(unassigned):
+            continue
+        local_labels[unassigned] = next_label
+        next_label += 1
+    return next_label, labels
+
+
 def _rgb_image(value: object, shape: tuple[int, int] | None, label: str) -> np.ndarray:
     image = np.asarray(value)
     if (
@@ -308,6 +411,7 @@ def _prepare_page_quality_context(
     *,
     calibration: PageCalibration,
     component_masks: list[np.ndarray] | None = None,
+    text_items: list[dict] | None = None,
 ) -> _PageQualityContext:
     source_rgb = _rgb_image(source, None, "source")
     shape = source_rgb.shape[:2]
@@ -321,8 +425,26 @@ def _prepare_page_quality_context(
     )
     text = _exact_mask(text_mask, shape, "text mask")
     text_ink = _text_ink_mask(source_rgb, text, calibration)
-    background_text_residual = text_ink & (background_delta <= 3.0)
-    background_residual_pixels, _ = _largest_region(background_text_residual)
+    alignment_radius = max(
+        1,
+        (max(calibration.text_halo_px, calibration.edge_width_px) + 1) // 2,
+    )
+    text_ink_neighborhood = cv2.dilate(
+        text_ink.astype(np.uint8),
+        np.ones((2 * alignment_radius + 1,) * 2, dtype=np.uint8),
+    ) > 0
+    background_residual_text_ink = _residual_text_ink_mask(
+        background_rgb, text, text_ink_neighborhood, calibration
+    )
+    reconstructed_residual_text_ink = _residual_text_ink_mask(
+        reconstructed_rgb, text, text_ink_neighborhood, calibration
+    )
+    text_count, text_labels = _text_region_labels(text, text_items)
+    reconstructed_residual_region_counts = np.bincount(
+        text_labels[reconstructed_residual_text_ink], minlength=text_count
+    )
+    if text_count:
+        reconstructed_residual_region_counts[0] = 0
     exterior_owner_count = np.zeros(shape, dtype=np.uint16)
     component_owner_count = np.zeros(shape, dtype=np.uint16)
     boundary_kernel = np.ones((3, 3), dtype=np.uint8)
@@ -332,6 +454,13 @@ def _prepare_page_quality_context(
         adjacent = cv2.dilate(support.astype(np.uint8), boundary_kernel) > 0
         adjacent &= ~support
         exterior_owner_count += adjacent.astype(np.uint16)
+    background_text_residual = (
+        background_residual_text_ink
+        & (component_owner_count == 0)
+    )
+    background_residual_pixels = _largest_text_region_pixels(
+        background_text_residual, text
+    )
     return _PageQualityContext(
         source_rgb=source_rgb,
         background_rgb=background_rgb,
@@ -341,6 +470,11 @@ def _prepare_page_quality_context(
         source_luma=cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32),
         text=text,
         text_ink=text_ink,
+        text_ink_neighborhood=text_ink_neighborhood,
+        background_residual_text_ink=background_residual_text_ink,
+        reconstructed_residual_text_ink=reconstructed_residual_text_ink,
+        text_labels=text_labels,
+        reconstructed_residual_region_counts=reconstructed_residual_region_counts,
         background_text_residual_ratio=(
             background_residual_pixels / max(int(np.count_nonzero(text_ink)), 1)
         ),
@@ -418,6 +552,34 @@ def _text_ink_mask(
                 candidate[component] = 0
         text_ink[y1:y2, x1:x2] |= candidate > 0
     return text_ink
+
+
+def _residual_text_ink_mask(
+    image: np.ndarray,
+    text: np.ndarray,
+    text_ink_neighborhood: np.ndarray,
+    calibration: PageCalibration,
+) -> np.ndarray:
+    text_radius = max(calibration.text_halo_px, calibration.edge_width_px)
+    kernel_size = min(31, 2 * text_radius + 1)
+    local_delta = np.zeros(text.shape, dtype=np.uint8)
+    for channel in range(3):
+        local_fill = cv2.medianBlur(image[:, :, channel], kernel_size)
+        local_delta = np.maximum(
+            local_delta, cv2.absdiff(image[:, :, channel], local_fill)
+        )
+    threshold = max(2.0, calibration.noise_l1 * 2.0)
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    edge_strength = cv2.morphologyEx(
+        gray, cv2.MORPH_GRADIENT, np.ones((3, 3), dtype=np.uint8)
+    )
+    edge_threshold = max(1.0, calibration.noise_l1)
+    return (
+        text
+        & text_ink_neighborhood
+        & (local_delta > threshold)
+        & (edge_strength > edge_threshold)
+    )
 
 
 def component_metrics(
@@ -519,19 +681,20 @@ def component_metrics(
     )
     component_text_residual = (
         full_support
-        & context.text_ink
-        & (reconstruction_delta <= hard_tolerance)
+        & context.reconstructed_residual_text_ink
     )
-    component_text_residual_pixels, _ = _largest_region(
-        component_text_residual
+    touched_text_labels = np.unique(context.text_labels[component_text_residual])
+    touched_text_labels = touched_text_labels[touched_text_labels > 0]
+    component_text_residual_pixels = (
+        int(np.max(context.reconstructed_residual_region_counts[touched_text_labels]))
+        if len(touched_text_labels) else 0
     )
     background_text_residual = (
         text_support
-        & context.text_ink
-        & (background_delta <= hard_tolerance)
+        & context.background_residual_text_ink
     )
-    background_text_residual_pixels, _ = _largest_region(
-        background_text_residual
+    background_text_residual_pixels = _largest_text_region_pixels(
+        background_text_residual, text_support
     )
     active_states = {"pending", "pending_gate", "frozen"}
     nodes = {value.get("id"): value for value in graph.get("nodes", []) if isinstance(value, dict)}
@@ -597,6 +760,7 @@ def evaluate_component(
     agent_confidence: float | None = None,
     previous_metrics: dict | None = None,
     over_merged_component: bool = False,
+    contained_parent_review: bool = False,
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
     metrics = component_metrics(
@@ -623,7 +787,7 @@ def evaluate_component(
         violations.append("text_ghost")
     residual_pixel_floor = max(
         calibration.min_component_pixels,
-        calibration.text_halo_px ** 2,
+        calibration.text_halo_px * 2,
     )
     if (
         metrics["component_text_residual_ratio"]
@@ -649,6 +813,8 @@ def evaluate_component(
         violations.append("incomplete_child")
     if over_merged_component:
         violations.append("over_merged_component")
+    if contained_parent_review:
+        violations.append("contained_parent_review")
     native_state = _check_state(page_checks, "protected_native_overlap")
     if native_state == "unknown":
         violations.append("protected_native_overlap_unknown")
@@ -681,6 +847,7 @@ def evaluate_page_quality(
     page_checks: dict | None = None,
     expected_component_ids: list[str],
     initial_component_count: int,
+    active_visual_count: int,
 ) -> dict:
     required_visual = {"mae", "p95", "changed_ratio"}
     if not isinstance(visual_metrics, dict) or not required_visual <= set(visual_metrics):
@@ -695,10 +862,12 @@ def evaluate_page_quality(
         or len(expected_component_ids) != len(set(expected_component_ids))
         or type(initial_component_count) is not int
         or initial_component_count < 0
+        or type(active_visual_count) is not int
+        or active_visual_count < len(expected_component_ids)
     ):
         raise ValueError("component report expectations are invalid")
-    if initial_component_count and not expected_component_ids:
-        raise ValueError("component reports cannot be empty for a nonempty page")
+    if initial_component_count and active_visual_count == 0:
+        raise ValueError("active visual components cannot be empty for a nonempty page")
     report_ids = []
     violations = []
     for report in component_reports:
@@ -715,7 +884,9 @@ def evaluate_page_quality(
         metrics = report.get("metrics")
         if not isinstance(metrics, dict):
             raise ValueError("component report metrics are invalid")
-        if int(metrics.get("orphan_residual_pixels", 0)) > 0:
+        orphan_pixels = int(metrics.get("orphan_residual_pixels", 0))
+        orphan_floor = max(1, int(metrics.get("edge_width_px", 1)) ** 2)
+        if orphan_pixels >= orphan_floor:
             violations.append("orphan_residual")
     if sorted(report_ids) != sorted(expected_component_ids):
         raise ValueError("component reports do not match expected IDs")
@@ -738,6 +909,10 @@ def evaluate_page_quality(
                 "background_text_residual_unknown"
                 if background_state == "unknown" else "background_text_residual"
             )
+    if page_checks is not None and "unowned_raster_text" in page_checks:
+        unowned_state = _check_state(page_checks, "unowned_raster_text")
+        if unowned_state != "pass":
+            violations.append("unowned_raster_text")
     if (
         float(visual_metrics["mae"]) > 8.0
         or float(visual_metrics["p95"]) > 32.0
@@ -759,6 +934,11 @@ def evaluate_page_quality(
             **(
                 {"background_text_clean": _check_state(page_checks, "background_text_clean")}
                 if page_checks is not None and "background_text_clean" in page_checks
+                else {}
+            ),
+            **(
+                {"unowned_raster_text": _check_state(page_checks, "unowned_raster_text")}
+                if page_checks is not None and "unowned_raster_text" in page_checks
                 else {}
             ),
         },

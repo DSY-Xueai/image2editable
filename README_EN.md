@@ -34,7 +34,7 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 |---------|-------------|
 | Background repair | PPTX uses OpenCV for small or narrow masks and LaMa for large or deep masks; PSD uses two-pass background modeling and inpainting |
 | Foreground separation | PPTX uses Grounding DINO semantic proposals and SAM 2.1 segmentation; PSD uses differences, edges, and connected components |
-| OCR text reconstruction | Detects text and estimates font size, color, weight, and alignment |
+| OCR text reconstruction | Runs full-page OCR, then bounded two-view rechecks on small visual candidates not covered by the text mask; consistent high-confidence results become editable text with estimated size, color, weight, and alignment |
 | PPTX export | Passing pages use minimal complete transparent visual components and editable text boxes; a page still failing after five batches is preserved unchanged; outputs original-aspect-ratio and 16:9 versions by default |
 | Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
 | PSD export | Generates a layered PSD with a background layer, foreground pixel layers, and Photoshop text layers |
@@ -70,9 +70,9 @@ PPTX conversion depends on Grounding DINO, SAM 2.1, and LaMa. The required model
 
 ### Resource and Quality Policy
 
-The default policy limits heavy-page concurrency to one, numerical threads to at most eight, and SAM `points_per_batch` to one. OCR detection/recognition, LaMa, DINO, SAM prompted/automatic/final hole recheck, and full-page visual processing run in sequential subprocess phases, so process exit becomes the resource-release boundary. This still uses SAM2.1 Large and does not reduce the 200 DPI PDF baseline, SAM sampling points, or candidate thresholds; conversion takes longer as a tradeoff.
+The default policy limits heavy-page concurrency to one, numerical threads to at most eight, and SAM `points_per_batch` to one. OCR detection/recognition, LaMa, DINO, SAM prompted/automatic/final hole recheck, and full-page visual processing run in sequential subprocess phases, so process exit becomes the resource-release boundary. Candidate OCR checks at most 24 candidates per page with two deterministic views whose longest edges are capped at 512 and 448 pixels, caps all crop pixels at 6 MiPixel, skips large candidates by bbox and alpha summaries, and deduplicates known text per result. This still uses SAM2.1 Large and does not reduce the 200 DPI PDF baseline, SAM sampling points, or candidate thresholds; conversion takes longer as a tradeoff.
 
-The final quality gate checks non-text P99 error, changed-pixel ratio, and the largest contiguous artifact. If layered reconstruction has visible risk, the page falls back to the existing text-clean fidelity background while keeping OCR text boxes editable. Visual objects are not independently layered on fallback pages.
+The final quality gate checks components, the component-free background, and the composed result. Reliable OCR text must appear exactly once as editable text, with no source glyphs left in component alpha or background text regions. Multiple OCR items in one candidate are paired by page coordinates: consistent items are recovered individually, while up to 96 high-confidence conflicts are recorded in deterministic order as `unowned_raster_text` violations bound to the source SHA-256, stable `candidate_id`, and text bbox. Additional conflicts are truncated, but the page remains hard-failed. Accepted leaves stay frozen. If no real component failures remain, the page is preserved immediately with a warning; otherwise it gets at most five real repair batches. Raster text is never an accepted fallback.
 
 ### OCR Engines
 

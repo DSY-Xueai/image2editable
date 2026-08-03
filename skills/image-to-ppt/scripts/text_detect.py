@@ -572,8 +572,17 @@ def _is_likely_vertical_decorative_fragment(box: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _estimate_style(img_rgb: np.ndarray, box: tuple) -> dict:
+def _estimate_style(
+    img_rgb: np.ndarray,
+    box: tuple,
+    *,
+    reference_width: int | None = None,
+) -> dict:
     """Estimate font_size, color, bold from the image region."""
+    if reference_width is not None and (
+        type(reference_width) is not int or reference_width <= 0
+    ):
+        raise ValueError("reference_width must be a positive integer")
     x, y, w, h = box
     ih, iw = img_rgb.shape[:2]
 
@@ -596,7 +605,7 @@ def _estimate_style(img_rgb: np.ndarray, box: tuple) -> dict:
     #   font_size_pt = bbox_height_inches * 72
     # Apply a correction factor: OCR bboxes include padding around text,
     # and larger text tends to have proportionally more padding.
-    pixels_per_inch = iw / 13.333
+    pixels_per_inch = (reference_width if reference_width is not None else iw) / 13.333
     bbox_inches = h / pixels_per_inch
     raw_pt = bbox_inches * 72.0
 

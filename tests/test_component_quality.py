@@ -33,6 +33,105 @@ def _mask(shape: tuple[int, int], box: tuple[int, int, int, int]) -> np.ndarray:
     return mask
 
 
+def test_visual_mask_ownership_preserves_the_higher_z_component() -> None:
+    panel = np.zeros((12, 16), dtype=bool)
+    panel[1:11, 1:15] = True
+    icon = np.zeros_like(panel)
+    icon[4:8, 6:10] = True
+    nodes = [
+        {"id": "panel", "z_index": 1},
+        {"id": "icon", "z_index": 2},
+    ]
+
+    owned_panel, owned_icon = component_quality.resolve_visual_mask_ownership(
+        nodes, [panel, icon]
+    )
+
+    assert np.array_equal(owned_icon, icon)
+    assert not np.any(owned_panel & owned_icon)
+    assert np.all((owned_panel | owned_icon)[panel])
+
+
+def test_contained_parent_overlap_requires_agent_pair_review() -> None:
+    outer = _mask((30, 40), (2, 2, 28, 38))
+    nested_parent = _mask((30, 40), (5, 5, 25, 20))
+    nested_child = _mask((30, 40), (8, 8, 14, 14))
+    nodes = [
+        {"id": "outer", "kind": "parent", "z_index": 1},
+        {"id": "nested_parent", "kind": "parent", "z_index": 2},
+        {"id": "nested_child", "kind": "child", "z_index": 3},
+    ]
+
+    assert component_quality.contained_active_parent_pairs(
+        nodes, [outer, nested_parent, nested_child]
+    ) == {("nested_parent", "outer")}
+
+
+def test_top_level_icon_inside_parent_is_reported_for_agent_decision() -> None:
+    panel = _mask((100, 100), (5, 5, 95, 95))
+    icon = _mask((100, 100), (20, 20, 30, 30))
+    nodes = [
+        {"id": "panel", "kind": "parent", "z_index": 1},
+        {"id": "icon", "kind": "parent", "z_index": 2},
+    ]
+
+    assert component_quality.contained_active_parent_pairs(
+        nodes, [panel, icon]
+    ) == {("icon", "panel")}
+
+
+def test_contained_parent_pair_blocks_both_until_agent_selects_owner(tmp_path) -> None:
+    shape = (30, 40)
+    source = np.full((*shape, 3), 128, dtype=np.uint8)
+    outer = _mask(shape, (2, 2, 28, 38)) > 0
+    nested = _mask(shape, (5, 5, 25, 20)) > 0
+    graph_dir = tmp_path / "round"
+    mask_dir = graph_dir / "masks"
+    mask_dir.mkdir(parents=True)
+    nodes = []
+    for z_index, (component_id, mask) in enumerate((
+        ("outer", outer), ("nested", nested)
+    )):
+        path = mask_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+        ys, xs = np.nonzero(mask)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending_gate", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+            "z_index": z_index, "text_ids": [],
+        })
+
+    report = evaluate_component_quality_round(
+        source, source, source, {"nodes": nodes},
+        graph_dir=graph_dir, trusted_root=tmp_path,
+        text_mask=np.zeros(shape, dtype=bool),
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=2, expected_component_ids=["outer", "nested"],
+    )
+
+    assert all(
+        "contained_parent_review" in component["violations"]
+        for component in report["component_reports"]
+    )
+
+    approved = evaluate_component_quality_round(
+        source, source, source, {"nodes": nodes},
+        graph_dir=graph_dir, trusted_root=tmp_path,
+        text_mask=np.zeros(shape, dtype=bool),
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=2, expected_component_ids=["outer", "nested"],
+        approved_contained_parent_pairs={("nested", "outer")},
+    )
+    assert all(
+        "contained_parent_review" not in component["violations"]
+        for component in approved["component_reports"]
+    )
+
+
 def _leaf_calibration(min_component_pixels: int = 20) -> component_quality.PageCalibration:
     return component_quality.PageCalibration(0.0, 1.0, 1, 1, min_component_pixels)
 
@@ -177,6 +276,7 @@ def test_strict_quality_report_rejects_empty_metrics() -> None:
             report,
             expected_component_ids=["component_0001"],
             initial_component_count=1,
+            active_visual_count=1,
         )
 
 
@@ -614,6 +714,72 @@ def test_component_full_alpha_with_source_glyph_pixels_fails_isolation_gate() ->
     assert "component_text_residual" in report["violations"]
 
 
+def test_recolored_low_contrast_text_imprint_fails_component_isolation_gate() -> None:
+    case = _text_isolation_case()
+    glyph = case["text_mask"] & np.any(
+        case["source"] != (70, 125, 190), axis=2
+    )
+    case["reconstructed"][glyph] = (82, 137, 202)
+
+    report = _evaluate_synthetic(case)
+
+    assert "component_text_residual" in report["violations"]
+
+
+def test_single_glyph_sized_text_imprint_fails_component_isolation_gate() -> None:
+    case = _text_isolation_case()
+    case["source"][case["component_mask"]] = (70, 125, 190)
+    glyph = np.zeros(case["text_mask"].shape, dtype=bool)
+    glyph[46:52, 48:54] = True
+    case["source"][glyph] = (238, 238, 238)
+    case["reconstructed"][glyph] = case["source"][glyph]
+
+    report = _evaluate_synthetic(case)
+
+    assert "component_text_residual" in report["violations"]
+
+
+def test_quality_text_refinement_rebuilds_the_confirmed_text_box_and_halo() -> None:
+    from image2editable import legacy
+
+    case = _text_isolation_case()
+    glyph = case["text_mask"] & np.any(
+        case["source"] != (70, 125, 190), axis=2
+    )
+    dirty = case["reconstructed"].copy()
+    dirty[glyph] = (82, 137, 202)
+    dirty[45:55, 40:42] = (238, 238, 238)
+    dirty[45:55, 36] = (10, 20, 30)
+
+    refined = legacy._refine_quality_text_clean(
+        case["source"], dirty, case["text_mask"],
+        [{"box": [42, 34, 98, 33]}],
+    )
+
+    assert np.all(refined[45:55, 40:42] == (70, 125, 190))
+    assert np.all(refined[45:55, 36] == (10, 20, 30))
+    assert np.array_equal(refined[:30], dirty[:30])
+    case["reconstructed"] = refined
+    assert "component_text_residual" not in _evaluate_synthetic(case)["violations"]
+
+
+def test_disconnected_glyph_strokes_are_aggregated_within_one_text_region() -> None:
+    case = _text_isolation_case()
+    case["source"][case["component_mask"]] = (70, 125, 190)
+    glyph = np.zeros(case["text_mask"].shape, dtype=bool)
+    for x in range(45, 135, 11):
+        glyph[46:53, x:x + 7] = True
+    case["source"][glyph] = (238, 238, 238)
+    case["reconstructed"][glyph] = case["source"][glyph]
+    case["component_mask"][:, 90:] = False
+    case["node"]["bbox"] = [20, 18, 90, 78]
+
+    report = _evaluate_synthetic(case)
+
+    assert report["metrics"]["component_text_residual_ratio"] > 0
+    assert "component_text_residual" in report["violations"]
+
+
 def test_background_with_source_glyph_pixels_fails_text_isolation_gate() -> None:
     case = _text_isolation_case()
     glyph = case["text_mask"] & np.any(case["source"] != (70, 125, 190), axis=2)
@@ -625,16 +791,98 @@ def test_background_with_source_glyph_pixels_fails_text_isolation_gate() -> None
     assert "background_text_residual" in report["violations"]
 
 
+def test_page_background_residual_ignores_text_pixels_owned_by_a_component() -> None:
+    case = _text_isolation_case()
+    case["background"] = np.full_like(case["source"], 238)
+    calibration = calibrate_page(case["source"], case["text_mask"])
+
+    context = component_quality._prepare_page_quality_context(
+        case["source"], case["background"], case["reconstructed"],
+        case["text_mask"], calibration=calibration,
+        component_masks=[case["component_mask"]],
+    )
+
+    assert context.background_text_residual_ratio == 0
+
+
 def test_reliable_ocr_requires_exactly_one_editable_text_contribution() -> None:
     report = evaluate_page_quality(
         [],
         visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
         page_checks={"pptx_reopen": "pass", "editable_text_once": "fail"},
         expected_component_ids=[], initial_component_count=0,
+        active_visual_count=0,
     )
 
     assert report["accepted"] is False
     assert "editable_text_once" in report["violations"]
+
+
+def test_unowned_raster_text_is_sticky_page_hard_gate_for_all_five_batches() -> None:
+    for _repair_round in range(1, 6):
+        report = evaluate_page_quality(
+            [],
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={
+                "pptx_reopen": "pass",
+                "unowned_raster_text": "fail",
+            },
+            expected_component_ids=[],
+            initial_component_count=0,
+            active_visual_count=0,
+        )
+
+        assert report["accepted"] is False
+        assert report["violations"] == ["unowned_raster_text"]
+        assert report["checks"]["unowned_raster_text"] == "fail"
+
+
+def test_page_quality_with_only_frozen_visuals_keeps_page_violations() -> None:
+    report = evaluate_page_quality(
+        [],
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={
+            "pptx_reopen": "pass",
+            "background_text_clean": "fail",
+        },
+        expected_component_ids=[],
+        initial_component_count=22,
+        active_visual_count=17,
+    )
+
+    assert report["accepted"] is False
+    assert report["component_reports"] == []
+    assert report["violations"] == ["background_text_residual"]
+
+
+def test_subscale_orphan_residual_does_not_fail_the_page() -> None:
+    report = evaluate_page_quality(
+        [{
+            "component_id": "component_0001",
+            "accepted": True,
+            "violations": [],
+            "metrics": {"orphan_residual_pixels": 3, "edge_width_px": 2},
+        }],
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"pptx_reopen": "pass"},
+        expected_component_ids=["component_0001"],
+        initial_component_count=1,
+        active_visual_count=1,
+    )
+
+    assert report["accepted"] is True
+
+
+def test_page_quality_rejects_clearing_all_initial_visuals() -> None:
+    with pytest.raises(ValueError, match="active visual"):
+        evaluate_page_quality(
+            [],
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={"pptx_reopen": "pass"},
+            expected_component_ids=[],
+            initial_component_count=22,
+            active_visual_count=0,
+        )
 
 
 def test_clean_component_and_background_pass_text_isolation_gate() -> None:
@@ -779,7 +1027,7 @@ def test_internal_page_context_reuses_full_page_conversions(monkeypatch) -> None
             page_checks={"protected_native_overlap": "pass"}, _page_context=context,
         )
     assert calls == ["source", "background", "reconstructed"]
-    assert median_calls == 3
+    assert median_calls == 9
     assert distance_calls == 1
 
 
@@ -845,6 +1093,7 @@ def test_ambiguous_exterior_residual_is_page_level_orphan() -> None:
         reports, visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
         page_checks={"pptx_reopen": "pass"},
         expected_component_ids=["left", "right"], initial_component_count=2,
+        active_visual_count=2,
     )
     assert all("duplicate_shadow" not in report["violations"] for report in reports)
     assert "orphan_residual" in page["violations"]
@@ -882,6 +1131,7 @@ def test_pptx_reopen_is_page_hard_gate(status: str | None) -> None:
         page_checks=checks,
         expected_component_ids=[],
         initial_component_count=0,
+        active_visual_count=0,
     )
     assert report["accepted"] is False
     assert "pptx_reopen_unknown" in report["violations"] or "pptx_reopen" in report["violations"]
@@ -1029,6 +1279,7 @@ def test_page_quality_rejects_incomplete_or_nonfinite_visual_metrics(visual_metr
             [], visual_metrics=visual_metrics,
             page_checks={"pptx_reopen": "pass"},
             expected_component_ids=[], initial_component_count=0,
+            active_visual_count=0,
         )
 
 
@@ -1038,6 +1289,7 @@ def test_page_quality_cannot_accept_empty_reports_for_nonempty_page() -> None:
             [], visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
             page_checks={"pptx_reopen": "pass"},
             expected_component_ids=["component_0001"], initial_component_count=1,
+            active_visual_count=1,
         )
 
 

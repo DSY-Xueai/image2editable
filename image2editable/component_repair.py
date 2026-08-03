@@ -12,6 +12,8 @@ import stat
 import time
 import uuid
 
+from scripts.initial_diagnostics import validate_initial_diagnostics
+
 from image2editable.component_contracts import (
     COMPONENT_EVIDENCE_NAMES,
     validate_agent_provider,
@@ -116,6 +118,15 @@ def advance_component_repair(
                 return {"status": "needs_next_round", "page_id": page_id,
                         "repair_round": state["repair_round"] + 1,
                         "candidate_ids": list(state["failed_ids"])}
+            blocking_violations = _blocking_page_quality_violations(store, state)
+            if blocking_violations:
+                updated = dict(state)
+                updated["stop_reason"] = (
+                    "unowned_raster_text"
+                    if "unowned_raster_text" in blocking_violations
+                    else "page_quality_failed"
+                )
+                return _commit_preserved_warning(store, updated, page_id)
             if state["initial_component_count"] and not state["frozen"]:
                 return _commit_preserved_warning(store, state, page_id)
             return _commit_ready_result(store, state, page_id)
@@ -386,7 +397,14 @@ def record_component_execution(
             or execution["executable_action_count"] < 0
         ):
             raise ValueError("component execution record identity is invalid")
-        _verify_quality_input_refs(store, state, execution["quality_input_refs"])
+        request_path = store.root / Path(
+            *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
+        )
+        _verify_quality_input_refs(
+            store, state, execution["quality_input_refs"],
+            request=load_component_agent_request(request_path),
+            request_path=request_path,
+        )
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
         ).decode("utf-8"))
@@ -544,6 +562,15 @@ def record_next_component_request(
         request_path = Path(request_path)
         request = load_component_agent_request(request_path)
         graph = load_component_agent_graph(request_path)
+        previous_request_path = store.root / Path(
+            *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
+        )
+        if _request_initial_diagnostics(
+            store, previous_request_path, state["source_sha256"]
+        ) != _request_initial_diagnostics(
+            store, request_path, state["source_sha256"]
+        ):
+            raise ValueError("next component request initial diagnostics changed")
         if (
             request["page_id"] != page_id
             or request["provider"] != state["provider"]
@@ -606,8 +633,13 @@ def record_parent_fallback_execution(
             store.root, Path(graph_path), "parent fallback graph"
         )
         graph = validate_component_graph(json.loads(payload.decode("utf-8")))
+        request_path = store.root / Path(
+            *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
+        )
         quality_input_refs = _verify_quality_input_refs(
-            store, state, quality_input_refs
+            store, state, quality_input_refs,
+            request=load_component_agent_request(request_path),
+            request_path=request_path,
         )
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
@@ -706,7 +738,9 @@ def _artifact_reference(root: Path, path: Path, label: str) -> tuple[dict, bytes
     }, payload
 
 
-def _verify_quality_input_refs(store, state: dict, refs: object) -> dict:
+def _verify_quality_input_refs(
+    store, state: dict, refs: object, *, request: dict, request_path: Path
+) -> dict:
     if not isinstance(refs, dict) or set(refs) != {
         "background", "reconstructed", "text_mask", "native_check"
     }:
@@ -719,19 +753,90 @@ def _verify_quality_input_refs(store, state: dict, refs: object) -> dict:
         store.root, refs["native_check"]
     ).decode("utf-8"))
     native_fields = {
-        "schema_version", "page_id", "source_sha256", "protected_native_overlap"
+        "schema_version", "page_id", "source_sha256", "protected_native_overlap",
+        "initial_diagnostics",
     }
-    if not isinstance(native, dict) or set(native) not in {
-        frozenset(native_fields), frozenset(native_fields | {"text_items"})
-    } or (
-        native["schema_version"] != 1
+    optional_native_fields = {"text_items", "contained_parent_pairs"}
+    contained_pairs = native.get("contained_parent_pairs", []) if isinstance(native, dict) else []
+    if (
+        not isinstance(native, dict)
+        or not (
+            set(native_fields) <= set(native)
+            and set(native) <= native_fields | optional_native_fields
+        )
+        or native["schema_version"] != 1
         or native["page_id"] != state["page_id"]
         or native["source_sha256"] != state["source_sha256"]
         or native["protected_native_overlap"] not in {"pass", "fail", "unknown"}
         or not isinstance(native.get("text_items", []), list)
+        or not isinstance(contained_pairs, list)
+        or any(
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(type(component_id) is not str for component_id in pair)
+            or pair != sorted(set(pair))
+            for pair in contained_pairs
+        )
+        or len(contained_pairs) != len({tuple(pair) for pair in contained_pairs})
     ):
         raise ValueError("component native overlap check is invalid")
+    evidence = request["evidence"]["quality-report.json"]
+    quality_path = request_path.parent / evidence["path"]
+    quality_ref, quality_payload = _artifact_reference(
+        store.root, quality_path, "initial quality evidence"
+    )
+    if quality_ref["sha256"] != evidence["sha256"]:
+        raise RuntimeError("initial quality evidence hash mismatch")
+    initial_quality = json.loads(quality_payload.decode("utf-8"))
+    expected = initial_quality.get("initial_diagnostics", [])
+    validate_initial_diagnostics(expected, source_sha256=state["source_sha256"])
+    validate_initial_diagnostics(
+        native["initial_diagnostics"], source_sha256=state["source_sha256"]
+    )
+    if native["initial_diagnostics"] != expected:
+        raise ValueError("component native diagnostics do not match request evidence")
     return refs
+
+
+def _request_initial_diagnostics(
+    store, request_path: Path, source_sha256: str
+) -> list[dict]:
+    request = load_component_agent_request(request_path)
+    evidence = request["evidence"]["quality-report.json"]
+    quality_path = request_path.parent / evidence["path"]
+    quality_ref, quality_payload = _artifact_reference(
+        store.root, quality_path, "initial quality evidence"
+    )
+    if quality_ref["sha256"] != evidence["sha256"]:
+        raise RuntimeError("initial quality evidence hash mismatch")
+    quality = json.loads(quality_payload.decode("utf-8"))
+    diagnostics = quality.get("initial_diagnostics", [])
+    validate_initial_diagnostics(diagnostics, source_sha256=source_sha256)
+    return diagnostics
+
+
+def _approved_contained_parent_pairs(
+    plan: dict, contained_parent_pairs: set[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    accepted = {
+        action["object_ids"][0]: action
+        for action in plan["actions"]
+        if action["action"] == "accept"
+    }
+    approved = set()
+    for pair in contained_parent_pairs:
+        actions = [accepted.get(component_id) for component_id in pair]
+        if all(
+            action is not None
+            and action["confidence"] >= 0.92
+            and all(
+                component_id in action["evidence"]
+                for component_id in pair
+            )
+            for action in actions
+        ):
+            approved.add(pair)
+    return approved
 
 
 def _recompute_quality_artifact(
@@ -756,7 +861,7 @@ def _recompute_quality_artifact(
     if source_ref["sha256"] != state["source_sha256"]:
         raise RuntimeError("component quality source hash mismatch")
     quality_input_refs = _verify_quality_input_refs(
-        store, state, quality_input_refs
+        store, state, quality_input_refs, request=request, request_path=request_path
     )
     input_refs = {"source": source_ref, **quality_input_refs}
     payloads = {"source": source_payload}
@@ -779,6 +884,7 @@ def _recompute_quality_artifact(
         decode("reconstructed", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
     )
     text_mask = decode("text_mask", cv2.IMREAD_GRAYSCALE)
+    plan = None
     if filename == "component-quality.json":
         input_graph = load_component_agent_graph(request_path)
         plan = json.loads(_load_state_artifact(
@@ -793,9 +899,20 @@ def _recompute_quality_artifact(
     native = json.loads(_load_state_artifact(
         store.root, quality_input_refs["native_check"]
     ).decode("utf-8"))
+    contained_parent_pairs = {
+        tuple(pair) for pair in native.get("contained_parent_pairs", [])
+    }
+    approved_contained_parent_pairs = set()
+    if plan is not None:
+        approved_contained_parent_pairs = _approved_contained_parent_pairs(
+            plan, contained_parent_pairs
+        )
     checks = {
         "protected_native_overlap": native["protected_native_overlap"],
         "pptx_reopen": "unknown",
+        "unowned_raster_text": (
+            "fail" if native.get("initial_diagnostics") else "pass"
+        ),
     }
     from scripts.visual_segment import visual_difference
     visual_metrics = visual_difference(source, reconstructed, text_mask)
@@ -806,6 +923,8 @@ def _recompute_quality_artifact(
         initial_component_count=state["initial_component_count"],
         expected_component_ids=expected_component_ids,
         text_items=native.get("text_items", []),
+        contained_parent_pairs=contained_parent_pairs,
+        approved_contained_parent_pairs=approved_contained_parent_pairs,
     )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
@@ -815,6 +934,13 @@ def _recompute_quality_artifact(
         "quality_gate_version": state["quality_gate_version"],
         "expected_component_ids": expected_component_ids,
         "initial_component_count": state["initial_component_count"],
+        "initial_diagnostics": native["initial_diagnostics"],
+        "contained_parent_pairs": [
+            list(pair) for pair in sorted(contained_parent_pairs)
+        ],
+        "approved_contained_parent_pairs": [
+            list(pair) for pair in sorted(approved_contained_parent_pairs)
+        ],
         "input_refs": input_refs, "report": report,
     }
     if native.get("text_items"):
@@ -876,7 +1002,8 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
         if item.get("accepted") is True and not item.get("violations")
     }
     failed = sorted(set(state["candidate_ids"]) - accepted)
-    if page_violations and not failed:
+    fixable_page_violations = page_violations - {"unowned_raster_text"}
+    if fixable_page_violations and not failed:
         accepted.clear()
     failed = sorted(set(state["candidate_ids"]) - accepted)
     graph_payload = _load_state_artifact(
@@ -933,6 +1060,18 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
     return {"status": "freeze_committed", "page_id": page_id,
             "repair_round": state["repair_round"], "frozen_ids": sorted(accepted),
             "failed_ids": failed}
+
+
+def _blocking_page_quality_violations(store, state: dict) -> set[str]:
+    quality_ref = state["current_round"].get("quality_ref")
+    if quality_ref is None:
+        return set()
+    quality = json.loads(_load_state_artifact(
+        store.root, quality_ref
+    ).decode("utf-8"))
+    return set(quality.get("report", {}).get("violations", [])) - {
+        "pptx_reopen_unknown"
+    }
 
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:
@@ -1062,11 +1201,21 @@ def _utc_now() -> str:
 
 
 def _normalized_plan_sha256(plan: dict) -> str:
+    planned_ids = {
+        component_id
+        for action in plan["actions"]
+        for component_id in action["object_ids"]
+    }
     actions = [
         {
             "action": action["action"],
             "object_ids": sorted(action["object_ids"]),
             "parameters": action["parameters"],
+            "approval_evidence_ids": (
+                sorted(planned_ids & set(action["evidence"]))
+                if action["action"] == "accept" and action["confidence"] >= 0.92
+                else []
+            ),
         }
         for action in plan["actions"]
     ]
@@ -1112,6 +1261,8 @@ def evaluate_component_quality_round(
     previous_reports: dict | None = None,
     agent_confidence_by_id: dict | None = None,
     over_merged_component_ids: set[str] | None = None,
+    contained_parent_pairs: set[tuple[str, str]] | None = None,
+    approved_contained_parent_pairs: set[tuple[str, str]] | None = None,
     text_items: list[dict] | None = None,
 ) -> dict:
     import numpy as np
@@ -1119,8 +1270,10 @@ def evaluate_component_quality_round(
     from image2editable.component_quality import (
         absorbed_leaf_cluster_count,
         calibrate_page,
+        contained_active_parent_pairs,
         evaluate_component,
         evaluate_page_quality,
+        resolve_visual_mask_ownership,
         _prepare_page_quality_context,
     )
     validated = validate_component_graph(graph)
@@ -1128,6 +1281,13 @@ def evaluate_component_quality_round(
     previous_reports = previous_reports or {}
     agent_confidence_by_id = agent_confidence_by_id or {}
     over_merged_component_ids = over_merged_component_ids or set()
+    contained_parent_pairs = {
+        tuple(sorted(pair)) for pair in (contained_parent_pairs or set())
+    }
+    approved_contained_parent_pairs = {
+        tuple(sorted(pair))
+        for pair in (approved_contained_parent_pairs or set())
+    }
     reports = []
     active_visual = [
         node for node in validated["nodes"]
@@ -1160,20 +1320,26 @@ def evaluate_component_quality_round(
             node, graph_root=graph_root, trusted_chain=directory_chain,
             shape=source.shape[:2],
         )
+    contained_parent_pairs.update(contained_active_parent_pairs(
+        active_visual, [masks[node["id"]] for node in active_visual]
+    ))
+    contained_parent_review_ids = {
+        component_id
+        for pair in contained_parent_pairs - approved_contained_parent_pairs
+        for component_id in pair
+    }
+    effective_masks = resolve_visual_mask_ownership(
+        active_visual, [masks[node["id"]] for node in active_visual]
+    )
+    for node, mask in zip(active_visual, effective_masks, strict=True):
+        masks[node["id"]] = mask
     def related_inactive_sources(target: dict):
         target_mask = masks[target["id"]]
         tx1, ty1, tx2, ty2 = target["bbox"]
         for source_node in validated["nodes"]:
             if source_node["kind"] == "text" or source_node["state"] != "inactive":
                 continue
-            ancestor_id = source_node.get("parent_id")
-            is_descendant = False
-            while ancestor_id is not None:
-                if ancestor_id == target["id"]:
-                    is_descendant = True
-                    break
-                ancestor_id = nodes_by_id[ancestor_id].get("parent_id")
-            if not is_descendant and source_node.get("parent_id") != target.get("parent_id"):
+            if not _is_related_inactive_source(target, source_node, nodes_by_id):
                 continue
             sx1, sy1, sx2, sy2 = source_node["bbox"]
             ix1, iy1 = max(tx1, sx1), max(ty1, sy1)
@@ -1190,7 +1356,7 @@ def evaluate_component_quality_round(
                 & target_mask[iy1:iy2, ix1:ix2]
             ))
             if covered / max(source_area, 1) >= 0.8:
-                yield source_mask
+                yield source_mask & target_mask
 
     for node in candidates:
         if absorbed_leaf_cluster_count(
@@ -1201,13 +1367,14 @@ def evaluate_component_quality_round(
         source, background, reconstructed, text_mask,
         calibration=calibration,
         component_masks=[masks[node["id"]] for node in active_visual],
+        text_items=text_items,
     )
     page_checks = dict(page_checks)
     text_pixels = int(np.count_nonzero(page_context.text_ink))
     residual_pixels = page_context.background_text_residual_ratio * text_pixels
     if residual_pixels >= max(
         calibration.min_component_pixels,
-        calibration.text_halo_px ** 2,
+        calibration.text_halo_px * 2,
     ):
         page_checks["background_text_clean"] = "fail"
     else:
@@ -1247,6 +1414,7 @@ def evaluate_component_quality_round(
             agent_confidence=agent_confidence_by_id.get(component_id),
             previous_metrics=previous.get("metrics"),
             over_merged_component=component_id in over_merged_component_ids,
+            contained_parent_review=component_id in contained_parent_review_ids,
             _page_context=page_context,
         ))
     return evaluate_page_quality(
@@ -1255,6 +1423,22 @@ def evaluate_component_quality_round(
         page_checks=page_checks,
         expected_component_ids=expected_component_ids,
         initial_component_count=initial_component_count,
+        active_visual_count=len(active_visual),
+    )
+
+
+def _is_related_inactive_source(
+    target: dict, source_node: dict, nodes_by_id: dict[str, dict]
+) -> bool:
+    ancestor_id = source_node.get("parent_id")
+    while ancestor_id is not None:
+        if ancestor_id == target["id"]:
+            return True
+        ancestor_id = nodes_by_id[ancestor_id].get("parent_id")
+    target_parent_id = target.get("parent_id")
+    return (
+        target_parent_id is not None
+        and source_node.get("parent_id") == target_parent_id
     )
 
 

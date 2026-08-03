@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import unicodedata
 from pathlib import Path
 
 import cv2
@@ -62,6 +63,11 @@ from scripts.object_detect import (
 )
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import close_ocr_engines, detect_text
+from scripts import text_detect as text_detection
+from scripts.initial_diagnostics import (
+    MAX_INITIAL_DIAGNOSTICS,
+    validate_initial_diagnostics,
+)
 from scripts.visual_segment import (
     MaskCandidate,
     VisualSegmentationError,
@@ -87,10 +93,366 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
+_TARGETED_OCR_VIEW_SCALES = (2.0, 3.0)
+_TARGETED_OCR_VIEW_EDGE_LIMITS = (512, 448)
+_TARGETED_OCR_MIN_CONFIDENCE = 0.88
+_TARGETED_OCR_MAX_CANDIDATES = 24
+_TARGETED_OCR_SINGLE_CROP_PIXELS = 512 * 512
+_TARGETED_OCR_TOTAL_CROP_PIXELS = 6 * 1024 * 1024
+_TARGETED_OCR_MAX_ITEMS_PER_VIEW = 32
+
 
 # ---------------------------------------------------------------------------
 # Core pipeline
 # ---------------------------------------------------------------------------
+
+
+def _normalized_candidate_text(value: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value)).casefold()
+    return "".join(normalized.split())
+
+
+def _box_intersection_ratio(left: list[int], right: list[int]) -> float:
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    intersection = max(0, min(lx + lw, rx + rw) - max(lx, rx)) * max(
+        0, min(ly + lh, ry + rh) - max(ly, ry)
+    )
+    return intersection / max(1, min(lw * lh, rw * rh))
+
+
+def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
+    return any(
+        _normalized_candidate_text(known.get("text", ""))
+        == item["normalized_text"]
+        and _box_intersection_ratio(
+            [int(value) for value in known.get("box", [0, 0, 0, 0])],
+            item["box"],
+        ) >= 0.50
+        for known in known_items
+    )
+
+
+def _targeted_candidate_ocr_sweep(
+    image_path: str | Path,
+    components: list[dict],
+    known_items: list[dict],
+    known_mask: np.ndarray,
+    work_dir: str | Path,
+    *,
+    lang: str,
+    isolated: bool,
+) -> dict:
+    """Recheck bounded visual candidates without retaining page-size copies."""
+    source_path = Path(image_path).resolve()
+    work_dir = Path(work_dir).resolve()
+    mask = np.asarray(known_mask, dtype=np.uint8)
+    with Image.open(source_path) as source:
+        page_width, page_height = source.size
+    if mask.shape != (page_height, page_width):
+        raise ValueError("targeted OCR text mask must match the source image")
+
+    page_pixels = page_width * page_height
+    candidate_limit = min(
+        _TARGETED_OCR_MAX_CANDIDATES,
+        max(16, page_pixels // 120_000),
+    )
+    total_pixel_limit = min(
+        _TARGETED_OCR_TOTAL_CROP_PIXELS,
+        max(_TARGETED_OCR_SINGLE_CROP_PIXELS, page_pixels * 2),
+    )
+    selected = []
+    for index, component in enumerate(components, start=1):
+        try:
+            x, y, width, height = (
+                int(component[name]) for name in ("x", "y", "w", "h")
+            )
+            alpha_area = int(component.get("area", width * height))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            x < 0
+            or y < 0
+            or width < 8
+            or height < 8
+            or x + width > page_width
+            or y + height > page_height
+            or (
+                page_pixels >= 200_000
+                and width * height > page_pixels * 0.10
+            )
+            or width * height > page_pixels * 0.25
+            or max(width / height, height / width) > 14
+            or alpha_area / max(width * height, 1) < 0.04
+        ):
+            continue
+        selected.append((index, [x, y, width, height]))
+        if len(selected) >= candidate_limit:
+            break
+
+    diagnostics = []
+    consistent = []
+    used_pixels = 0
+    with source_path.open("rb") as source_file:
+        source_sha256 = hashlib.file_digest(source_file, "sha256").hexdigest()
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="targeted-ocr-", dir=work_dir) as temporary:
+            crop_root = Path(temporary)
+            with Image.open(source_path) as source:
+                for component_index, box in selected:
+                    x, y, width, height = box
+                    views = []
+                    candidate_pixels = []
+                    for target_scale, edge_limit in zip(
+                        _TARGETED_OCR_VIEW_SCALES,
+                        _TARGETED_OCR_VIEW_EDGE_LIMITS,
+                    ):
+                        bounded_scale = min(
+                            target_scale,
+                            edge_limit / width,
+                            edge_limit / height,
+                            math.sqrt(
+                                _TARGETED_OCR_SINGLE_CROP_PIXELS
+                                / max(width * height, 1)
+                            ),
+                        )
+                        view_width = max(1, int(round(width * bounded_scale)))
+                        view_height = max(1, int(round(height * bounded_scale)))
+                        candidate_pixels.append(view_width * view_height)
+                        views.append((bounded_scale, view_width, view_height))
+                    if used_pixels + sum(candidate_pixels) > total_pixel_limit:
+                        break
+
+                    recognized = []
+                    with source.crop((x, y, x + width, y + height)) as raw_crop:
+                        with raw_crop.convert("RGB") as base_crop:
+                            for view_index, (scale, view_width, view_height) in enumerate(views):
+                                crop_path = crop_root / (
+                                    f"candidate-{component_index:04d}-view-{view_index + 1}.png"
+                                )
+                                with base_crop.resize(
+                                    (view_width, view_height), Image.Resampling.LANCZOS
+                                ) as resized:
+                                    resized.save(crop_path)
+                                used_pixels += view_width * view_height
+                                items, _ = detect_text(
+                                    crop_path, lang=lang, confidence_threshold=0.70,
+                                    isolated=isolated,
+                                    worker_root=work_dir if isolated else None,
+                                )
+                                mapped_items = []
+                                for item in text_detection._merge_adjacent_text_items(items):
+                                    raw_box = item.get("box")
+                                    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+                                        continue
+                                    mapped_box = [
+                                        max(0, int(round(x + raw_box[0] / scale))),
+                                        max(0, int(round(y + raw_box[1] / scale))),
+                                        max(1, int(round(raw_box[2] / scale))),
+                                        max(1, int(round(raw_box[3] / scale))),
+                                    ]
+                                    mapped_box[2] = min(mapped_box[2], page_width - mapped_box[0])
+                                    mapped_box[3] = min(mapped_box[3], page_height - mapped_box[1])
+                                    normalized = _normalized_candidate_text(item.get("text", ""))
+                                    confidence = float(item.get("confidence", 0.0))
+                                    if (
+                                        normalized
+                                        and confidence >= _TARGETED_OCR_MIN_CONFIDENCE
+                                        and _box_intersection_ratio(mapped_box, box) >= 0.50
+                                    ):
+                                        mapped_items.append({
+                                            "text": str(item.get("text", "")).strip(),
+                                            "normalized_text": normalized,
+                                            "confidence": confidence,
+                                            "box": mapped_box,
+                                        })
+                                recognized.append(sorted(
+                                    mapped_items,
+                                    key=lambda value: (value["box"][1], value["box"][0]),
+                                )[:_TARGETED_OCR_MAX_ITEMS_PER_VIEW])
+
+                    unmatched = set(range(len(recognized[1])))
+                    pairs = []
+                    for left in recognized[0]:
+                        choices = [
+                            (index, _box_intersection_ratio(left["box"], recognized[1][index]["box"]))
+                            for index in unmatched
+                        ]
+                        choices = [choice for choice in choices if choice[1] >= 0.50]
+                        if not choices:
+                            continue
+                        right_index = max(choices, key=lambda choice: choice[1])[0]
+                        unmatched.remove(right_index)
+                        pairs.append((left, recognized[1][right_index]))
+                    pairs.sort(key=lambda pair: (
+                        min(pair[0]["box"][1], pair[1]["box"][1]),
+                        min(pair[0]["box"][0], pair[1]["box"][0]),
+                    ))
+                    for pair_index, (left, right) in enumerate(pairs, start=1):
+                        if _matches_known_text(left, known_items) or _matches_known_text(
+                            right, known_items
+                        ):
+                            continue
+                        if left["normalized_text"] == right["normalized_text"]:
+                            consistent.append(max(
+                                (left, right), key=lambda item: item["confidence"]
+                            ))
+                            continue
+                        left_box, right_box = left["box"], right["box"]
+                        if len(diagnostics) >= MAX_INITIAL_DIAGNOSTICS:
+                            continue
+                        diagnostics.append({
+                            "kind": "unowned_raster_text",
+                            "source_sha256": source_sha256,
+                            "candidate_id": (
+                                f"candidate_{component_index:04d}_{pair_index:02d}"
+                            ),
+                            "bbox": [
+                                min(left_box[0], right_box[0]),
+                                min(left_box[1], right_box[1]),
+                                max(left_box[0] + left_box[2], right_box[0] + right_box[2]),
+                                max(left_box[1] + left_box[3], right_box[1] + right_box[3]),
+                            ],
+                            "views": [
+                                {"normalized_text": left["normalized_text"],
+                                 "confidence": left["confidence"]},
+                                {"normalized_text": right["normalized_text"],
+                                 "confidence": right["confidence"]},
+                            ],
+                        })
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
+    finally:
+        _run_cleanup_preserving_exception(
+            close_ocr_engines,
+            "targeted OCR",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
+
+    recovered = []
+    if consistent:
+        with Image.open(source_path) as source:
+            for item in consistent:
+                x, y, width, height = item["box"]
+                left, top = max(0, x - 6), max(0, y - 6)
+                right = min(page_width, x + width + 6)
+                bottom = min(page_height, y + height + 6)
+                with source.crop((left, top, right, bottom)).convert("RGB") as crop:
+                    pixels = np.asarray(crop).copy()
+                local_box = (x - left, y - top, width, height)
+                style = text_detection._estimate_style(
+                    pixels,
+                    local_box,
+                    reference_width=page_width,
+                )
+                font_size = text_detection._adjust_font_size(
+                    item["text"], style["font_size"]
+                )
+                recovered.append({
+                "box": item["box"],
+                "text": item["text"],
+                "font_size": font_size,
+                "color": style["color"],
+                "bold": (
+                    False
+                    if text_detection._should_force_regular_weight(
+                        item["text"], font_size
+                    )
+                    else style["bold"]
+                ),
+                "font": text_detection._select_font(item["text"], font_size),
+                "align": 1,
+                "confidence": item["confidence"],
+                })
+    all_items = text_detection._merge_adjacent_text_items(
+        [dict(item) for item in known_items] + recovered
+    )
+    all_items = text_detection._refine_alignment(all_items, page_width)
+    updated_mask = text_detection._build_text_mask(
+        (page_height, page_width), all_items, padding=6
+    )
+    return {
+        "items": all_items,
+        "recovered_items": recovered,
+        "text_mask": updated_mask,
+        "diagnostics": diagnostics,
+        "resource_stats": {
+            "candidate_limit": candidate_limit,
+            "selected_candidates": len(selected),
+            "single_crop_pixel_limit": _TARGETED_OCR_SINGLE_CROP_PIXELS,
+            "total_crop_pixel_limit": total_pixel_limit,
+            "processed_crop_pixels": used_pixels,
+        },
+    }
+
+
+def _remove_owned_first_visual_assets(slide_data: dict, work_dir: Path) -> None:
+    owned_root = Path(os.path.abspath(work_dir))
+    root_identity = owned_root.lstat()
+    if _is_link_or_reparse(root_identity) or not stat.S_ISDIR(root_identity.st_mode):
+        raise ValueError("first visual work directory identity is unsafe")
+    groups = (
+        ("components", [component.get("path") for component in slide_data.get("components", [])]),
+        ("element-masks", slide_data.get("_element_mask_paths", [])),
+        ("semantic-masks", slide_data.get("_semantic_mask_paths", [])),
+    )
+    validated = []
+    for directory, paths in groups:
+        if not paths:
+            continue
+        owned_directory = owned_root / directory
+        directory_status = owned_directory.lstat()
+        if (_is_link_or_reparse(directory_status)
+                or not stat.S_ISDIR(directory_status.st_mode)):
+            raise ValueError("first visual owned directory identity is unsafe")
+        for value in paths:
+            if not value:
+                continue
+            path = Path(os.path.abspath(value))
+            try:
+                path.relative_to(owned_root)
+            except ValueError:
+                raise ValueError("first visual asset is outside the work directory")
+            if path.parent != owned_directory:
+                raise ValueError("first visual asset is outside its owned directory")
+            before = path.lstat()
+            if (_is_link_or_reparse(before) or not stat.S_ISREG(before.st_mode)
+                    or before.st_nlink != 1):
+                raise ValueError("first visual asset identity is unsafe")
+            after = path.lstat()
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise RuntimeError("first visual asset identity changed")
+            current_directory = owned_directory.lstat()
+            if (
+                _is_link_or_reparse(current_directory)
+                or not stat.S_ISDIR(current_directory.st_mode)
+                or (directory_status.st_dev, directory_status.st_ino)
+                != (current_directory.st_dev, current_directory.st_ino)
+            ):
+                raise RuntimeError("first visual owned directory identity changed")
+            validated.append((path, before, owned_directory, directory_status))
+    for path, expected, owned_directory, expected_directory in validated:
+        current_directory = owned_directory.lstat()
+        current = path.lstat()
+        if (
+            _is_link_or_reparse(current_directory)
+            or not stat.S_ISDIR(current_directory.st_mode)
+            or (expected_directory.st_dev, expected_directory.st_ino)
+            != (current_directory.st_dev, current_directory.st_ino)
+            or _is_link_or_reparse(current)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (expected.st_dev, expected.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError("first visual asset identity changed")
+        path.unlink()
 
 
 def _filter_probable_icon_text_items(items: list[dict]) -> list[dict]:
@@ -1476,7 +1838,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 2
+_PREPARED_PAGE_SCHEMA_VERSION = 3
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -1486,6 +1848,7 @@ _PREPARED_PAGE_FIELDS = {
     "initial_component_count",
     "components",
     "text_items",
+    "initial_diagnostics",
     "dimensions",
     "assets",
 }
@@ -1797,6 +2160,18 @@ def _validate_prepared_payload(manifest: dict) -> None:
         ):
             raise ValueError("prepared page component metadata is invalid")
 
+    diagnostics = manifest["initial_diagnostics"]
+    assets = manifest.get("assets")
+    source_record = assets.get("source_image") if isinstance(assets, dict) else None
+    source_sha256 = (
+        source_record.get("sha256") if isinstance(source_record, dict) else None
+    )
+    validate_initial_diagnostics(
+        diagnostics,
+        source_sha256=source_sha256,
+        image_size=(image_width, image_height),
+    )
+
 
 def _atomic_write_prepared_text(
     work_dir: Path,
@@ -1899,6 +2274,7 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
         "initial_component_count": len(components),
         "components": components,
         "text_items": slide_data["text_items"],
+        "initial_diagnostics": slide_data.get("_initial_diagnostics", []),
         "dimensions": dimensions,
         "assets": assets,
     }
@@ -1956,14 +2332,19 @@ def _load_component_layer_state(
         manifest = json.loads(state_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("prepared page state is invalid JSON") from exc
-    if not isinstance(manifest, dict) or set(manifest) != _PREPARED_PAGE_FIELDS:
+    if not isinstance(manifest, dict):
         raise ValueError("prepared page state fields are invalid")
-    schema_version = manifest["schema_version"]
-    if type(schema_version) is not int or schema_version not in {
-        1,
-        _PREPARED_PAGE_SCHEMA_VERSION,
-    }:
+    schema_version = manifest.get("schema_version")
+    if type(schema_version) is not int or schema_version not in {1, 2, 3}:
         raise ValueError("prepared page schema_version is invalid")
+    legacy_fields = _PREPARED_PAGE_FIELDS - {"initial_diagnostics"}
+    expected_fields = (
+        _PREPARED_PAGE_FIELDS if schema_version == 3 else legacy_fields
+    )
+    if set(manifest) != expected_fields:
+        raise ValueError("prepared page state fields are invalid")
+    if schema_version < 3:
+        manifest = {**manifest, "initial_diagnostics": []}
     if manifest["phase"] != "initial_layers":
         raise ValueError("prepared page phase is invalid")
     if type(manifest["resource_isolation"]) is not bool:
@@ -1980,14 +2361,14 @@ def _load_component_layer_state(
     assets = manifest["assets"]
     expected_asset_fields = (
         _PREPARED_ASSET_FIELDS_V2
-        if schema_version == 2
+        if schema_version >= 2
         else _PREPARED_ASSET_FIELDS_V1
     )
     if not isinstance(assets, dict) or set(assets) != expected_asset_fields:
         raise ValueError("prepared page assets are invalid")
     if not isinstance(assets["element_masks"], list):
         raise ValueError("prepared page element masks are invalid")
-    if schema_version == 2:
+    if schema_version >= 2:
         if not isinstance(assets["semantic_masks"], list):
             raise ValueError("prepared page semantic masks are invalid")
         if not (
@@ -2029,7 +2410,7 @@ def _load_component_layer_state(
             ),
         })
 
-    if schema_version == 2:
+    if schema_version >= 2:
         semantic_mask_paths = []
         expected_size = (dimensions["img_width"], dimensions["img_height"])
         for index, (child_record, parent_record) in enumerate(
@@ -2082,6 +2463,7 @@ def _load_component_layer_state(
         **dimensions,
         "components": components,
         "text_items": manifest["text_items"],
+        "initial_diagnostics": manifest["initial_diagnostics"],
         "original_image_path": loaded_assets["source_image"],
         "background_path": loaded_assets["background_widescreen"],
         "background_original_path": loaded_assets["background_original"],
@@ -2210,48 +2592,120 @@ def prepare_component_layers(
                 exception_boundary,
             )
 
-    object_detector = None
-    mask_generator = None
-    exception_boundary = sys.exc_info()[1]
-    primary_exception = None
-    primary_traceback = None
-    try:
-        if resource_isolation:
-            slide_data = _process_image_isolated(
-                owned_source,
-                owned_work_dir,
-                lang,
-                text_analysis,
-            )
-        else:
-            object_detector = create_object_detector()
-            mask_generator = create_sam_generator(resolve_sam_checkpoint())
-            slide_data = _process_image(
-                owned_source,
-                owned_work_dir,
-                object_detector,
-                mask_generator,
-                lang,
-                text_analysis=text_analysis,
-                defer_quality=True,
-            )
-    except BaseException as exc:
-        primary_exception = exc
-        primary_traceback = exc.__traceback__
-        raise
-    finally:
-        mask_generator = None
+    initial_diagnostics = []
+    for visual_pass in range(2):
         object_detector = None
-        _run_cleanup_preserving_exception(
-            _release_visual_resources,
-            "visual resources",
-            primary_exception,
-            primary_traceback,
-            exception_boundary,
+        mask_generator = None
+        exception_boundary = sys.exc_info()[1]
+        primary_exception = None
+        primary_traceback = None
+        try:
+            if resource_isolation:
+                slide_data = _process_image_isolated(
+                    owned_source,
+                    owned_work_dir,
+                    lang,
+                    text_analysis,
+                )
+            else:
+                object_detector = create_object_detector()
+                mask_generator = create_sam_generator(resolve_sam_checkpoint())
+                slide_data = _process_image(
+                    owned_source,
+                    owned_work_dir,
+                    object_detector,
+                    mask_generator,
+                    lang,
+                    text_analysis=text_analysis,
+                    defer_quality=True,
+                )
+        except BaseException as exc:
+            primary_exception = exc
+            primary_traceback = exc.__traceback__
+            raise
+        finally:
+            mask_generator = None
+            object_detector = None
+            _run_cleanup_preserving_exception(
+                _release_visual_resources,
+                "visual resources",
+                primary_exception,
+                primary_traceback,
+                exception_boundary,
+            )
+
+        if visual_pass:
+            break
+        with Image.open(text_analysis["mask_path"]) as stored_text_mask:
+            sweep_mask = np.asarray(stored_text_mask.convert("L")).copy()
+        sweep = _targeted_candidate_ocr_sweep(
+            owned_source,
+            slide_data["components"],
+            text_analysis["items"],
+            sweep_mask,
+            owned_work_dir,
+            lang=lang,
+            isolated=resource_isolation,
         )
+        sweep_mask = None
+        initial_diagnostics = sweep["diagnostics"]
+        if not sweep["recovered_items"]:
+            break
+
+        text_items = sweep["items"]
+        Image.fromarray(sweep["text_mask"], mode="L").save(text_mask_path)
+        text_analysis = {
+            "items": text_items,
+            "mask_path": str(text_mask_path),
+        }
+        if resource_isolation:
+            source_image = None
+            stored_mask = None
+            removal_mask = None
+            text_clean = None
+            exception_boundary = sys.exc_info()[1]
+            primary_exception = None
+            primary_traceback = None
+            try:
+                source_image = _load_rgb(owned_source)
+                stored_mask = sweep["text_mask"]
+                removal_mask = _build_text_cleanup_mask(
+                    source_image,
+                    stored_mask,
+                    text_items,
+                )
+                removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
+                Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+                text_clean_path = owned_work_dir / "text-clean.png"
+                text_clean = _repair_text_background(
+                    source_image,
+                    removal_mask,
+                    text_items=text_items,
+                    large_inpainter=_isolated_large_inpainter(owned_work_dir),
+                )
+                _save_rgb(text_clean_path, text_clean)
+                text_analysis["text_clean_path"] = str(text_clean_path)
+            except BaseException as exc:
+                primary_exception = exc
+                primary_traceback = exc.__traceback__
+                raise
+            finally:
+                source_image = None
+                stored_mask = None
+                removal_mask = None
+                text_clean = None
+                _run_cleanup_preserving_exception(
+                    gc.collect,
+                    "targeted text cleanup arrays",
+                    primary_exception,
+                    primary_traceback,
+                    exception_boundary,
+                )
+        _remove_owned_first_visual_assets(slide_data, owned_work_dir)
 
     slide_data["original_image_path"] = str(owned_source)
     slide_data["_resource_isolation"] = resource_isolation
+    slide_data["_initial_diagnostics"] = initial_diagnostics
     state_path = _write_prepared_page(slide_data, owned_work_dir)
     return load_component_layers(state_path)
 

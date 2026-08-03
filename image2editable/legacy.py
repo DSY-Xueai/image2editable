@@ -553,11 +553,16 @@ def _build_initial_page_session(
     )
     evidence["component-graph.json"] = graph_path
     quality_path = evidence_root / "quality-report.json"
+    initial_diagnostics = prepared.get("initial_diagnostics", [])
     quality_path.write_text(
         json.dumps({
             "schema_version": 1,
             "phase": "initial_layers",
             "text_items": text_items,
+            "initial_diagnostics": initial_diagnostics,
+            "violations": (
+                ["unowned_raster_text"] if initial_diagnostics else []
+            ),
         }, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -920,8 +925,21 @@ def _rebuild_canvas_background(
     return output_path
 
 
+def _text_item_repair_padding_px(box_height: int) -> int:
+    return max(2, min(4, int(round(max(box_height, 1) * 0.15))))
+
+
+def _text_item_halo_px(box_height: int) -> int:
+    return max(
+        _text_item_repair_padding_px(box_height),
+        min(12, int(round(max(box_height, 1) * 0.30))),
+    )
+
+
 def _assign_text_regions_to_component_masks(
-    component_masks: list[Any], text_mask: Any
+    component_masks: list[Any],
+    text_mask: Any,
+    text_items: list[dict] | None = None,
 ) -> list[Any]:
     import cv2
     import numpy as np
@@ -932,18 +950,106 @@ def _assign_text_regions_to_component_masks(
         return assigned
     if any(mask.shape != text.shape for mask in assigned):
         raise ValueError("component text ownership mask dimensions differ")
-    count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
-    for label in range(1, count):
-        region = labels == label
-        pixels = int(np.count_nonzero(region))
-        overlaps = [int(np.count_nonzero(mask & region)) for mask in assigned]
+    if text_items:
+        regions = []
+        height, width = text.shape
+        for item in text_items:
+            box = item.get("box") if isinstance(item, dict) else None
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            x, y, box_width, box_height = (int(value) for value in box)
+            x1, y1 = max(0, x), max(0, y)
+            x2, y2 = min(width, x + box_width), min(height, y + box_height)
+            if x1 >= x2 or y1 >= y2:
+                continue
+            ownership_region = np.zeros(text.shape, dtype=bool)
+            ownership_region[y1:y2, x1:x2] = text[y1:y2, x1:x2]
+            if np.any(ownership_region):
+                halo = _text_item_halo_px(box_height)
+                fill_region = np.zeros(text.shape, dtype=bool)
+                fill_region[
+                    max(0, y1 - halo):min(height, y2 + halo),
+                    max(0, x1 - halo):min(width, x2 + halo),
+                ] = True
+                regions.append((ownership_region, fill_region))
+    else:
+        count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
+        regions = [
+            (labels == label, labels == label) for label in range(1, count)
+        ]
+    mask_boxes = []
+    for mask in assigned:
+        ys, xs = np.nonzero(mask)
+        mask_boxes.append(
+            None if not len(xs) else (
+                int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+            )
+        )
+    for ownership_region, fill_region in regions:
+        pixels = int(np.count_nonzero(ownership_region))
+        overlaps = [
+            int(np.count_nonzero(mask & ownership_region)) for mask in assigned
+        ]
         best = max(range(len(assigned)), key=overlaps.__getitem__)
-        if overlaps[best] / max(pixels, 1) >= 0.45:
+        overlap_ratio = overlaps[best] / max(pixels, 1)
+        backing_ratio = 0.0
+        if text_items and overlap_ratio < 0.2:
+            fill_pixels = int(np.count_nonzero(fill_region))
+            backing = [
+                int(np.count_nonzero(mask & fill_region)) for mask in assigned
+            ]
+            best = max(range(len(assigned)), key=backing.__getitem__)
+            backing_ratio = backing[best] / max(fill_pixels, 1)
+        box = mask_boxes[best]
+        contained_ratio = 0.0
+        if box is not None:
+            left, top, right, bottom = box
+            contained_ratio = np.count_nonzero(
+                fill_region[top:bottom, left:right]
+            ) / max(int(np.count_nonzero(fill_region)), 1)
+        owns_text_region = (
+            overlap_ratio >= (0.2 if text_items else 0.45)
+            or (bool(text_items) and backing_ratio >= 0.5)
+        )
+        if owns_text_region and (
+            not text_items or contained_ratio >= 0.8
+        ):
             for index, mask in enumerate(assigned):
                 if index != best:
-                    mask[region] = False
-            assigned[best] |= region
+                    mask[ownership_region] = False
+            occupied_by_others = np.zeros(text.shape, dtype=bool)
+            for index, mask in enumerate(assigned):
+                if index != best:
+                    occupied_by_others |= mask
+            assigned[best] |= fill_region & ~occupied_by_others
     return assigned
+
+
+def _refine_quality_text_clean(
+    source,
+    text_clean,
+    text_mask,
+    text_items: list[dict],
+):
+    import numpy as np
+
+    source = np.asarray(source, dtype=np.uint8)
+    cleaned = np.asarray(text_clean, dtype=np.uint8)
+    text = np.asarray(text_mask) > 0
+    if cleaned.shape != source.shape or text.shape != source.shape[:2]:
+        raise ValueError("quality text refinement dimensions differ")
+    if not text_items or not np.any(text):
+        return cleaned.copy()
+    module = importlib.import_module("image_to_ppt")
+    refined = cleaned.copy()
+    for item in text_items:
+        box = item.get("box") if isinstance(item, dict) else None
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        refined = module._interpolate_text_item_boxes(
+            refined, [item], padding=_text_item_repair_padding_px(int(box[3]))
+        )
+    return refined
 
 
 def _quality_assets(
@@ -956,6 +1062,11 @@ def _quality_assets(
     background_path_override: Path | None = None,
 ) -> dict:
     import numpy as np
+
+    from image2editable.component_quality import (
+        contained_active_parent_pairs,
+        resolve_visual_mask_ownership,
+    )
 
     module = importlib.import_module("image_to_ppt")
     prepared = module.load_component_layers(
@@ -979,21 +1090,34 @@ def _quality_assets(
         text_mask = np.asarray(image.convert("L")) > 0
     if text_mask.shape != source.shape[:2] or text_clean.shape != source.shape:
         raise ValueError("quality text-clean dimensions differ")
+    text_clean = _refine_quality_text_clean(
+        source, text_clean, text_mask, prepared.get("text_items", [])
+    )
+    text_clean_output = output_dir / "text-clean.png"
+    Image.fromarray(text_clean, mode="RGB").save(text_clean_output)
     reconstructed = background.copy()
+    component_nodes = []
     component_masks = []
     for node in graph["nodes"]:
         if node["kind"] == "text" or node["state"] not in {
             "pending", "pending_gate", "frozen"
         }:
             continue
+        component_nodes.append(node)
         mask_path = graph_dir / Path(node["mask"])
         if sha256_file(mask_path) != node["mask_sha256"]:
             raise ValueError("execution graph mask sha256 mismatch")
         with Image.open(mask_path) as image:
             mask = np.asarray(image.convert("L")) > 0
         component_masks.append(mask)
+    contained_parent_pairs = contained_active_parent_pairs(
+        component_nodes, component_masks
+    )
+    component_masks = resolve_visual_mask_ownership(
+        component_nodes, component_masks
+    )
     component_masks = _assign_text_regions_to_component_masks(
-        component_masks, text_mask
+        component_masks, text_mask, prepared.get("text_items", [])
     )
     for mask in component_masks:
         reconstructed[mask] = text_clean[mask]
@@ -1010,7 +1134,11 @@ def _quality_assets(
         "schema_version": 1, "page_id": page_id,
         "source_sha256": sha256_file(source_path),
         "protected_native_overlap": "pass",
+        "contained_parent_pairs": [
+            list(pair) for pair in sorted(contained_parent_pairs)
+        ],
         "text_items": prepared.get("text_items", []),
+        "initial_diagnostics": prepared.get("initial_diagnostics", []),
     }, ensure_ascii=False), encoding="utf-8")
     return {
         name: {
@@ -1170,7 +1298,13 @@ def _publish_next_legacy_request(
             graph_dir=evidence_root,
             text_mask_path=_state_artifact(store, refs["text_mask"]),
             background_path=_state_artifact(store, refs["background"]),
-            text_clean_path=Path(prepared.get("_text_clean_path", prepared["original_image_path"])),
+            text_clean_path=(
+                graph_path.parent / "text-clean.png"
+                if (graph_path.parent / "text-clean.png").exists()
+                else Path(prepared.get(
+                    "_text_clean_path", prepared["original_image_path"]
+                ))
+            ),
             reconstructed_path=evidence["reconstructed.png"],
             output_dir=evidence_root,
             text_items=text_items,
@@ -1407,6 +1541,8 @@ def _accepted_slide_data(
 ) -> dict:
     import numpy as np
 
+    from image2editable.component_quality import resolve_visual_mask_ownership
+
     refs = result["accepted_asset_refs"]
     asset_payloads = {
         name: _load_legacy_ref(store, refs[name])[1]
@@ -1447,8 +1583,14 @@ def _accepted_slide_data(
         if mask.shape != text_mask.shape:
             raise ValueError("final component mask dimensions differ")
         loaded_components.append((node, mask))
+    effective_masks = resolve_visual_mask_ownership(
+        [node for node, _ in loaded_components],
+        [mask for _, mask in loaded_components],
+    )
     effective_masks = _assign_text_regions_to_component_masks(
-        [mask for _, mask in loaded_components], text_mask
+        effective_masks,
+        text_mask,
+        prepared.get("text_items", []),
     )
     owner_count = np.zeros(text_mask.shape, dtype=np.uint16)
     component_masks = []

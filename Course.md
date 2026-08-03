@@ -7,6 +7,7 @@
 - Agent Provider 在 Run 创建时冻结为 `host` 或 `local`。两者共享相同的严格请求/证据契约、十二类动作、确定性执行、最多五批修复和质量门禁；Host 不读取本地模型状态，Local 不读取 Host 握手状态。
 - 本地模型只在用户明确安装后离线使用；转换过程不下载模型。模型权重可缓存，但图片语义、组件计划和证据不得跨图片、跨页或跨批复用。
 - 每页以可独立移动的最小完整视觉单元为组件。已通过组件冻结；五批后完整父组件仍失败时仅该页进入 `preserved_with_warning`，不发布 donor，不允许通过清空组件或保留栅格文字伪装成功。
+- 全页 OCR 漏检时，prepare 会对未被文字遮罩覆盖的小型组件候选做双视图有界复查；一致高置信文字回灌后从 source 重建全部真实资产。
 
 ## 本轮变更
 
@@ -15,8 +16,15 @@
 - 背景质量新增 `background_text_residual_ratio` 与页级 `background_text_clean`：无组件、无文字的背景在 OCR 区仍保留相对局部底色可见的源字形时硬失败；页级检查避免通过清空组件绕过。
 - 合成质量新增 `editable_text_once`：存在可靠文字掩码时必须存在可编辑文字对象，且栅格层不得保留第二份字形。已删除 `raster_text_preserved` 成功分支，结果不再以栅格文字兜底。
 - OCR 通用噪声过滤现按置信度、字符组成、分隔符位置与重复、主体长度保留结构规范的技术标签，同时继续拒绝乱码、纯符号与无意义短串。
+- targeted OCR 每页检查 16–24 个候选，两个确定性视图的最长边分别不超过 512 与 448 像素，总 crop 不超过 6 MiPixel；大候选和低 alpha 摘要候选先跳过，已知文字逐项去重。多项结果按页坐标一一匹配，文本比较只做 NFKC、casefold 与去空白并保留语义标点。
+- targeted OCR 恢复文字的颜色与粗体仍从局部 bbox 邻域估计，字号换算则显式使用原页面宽度；局部 crop 不再被误当作整页而放大字号。显式参考宽度只接受非布尔正整数，省略时保持整图调用的旧行为。
+- prepared-page schema v3 严格绑定 `initial_diagnostics` 的 source SHA-256、稳定 `candidate_id`、文字 bbox 和两视图文本/置信度；v1/v2 读取为空诊断。后续 native-check 必须与请求中哈希绑定的初始 diagnostics 结构和内容完全一致。`unowned_raster_text` 不解冻已通过叶组件；没有真实失败组件时立即 `preserved_with_warning`，否则最多执行五批真实修复，不制造空批次。
+- 每个 OCR 视图最多保留 32 项，整页 diagnostics 最多 96 项并确定性截断；每轮 request、quality 与 native-check 必须原样携带相同的初始 diagnostics，删除或替换都会被拒绝。恢复文字只裁剪 bbox 邻域估计样式，不创建整页 RGB。
+- 二次 prepare 只清理 `components`、`element-masks`、`semantic-masks` 三个约定目录中的普通单链接文件；工作根内的 source、OCR mask、其他文件及工作根外文件均拒绝，文件/目录 symlink、reparse、hardlink 或身份变化也拒绝。
 - 组件文字、背景文字和合成检查复用 `_PageQualityContext` 的页级 RGB、差异、亮度与 text-ink 缓存；逐组件仅处理当前 mask/邻域和连通残留，不重复创建整页 float/blur/distance 数组。
 - 保留既有 `text_ghost` 兼容报告、`over_merged_component` 跨轮 sticky、merge/collapse 非活动来源 provenance、紧 bbox 低内存与 TOCTOU 门禁；Agent confidence 不能放宽任何硬失败。
+- 页面质量门禁现显式使用当前 validated graph 的活动视觉组件数，不再用历史 `initial_component_count` 猜测本轮候选。仅剩 frozen 组件且本轮报告为空时仍执行页级文字残留等检查，不解冻或重评 frozen；初始非空但当前活动视觉组件为零仍硬拒绝，不能通过丢弃整页组件绕过门禁。
+- 组件执行现会在像素 ownership 生效前识别近乎完全套叠的活动父级 pair，以 `contained_parent_review` 暂停双方冻结；精确 pair 会写入下一批 Agent 可见的质量证据。Agent 查看两个隔离单元后可选择唯一像素所有者；若两者确实独立，则必须对双方显式高置信 `accept`，且两条 evidence 都引用 pair 的两个 ID，才允许共同保留，不再由固定面积规则替 Agent 决定。原始候选遮罩不被独占结果覆盖写回；最终发布仍使用唯一 ownership，并把去字区域的连续底色交给唯一组件，避免 PowerPoint 分别缩放重复父层时产生字形白边、浅灰残影或矩形补丁。
 
 ## 关键文件
 
@@ -24,10 +32,10 @@
 - 输入与 PPTX 原位替换：`image2editable/inputs.py`、`image2editable/pptx_reconstruct.py`
 - 组件证据与旧管线适配：`image2editable/legacy.py`
 - 组件契约、状态机与质量：`image2editable/component_contracts.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`
-- OCR 过滤与镜像：`scripts/text_detect.py`、`skills/image-to-ppt/scripts/text_detect.py`
+- OCR 准备与镜像：`image_to_ppt.py`、`scripts/text_detect.py`、`skills/image-to-ppt/scripts/image_to_ppt.py`、`skills/image-to-ppt/scripts/text_detect.py`
 - Agent：`image2editable/host_agent.py`、`image2editable/local_agent.py`、`image2editable/local_agent_worker.py`
 - Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_contracts.py`、`skills/image-to-ppt/scripts/component_quality.py`
-- 主要测试：`tests/test_ocr_isolation.py`、`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
+- 主要测试：`tests/test_targeted_ocr.py`、`tests/test_ocr_isolation.py`、`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
 
 ## 运行入口
 
@@ -49,15 +57,14 @@ image2editable models status
 
 ## 验证事实
 
-- 本轮 TDD 红灯：新增门禁前，证据契约、隔离图参数、两个残影指标与 `editable_text_once` 共 6 项按预期失败；实现后对应定向测试通过。
-- OCR 过滤 TDD 红灯确认 `WSL/WSL2` 被误删且畸形/低置信标签被放行；通用规则实现后相关 OCR 定向测试通过。未重新运行真实转换。
-- 本轮六个目标测试文件最终结果：`481 passed, 9 skipped`；全量结果：`1409 passed, 20 skipped`。
-- 真实文件与 PowerPoint COM reopen 尚未在本轮新门禁下完成，不能沿用旧门禁的输出宣称本轮真实验收已通过。
-- `wsl和虚拟机对比.png` 已用 `image2editable prepare` 后串行执行 `image2editable run execute`；约 182.4 秒后安全停在第 1 批 `awaiting_plan` Host 决策边界。当前 25 个候选、29 个可靠文字项、0 个冻结组件；`component-isolation.png` 为 960×2160，SHA-256 `7c034d18651d1512ca2e19f19343326dd90aea621c65a29212f426121b1696a1`。运行目录 `tmp/task2-isolation-real-image-r1` 约 25.2 MiB，相关进程总工作集峰值约 2.45 GiB，停止后无残留 Python/OCR/SAM 进程。尚未形成最终渲染或 donor，不能写作验收通过。
+- 本轮 TDD 红灯覆盖多项 OCR 只取 max、部分已知文字导致整候选跳过、OCR 返回顺序变化、逐项 conflict bbox/ID、跨轮 diagnostics 删除/置空/替换、伪造空批次、整页 hash/RGB 副本和首轮视觉残留；32/96 上限另以 40/97 mutation 验证测试确实能捕获旧缺陷。
+- 最新核心回归为 `507 passed, 9 skipped`，历史回归与 Task10 E2E 为 `258 passed`，全量为 `1493 passed, 20 skipped`。prepared-page 继续兼容读取 v1/v2；独立代码复审确认原始遮罩恢复、页级失败拦截、pair 语义批准与重复计划保护均无未关闭的 Critical/Important。
+- `wsl和虚拟机对比.png` 的既有 r9 原始父遮罩实测只命中冗余 `parent_0004`、`parent_0006`，未命中完整表格 `parent_0002`、页脚 `parent_0005` 与 13 个独立图标。按新规则生成的验收候选含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；PowerPoint COM reopen 与原生渲染成功，隐藏文字后的图片层未见文字轮廓、浅灰残影或白色字形补丁。该候选用于验证根因与门禁，仍需新建 Run 复验自动 Agent 闭环后再视为该文件完整验收通过。
+- 真实 r3 已确认 targeted OCR 能把全页漏检的小型候选文字恢复为可编辑对象，同时暴露局部 crop 导致的字号放大；该字号回归已有通用自动化测试和修复，仍需重新生成真实输出后再宣称真实验收通过。
 
 ## 当前注意事项
 
 - 真实文件必须串行、一次一个文件/重型页面；监控内存和磁盘，结束后确认无残留 Python/OCR/SAM 进程。禁止下载模型。
-- 待复验文件：`wsl和虚拟机对比.png`、`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
+- 待自动闭环复验文件：`wsl和虚拟机对比.png`、`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
 - `test1.pptx` 不得再把“每页 3 个整块父组件”视为成功条件；必须通过最小完整视觉单元和三层文字隔离门禁。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不得 force-add。

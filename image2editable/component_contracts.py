@@ -101,7 +101,10 @@ def validate_component_repair_state(state: object) -> dict:
     validate_repair_round(state["repair_round"])
     if type(state["plan_count"]) is not int or not 0 <= state["plan_count"] <= MAX_REPAIR_ROUNDS:
         raise ValueError("component repair plan_count is invalid")
-    if state["stop_reason"] not in {None, "empty_plan", "repeated_plan", "no_executable_actions", "round_limit"}:
+    if state["stop_reason"] not in {
+        None, "empty_plan", "repeated_plan", "no_executable_actions",
+        "round_limit", "unowned_raster_text", "page_quality_failed",
+    }:
         raise ValueError("component repair stop_reason is invalid")
     _validate_artifact_ref(state["graph_ref"], "graph_ref")
     current = state["current_round"]

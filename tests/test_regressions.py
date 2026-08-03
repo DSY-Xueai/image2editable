@@ -5524,7 +5524,8 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
+    assert manifest["initial_diagnostics"] == []
     assert manifest["phase"] == "initial_layers"
     assert len(manifest["assets"]["semantic_masks"]) == 2
     sidecar_path = work_dir / "prepared_page.sha256"
@@ -5925,8 +5926,9 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     manifest["schema_version"] = 1
+    manifest.pop("initial_diagnostics")
     manifest["assets"].pop("semantic_masks")
     _write_prepared_manifest(state_path, manifest)
 

@@ -177,6 +177,11 @@ def test_test1_two_page_component_state_to_shadow_output(
             page_checks={"pptx_reopen": "unknown"},
             expected_component_ids=expected_component_ids,
             initial_component_count=initial_component_count,
+            active_visual_count=sum(
+                node["kind"] != "text"
+                and node["state"] in {"pending", "pending_gate", "frozen"}
+                for node in args[3]["nodes"]
+            ),
         )
 
     monkeypatch.setattr(legacy, "execute_component_action_round", deterministic_execute)

@@ -33,6 +33,9 @@ def test_local_prompt_requires_independently_movable_leaf_components() -> None:
         "or segmentation gaps"
     ) in prompt
     assert "semantic parent is grouping-only and non-rendering" in prompt
+    assert "glyph-shaped transparent holes" in prompt
+    assert "collapse_to_parent" in prompt
+    assert "contained parent candidates" in prompt
     assert "Prefer preserving one complete parent" not in prompt
     assert "component-isolation.png" in local_agent_worker._IMAGE_EVIDENCE
     assert "without OCR text pixels" in prompt
