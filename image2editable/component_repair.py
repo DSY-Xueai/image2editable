@@ -634,6 +634,17 @@ def record_next_component_request(
             request=request,
             active_component_ids=_presentation_component_ids(graph),
         )
+        previous_manifest = _quality_presentation_manifest(
+            store, state, previous_quality
+        )
+        next_manifest = _request_presentation_manifest(
+            store, state, request_path, request
+        )
+        _validate_frozen_presentation_assets(
+            previous_manifest,
+            next_manifest,
+            frozen_ids=set(state["frozen"]),
+        )
         if (
             request["page_id"] != page_id
             or request["provider"] != state["provider"]
@@ -699,12 +710,37 @@ def record_parent_fallback_execution(
         request_path = store.root / Path(
             *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
         )
-        quality_input_refs = _verify_quality_input_refs(
+        request = load_component_agent_request(request_path)
+        (
+            quality_input_refs,
+            _,
+            fallback_manifest,
+            _,
+        ) = _verify_quality_input_refs(
             store, state, quality_input_refs,
-            request=load_component_agent_request(request_path),
+            request=request,
             request_path=request_path,
             expected_graph_sha256=graph_ref["sha256"],
             expected_component_ids=_presentation_component_ids(graph),
+            return_bound_inputs=True,
+        )
+        if state["current_round"]["quality_ref"] is None:
+            previous_manifest = _request_presentation_manifest(
+                store, state, request_path, request
+            )
+        else:
+            previous_quality = json.loads(_load_state_artifact(
+                store.root,
+                state["current_round"]["quality_ref"],
+                max_bytes=GRAPH_JSON_LIMIT,
+            ).decode("utf-8"))
+            previous_manifest = _quality_presentation_manifest(
+                store, state, previous_quality
+            )
+        _validate_frozen_presentation_assets(
+            previous_manifest,
+            fallback_manifest,
+            frozen_ids=set(state["frozen"]),
         )
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
@@ -923,6 +959,7 @@ def _validate_presentation_manifest(
     graph_sha256: str,
     run_root: Path | None = None,
     expected_component_ids: list[str] | None = None,
+    expected_sha256: str | None = None,
 ) -> dict:
     payload = _read_bound_file(
         manifest_path,
@@ -930,6 +967,11 @@ def _validate_presentation_manifest(
         max_bytes=GRAPH_JSON_LIMIT,
         label="presentation manifest JSON",
     )
+    if (
+        expected_sha256 is not None
+        and hashlib.sha256(payload).hexdigest() != expected_sha256
+    ):
+        raise RuntimeError("presentation manifest sha256 mismatch")
     manifest = _validate_presentation_manifest_payload(
         payload,
         reconstruction,
@@ -1091,6 +1133,46 @@ def _validate_frozen_presentation_assets(
                     f"frozen presentation asset changed: "
                     f"{component_id}/{field}"
                 )
+
+
+def _quality_presentation_manifest(store, state: dict, quality: dict) -> dict:
+    reference = quality.get("input_refs", {}).get("presentation_manifest")
+    graph_sha256 = quality.get("input_graph_sha256")
+    if not _is_artifact_reference(reference) or not _is_sha256(graph_sha256):
+        raise ValueError("previous presentation manifest binding is invalid")
+    payload = _load_state_artifact(
+        store.root, reference, max_bytes=GRAPH_JSON_LIMIT
+    )
+    return _validate_presentation_manifest_payload(
+        payload,
+        store.root / "pages" / state["page_id"] / "reconstruction",
+        source_sha256=state["source_sha256"],
+        graph_sha256=graph_sha256,
+    )
+
+
+def _request_presentation_manifest(
+    store,
+    state: dict,
+    request_path: Path,
+    request: dict,
+) -> dict:
+    reference = request["evidence"]["presentation-manifest.json"]
+    path = request_path.parent / Path(*PurePosixPath(reference["path"]).parts)
+    payload = _read_bound_file(
+        path,
+        store.root / "pages" / state["page_id"] / "reconstruction",
+        max_bytes=GRAPH_JSON_LIMIT,
+        label="request presentation manifest",
+    )
+    if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+        raise RuntimeError("request presentation manifest hash mismatch")
+    return _validate_presentation_manifest_payload(
+        payload,
+        store.root / "pages" / state["page_id"] / "reconstruction",
+        source_sha256=state["source_sha256"],
+        graph_sha256=request["graph_sha256"],
+    )
 
 
 def _is_sha256(value: object) -> bool:

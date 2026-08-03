@@ -2620,6 +2620,96 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
     return store, reconstruction, result, manifest_path, reconstructed
 
 
+def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
+    store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
+    output = tmp_path / "accepted-output.pptx"
+    result["status"] = "ready_for_assembly"
+    result_path = reconstruction / "component_result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    def ref(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    store.write_json("job_manifest.json", {
+        "pages": ["page_001"],
+        "options": {"output_path": str(output), "slide_size": "16:9"},
+        "input": {},
+    })
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "status": "ready_for_assembly", "result_ref": ref(result_path),
+    })
+    return store, reconstruction, output
+
+
+def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pptx.util import Inches
+
+    store, reconstruction, output = _accepted_assembly_job(tmp_path)
+
+    class AcceptedImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {"text_items": [{"text": "editable"}]}
+
+        @staticmethod
+        def _assemble_prepared_slide(slide_data, output_path, *args):
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            slide.shapes.add_picture(
+                slide_data["components"][0]["path"], 0, 0, width=Inches(1)
+            )
+            text_box = slide.shapes.add_textbox(0, Inches(1), Inches(2), Inches(1))
+            text_box.text_frame.text = slide_data["text_items"][0]["text"]
+            presentation.save(output_path)
+            return str(output_path)
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: AcceptedImageModule
+    )
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    reopened = Presentation(outputs["16:9"])
+    assert len(reopened.slides) == 1
+    assert any(
+        getattr(shape, "text", "") == "editable"
+        for shape in reopened.slides[0].shapes
+    )
+    assert any(shape.shape_type == 13 for shape in reopened.slides[0].shapes)
+    assert output.is_file()
+    assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_accepted_presentation_assembly_failure_cleans_temporary_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, reconstruction, output = _accepted_assembly_job(tmp_path)
+
+    class FailingImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {"text_items": [{"text": "editable"}]}
+
+        @staticmethod
+        def _assemble_prepared_slide(*args, **kwargs):
+            raise RuntimeError("controlled assembly failure")
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FailingImageModule
+    )
+
+    with pytest.raises(RuntimeError, match="controlled assembly failure"):
+        legacy.assemble_legacy_results(store)
+
+    assert not output.exists()
+    assert not list(reconstruction.glob("assembly-assets-*"))
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing_manifest", "manifest_content", "component_id", "rgba"],
 )
@@ -2648,6 +2738,72 @@ def test_presentation_tamper_is_rejected(tmp_path: Path, mutation: str) -> None:
         legacy._accepted_slide_data(
             store, reconstruction, {"text_items": []}, result
         )
+    assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_presentation_tamper_between_ref_check_and_loader_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, reconstruction, result, manifest_path, _ = (
+        _accepted_presentation_case(tmp_path)
+    )
+    real_loader = legacy._load_presentation_assets
+
+    def replace_then_load(**kwargs):
+        manifest_path.write_bytes(manifest_path.read_bytes() + b"replacement")
+        return real_loader(**kwargs)
+
+    monkeypatch.setattr(legacy, "_load_presentation_assets", replace_then_load)
+
+    with pytest.raises((ValueError, RuntimeError), match="presentation"):
+        legacy._accepted_slide_data(
+            store, reconstruction, {"text_items": []}, result
+        )
+    assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_unused_accepted_asset_reference_structure_is_still_validated(
+    tmp_path: Path,
+) -> None:
+    store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
+    result["accepted_asset_refs"]["reconstructed"]["path"] = "../outside.png"
+
+    with pytest.raises(ValueError, match="reference"):
+        legacy._accepted_slide_data(
+            store, reconstruction, {"text_items": []}, result
+        )
+
+
+@pytest.mark.parametrize("component_id", ["../escape", "..\\escape"])
+def test_accepted_presentation_component_id_cannot_escape_asset_directory(
+    tmp_path: Path, component_id: str,
+) -> None:
+    store, reconstruction, result, manifest_path, _ = (
+        _accepted_presentation_case(tmp_path)
+    )
+    graph_path = store.root / result["graph_ref"]["path"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["nodes"][0]["id"] = component_id
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    graph_sha256 = hashlib.sha256(graph_path.read_bytes()).hexdigest()
+    result["graph_ref"]["sha256"] = graph_sha256
+    result["accepted_graph_sha256"] = graph_sha256
+    result["final_component_ids"] = [component_id]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["graph_sha256"] = graph_sha256
+    manifest["components"][0]["component_id"] = component_id
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    result["accepted_asset_refs"]["presentation_manifest"]["sha256"] = (
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    )
+
+    slide = legacy._accepted_slide_data(
+        store, reconstruction, {"text_items": []}, result
+    )
+
+    component_path = Path(slide["components"][0]["path"]).resolve()
+    assert component_path.parent.name.startswith("assembly-assets-")
+    assert component_path.is_relative_to(reconstruction.resolve())
 
 
 def test_warning_page_assembly_preserves_full_source_and_records_warning(
@@ -2738,6 +2894,7 @@ def test_legacy_assembly_refuses_existing_output_before_assembler_call(
     with pytest.raises(RuntimeError, match="Refusing to overwrite"):
         legacy.assemble_legacy_results(store)
     assert output.read_bytes() == b"owner data"
+    assert not list(reconstruction.glob("assembly-assets-*"))
 
 
 def test_legacy_variant_assembly_does_not_publish_partial_outputs(

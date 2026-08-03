@@ -767,6 +767,12 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
     )
 
     def bind_synthetic_quality(current: dict) -> dict:
+        request_path = (
+            store.root / current["current_round"]["request_ref"]["path"]
+        )
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        manifest_record = request["evidence"]["presentation-manifest.json"]
+        manifest_path = request_path.parent / manifest_record["path"]
         quality_path = Path(page_session["reconstruction_dir"]) / (
             f"synthetic-quality-{current['repair_round']:02d}.json"
         )
@@ -787,9 +793,15 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
                 **{
                     name: current["current_round"]["request_ref"]
                     for name in (
-                    "background", "reconstructed", "text_mask",
-                    "native_check", "presentation_manifest",
+                        "background", "reconstructed", "text_mask",
+                        "native_check",
                     )
+                },
+                "presentation_manifest": {
+                    "path": manifest_path.relative_to(store.root).as_posix(),
+                    "sha256": hashlib.sha256(
+                        manifest_path.read_bytes()
+                    ).hexdigest(),
                 },
                 "source": {
                     "path": current["current_round"]["request_ref"]["path"],
@@ -1027,6 +1039,48 @@ def _real_next_round_session(page_session: dict, store, quality_path: Path) -> d
     session = {**page_session, "provider": "local", "evidence": evidence}
     _refresh_test_presentation_manifest(session)
     return session
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ],
+)
+def test_next_round_rejects_replaced_frozen_presentation_asset(
+    page_session: dict, field: str,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    graph_path = store.root / state["graph_ref"]["path"]
+    replacement_dir = Path(page_session["reconstruction_dir"]) / (
+        f"round-02-frozen-{field}"
+    )
+    replacement_dir.mkdir()
+    manifest_path = _write_test_presentation_manifest(
+        store.root,
+        replacement_dir,
+        source_sha256=state["source_sha256"],
+        graph_path=graph_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    frozen = next(
+        item for item in manifest["components"]
+        if item["component_id"] == "frozen_a"
+    )
+    asset_path = store.root / frozen[field]["path"]
+    asset_path.write_bytes(asset_path.read_bytes() + b"round-two-replacement")
+    frozen[field]["sha256"] = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    session = _real_next_round_session(page_session, store, quality_path)
+    session["evidence"]["presentation-manifest.json"] = manifest_path
+    request_path = build_component_agent_request(session, repair_round=2)
+
+    with pytest.raises(ValueError, match="frozen presentation"):
+        record_next_component_request(
+            store, "page_001", request_path=request_path,
+        )
 
 
 def test_real_round_two_uses_bound_previous_quality_for_improvement(
@@ -1302,41 +1356,7 @@ def test_intact_parent_gate_controls_fallback_result(
     page_session: dict, accepted: bool, expected: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from image2editable.store import RunStore
-
-    request_path = build_component_agent_request(page_session, repair_round=1)
-    store = RunStore(request_path.parents[5])
-    store.write_json("job_manifest.json", {
-        "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "host"},
-    })
-    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
-    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
-        "page_001": {"schema_version": 1, "status": "processing"}
-    }})
-    state = initialize_component_repair_state(
-        store, "page_001", request_path=request_path, initial_component_count=2,
-    )
-    state["phase"] = "fallback_required"
-    state["stop_reason"] = "round_limit"
-    state["fallback"] = {"status": "required", "parent_ids": ["candidate_b"]}
-    store.write_json("pages/page_001/reconstruction/component_state.json", state)
-    graph = load_component_agent_graph(request_path)
-    next(node for node in graph["nodes"] if node["id"] == "candidate_b")["state"] = "pending_gate"
-    fallback_dir = request_path.parents[2] / "fallback"
-    fallback_dir.mkdir()
-    (fallback_dir / "masks").mkdir()
-    shutil.copy2(
-        request_path.parent / "masks/candidate_b.png",
-        fallback_dir / "masks/candidate_b.png",
-    )
-    shutil.copy2(
-        request_path.parent / "masks/frozen_a.png",
-        fallback_dir / "masks/frozen_a.png",
-    )
-    graph_path = fallback_dir / "component-graph.json"
-    graph_path.write_text(json.dumps(graph), encoding="utf-8")
-    quality_input_refs = _quality_input_refs(fallback_dir, store, graph_path)
+    store, graph_path, quality_input_refs = _fallback_execution_case(page_session)
     record_parent_fallback_execution(
         store, "page_001", graph_path=graph_path,
         quality_input_refs=quality_input_refs,
@@ -1357,6 +1377,76 @@ def test_intact_parent_gate_controls_fallback_result(
         assert final_state["frozen"]["candidate_b"] == final_state["parent_assets"]["candidate_b"]["sha256"]
     else:
         assert final_state["fallback"]["status"] == "warning"
+
+
+def _fallback_execution_case(page_session: dict):
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    })
+    store.write_json("run_state.json", {"schema_version": 1, "status": "prepared"})
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"}
+    }})
+    state = initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    state["phase"] = "fallback_required"
+    state["stop_reason"] = "round_limit"
+    state["fallback"] = {"status": "required", "parent_ids": ["candidate_b"]}
+    store.write_json("pages/page_001/reconstruction/component_state.json", state)
+    graph = load_component_agent_graph(request_path)
+    next(node for node in graph["nodes"] if node["id"] == "candidate_b")[
+        "state"
+    ] = "pending_gate"
+    fallback_dir = request_path.parents[2] / "fallback"
+    fallback_dir.mkdir()
+    (fallback_dir / "masks").mkdir()
+    for component_id in ("candidate_b", "frozen_a"):
+        shutil.copy2(
+            request_path.parent / f"masks/{component_id}.png",
+            fallback_dir / f"masks/{component_id}.png",
+        )
+    graph_path = fallback_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    return store, graph_path, _quality_input_refs(fallback_dir, store, graph_path)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ],
+)
+def test_parent_fallback_rejects_replaced_frozen_presentation_asset(
+    page_session: dict, field: str,
+) -> None:
+    store, graph_path, quality_input_refs = _fallback_execution_case(page_session)
+    manifest_ref = quality_input_refs["presentation_manifest"]
+    manifest_path = store.root / manifest_ref["path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    frozen = next(
+        item for item in manifest["components"]
+        if item["component_id"] == "frozen_a"
+    )
+    asset_path = store.root / frozen[field]["path"]
+    asset_path.write_bytes(asset_path.read_bytes() + b"fallback-replacement")
+    frozen[field]["sha256"] = hashlib.sha256(asset_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_ref["sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="frozen presentation"):
+        record_parent_fallback_execution(
+            store,
+            "page_001",
+            graph_path=graph_path,
+            quality_input_refs=quality_input_refs,
+        )
 
 
 def _node(component_id: str, state: str, z_index: int) -> dict:

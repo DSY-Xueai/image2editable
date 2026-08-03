@@ -981,6 +981,7 @@ def _load_presentation_assets(
     graph: dict,
     page_size: tuple[int, int],
     component_ids: list[str] | None = None,
+    expected_manifest_sha256: str | None = None,
 ):
 
     manifest = _validate_presentation_manifest(
@@ -992,6 +993,7 @@ def _load_presentation_assets(
         expected_component_ids=[
             node["id"] for node in _active_visual_nodes(graph)
         ],
+        expected_sha256=expected_manifest_sha256,
     )
     components_by_id = {
         component["component_id"]: component
@@ -1868,39 +1870,6 @@ def _execute_legacy_parent_fallback(
 def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     manifest = store.read_json("job_manifest.json")
     page_ids = manifest["pages"]
-    module = importlib.import_module("image_to_ppt")
-    slides = []
-    page_records = []
-    for page_id in page_ids:
-        reconstruction = store.root / "pages" / page_id / "reconstruction"
-        state = store.read_json(
-            f"pages/{page_id}/reconstruction/component_state.json"
-        )
-        prepared = module.load_component_layers(
-            reconstruction / "initial" / "prepared_page.json"
-        )
-        if state["status"] == "preserved_with_warning":
-            source = _source_path(store, page_id)
-            slides.append({
-                **prepared,
-                "background_path": str(source),
-                "background_original_path": str(source),
-                "background_widescreen_path": str(source),
-                "original_image_path": str(source),
-                "components": [],
-                "text_items": [],
-            })
-            page_records.append((page_id, state, None))
-            continue
-        _, result_payload = _load_legacy_ref(store, state["result_ref"])
-        result = json.loads(result_payload.decode("utf-8"))
-        if result["status"] != "ready_for_assembly":
-            raise ValueError("component result is not ready for assembly")
-        slides.append(
-            _accepted_slide_data(store, reconstruction, prepared, result)
-        )
-        page_records.append((page_id, state, result))
-
     output_path = manifest["options"]["output_path"]
     if output_path is None:
         output_path = store.root / "final" / "output.pptx"
@@ -1913,6 +1882,48 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             if path.exists() or path.is_symlink()
         )
         raise RuntimeError(f"Refusing to overwrite existing output: {existing}")
+    module = importlib.import_module("image_to_ppt")
+    slides = []
+    page_records = []
+    assembly_asset_dirs = []
+    try:
+        for page_id in page_ids:
+            reconstruction = store.root / "pages" / page_id / "reconstruction"
+            state = store.read_json(
+                f"pages/{page_id}/reconstruction/component_state.json"
+            )
+            prepared = module.load_component_layers(
+                reconstruction / "initial" / "prepared_page.json"
+            )
+            if state["status"] == "preserved_with_warning":
+                source = _source_path(store, page_id)
+                slides.append({
+                    **prepared,
+                    "background_path": str(source),
+                    "background_original_path": str(source),
+                    "background_widescreen_path": str(source),
+                    "original_image_path": str(source),
+                    "components": [],
+                    "text_items": [],
+                })
+                page_records.append((page_id, state, None))
+                continue
+            _, result_payload = _load_legacy_ref(store, state["result_ref"])
+            result = json.loads(result_payload.decode("utf-8"))
+            if result["status"] != "ready_for_assembly":
+                raise ValueError("component result is not ready for assembly")
+            slide = _accepted_slide_data(
+                store, reconstruction, prepared, result
+            )
+            asset_dir = Path(slide.pop("_assembly_assets_dir"))
+            assembly_asset_dirs.append(
+                (asset_dir, _directory_identity(asset_dir.lstat()))
+            )
+            slides.append(slide)
+            page_records.append((page_id, state, result))
+    except Exception:
+        _cleanup_legacy_assembly_assets(assembly_asset_dirs)
+        raise
 
     staged = {}
     published = {}
@@ -1964,9 +1975,17 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     finally:
         for staging in staged.values():
             staging.unlink(missing_ok=True)
+        _cleanup_legacy_assembly_assets(assembly_asset_dirs)
 
     _record_legacy_delivery(store, page_records, published)
     return published
+
+
+def _cleanup_legacy_assembly_assets(
+    directories: list[tuple[Path, tuple[int, int]]],
+) -> None:
+    for path, identity in reversed(directories):
+        _safe_rmtree(path, identity)
 
 
 def _legacy_output_targets(output_path: Path, slide_size: str) -> dict[str, Path]:
@@ -2008,11 +2027,7 @@ def _record_legacy_delivery(
 
 
 def _load_legacy_ref(store: RunStore, reference: dict) -> tuple[Path, bytes]:
-    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
-        raise ValueError("legacy artifact reference is invalid")
-    path = (store.root / Path(reference["path"])).resolve()
-    if not path.is_relative_to(store.root.resolve()):
-        raise ValueError("legacy artifact reference escapes Run directory")
+    path = _legacy_ref_path(store, reference)
     payload = _read_bound_file(
         path,
         store.root,
@@ -2022,6 +2037,25 @@ def _load_legacy_ref(store: RunStore, reference: dict) -> tuple[Path, bytes]:
     if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
         raise ValueError("legacy artifact sha256 mismatch")
     return path, payload
+
+
+def _legacy_ref_path(store: RunStore, reference: dict) -> Path:
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        raise ValueError("legacy artifact reference is invalid")
+    if (
+        not isinstance(reference["path"], str)
+        or not isinstance(reference["sha256"], str)
+        or len(reference["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in reference["sha256"]
+        )
+    ):
+        raise ValueError("legacy artifact reference is invalid")
+    path = (store.root / Path(reference["path"])).resolve()
+    if not path.is_relative_to(store.root.resolve()):
+        raise ValueError("legacy artifact reference escapes Run directory")
+    return path
 
 
 def _accepted_slide_data(
@@ -2036,21 +2070,13 @@ def _accepted_slide_data(
     }
     if not isinstance(refs, dict) or set(refs) != expected_refs:
         raise ValueError("accepted presentation references are invalid")
-    asset_payloads = {}
-    for name in (
-        "source", "background", "reconstructed", "text_mask",
-        "native_check", "presentation_manifest",
-    ):
-        try:
-            payload = _load_legacy_ref(store, refs[name])[1]
-        except (ValueError, RuntimeError) as error:
-            if name == "presentation_manifest":
-                raise ValueError(
-                    "accepted presentation manifest reference is invalid"
-                ) from error
-            raise
-        if name in {"source", "background", "presentation_manifest"}:
-            asset_payloads[name] = payload
+    for reference in refs.values():
+        _legacy_ref_path(store, reference)
+    asset_payloads = {
+        name: _load_legacy_ref(store, refs[name])[1]
+        for name in ("source", "background")
+    }
+    manifest_path = _legacy_ref_path(store, refs["presentation_manifest"])
     graph_path, graph_payload = _load_legacy_ref(store, result["graph_ref"])
     graph = validate_component_graph(json.loads(graph_payload.decode("utf-8")))
     accepted_graph_sha256 = result.get("accepted_graph_sha256")
@@ -2093,49 +2119,54 @@ def _accepted_slide_data(
             finally:
                 mask.close()
     output_dir = Path(tempfile.mkdtemp(prefix="assembly-assets-", dir=reconstruction))
-    asset_paths = {}
-    for name in ("source", "background"):
-        payload = asset_payloads[name]
-        snapshot = output_dir / f"accepted-{name}.asset"
-        snapshot.write_bytes(payload)
-        asset_paths[name] = snapshot
-    manifest_snapshot = output_dir / "accepted-presentation-manifest.json"
-    manifest_snapshot.write_bytes(asset_payloads["presentation_manifest"])
-    components = []
-    layers = _load_presentation_assets(
-        run_root=store.root,
-        reconstruction=reconstruction,
-        manifest_path=manifest_snapshot,
-        source_sha256=refs["source"]["sha256"],
-        graph_sha256=accepted_graph_sha256,
-        graph=graph,
-        page_size=page_size,
-        component_ids=active_ids,
-    )
-    for layer in layers:
-        component_id = layer["component_id"]
-        node = by_id[component_id]
-        alpha = layer["rgba"][:, :, 3] == 255
-        ys, xs = np.nonzero(alpha)
-        if not len(xs):
-            raise ValueError(f"final component became empty: {component_id}")
-        left, right = int(xs.min()), int(xs.max()) + 1
-        top, bottom = int(ys.min()), int(ys.max()) + 1
-        component_path = output_dir / f"{component_id}.png"
-        Image.fromarray(
-            layer["rgba"][top:bottom, left:right], mode="RGBA"
-        ).save(component_path)
-        components.append({
-            "component_id": component_id,
-            "path": str(component_path), "x": left, "y": top,
-            "w": right - left, "h": bottom - top,
-            "z_index": node["z_index"],
-        })
-    return {
-        **prepared,
-        "background_path": str(asset_paths["background"]),
-        "background_original_path": str(asset_paths["background"]),
-        "background_widescreen_path": str(asset_paths["background"]),
-        "original_image_path": str(asset_paths["source"]),
-        "components": sorted(components, key=lambda item: item["z_index"]),
-    }
+    output_identity = _directory_identity(output_dir.lstat())
+    try:
+        asset_paths = {}
+        for name in ("source", "background"):
+            payload = asset_payloads[name]
+            snapshot = output_dir / f"accepted-{name}.asset"
+            snapshot.write_bytes(payload)
+            asset_paths[name] = snapshot
+        components = []
+        layers = _load_presentation_assets(
+            run_root=store.root,
+            reconstruction=reconstruction,
+            manifest_path=manifest_path,
+            source_sha256=refs["source"]["sha256"],
+            graph_sha256=accepted_graph_sha256,
+            graph=graph,
+            page_size=page_size,
+            component_ids=active_ids,
+            expected_manifest_sha256=refs["presentation_manifest"]["sha256"],
+        )
+        for index, layer in enumerate(layers, start=1):
+            component_id = layer["component_id"]
+            node = by_id[component_id]
+            alpha = layer["rgba"][:, :, 3] == 255
+            ys, xs = np.nonzero(alpha)
+            if not len(xs):
+                raise ValueError(f"final component became empty: {component_id}")
+            left, right = int(xs.min()), int(xs.max()) + 1
+            top, bottom = int(ys.min()), int(ys.max()) + 1
+            component_path = output_dir / f"component-{index:04d}.png"
+            Image.fromarray(
+                layer["rgba"][top:bottom, left:right], mode="RGBA"
+            ).save(component_path)
+            components.append({
+                "component_id": component_id,
+                "path": str(component_path), "x": left, "y": top,
+                "w": right - left, "h": bottom - top,
+                "z_index": node["z_index"],
+            })
+        return {
+            **prepared,
+            "background_path": str(asset_paths["background"]),
+            "background_original_path": str(asset_paths["background"]),
+            "background_widescreen_path": str(asset_paths["background"]),
+            "original_image_path": str(asset_paths["source"]),
+            "components": sorted(components, key=lambda item: item["z_index"]),
+            "_assembly_assets_dir": str(output_dir),
+        }
+    except Exception:
+        _safe_rmtree(output_dir, output_identity)
+        raise
