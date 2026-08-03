@@ -2265,7 +2265,10 @@ def _write_test_presentation_manifest(
         ):
             path = assets_dir / f"{index:04d}-{name}.png"
             mode = "RGBA" if name == "rgba" else "L"
-            color = (0, 0, 0, 255) if mode == "RGBA" else 255
+            if mode == "RGBA":
+                color = (0, 0, 0, 255)
+            else:
+                color = 0 if name == "generated-underlay-mask" else 255
             Image.new(mode, (2, 2), color).save(path)
             paths[name.replace("-", "_")] = {
                 "path": path.relative_to(run_root).as_posix(),

@@ -1519,7 +1519,9 @@ def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
     ]
 
 
-def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> None:
+def _presentation_asset_validation_case(
+    tmp_path: Path,
+) -> tuple[Path, dict, Path, str]:
     source = tmp_path / "source.png"
     mask = tmp_path / "mask.png"
     Image.new("RGB", (4, 4), "red").save(source)
@@ -1538,6 +1540,50 @@ def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> Non
         graph_dir=tmp_path,
         output_dir=tmp_path,
     )
+    return source, graph, manifest_path, graph_sha256
+
+
+def _set_manifest_mask_pixel(
+    tmp_path: Path,
+    manifest_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    asset_path = tmp_path / manifest["components"][0][field]["path"]
+    with Image.open(asset_path) as opened:
+        mask = opened.convert("L")
+    mask.putpixel((0, 0), value)
+    mask.save(asset_path)
+    mask.close()
+    manifest["components"][0][field]["sha256"] = hashlib.sha256(
+        asset_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _load_test_presentation_assets(
+    tmp_path: Path,
+    source: Path,
+    graph: dict,
+    manifest_path: Path,
+    graph_sha256: str,
+) -> None:
+    legacy._load_presentation_assets(
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        manifest_path=manifest_path,
+        source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        graph_sha256=graph_sha256,
+        graph=graph,
+        page_size=(4, 4),
+    )
+
+
+def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> None:
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     rgba_path = tmp_path / manifest["components"][0]["rgba"]["path"]
     with Image.open(rgba_path) as opened:
@@ -1550,15 +1596,67 @@ def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> Non
     ).hexdigest()
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="binary|alpha"):
-        legacy._load_presentation_assets(
-            run_root=tmp_path,
-            reconstruction=tmp_path,
-            manifest_path=manifest_path,
-            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
-            graph_sha256=graph_sha256,
-            graph=graph,
-            page_size=(4, 4),
+    with pytest.raises(
+        ValueError,
+        match="presentation RGBA alpha does not match alpha mask",
+    ):
+        _load_test_presentation_assets(
+            tmp_path, source, graph, manifest_path, graph_sha256
+        )
+
+
+def test_presentation_assets_reject_non_binary_mask(tmp_path: Path) -> None:
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
+    _set_manifest_mask_pixel(
+        tmp_path, manifest_path, "ownership_mask", 127
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="presentation asset masks must be binary",
+    ):
+        _load_test_presentation_assets(
+            tmp_path, source, graph, manifest_path, graph_sha256
+        )
+
+
+def test_presentation_assets_reject_ownership_generated_overlap(
+    tmp_path: Path,
+) -> None:
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
+    _set_manifest_mask_pixel(
+        tmp_path, manifest_path, "generated_underlay_mask", 255
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="presentation ownership and generated underlay masks overlap",
+    ):
+        _load_test_presentation_assets(
+            tmp_path, source, graph, manifest_path, graph_sha256
+        )
+
+
+def test_presentation_assets_reject_alpha_mask_union_mismatch(
+    tmp_path: Path,
+) -> None:
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
+    _set_manifest_mask_pixel(
+        tmp_path, manifest_path, "ownership_mask", 0
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="presentation asset masks do not match RGBA alpha",
+    ):
+        _load_test_presentation_assets(
+            tmp_path, source, graph, manifest_path, graph_sha256
         )
 
 
