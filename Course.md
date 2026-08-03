@@ -37,6 +37,7 @@
 - Agent：`image2editable/host_agent.py`、`image2editable/local_agent.py`、`image2editable/local_agent_worker.py`
 - Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/component_contracts.py`、`skills/image-to-ppt/scripts/component_quality.py`
 - 主要测试：`tests/test_targeted_ocr.py`、`tests/test_ocr_isolation.py`、`tests/test_component_contracts.py`、`tests/test_component_quality.py`、`tests/test_component_repair.py`、`tests/test_runtime_execution.py`、`tests/test_task10_runtime_e2e.py`、`tests/test_local_agent.py`
+- 已批准待实现设计：`docs/superpowers/specs/2026-08-03-dual-mask-component-underlay-design.md`
 
 ## 运行入口
 
@@ -69,4 +70,5 @@ image2editable models status
 - 真实文件必须串行、一次一个文件/重型页面；监控内存和磁盘，结束后确认无残留 Python/OCR/SAM 进程。禁止下载模型。
 - 待自动闭环复验文件：`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
 - `test1.pptx` 不得再把“每页 3 个整块父组件”视为成功条件；必须通过最小完整视觉单元和三层文字隔离门禁。
+- `test1.pptx` 全新 r6 已完成两页初始分层并执行第 1 页首批真实 box/points 重修，确认重复 `image` 参数修复生效；第二批证据暴露 ownership mask 与可移动组件 alpha 共用导致父组件空洞、色带和放射补丁。Run 安全停在 `awaiting_agent`，不得继续消耗第 3–5 批掩盖表示层根因；双遮罩设计实现后应使用全新 Run 复验。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不得 force-add。
