@@ -21,7 +21,10 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from pptx import Presentation
 
 from image2editable.contracts import validate_schema_version
-from image2editable.component_contracts import MAX_REPAIR_ROUNDS
+from image2editable.component_contracts import (
+    MAX_REPAIR_ROUNDS,
+    validate_component_graph,
+)
 from image2editable.component_repair import (
     EVIDENCE_NAMES,
     advance_component_repair,
@@ -2010,10 +2013,12 @@ def _load_legacy_ref(store: RunStore, reference: dict) -> tuple[Path, bytes]:
     path = (store.root / Path(reference["path"])).resolve()
     if not path.is_relative_to(store.root.resolve()):
         raise ValueError("legacy artifact reference escapes Run directory")
-    status = path.lstat()
-    if _is_link_or_reparse(status) or not stat.S_ISREG(status.st_mode):
-        raise ValueError("legacy artifact is not a regular owned file")
-    payload = path.read_bytes()
+    payload = _read_bound_file(
+        path,
+        store.root,
+        max_bytes=256 * 1024 * 1024,
+        label="legacy artifact",
+    )
     if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
         raise ValueError("legacy artifact sha256 mismatch")
     return path, payload
@@ -2024,75 +2029,104 @@ def _accepted_slide_data(
 ) -> dict:
     import numpy as np
 
-    from image2editable.component_quality import resolve_visual_mask_ownership
-
     refs = result["accepted_asset_refs"]
-    asset_payloads = {
-        name: _load_legacy_ref(store, refs[name])[1]
-        for name in (
-            "source", "background", "reconstructed", "text_mask", "native_check"
-        )
+    expected_refs = {
+        "source", "background", "reconstructed", "text_mask",
+        "native_check", "presentation_manifest",
     }
+    if not isinstance(refs, dict) or set(refs) != expected_refs:
+        raise ValueError("accepted presentation references are invalid")
+    asset_payloads = {}
+    for name in (
+        "source", "background", "reconstructed", "text_mask",
+        "native_check", "presentation_manifest",
+    ):
+        try:
+            payload = _load_legacy_ref(store, refs[name])[1]
+        except (ValueError, RuntimeError) as error:
+            if name == "presentation_manifest":
+                raise ValueError(
+                    "accepted presentation manifest reference is invalid"
+                ) from error
+            raise
+        if name in {"source", "background", "presentation_manifest"}:
+            asset_payloads[name] = payload
     graph_path, graph_payload = _load_legacy_ref(store, result["graph_ref"])
-    graph = json.loads(graph_payload.decode("utf-8"))
+    graph = validate_component_graph(json.loads(graph_payload.decode("utf-8")))
+    accepted_graph_sha256 = result.get("accepted_graph_sha256")
+    if (
+        not isinstance(accepted_graph_sha256, str)
+        or len(accepted_graph_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in accepted_graph_sha256
+        )
+    ):
+        raise ValueError("accepted presentation graph hash is invalid")
     by_id = {node["id"]: node for node in graph["nodes"]}
     final_ids = result["final_component_ids"]
     if len(final_ids) != len(set(final_ids)) or any(
         component_id not in by_id for component_id in final_ids
     ):
         raise ValueError("component result final IDs are invalid")
-    output_dir = Path(tempfile.mkdtemp(prefix="assembly-assets-", dir=reconstruction))
-    asset_paths = {}
-    for name, payload in asset_payloads.items():
-        snapshot = output_dir / f"accepted-{name}.asset"
-        snapshot.write_bytes(payload)
-        asset_paths[name] = snapshot
-    with Image.open(io.BytesIO(asset_payloads["reconstructed"])) as image:
-        reconstructed_image = np.asarray(image.convert("RGB")).copy()
-    with Image.open(io.BytesIO(asset_payloads["text_mask"])) as image:
-        text_mask = np.asarray(image.convert("L")) > 0
-    loaded_components = []
-    for component_id in final_ids:
-        node = by_id[component_id]
+    active_nodes = _active_visual_nodes(graph)
+    active_ids = [node["id"] for node in active_nodes]
+    if set(final_ids) != set(active_ids):
+        raise ValueError("component result final IDs do not match graph")
+    with Image.open(io.BytesIO(asset_payloads["source"])) as image:
+        page_size = image.size
+    for node in active_nodes:
         mask_path = (graph_path.parent / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(store.root.resolve()):
             raise ValueError("final component mask escapes Run directory")
-        mask_relative = mask_path.relative_to(store.root.resolve()).as_posix()
         _, mask_payload = _load_legacy_ref(store, {
-            "path": mask_relative, "sha256": node["mask_sha256"]
+            "path": mask_path.relative_to(store.root.resolve()).as_posix(),
+            "sha256": node["mask_sha256"],
         })
         with Image.open(io.BytesIO(mask_payload)) as image:
-            mask = np.asarray(image.convert("L")) > 0
-        if mask.shape != text_mask.shape:
-            raise ValueError("final component mask dimensions differ")
-        loaded_components.append((node, mask))
-    effective_masks = resolve_visual_mask_ownership(
-        [node for node, _ in loaded_components],
-        [mask for _, mask in loaded_components],
-    )
-    effective_masks = _assign_text_regions_to_component_masks(
-        effective_masks,
-        text_mask,
-        prepared.get("text_items", []),
-    )
-    owner_count = np.zeros(text_mask.shape, dtype=np.uint16)
-    component_masks = []
-    for (node, _), mask in zip(loaded_components, effective_masks, strict=True):
-        owner_count += mask
-        component_masks.append((node, mask))
-    if np.any(owner_count > 1):
-        raise ValueError("final component masks violate unique ownership")
+            mask = image.convert("L")
+            try:
+                if mask.size != page_size or mask.getbbox() != tuple(node["bbox"]):
+                    raise ValueError(
+                        f"final component bbox is invalid: {node['id']}"
+                    )
+            finally:
+                mask.close()
+    output_dir = Path(tempfile.mkdtemp(prefix="assembly-assets-", dir=reconstruction))
+    asset_paths = {}
+    for name in ("source", "background"):
+        payload = asset_payloads[name]
+        snapshot = output_dir / f"accepted-{name}.asset"
+        snapshot.write_bytes(payload)
+        asset_paths[name] = snapshot
+    manifest_snapshot = output_dir / "accepted-presentation-manifest.json"
+    manifest_snapshot.write_bytes(asset_payloads["presentation_manifest"])
     components = []
-    for node, mask in component_masks:
-        ys, xs = np.nonzero(mask)
+    layers = _load_presentation_assets(
+        run_root=store.root,
+        reconstruction=reconstruction,
+        manifest_path=manifest_snapshot,
+        source_sha256=refs["source"]["sha256"],
+        graph_sha256=accepted_graph_sha256,
+        graph=graph,
+        page_size=page_size,
+        component_ids=active_ids,
+    )
+    for layer in layers:
+        component_id = layer["component_id"]
+        node = by_id[component_id]
+        alpha = layer["rgba"][:, :, 3] == 255
+        ys, xs = np.nonzero(alpha)
         if not len(xs):
-            raise ValueError(f"final component became empty: {node['id']}")
+            raise ValueError(f"final component became empty: {component_id}")
         left, right = int(xs.min()), int(xs.max()) + 1
         top, bottom = int(ys.min()), int(ys.max()) + 1
-        rgba = np.dstack((reconstructed_image, mask.astype(np.uint8) * 255))
-        component_path = output_dir / f"{node['id']}.png"
-        Image.fromarray(rgba[top:bottom, left:right], mode="RGBA").save(component_path)
+        component_path = output_dir / f"{component_id}.png"
+        Image.fromarray(
+            layer["rgba"][top:bottom, left:right], mode="RGBA"
+        ).save(component_path)
         components.append({
+            "component_id": component_id,
             "path": str(component_path), "x": left, "y": top,
             "w": right - left, "h": bottom - top,
             "z_index": node["z_index"],

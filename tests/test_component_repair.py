@@ -513,6 +513,21 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
     from image2editable.store import RunStore
 
     page_session["provider"] = "local"
+    evidence_graph_path = page_session["evidence"]["component-graph.json"]
+    evidence_graph = json.loads(evidence_graph_path.read_text(encoding="utf-8"))
+    for component_id, point in (("candidate_b", (0, 0)), ("frozen_a", (1, 1))):
+        node = next(
+            item for item in evidence_graph["nodes"]
+            if item["id"] == component_id
+        )
+        mask = np.zeros((2, 2), dtype=np.uint8)
+        mask[point[1], point[0]] = 255
+        mask_path = evidence_graph_path.parent / node["mask"]
+        Image.fromarray(mask, mode="L").save(mask_path)
+        node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+        node["bbox"] = [point[0], point[1], point[0] + 1, point[1] + 1]
+    evidence_graph_path.write_text(json.dumps(evidence_graph), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
@@ -1615,6 +1630,7 @@ def _execute_composite_quality_round(
     action: dict,
     shape: tuple[int, int],
     before_execution_record=None,
+    before_execution_submit=None,
     before_quality=None,
     initial_diagnostics: list[dict] | None = None,
     presentation_metrics_by_id: dict[str, dict] | None = None,
@@ -1695,6 +1711,11 @@ def _execute_composite_quality_round(
             "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         }
         execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    if before_execution_submit is not None:
+        before_execution_submit(
+            quality_paths["presentation_manifest"], execution
+        )
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
     record_component_execution(
         store, "page_001", execution_path=execution_path,
         output_graph_path=graph_path,
@@ -1725,6 +1746,45 @@ def _start_quality_mutation_round(page_session: dict):
     )
     advance_component_repair(store, "page_001")
     return store, request_path
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ],
+)
+def test_frozen_presentation_asset_cannot_be_replaced_during_execution(
+    page_session: dict, field: str,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    def replace_frozen_asset(manifest_path: Path, execution: dict) -> None:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        frozen = next(
+            item for item in manifest["components"]
+            if item["component_id"] == "frozen_a"
+        )
+        asset_path = store.root / frozen[field]["path"]
+        asset_path.write_bytes(asset_path.read_bytes() + b"replacement")
+        frozen[field]["sha256"] = hashlib.sha256(
+            asset_path.read_bytes()
+        ).hexdigest()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        execution["quality_input_refs"]["presentation_manifest"]["sha256"] = (
+            hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        )
+
+    with pytest.raises(ValueError, match="frozen presentation"):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            before_execution_submit=replace_frozen_asset,
+        )
 
 
 @pytest.mark.parametrize(

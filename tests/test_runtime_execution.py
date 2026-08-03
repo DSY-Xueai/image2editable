@@ -2385,8 +2385,8 @@ def test_initial_page_session_reserves_disk_before_writing_evidence(
     assert not (reconstruction / "evidence-source").exists()
 
 
-def test_legacy_assembly_preserves_text_clean_component_fill_in_alpha(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_accepted_presentation_assembly_preserves_bound_underlay_and_text_clean_rgb(
+    tmp_path: Path,
 ) -> None:
     source = tmp_path / "source.png"
     _image(source)
@@ -2397,29 +2397,63 @@ def test_legacy_assembly_preserves_text_clean_component_fill_in_alpha(
     reconstruction = run_dir / "pages/page_001/reconstruction"
     assets = reconstruction / "accepted"
     masks = assets / "masks"
+    presentation_assets = assets / "presentation-assets"
     masks.mkdir(parents=True)
+    presentation_assets.mkdir()
     accepted_source = assets / "source.png"
     background = assets / "background.png"
     reconstructed = assets / "reconstructed.png"
     text_mask = assets / "text-mask.png"
     native = assets / "native.json"
-    Image.new("RGB", (4, 4), "white").save(accepted_source)
+    source_pixels = np.full((4, 4, 3), 255, dtype=np.uint8)
+    source_pixels[1:3, 1:3] = (0, 0, 255)
+    source_pixels[0, 0] = (255, 0, 0)
+    Image.fromarray(source_pixels, mode="RGB").save(accepted_source)
     Image.new("RGB", (4, 4), "white").save(background)
     Image.new("RGB", (4, 4), "red").save(reconstructed)
     Image.new("L", (4, 4), 0).save(text_mask)
     with Image.open(text_mask) as image:
-        image.putpixel((1, 1), 255)
+        image.putpixel((0, 0), 255)
         image.save(text_mask)
     native.write_text("{}", encoding="utf-8")
-    mask_path = masks / "component_0001.png"
-    Image.new("L", (4, 4), 255).save(mask_path)
+    base_mask_path = masks / "base.png"
+    child_mask_path = masks / "child.png"
+    text_node_mask_path = masks / "text.png"
+    Image.new("L", (4, 4), 255).save(base_mask_path)
+    child_mask = np.zeros((4, 4), dtype=np.uint8)
+    child_mask[1:3, 1:3] = 255
+    Image.fromarray(child_mask, mode="L").save(child_mask_path)
+    text_node_mask = np.zeros((4, 4), dtype=np.uint8)
+    text_node_mask[0, 0] = 255
+    Image.fromarray(text_node_mask, mode="L").save(text_node_mask_path)
     graph = {
-        "nodes": [{
-            "id": "component_0001", "kind": "parent", "parent_id": None,
-            "state": "frozen", "mask": "masks/component_0001.png",
-            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
-            "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
-        }]
+        "nodes": [
+            {
+                "id": "base", "kind": "parent", "parent_id": None,
+                "state": "frozen", "mask": "masks/base.png",
+                "mask_sha256": hashlib.sha256(
+                    base_mask_path.read_bytes()
+                ).hexdigest(),
+                "bbox": [0, 0, 4, 4], "z_index": 0,
+                "text_ids": ["text_1"],
+            },
+            {
+                "id": "child", "kind": "parent", "parent_id": None,
+                "state": "frozen", "mask": "masks/child.png",
+                "mask_sha256": hashlib.sha256(
+                    child_mask_path.read_bytes()
+                ).hexdigest(),
+                "bbox": [1, 1, 3, 3], "z_index": 1, "text_ids": [],
+            },
+            {
+                "id": "text_1", "kind": "text", "parent_id": None,
+                "state": "frozen", "mask": "masks/text.png",
+                "mask_sha256": hashlib.sha256(
+                    text_node_mask_path.read_bytes()
+                ).hexdigest(),
+                "bbox": [0, 0, 1, 1], "z_index": 2, "text_ids": [],
+            },
+        ]
     }
     graph_path = assets / "component-graph.json"
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
@@ -2430,66 +2464,103 @@ def test_legacy_assembly_preserves_text_clean_component_fill_in_alpha(
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
+    ownership_base = np.full((4, 4), 255, dtype=np.uint8)
+    ownership_base[1:3, 1:3] = 0
+    ownership_base[0, 0] = 0
+    generated_base = np.zeros((4, 4), dtype=np.uint8)
+    generated_base[1:3, 1:3] = 255
+    generated_base[0, 0] = 255
+    alpha_base = np.full((4, 4), 255, dtype=np.uint8)
+    base_rgba = np.zeros((4, 4, 4), dtype=np.uint8)
+    base_rgba[:, :, :3] = (255, 255, 255)
+    base_rgba[1:3, 1:3, :3] = (0, 255, 0)
+    base_rgba[:, :, 3] = alpha_base
+    child_rgba = np.zeros((4, 4, 4), dtype=np.uint8)
+    child_rgba[1:3, 1:3, :3] = source_pixels[1:3, 1:3]
+    child_rgba[1:3, 1:3, 3] = 255
+
+    def presentation_component(
+        component_id: str,
+        index: int,
+        rgba: np.ndarray,
+        ownership: np.ndarray,
+        alpha: np.ndarray,
+        generated: np.ndarray,
+    ) -> dict:
+        references = {}
+        for name, array, mode in (
+            ("rgba", rgba, "RGBA"),
+            ("ownership_mask", ownership, "L"),
+            ("presentation_alpha_mask", alpha, "L"),
+            ("generated_underlay_mask", generated, "L"),
+        ):
+            path = presentation_assets / f"{index:04d}-{name}.png"
+            Image.fromarray(array, mode=mode).save(path)
+            references[name] = ref(path)
+        return {
+            "component_id": component_id,
+            **references,
+            "metrics": {
+                "boundary_color_mae": 0.0,
+                "gradient_jump_p95": 0.0,
+                "added_high_frequency_pixels": 0.0,
+            },
+        }
+
+    presentation_manifest = presentation_assets / "presentation-manifest.json"
+    presentation_manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "source_sha256": ref(accepted_source)["sha256"],
+        "graph_sha256": ref(graph_path)["sha256"],
+        "components": [
+            presentation_component(
+                "base", 1, base_rgba, ownership_base,
+                alpha_base, generated_base,
+            ),
+            presentation_component(
+                "child", 2, child_rgba, child_mask, child_mask,
+                np.zeros((4, 4), dtype=np.uint8),
+            ),
+        ],
+    }), encoding="utf-8")
+
     result = {
         "schema_version": 1, "page_id": "page_001",
         "status": "ready_for_assembly", "provider": "host",
-        "repair_rounds": 1, "initial_component_count": 1,
-        "final_component_ids": ["component_0001"], "graph_ref": ref(graph_path),
+        "repair_rounds": 1, "initial_component_count": 2,
+        "final_component_ids": ["base", "child"], "graph_ref": ref(graph_path),
+        "accepted_graph_sha256": ref(graph_path)["sha256"],
         "round_history": [], "fallback": {"status": "none", "parent_ids": []},
         "accepted_asset_refs": {
             "source": ref(accepted_source), "background": ref(background),
             "reconstructed": ref(reconstructed), "text_mask": ref(text_mask),
             "native_check": ref(native),
+            "presentation_manifest": ref(presentation_manifest),
         },
         "delivery_checks": {"pptx_reopen": "unknown"},
     }
-    result_path = reconstruction / "component_result.json"
-    result_path.write_text(json.dumps(result), encoding="utf-8")
-    store.write_json("pages/page_001/reconstruction/component_state.json", {
-        "status": "ready_for_assembly", "result_ref": ref(result_path)
-    })
-    captured = {}
-
-    class FakeImageModule:
-        @staticmethod
-        def load_component_layers(path):
-            return {
-                "img_width": 4, "img_height": 4, "canvas_width": 4,
-                "canvas_height": 4, "content_offset_x": 0, "content_offset_y": 0,
-                "text_items": [{"text": "editable"}],
-                "original_image_path": str(accepted_source),
-            }
-
-        @staticmethod
-        def _assemble_prepared_slide(slide_data, output_path, *args):
-            captured.update(slide_data)
-            output = Path(output_path)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            presentation = Presentation()
-            presentation.slides.add_slide(presentation.slide_layouts[6])
-            presentation.save(output)
-            return str(output)
-
-    monkeypatch.setattr(
-        legacy.importlib, "import_module", lambda name: FakeImageModule
+    slide = legacy._accepted_slide_data(
+        store,
+        reconstruction,
+        {"text_items": [{"text": "editable"}]},
+        result,
     )
 
-    outputs = legacy.assemble_legacy_results(store)
+    assert [item["component_id"] for item in slide["components"]] == [
+        "base", "child",
+    ]
+    with Image.open(slide["components"][0]["path"]) as component:
+        rgba = np.asarray(component.convert("RGBA"))
+    assert np.all(rgba[1:3, 1:3, 3] == 255)
+    assert np.all(rgba[1:3, 1:3, :3] == (0, 255, 0))
+    assert not np.array_equal(rgba[1:3, 1:3, :3], source_pixels[1:3, 1:3])
+    assert tuple(rgba[0, 0, :3]) == (255, 255, 255)
+    assert not np.array_equal(rgba[0, 0, :3], source_pixels[0, 0])
 
-    with Image.open(captured["components"][0]["path"]) as component:
-        alpha = component.getchannel("A")
-        assert alpha.getpixel((1, 1)) == 255
-        assert alpha.getpixel((0, 0)) == 255
-    assert Path(outputs["16:9"]).is_file()
-    delivery = store.read_json(
-        "pages/page_001/reconstruction/component_delivery.json"
-    )
-    assert delivery["delivery_checks"] == {"pptx_reopen": "pass"}
 
-
-def test_accepted_asset_snapshot_survives_replacement_after_hash_verification(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _accepted_presentation_case(tmp_path: Path) -> tuple[
+    RunStore, Path, dict, Path, Path
+]:
     run_root = tmp_path / "run"
     reconstruction = run_root / "pages/page_001/reconstruction"
     accepted = reconstruction / "accepted"
@@ -2523,6 +2594,16 @@ def test_accepted_asset_snapshot_survives_replacement_after_hash_verification(
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
 
+    presentation_output = accepted / "presentation"
+    presentation_output.mkdir()
+    manifest_path, _ = _build_test_presentation_manifest(
+        run_root,
+        source_path=source,
+        text_clean_path=source,
+        graph=graph,
+        graph_dir=accepted,
+        output_dir=presentation_output,
+    )
     result = {
         "accepted_asset_refs": {
             name: ref(path) for name, path in {
@@ -2532,24 +2613,41 @@ def test_accepted_asset_snapshot_survives_replacement_after_hash_verification(
             }.items()
         },
         "graph_ref": ref(graph_path),
+        "accepted_graph_sha256": ref(graph_path)["sha256"],
         "final_component_ids": ["component_0001"],
     }
-    original = legacy._load_legacy_ref
+    result["accepted_asset_refs"]["presentation_manifest"] = ref(manifest_path)
+    return store, reconstruction, result, manifest_path, reconstructed
 
-    def replace_after_verify(store_arg, reference):
-        path, payload = original(store_arg, reference)
-        if path == reconstructed:
-            reconstructed.write_bytes(b"attacker replacement")
-        return path, payload
 
-    monkeypatch.setattr(legacy, "_load_legacy_ref", replace_after_verify)
-
-    slide = legacy._accepted_slide_data(
-        store, reconstruction, {"text_items": []}, result
+@pytest.mark.parametrize(
+    "mutation", ["missing_manifest", "manifest_content", "component_id", "rgba"],
+)
+def test_presentation_tamper_is_rejected(tmp_path: Path, mutation: str) -> None:
+    store, reconstruction, result, manifest_path, _ = (
+        _accepted_presentation_case(tmp_path)
     )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "missing_manifest":
+        result["accepted_asset_refs"].pop("presentation_manifest")
+    elif mutation == "manifest_content":
+        manifest["components"][0]["metrics"]["boundary_color_mae"] = 1.0
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    elif mutation == "component_id":
+        manifest["components"][0]["component_id"] = "replacement"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        result["accepted_asset_refs"]["presentation_manifest"]["sha256"] = (
+            hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        )
+    else:
+        rgba_ref = manifest["components"][0]["rgba"]
+        rgba_path = store.root / Path(*PurePosixPath(rgba_ref["path"]).parts)
+        Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(rgba_path)
 
-    with Image.open(slide["components"][0]["path"]) as component:
-        assert component.getpixel((0, 0))[:3] == (255, 0, 0)
+    with pytest.raises((ValueError, RuntimeError), match="presentation"):
+        legacy._accepted_slide_data(
+            store, reconstruction, {"text_items": []}, result
+        )
 
 
 def test_warning_page_assembly_preserves_full_source_and_records_warning(

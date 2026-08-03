@@ -402,16 +402,47 @@ def record_component_execution(
         request_path = store.root / Path(
             *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
         )
+        request = load_component_agent_request(request_path)
         before = json.loads(_load_state_artifact(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
         ).decode("utf-8"))
         after = json.loads(graph_payload.decode("utf-8"))
-        _verify_quality_input_refs(
+        _, _, presentation_manifest, _ = _verify_quality_input_refs(
             store, state, execution["quality_input_refs"],
-            request=load_component_agent_request(request_path),
+            request=request,
             request_path=request_path,
             expected_graph_sha256=graph_ref["sha256"],
             expected_component_ids=_presentation_component_ids(after),
+            return_bound_inputs=True,
+        )
+        request_manifest_record = request["evidence"][
+            "presentation-manifest.json"
+        ]
+        request_manifest_path = request_path.parent / Path(
+            *PurePosixPath(request_manifest_record["path"]).parts
+        )
+        request_manifest_payload = _read_bound_file(
+            request_manifest_path,
+            store.root / "pages" / page_id / "reconstruction",
+            max_bytes=GRAPH_JSON_LIMIT,
+            label="request presentation manifest",
+        )
+        if (
+            hashlib.sha256(request_manifest_payload).hexdigest()
+            != request_manifest_record["sha256"]
+        ):
+            raise RuntimeError("request presentation manifest hash mismatch")
+        request_manifest = _validate_presentation_manifest_payload(
+            request_manifest_payload,
+            store.root / "pages" / page_id / "reconstruction",
+            source_sha256=state["source_sha256"],
+            graph_sha256=request["graph_sha256"],
+            expected_component_ids=_presentation_component_ids(before),
+        )
+        _validate_frozen_presentation_assets(
+            request_manifest,
+            presentation_manifest,
+            frozen_ids=set(state["frozen"]),
         )
         from image2editable.component_contracts import validate_graph_transition
         validate_graph_transition(before=before, after=after)
@@ -1027,6 +1058,41 @@ def _presentation_component_ids(graph: dict) -> list[str]:
     ]
 
 
+def _validate_frozen_presentation_assets(
+    previous_manifest: dict,
+    current_manifest: dict,
+    *,
+    frozen_ids: set[str],
+) -> None:
+    if not frozen_ids:
+        return
+    previous = {
+        component["component_id"]: component
+        for component in previous_manifest["components"]
+    }
+    current = {
+        component["component_id"]: component
+        for component in current_manifest["components"]
+    }
+    for component_id in sorted(frozen_ids):
+        if component_id not in previous or component_id not in current:
+            raise ValueError(
+                f"frozen presentation component is missing: {component_id}"
+            )
+        for field in (
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
+        ):
+            if (
+                previous[component_id][field]["sha256"]
+                != current[component_id][field]["sha256"]
+            ):
+                raise ValueError(
+                    f"frozen presentation asset changed: "
+                    f"{component_id}/{field}"
+                )
+
+
 def _is_sha256(value: object) -> bool:
     return (
         type(value) is str
@@ -1533,6 +1599,7 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "initial_component_count": state["initial_component_count"],
         "final_component_ids": sorted(state["frozen"]),
         "graph_ref": state["graph_ref"], "round_history": state["round_history"],
+        "accepted_graph_sha256": quality["input_graph_sha256"],
         "fallback": state["fallback"],
         "accepted_asset_refs": quality["input_refs"],
         "text_items": quality.get("text_items", []),
