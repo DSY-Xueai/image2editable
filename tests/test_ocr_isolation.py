@@ -9,6 +9,7 @@ import sys
 
 import numpy as np
 from PIL import Image
+import pytest
 
 import image_to_ppt
 from scripts import text_detect
@@ -21,11 +22,11 @@ def test_isolated_ocr_runs_detection_then_recognition_workers(
 ) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (20, 10), "white").save(image_path)
-    calls: list[list[str]] = []
+    calls = []
     poly = [[4, 2], [14, 5], [11, 11], [1, 8]]
 
     def fake_run(command, **kwargs):
-        calls.append(command)
+        calls.append((command, kwargs))
         result_path = Path(command[command.index("--result") + 1])
         if command[2] == "detect":
             result_path.write_text(
@@ -45,7 +46,17 @@ def test_isolated_ocr_runs_detection_then_recognition_workers(
             )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(text_detect.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        text_detect,
+        "run_isolated_worker",
+        fake_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("OCR must use the shared runner"),
+    )
 
     boxes = text_detect._try_isolated_paddleocr(
         image_path,
@@ -55,12 +66,16 @@ def test_isolated_ocr_runs_detection_then_recognition_workers(
     )
 
     worker_path = Path(text_detect.__file__).with_name("ocr_worker.py").resolve()
-    assert [command[:3] for command in calls] == [
+    assert [command[:3] for command, _ in calls] == [
         [sys.executable, str(worker_path), "detect"],
         [sys.executable, str(worker_path), "recognize"],
     ]
-    assert "--lang" not in calls[0]
-    assert calls[1][calls[1].index("--lang") + 1] == "en"
+    assert "--lang" not in calls[0][0]
+    assert calls[1][0][calls[1][0].index("--lang") + 1] == "en"
+    assert all(
+        kwargs == {"capture_output": True, "text": True, "check": False}
+        for _, kwargs in calls
+    )
     assert boxes == [
         {
             "box": (1, 2, 13, 9),
@@ -266,8 +281,8 @@ def test_isolated_worker_failure_falls_back_to_tesseract(
     image_path.write_bytes(b"not-used")
     expected = [{"box": (1, 2, 3, 4), "text": "fallback", "confidence": 0.9}]
     monkeypatch.setattr(
-        text_detect.subprocess,
-        "run",
+        text_detect,
+        "run_isolated_worker",
         lambda command, **kwargs: subprocess.CompletedProcess(
             command,
             1,
@@ -445,7 +460,17 @@ def test_isolated_visual_processing_runs_page_worker(
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(image_to_ppt.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "run_isolated_worker",
+        fake_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("visual must use the shared runner"),
+    )
 
     actual = image_to_ppt._process_image_isolated(
         image_path,
@@ -647,7 +672,17 @@ def test_resource_safe_proposals_run_object_worker(
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(image_to_ppt.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "run_isolated_worker",
+        fake_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("object must use the shared runner"),
+    )
 
     proposals = image_to_ppt._generate_filtered_object_proposals_isolated(
         image,
@@ -716,11 +751,15 @@ def test_resource_safe_sam_phases_run_separate_workers(
 
     monkeypatch.setattr(
         image_to_ppt,
-        "_trim_parent_working_set_before_worker",
-        lambda: events.append("trim"),
+        "run_isolated_worker",
+        fake_run,
         raising=False,
     )
-    monkeypatch.setattr(image_to_ppt.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("SAM must use the shared runner"),
+    )
 
     prompted = image_to_ppt._generate_sam_candidates_isolated(
         image,
@@ -738,7 +777,7 @@ def test_resource_safe_sam_phases_run_separate_workers(
     )
 
     assert len(calls) == 2
-    assert events == ["trim", "spawn", "trim", "spawn"]
+    assert events == ["spawn", "spawn"]
     assert [
         command[command.index("--mode") + 1] for command, _ in calls
     ] == ["prompted", "automatic"]
@@ -755,48 +794,6 @@ def test_resource_safe_sam_phases_run_separate_workers(
     assert prompted[0].crop_box == (0, 0, 20, 10)
     assert prompted[0].object_box == (4.0, 2.0, 16.0, 8.0)
     assert not any(path.name.startswith("sam-") for path in tmp_path.iterdir())
-
-
-def test_parent_working_set_trim_ignores_windows_api_failure(monkeypatch) -> None:
-    events = []
-
-    monkeypatch.setattr(
-        image_to_ppt.gc,
-        "collect",
-        lambda: events.append("gc"),
-    )
-    monkeypatch.setattr(image_to_ppt.os, "name", "nt")
-    monkeypatch.setattr(
-        image_to_ppt,
-        "_empty_current_process_working_set_windows",
-        lambda: (_ for _ in ()).throw(OSError("trim unavailable")),
-        raising=False,
-    )
-
-    image_to_ppt._trim_parent_working_set_before_worker()
-
-    assert events == ["gc"]
-
-
-def test_parent_working_set_trim_only_collects_on_non_windows(monkeypatch) -> None:
-    events = []
-
-    monkeypatch.setattr(
-        image_to_ppt.gc,
-        "collect",
-        lambda: events.append("gc"),
-    )
-    monkeypatch.setattr(image_to_ppt.os, "name", "posix")
-    monkeypatch.setattr(
-        image_to_ppt,
-        "_empty_current_process_working_set_windows",
-        lambda: events.append("windows"),
-        raising=False,
-    )
-
-    image_to_ppt._trim_parent_working_set_before_worker()
-
-    assert events == ["gc"]
 
 
 def test_resource_safe_hole_recheck_runs_separate_worker(
@@ -851,7 +848,17 @@ def test_resource_safe_hole_recheck_runs_separate_worker(
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(image_to_ppt.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "run_isolated_worker",
+        fake_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("recheck must use the shared runner"),
+    )
 
     image_to_ppt._recheck_visual_element_holes_isolated(
         image,
@@ -1318,6 +1325,7 @@ def test_ocr_product_and_skill_mirrors_match() -> None:
         "text_detect.py",
         "visual_segment.py",
         "visual_worker.py",
+        "worker_resources.py",
     ]
     pairs = [
         *[

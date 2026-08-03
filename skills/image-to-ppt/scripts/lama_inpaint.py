@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
+try:
+    from scripts.worker_resources import run_isolated_worker
+except ModuleNotFoundError as error:
+    if error.name not in {"scripts", "scripts.worker_resources"}:
+        raise
+    from worker_resources import run_isolated_worker
 
 
 class LargeMaskInpaintError(RuntimeError):
@@ -58,7 +64,7 @@ def inpaint_large_mask_isolated(
     output_path: str | Path,
 ) -> None:
     output_path = Path(output_path).resolve()
-    completed = subprocess.run(
+    completed = run_isolated_worker(
         [
             sys.executable,
             str(Path(__file__).with_name("lama_worker.py").resolve()),

@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import shutil
 import stat
+import subprocess
 
 import pytest
 import cv2
@@ -2890,6 +2891,8 @@ def test_component_sam_subprocess_runner_reads_result_and_cleans_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from scripts import sam_worker
+
     calls = []
 
     def run(command: list[str], **kwargs: object) -> None:
@@ -2904,7 +2907,19 @@ def test_component_sam_subprocess_runner_reads_result_and_cleans_workspace(
             "mask_shape": [4, 5],
         }]), encoding="utf-8")
 
-    monkeypatch.setattr("scripts.sam_worker.subprocess.run", run)
+    monkeypatch.setattr(
+        sam_worker,
+        "run_isolated_worker",
+        run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail(
+            "component SAM must use the shared runner"
+        ),
+    )
     mask = run_component_prompt_worker(
         np.zeros((4, 5, 3), dtype=np.uint8),
         box=[1, 1, 4, 3], positive=[], negative=[], work_dir=tmp_path,

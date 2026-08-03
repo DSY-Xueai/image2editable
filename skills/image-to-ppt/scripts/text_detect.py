@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
@@ -23,6 +22,13 @@ import numpy as np
 from PIL import Image
 
 import re
+
+try:
+    from scripts.worker_resources import run_isolated_worker
+except ModuleNotFoundError as error:
+    if error.name not in {"scripts", "scripts.worker_resources"}:
+        raise
+    from worker_resources import run_isolated_worker
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +206,7 @@ def _try_isolated_paddleocr(
                 ("detection", commands[0], detection_result),
                 ("recognition", commands[1], recognition_result),
             ):
-                completed = subprocess.run(
+                completed = run_isolated_worker(
                     command,
                     capture_output=True,
                     text=True,

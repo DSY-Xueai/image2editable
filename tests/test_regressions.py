@@ -718,9 +718,15 @@ def test_isolated_lama_invokes_worker(
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(
-        lama_inpaint.subprocess,
-        "run",
+        lama_inpaint,
+        "run_isolated_worker",
         fake_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("LaMa must use the shared runner"),
         raising=False,
     )
 
@@ -734,6 +740,7 @@ def test_isolated_lama_invokes_worker(
     assert len(calls) == 1
     assert calls[0][0][0] == sys.executable
     assert Path(calls[0][0][1]).name == "lama_worker.py"
+    assert calls[0][1] == {"capture_output": True, "text": True}
 
 
 def test_sam_cuda_inference_uses_bfloat16_autocast(monkeypatch) -> None:

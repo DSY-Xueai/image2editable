@@ -5,12 +5,18 @@ import base64
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
 import numpy as np
 from PIL import Image
+
+try:
+    from scripts.worker_resources import run_isolated_worker
+except ModuleNotFoundError as error:
+    if error.name not in {"scripts", "scripts.worker_resources"}:
+        raise
+    from worker_resources import run_isolated_worker
 
 
 def _load_tools():
@@ -114,7 +120,7 @@ def run_component_prompt_worker(
             json.dumps({"box": box, "positive": positive, "negative": negative}),
             encoding="utf-8",
         )
-        subprocess.run(
+        run_isolated_worker(
             [
                 sys.executable,
                 str(Path(__file__).resolve()),

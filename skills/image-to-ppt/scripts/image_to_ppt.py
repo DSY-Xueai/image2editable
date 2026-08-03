@@ -28,7 +28,6 @@ import math
 import os
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import traceback
@@ -88,6 +87,7 @@ from scripts.visual_segment import (
     visual_difference,
     write_segmentation_diagnostics,
 )
+from scripts.worker_resources import run_isolated_worker
 
 logger = logging.getLogger(__name__)
 
@@ -100,34 +100,6 @@ _TARGETED_OCR_MAX_CANDIDATES = 24
 _TARGETED_OCR_SINGLE_CROP_PIXELS = 512 * 512
 _TARGETED_OCR_TOTAL_CROP_PIXELS = 6 * 1024 * 1024
 _TARGETED_OCR_MAX_ITEMS_PER_VIEW = 32
-
-
-def _empty_current_process_working_set_windows() -> None:
-    import ctypes
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    get_current_process = kernel32.GetCurrentProcess
-    get_current_process.restype = ctypes.c_void_p
-    empty_working_set = psapi.EmptyWorkingSet
-    empty_working_set.argtypes = [ctypes.c_void_p]
-    empty_working_set.restype = ctypes.c_int
-    empty_working_set(get_current_process())
-
-
-def _trim_parent_working_set_before_worker() -> None:
-    gc.collect()
-    if os.name != "nt":
-        return
-    try:
-        _empty_current_process_working_set_windows()
-    except Exception:
-        return
-
-
-def _run_isolated_worker(command: list[str]):
-    _trim_parent_working_set_before_worker()
-    return subprocess.run(command, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +990,6 @@ def _isolated_large_inpainter(work_dir: Path):
                 (np.asarray(mask) > 0).astype(np.uint8) * 255,
                 mode="L",
             ).save(mask_path)
-            _trim_parent_working_set_before_worker()
             inpaint_large_mask_isolated(
                 input_path,
                 mask_path,
@@ -1275,7 +1246,7 @@ def _generate_filtered_object_proposals_isolated(
         worker_path = module_dir / "scripts" / "object_worker.py"
         if not worker_path.is_file():
             worker_path = module_dir / "object_worker.py"
-        completed = _run_isolated_worker(
+        completed = run_isolated_worker(
             [
                 sys.executable,
                 str(worker_path),
@@ -1285,7 +1256,9 @@ def _generate_filtered_object_proposals_isolated(
                 str(mask_path),
                 "--result",
                 str(result_path),
-            ]
+            ],
+            capture_output=True,
+            text=True,
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -1364,7 +1337,11 @@ def _generate_sam_candidates_isolated(
                 encoding="utf-8",
             )
             command.extend(["--proposals", str(proposals_path)])
-        completed = _run_isolated_worker(command)
+        completed = run_isolated_worker(
+            command,
+            capture_output=True,
+            text=True,
+        )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise RuntimeError(f"Isolated SAM worker failed: {detail}")
@@ -1457,7 +1434,7 @@ def _recheck_visual_element_holes_isolated(
         worker_path = module_dir / "scripts" / "sam_worker.py"
         if not worker_path.is_file():
             worker_path = module_dir / "sam_worker.py"
-        completed = _run_isolated_worker(
+        completed = run_isolated_worker(
             [
                 sys.executable,
                 str(worker_path),
@@ -1469,7 +1446,9 @@ def _recheck_visual_element_holes_isolated(
                 str(elements_path),
                 "--result",
                 str(result_path),
-            ]
+            ],
+            capture_output=True,
+            text=True,
         )
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip()
@@ -1501,7 +1480,7 @@ def _process_image_isolated(
     worker_path = module_dir / "scripts" / "visual_worker.py"
     if not worker_path.is_file():
         worker_path = module_dir / "visual_worker.py"
-    completed = _run_isolated_worker(
+    completed = run_isolated_worker(
         [
             sys.executable,
             str(worker_path),
@@ -1515,7 +1494,9 @@ def _process_image_isolated(
             str(request_path),
             "--result",
             str(result_path),
-        ]
+        ],
+        capture_output=True,
+        text=True,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
