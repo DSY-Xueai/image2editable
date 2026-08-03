@@ -686,8 +686,10 @@ def test_resource_safe_sam_phases_run_separate_workers(
         crop_box=(0, 0, 20, 10),
     )
     calls = []
+    events = []
 
     def fake_run(command, **kwargs):
+        events.append("spawn")
         calls.append((command, kwargs))
         result_path = Path(command[command.index("--result") + 1])
         result_path.write_text(
@@ -712,6 +714,12 @@ def test_resource_safe_sam_phases_run_separate_workers(
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_trim_parent_working_set_before_worker",
+        lambda: events.append("trim"),
+        raising=False,
+    )
     monkeypatch.setattr(image_to_ppt.subprocess, "run", fake_run)
 
     prompted = image_to_ppt._generate_sam_candidates_isolated(
@@ -730,6 +738,7 @@ def test_resource_safe_sam_phases_run_separate_workers(
     )
 
     assert len(calls) == 2
+    assert events == ["trim", "spawn", "trim", "spawn"]
     assert [
         command[command.index("--mode") + 1] for command, _ in calls
     ] == ["prompted", "automatic"]
@@ -746,6 +755,48 @@ def test_resource_safe_sam_phases_run_separate_workers(
     assert prompted[0].crop_box == (0, 0, 20, 10)
     assert prompted[0].object_box == (4.0, 2.0, 16.0, 8.0)
     assert not any(path.name.startswith("sam-") for path in tmp_path.iterdir())
+
+
+def test_parent_working_set_trim_ignores_windows_api_failure(monkeypatch) -> None:
+    events = []
+
+    monkeypatch.setattr(
+        image_to_ppt.gc,
+        "collect",
+        lambda: events.append("gc"),
+    )
+    monkeypatch.setattr(image_to_ppt.os, "name", "nt")
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_empty_current_process_working_set_windows",
+        lambda: (_ for _ in ()).throw(OSError("trim unavailable")),
+        raising=False,
+    )
+
+    image_to_ppt._trim_parent_working_set_before_worker()
+
+    assert events == ["gc"]
+
+
+def test_parent_working_set_trim_only_collects_on_non_windows(monkeypatch) -> None:
+    events = []
+
+    monkeypatch.setattr(
+        image_to_ppt.gc,
+        "collect",
+        lambda: events.append("gc"),
+    )
+    monkeypatch.setattr(image_to_ppt.os, "name", "posix")
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_empty_current_process_working_set_windows",
+        lambda: events.append("windows"),
+        raising=False,
+    )
+
+    image_to_ppt._trim_parent_working_set_before_worker()
+
+    assert events == ["gc"]
 
 
 def test_resource_safe_hole_recheck_runs_separate_worker(
