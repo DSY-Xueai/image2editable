@@ -2849,6 +2849,26 @@ def test_retry_outside_semantic_parent_builds_bound_presentation_assets(
     assert np.array_equal(decoded["rgba"][:, :, 3] > 0, proposed)
     assert np.array_equal(decoded["rgba"][proposed, :3], source[proposed])
 
+    quality = component_repair.evaluate_component_quality_round(
+        source, source, source, result,
+        graph_dir=output, trusted_root=tmp_path,
+        text_mask=proposed,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1, expected_component_ids=["left"],
+        presentation_layers=[{
+            "component_id": "left",
+            "ownership_mask": decoded["ownership_mask"],
+            "presentation_alpha_mask": decoded["presentation_alpha_mask"],
+            "generated_underlay_mask": decoded["generated_underlay_mask"],
+            "metrics": entry["metrics"],
+        }],
+    )
+    component_report = quality["component_reports"][0]
+    assert component_report["metrics"]["component_pixels"] == 0
+    assert component_report["violations"] == ["empty_component"]
+    assert component_report["accepted"] is False
+
 
 def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> None:
     class Predictor:

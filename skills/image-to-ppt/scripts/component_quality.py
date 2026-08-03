@@ -859,7 +859,9 @@ def evaluate_component(
     })
     violations = []
     if presentation_alpha_mask is not None and (
-        not np.any(ownership) or not np.any(alpha)
+        metrics["component_pixels"] == 0
+        or not np.any(ownership)
+        or not np.any(alpha)
     ):
         violations.append("empty_component")
     hard_pixel_ratio = max(
@@ -883,8 +885,9 @@ def evaluate_component(
         calibration.text_halo_px * 2,
     )
     if (
-        metrics["component_text_residual_ratio"]
-        * metrics["text_support_pixels"] >= residual_pixel_floor
+        metrics["component_pixels"] > 0
+        and metrics["component_text_residual_ratio"]
+        * max(metrics["text_support_pixels"], 1) >= residual_pixel_floor
     ):
         violations.append("component_text_residual")
     if (

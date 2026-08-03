@@ -673,6 +673,80 @@ def test_exact_empty_component_cannot_pass_quality_gate(
     assert report["accepted"] is False
 
 
+def test_presentation_text_only_ownership_reports_only_empty_component() -> None:
+    import cv2
+
+    shape = (48, 64)
+    source = np.full((*shape, 3), 180, dtype=np.uint8)
+    text = np.zeros(shape, dtype=bool)
+    text[12:36, 8:56] = True
+    cv2.putText(
+        source, "TXT", (10, 31), cv2.FONT_HERSHEY_SIMPLEX,
+        0.65, (20, 20, 20), 2, cv2.LINE_AA,
+    )
+    background = np.full_like(source, 180)
+    node = {
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/component_0001.png",
+        "mask_sha256": "a" * 64, "bbox": [8, 12, 56, 36],
+        "z_index": 0, "text_ids": [],
+    }
+
+    report = evaluate_component(
+        source, background, source, node, {"nodes": [node]},
+        calibrate_page(source, text), component_mask=text.copy(),
+        parent_mask=text.copy(), presentation_alpha_mask=text.copy(),
+        generated_underlay_mask=np.zeros(shape, dtype=bool),
+        underlay_metrics=_underlay_metrics(), text_mask=text,
+        page_checks={"protected_native_overlap": "pass"},
+    )
+
+    assert report["metrics"]["component_pixels"] == 0
+    assert report["metrics"]["text_support_pixels"] == 0
+    assert report["metrics"]["component_text_residual_ratio"] > 0
+    assert report["violations"] == ["empty_component"]
+
+
+def test_visual_component_with_distant_text_residual_fails_when_text_support_is_zero() -> None:
+    import cv2
+
+    shape = (72, 112)
+    source = np.full((*shape, 3), 220, dtype=np.uint8)
+    ownership = np.zeros(shape, dtype=bool)
+    ownership[8:24, 8:24] = True
+    source[ownership] = (60, 120, 190)
+    text = np.zeros(shape, dtype=bool)
+    text[42:66, 58:106] = True
+    cv2.putText(
+        source, "TXT", (60, 61), cv2.FONT_HERSHEY_SIMPLEX,
+        0.65, (20, 20, 20), 2, cv2.LINE_AA,
+    )
+    ownership |= text
+    background = np.full_like(source, 220)
+    reconstructed = background.copy()
+    reconstructed[ownership] = source[ownership]
+    node = {
+        "id": "component_0001", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/component_0001.png",
+        "mask_sha256": "a" * 64, "bbox": [8, 8, 106, 66],
+        "z_index": 0, "text_ids": [],
+    }
+
+    report = evaluate_component(
+        source, background, reconstructed, node, {"nodes": [node]},
+        calibrate_page(source, text), component_mask=ownership.copy(),
+        parent_mask=ownership.copy(), presentation_alpha_mask=ownership.copy(),
+        generated_underlay_mask=np.zeros(shape, dtype=bool),
+        underlay_metrics=_underlay_metrics(), text_mask=text,
+        page_checks={"protected_native_overlap": "pass"},
+    )
+
+    assert report["metrics"]["component_pixels"] > 0
+    assert report["metrics"]["text_support_pixels"] == 0
+    assert report["metrics"]["component_text_residual_ratio"] > 0
+    assert report["violations"] == ["component_text_residual"]
+
+
 def test_legacy_empty_component_does_not_gain_exact_only_violation() -> None:
     case = _synthetic_quality_case()
     case["component_mask"] = np.zeros_like(case["component_mask"])
