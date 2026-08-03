@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack, redirect_stdout
 import ctypes
+import errno
 import hashlib
 import importlib
 import io
@@ -14,6 +15,7 @@ import stat
 import sys
 import tempfile
 from typing import Any
+import uuid
 
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from pptx import Presentation
@@ -31,6 +33,7 @@ from image2editable.component_repair import (
     record_next_component_request,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
+    _read_bound_file,
     _validate_presentation_manifest,
 )
 from image2editable.inputs import sha256_file
@@ -330,6 +333,52 @@ def _safe_rmtree(
     if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
         raise RuntimeError("Safe recursive directory cleanup is unavailable")
     shutil.rmtree(path)
+
+
+def _rename_directory_exclusive(
+    staging: Path,
+    final: Path,
+    expected_identity: tuple[int, int],
+) -> None:
+    if staging.parent != final.parent:
+        raise RuntimeError("presentation publication directories differ")
+    _validate_directory(staging, staging.lstat(), expected_identity)
+    if os.name == "nt":
+        try:
+            os.rename(staging, final)
+        except OSError as error:
+            if final.exists() or final.is_symlink():
+                raise RuntimeError(
+                    "presentation assets already published"
+                ) from error
+            raise
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise RuntimeError("exclusive directory publication is unavailable")
+        rename.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        result = rename(
+            -100, os.fsencode(staging), -100, os.fsencode(final), 1
+        )
+    elif sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise RuntimeError("exclusive directory publication is unavailable")
+        rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+        result = rename(os.fsencode(staging), os.fsencode(final), 4)
+    else:
+        raise RuntimeError("exclusive directory publication is unavailable")
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise RuntimeError("presentation assets already published")
+    raise OSError(error_number, os.strerror(error_number), str(staging), str(final))
 
 
 def _prepare_work_root(
@@ -707,84 +756,159 @@ def _build_presentation_assets(
         if node["kind"] == "text" and node["state"] == "frozen":
             text_mask |= masks[node["id"]]
 
-    assets_dir = output_dir / "presentation-assets"
-    assets_dir.mkdir(exist_ok=False)
-    components = []
-    for index, (node, ownership) in enumerate(
-        zip(active_nodes, ownership_masks, strict=True), start=1
-    ):
-        semantic = (
-            masks[node["parent_id"]]
-            if node["parent_id"] is not None
-            else ownership
+    final_dir = output_dir / "presentation-assets"
+    staging = output_dir / f".presentation-assets.tmp-{uuid.uuid4().hex}"
+    staging.mkdir()
+    staging_identity = _directory_identity(staging.lstat())
+    try:
+        components_by_id = {}
+        max_asset_bytes = max(
+            1024 * 1024, source.shape[0] * source.shape[1] * 8
         )
+        indexed_layers = [
+            (index, node, ownership)
+            for index, (node, ownership) in enumerate(
+                zip(active_nodes, ownership_masks, strict=True), start=1
+            )
+        ]
+        groups = {}
+        for item in indexed_layers:
+            groups.setdefault(int(item[1]["z_index"]), []).append(item)
         higher = np.zeros(source.shape[:2], dtype=bool)
-        for other, other_ownership in zip(
-            active_nodes, ownership_masks, strict=True
-        ):
-            if int(other["z_index"]) > int(node["z_index"]):
-                higher |= other_ownership
-        layer = build_presentation_layer(
-            source_rgb=source,
-            text_clean_rgb=text_clean,
-            ownership_mask=ownership,
-            semantic_mask=semantic,
-            higher_layer_mask=higher,
-            text_mask=text_mask,
-        )
-        paths = {
-            "rgba": assets_dir / f"{index:04d}-rgba.png",
-            "ownership_mask": assets_dir / f"{index:04d}-ownership-mask.png",
-            "presentation_alpha_mask": (
-                assets_dir / f"{index:04d}-presentation-alpha-mask.png"
-            ),
-            "generated_underlay_mask": (
-                assets_dir / f"{index:04d}-generated-underlay-mask.png"
-            ),
-        }
-        rgba = Image.fromarray(np.dstack((
-            layer["rgb"],
-            layer["presentation_alpha_mask"].astype(np.uint8) * 255,
-        )), mode="RGBA")
-        try:
-            rgba.save(paths["rgba"])
-        finally:
-            rgba.close()
-        for name in (
-            "ownership_mask", "presentation_alpha_mask",
-            "generated_underlay_mask",
-        ):
-            image = Image.fromarray(layer[name].astype(np.uint8) * 255, mode="L")
-            try:
-                image.save(paths[name])
-            finally:
-                image.close()
-        metrics = {name: float(value) for name, value in layer["metrics"].items()}
-        if any(not math.isfinite(value) for value in metrics.values()):
-            raise ValueError("presentation metrics must be finite")
-        components.append({
-            "component_id": node["id"],
-            **{
-                name: {
-                    "path": path.resolve().relative_to(
-                        store.root.resolve()
-                    ).as_posix(),
-                    "sha256": sha256_file(path),
+        for z_index in sorted(groups, reverse=True):
+            group = groups[z_index]
+            for index, node, ownership in group:
+                semantic = (
+                    masks[node["parent_id"]]
+                    if node["parent_id"] is not None
+                    else ownership
+                )
+                if np.any(ownership):
+                    layer = build_presentation_layer(
+                        source_rgb=source,
+                        text_clean_rgb=text_clean,
+                        ownership_mask=ownership,
+                        semantic_mask=semantic,
+                        higher_layer_mask=higher,
+                        text_mask=text_mask,
+                    )
+                else:
+                    empty = np.zeros(source.shape[:2], dtype=bool)
+                    layer = {
+                        "rgb": np.zeros_like(source),
+                        "ownership_mask": empty,
+                        "presentation_alpha_mask": empty.copy(),
+                        "generated_underlay_mask": empty.copy(),
+                        "metrics": {
+                            "boundary_color_mae": 0.0,
+                            "gradient_jump_p95": 0.0,
+                            "added_high_frequency_pixels": 0.0,
+                        },
+                    }
+                filenames = {
+                    "rgba": f"{index:04d}-rgba.png",
+                    "ownership_mask": f"{index:04d}-ownership-mask.png",
+                    "presentation_alpha_mask": (
+                        f"{index:04d}-presentation-alpha-mask.png"
+                    ),
+                    "generated_underlay_mask": (
+                        f"{index:04d}-generated-underlay-mask.png"
+                    ),
                 }
-                for name, path in paths.items()
-            },
-            "metrics": metrics,
-        })
-    manifest_path = output_dir / "presentation-manifest.json"
-    with manifest_path.open("x", encoding="utf-8") as stream:
-        json.dump({
+                paths = {
+                    name: staging / filename
+                    for name, filename in filenames.items()
+                }
+                final_paths = {
+                    name: final_dir / filename
+                    for name, filename in filenames.items()
+                }
+                encoded_rgb = layer["rgb"].copy()
+                encoded_rgb[~layer["presentation_alpha_mask"]] = 0
+                rgba = Image.fromarray(np.dstack((
+                    encoded_rgb,
+                    layer["presentation_alpha_mask"].astype(np.uint8) * 255,
+                )), mode="RGBA")
+                try:
+                    rgba.save(paths["rgba"])
+                finally:
+                    rgba.close()
+                for name in (
+                    "ownership_mask", "presentation_alpha_mask",
+                    "generated_underlay_mask",
+                ):
+                    image = Image.fromarray(
+                        layer[name].astype(np.uint8) * 255, mode="L"
+                    )
+                    try:
+                        image.save(paths[name])
+                    finally:
+                        image.close()
+                metrics = {
+                    name: float(value) for name, value in layer["metrics"].items()
+                }
+                if any(not math.isfinite(value) for value in metrics.values()):
+                    raise ValueError("presentation metrics must be finite")
+                payloads = {}
+                hashes = {}
+                for name, path in paths.items():
+                    payload = _read_bound_file(
+                        path,
+                        output_dir,
+                        max_bytes=max_asset_bytes,
+                        label="presentation staging asset",
+                    )
+                    payloads[name] = payload
+                    hashes[name] = hashlib.sha256(payload).hexdigest()
+                arrays = _decode_presentation_arrays(
+                    payloads,
+                    page_size=(source.shape[1], source.shape[0]),
+                )
+                _validate_presentation_arrays(arrays)
+                component = {
+                    "component_id": node["id"],
+                    **{
+                        name: {
+                            "path": final_path.resolve().relative_to(
+                                store.root.resolve()
+                            ).as_posix(),
+                            "sha256": hashes[name],
+                        }
+                        for name, final_path in final_paths.items()
+                    },
+                    "metrics": metrics,
+                }
+                components_by_id[node["id"]] = component
+                del arrays, encoded_rgb, layer, payloads
+            for _, _, ownership in group:
+                higher |= ownership
+        components = [components_by_id[node["id"]] for node in active_nodes]
+        manifest = {
             "schema_version": 1,
             "source_sha256": sha256_file(source_path),
             "graph_sha256": sha256_file(graph_path),
             "components": components,
-        }, stream, ensure_ascii=False, indent=2, sort_keys=True)
-        stream.write("\n")
-    return manifest_path
+        }
+        staging_manifest = staging / "presentation-manifest.json"
+        with staging_manifest.open("x", encoding="utf-8") as stream:
+            json.dump(
+                manifest, stream, ensure_ascii=False, indent=2, sort_keys=True
+            )
+            stream.write("\n")
+        manifest_payload = _read_bound_file(
+            staging_manifest,
+            output_dir,
+            max_bytes=16 * 1024 * 1024,
+            label="presentation staging manifest",
+        )
+        if json.loads(manifest_payload.decode("utf-8")) != manifest:
+            raise RuntimeError("presentation staging manifest mismatch")
+        _rename_directory_exclusive(staging, final_dir, staging_identity)
+    except BaseException:
+        if staging.exists():
+            _safe_rmtree(staging, staging_identity)
+        raise
+    return final_dir / "presentation-manifest.json"
 
 
 def _active_visual_nodes(graph: dict) -> list[dict]:
@@ -793,6 +917,55 @@ def _active_visual_nodes(graph: dict) -> list[dict]:
         if node["kind"] != "text"
         and node["state"] in {"pending", "pending_gate", "frozen"}
     ]
+
+
+def _decode_presentation_arrays(
+    payloads: dict[str, bytes], *, page_size: tuple[int, int]
+) -> dict[str, Any]:
+    import numpy as np
+
+    arrays = {}
+    for name, mode in (
+        ("rgba", "RGBA"),
+        ("ownership_mask", "L"),
+        ("presentation_alpha_mask", "L"),
+        ("generated_underlay_mask", "L"),
+    ):
+        with Image.open(io.BytesIO(payloads[name])) as image:
+            converted = image.convert(mode)
+            try:
+                if converted.size != page_size:
+                    raise ValueError("presentation asset dimensions differ")
+                arrays[name] = np.asarray(converted).copy()
+            finally:
+                converted.close()
+    return arrays
+
+
+def _validate_presentation_arrays(arrays: dict[str, Any]) -> None:
+    import numpy as np
+
+    for name in (
+        "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ):
+        if not np.all((arrays[name] == 0) | (arrays[name] == 255)):
+            raise ValueError("presentation asset masks must be binary")
+    ownership = arrays["ownership_mask"] == 255
+    alpha = arrays["presentation_alpha_mask"] == 255
+    generated = arrays["generated_underlay_mask"] == 255
+    if np.any(ownership & generated):
+        raise ValueError(
+            "presentation ownership and generated underlay masks overlap"
+        )
+    if not np.array_equal(
+        arrays["rgba"][:, :, 3], arrays["presentation_alpha_mask"]
+    ):
+        raise ValueError("presentation RGBA alpha does not match alpha mask")
+    if not np.array_equal(alpha, ownership | generated):
+        raise ValueError("presentation asset masks do not match RGBA alpha")
+    if np.any(arrays["rgba"][~alpha, :3]):
+        raise ValueError("presentation transparent RGB must be zero")
 
 
 def _load_presentation_assets(
@@ -804,8 +977,8 @@ def _load_presentation_assets(
     graph_sha256: str,
     graph: dict,
     page_size: tuple[int, int],
-) -> list[dict]:
-    import numpy as np
+    component_ids: list[str] | None = None,
+):
 
     manifest = _validate_presentation_manifest(
         manifest_path,
@@ -817,67 +990,77 @@ def _load_presentation_assets(
             node["id"] for node in _active_visual_nodes(graph)
         ],
     )
-    layers = []
-    for component in manifest["components"]:
-        arrays = {}
-        for name, mode in (
-            ("rgba", "RGBA"),
-            ("ownership_mask", "L"),
-            ("presentation_alpha_mask", "L"),
-            ("generated_underlay_mask", "L"),
+    components_by_id = {
+        component["component_id"]: component
+        for component in manifest["components"]
+    }
+    expected_ids = [node["id"] for node in _active_visual_nodes(graph)]
+    ordered_ids = expected_ids if component_ids is None else component_ids
+    if sorted(ordered_ids) != sorted(expected_ids):
+        raise ValueError("presentation asset load order does not match graph")
+    for component_id in ordered_ids:
+        component = components_by_id[component_id]
+        payloads = {}
+        max_bytes = max(1024 * 1024, page_size[0] * page_size[1] * 8)
+        for name in (
+            "rgba", "ownership_mask", "presentation_alpha_mask",
+            "generated_underlay_mask",
         ):
             reference = component[name]
             path = run_root / Path(*PurePosixPath(reference["path"]).parts)
-            with Image.open(path) as image:
-                converted = image.convert(mode)
-                try:
-                    if converted.size != page_size:
-                        raise ValueError("presentation asset dimensions differ")
-                    arrays[name] = np.asarray(converted).copy()
-                finally:
-                    converted.close()
-        for name in (
-            "ownership_mask", "presentation_alpha_mask",
-            "generated_underlay_mask",
-        ):
-            if not np.all((arrays[name] == 0) | (arrays[name] == 255)):
-                raise ValueError("presentation asset masks must be binary")
-        ownership = arrays["ownership_mask"] == 255
-        alpha = arrays["presentation_alpha_mask"] == 255
-        generated = arrays["generated_underlay_mask"] == 255
-        if np.any(ownership & generated):
-            raise ValueError(
-                "presentation ownership and generated underlay masks overlap"
+            payload = _read_bound_file(
+                path,
+                reconstruction,
+                max_bytes=max_bytes,
+                label="presentation asset",
             )
-        if not np.array_equal(
-            arrays["rgba"][:, :, 3], arrays["presentation_alpha_mask"]
-        ):
-            raise ValueError("presentation RGBA alpha does not match alpha mask")
-        if not np.array_equal(alpha, ownership | generated):
-            raise ValueError("presentation asset masks do not match RGBA alpha")
-        layers.append({"component_id": component["component_id"], **arrays})
-    return layers
+            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+                raise RuntimeError(
+                    f"presentation asset hash mismatch: "
+                    f"{component['component_id']}/{name}"
+                )
+            payloads[name] = payload
+        arrays = _decode_presentation_arrays(payloads, page_size=page_size)
+        _validate_presentation_arrays(arrays)
+        del payloads
+        layer = {"component_id": component["component_id"], **arrays}
+        yield layer
+        del layer, arrays
 
 
 def _composite_presentation_layers(
     background: Image.Image,
     graph: dict,
-    layers: list[dict],
+    layers,
 ) -> Image.Image:
-    by_id = {layer["component_id"]: layer for layer in layers}
     composited = background.convert("RGBA")
     try:
         active_nodes = _active_visual_nodes(graph)
         indexed = {node["id"]: index for index, node in enumerate(active_nodes)}
-        for node in sorted(
+        ordered_nodes = sorted(
             active_nodes,
             key=lambda item: (int(item["z_index"]), indexed[item["id"]]),
-        ):
-            overlay = Image.fromarray(by_id[node["id"]]["rgba"], mode="RGBA")
+        )
+        layer_iterator = iter(layers)
+        for node in ordered_nodes:
+            try:
+                layer = next(layer_iterator)
+            except StopIteration as error:
+                raise ValueError("presentation layer stream ended early") from error
+            if layer["component_id"] != node["id"]:
+                raise ValueError("presentation layer stream order does not match graph")
+            overlay = Image.fromarray(layer["rgba"], mode="RGBA")
             try:
                 composited.alpha_composite(overlay)
             finally:
                 overlay.close()
+            del layer
+        try:
+            next(layer_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError("presentation layer stream has extra components")
         return composited.convert("RGB")
     finally:
         composited.close()
@@ -911,18 +1094,31 @@ def _render_component_evidence(
             background = keep(image.convert("RGB"))
         if background.size != source.size:
             raise ValueError("component evidence background dimensions differ")
-        layers = _load_presentation_assets(
-            run_root=run_root,
-            reconstruction=reconstruction,
-            manifest_path=presentation_manifest_path,
-            source_sha256=sha256_file(source_path),
-            graph_sha256=graph_sha256,
-            graph=graph,
-            page_size=source.size,
-        )
-        layer_by_id = {layer["component_id"]: layer for layer in layers}
+        isolation_nodes = _active_visual_nodes(graph)
+        indexed = {node["id"]: index for index, node in enumerate(isolation_nodes)}
+        composite_ids = [
+            node["id"] for node in sorted(
+                isolation_nodes,
+                key=lambda item: (
+                    int(item["z_index"]), indexed[item["id"]]
+                ),
+            )
+        ]
         reconstructed = keep(
-            _composite_presentation_layers(background, graph, layers)
+            _composite_presentation_layers(
+                background,
+                graph,
+                _load_presentation_assets(
+                    run_root=run_root,
+                    reconstruction=reconstruction,
+                    manifest_path=presentation_manifest_path,
+                    source_sha256=sha256_file(source_path),
+                    graph_sha256=graph_sha256,
+                    graph=graph,
+                    page_size=source.size,
+                    component_ids=composite_ids,
+                ),
+            )
         )
 
         numbered = keep(source.copy())
@@ -937,7 +1133,6 @@ def _render_component_evidence(
             (190, 100, 255),
             (60, 220, 210),
         )
-        isolation_nodes = _active_visual_nodes(graph)
         columns = max(1, min(3, len(isolation_nodes)))
         rows = max(1, math.ceil(len(isolation_nodes) / columns))
         cell_width, cell_height, label_height = 320, 240, 24
@@ -945,8 +1140,21 @@ def _render_component_evidence(
             "RGBA", (columns * cell_width, rows * cell_height), (0, 0, 0, 0)
         ))
         isolation_draw = ImageDraw.Draw(isolation)
+        isolation_layers = _load_presentation_assets(
+            run_root=run_root,
+            reconstruction=reconstruction,
+            manifest_path=presentation_manifest_path,
+            source_sha256=sha256_file(source_path),
+            graph_sha256=graph_sha256,
+            graph=graph,
+            page_size=source.size,
+        )
+        isolation_iterator = iter(isolation_layers)
         for index, node in enumerate(isolation_nodes):
-            layer = layer_by_id[node["id"]]
+            try:
+                layer = next(isolation_iterator)
+            except StopIteration as error:
+                raise ValueError("presentation isolation stream ended early") from error
             with ExitStack() as node_images:
                 def keep_node(image: Image.Image) -> Image.Image:
                     node_images.callback(image.close)
@@ -960,27 +1168,26 @@ def _render_component_evidence(
                 )
                 presentation_alpha = keep_node(presentation.getchannel("A"))
                 bbox = presentation_alpha.getbbox()
-                if bbox is None:
-                    raise ValueError("component presentation alpha is empty")
-                isolated = keep_node(presentation.crop(bbox))
-                isolated.thumbnail(
-                    (cell_width - 16, cell_height - label_height - 16),
-                    Image.Resampling.LANCZOS,
-                )
                 cell_left = (index % columns) * cell_width
                 cell_top = (index // columns) * cell_height
                 isolation_draw.text(
                     (cell_left + 4, cell_top + 4), node["id"], fill="white",
                     stroke_width=2, stroke_fill="black",
                 )
-                isolation.alpha_composite(
-                    isolated,
-                    (
-                        cell_left + (cell_width - isolated.width) // 2,
-                        cell_top + label_height
-                        + (cell_height - label_height - isolated.height) // 2,
-                    ),
-                )
+                if bbox is not None:
+                    isolated = keep_node(presentation.crop(bbox))
+                    isolated.thumbnail(
+                        (cell_width - 16, cell_height - label_height - 16),
+                        Image.Resampling.LANCZOS,
+                    )
+                    isolation.alpha_composite(
+                        isolated,
+                        (
+                            cell_left + (cell_width - isolated.width) // 2,
+                            cell_top + label_height
+                            + (cell_height - label_height - isolated.height) // 2,
+                        ),
+                    )
                 color_layer = keep_node(Image.new("RGB", source.size, color))
                 numbered.paste(color_layer, (0, 0), alpha)
                 ownership.paste(color_layer, (0, 0), mask)
@@ -995,6 +1202,13 @@ def _render_component_evidence(
                         stroke_fill="black",
                         anchor="mm",
                     )
+            del layer
+        try:
+            next(isolation_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError("presentation isolation stream has extra components")
 
         paths = {}
         for name, evidence_image in (
@@ -1339,17 +1553,31 @@ def _quality_assets(
     with Image.open(background_path) as image:
         background_image = image.convert("RGB")
     try:
-        layers = _load_presentation_assets(
-            run_root=store.root,
-            reconstruction=store.root / "pages" / page_id / "reconstruction",
-            manifest_path=presentation_manifest,
-            source_sha256=sha256_file(source_path),
-            graph_sha256=sha256_file(graph_path),
-            graph=graph,
-            page_size=background_image.size,
-        )
+        active_nodes = _active_visual_nodes(graph)
+        indexed = {node["id"]: index for index, node in enumerate(active_nodes)}
+        component_ids = [
+            node["id"] for node in sorted(
+                active_nodes,
+                key=lambda item: (
+                    int(item["z_index"]), indexed[item["id"]]
+                ),
+            )
+        ]
         reconstructed_image = _composite_presentation_layers(
-            background_image, graph, layers
+            background_image,
+            graph,
+            _load_presentation_assets(
+                run_root=store.root,
+                reconstruction=(
+                    store.root / "pages" / page_id / "reconstruction"
+                ),
+                manifest_path=presentation_manifest,
+                source_sha256=sha256_file(source_path),
+                graph_sha256=sha256_file(graph_path),
+                graph=graph,
+                page_size=background_image.size,
+                component_ids=component_ids,
+            ),
         )
     finally:
         background_image.close()

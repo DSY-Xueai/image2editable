@@ -235,6 +235,386 @@ def _build_test_presentation_manifest(
     return manifest_path, hashlib.sha256(graph_path.read_bytes()).hexdigest()
 
 
+def _manifest_asset_path(
+    run_root: Path, manifest: dict, component_index: int, field: str
+) -> Path:
+    reference = manifest["components"][component_index][field]
+    return run_root / Path(*PurePosixPath(reference["path"]).parts)
+
+
+def test_presentation_rgba_zeroes_only_transparent_rgb(tmp_path: Path) -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source_path = tmp_path / "source.png"
+    mask_path = tmp_path / "mask.png"
+    source = np.arange(6 * 4 * 3, dtype=np.uint8).reshape((4, 6, 3))
+    ownership = np.zeros((4, 6), dtype=bool)
+    ownership[:, :3] = True
+    Image.fromarray(source, mode="RGB").save(source_path)
+    Image.fromarray(ownership.astype(np.uint8) * 255, mode="L").save(mask_path)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 3, 4], "z_index": 0, "text_ids": [],
+    }]}
+    manifest_path, _ = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    expected = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=ownership,
+        semantic_mask=ownership,
+        higher_layer_mask=np.zeros_like(ownership),
+        text_mask=np.zeros_like(ownership),
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    with Image.open(_manifest_asset_path(tmp_path, manifest, 0, "rgba")) as image:
+        rgba = np.asarray(image.convert("RGBA")).copy()
+
+    alpha = expected["presentation_alpha_mask"]
+    assert np.array_equal(rgba[:, :, 3] == 255, alpha)
+    assert np.all(rgba[~alpha, :3] == 0)
+    assert np.array_equal(rgba[alpha, :3], expected["rgb"][alpha])
+
+
+def test_presentation_assets_publish_atomically_and_retry_after_save_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    Image.new("L", (4, 4), 255).save(mask_path)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+    graph_path = tmp_path / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    real_save = Image.Image.save
+    save_count = 0
+
+    def fail_second_save(image, *args, **kwargs):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 2:
+            raise RuntimeError("controlled presentation save failure")
+        return real_save(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", fail_second_save)
+    with pytest.raises(RuntimeError, match="controlled presentation save failure"):
+        legacy._build_presentation_assets(
+            types.SimpleNamespace(root=tmp_path),
+            source_path=source_path,
+            text_clean_path=source_path,
+            graph_path=graph_path,
+            output_dir=tmp_path,
+        )
+
+    final_dir = tmp_path / "presentation-assets"
+    assert not final_dir.exists()
+    assert not list(tmp_path.glob(".presentation-assets.tmp-*"))
+
+    monkeypatch.setattr(Image.Image, "save", real_save)
+    real_sha256_file = legacy.sha256_file
+
+    def reject_staging_hash(path):
+        assert not Path(path).parent.name.startswith(".presentation-assets.tmp-")
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(legacy, "sha256_file", reject_staging_hash)
+    manifest_path = legacy._build_presentation_assets(
+        types.SimpleNamespace(root=tmp_path),
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph_path=graph_path,
+        output_dir=tmp_path,
+    )
+    assert manifest_path == final_dir / "presentation-manifest.json"
+    assert manifest_path.is_file()
+
+    conflict_output = tmp_path / "conflict"
+    conflict_output.mkdir()
+    conflict_final = conflict_output / "presentation-assets"
+    conflict_final.mkdir()
+    with pytest.raises(RuntimeError, match="presentation assets already published"):
+        legacy._build_presentation_assets(
+            types.SimpleNamespace(root=tmp_path),
+            source_path=source_path,
+            text_clean_path=source_path,
+            graph_path=graph_path,
+            output_dir=conflict_output,
+        )
+    assert list(conflict_final.iterdir()) == []
+    assert not list(conflict_output.glob(".presentation-assets.tmp-*"))
+
+
+def test_presentation_assets_keep_fully_occluded_component_transparent(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    text_mask_path = tmp_path / "text-mask.png"
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    Image.new("RGB", (4, 4), "black").save(background_path)
+    Image.new("L", (4, 4), 0).save(text_mask_path)
+    Image.new("L", (4, 4), 255).save(mask_path)
+    mask_sha256 = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    graph = {"nodes": [
+        {
+            "id": "lower", "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": mask_path.name,
+            "mask_sha256": mask_sha256, "bbox": [0, 0, 4, 4],
+            "z_index": 0, "text_ids": [],
+        },
+        {
+            "id": "upper", "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": mask_path.name,
+            "mask_sha256": mask_sha256, "bbox": [0, 0, 4, 4],
+            "z_index": 1, "text_ids": [],
+        },
+    ]}
+    manifest_path, _ = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert [item["component_id"] for item in manifest["components"]] == [
+        "lower", "upper",
+    ]
+    for field in (
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ):
+        with Image.open(_manifest_asset_path(tmp_path, manifest, 0, field)) as image:
+            assert not np.any(np.asarray(image))
+    assert all(
+        value == 0.0 for value in manifest["components"][0]["metrics"].values()
+    )
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir()
+    evidence = legacy._render_component_evidence(
+        source_path=source_path,
+        graph=graph,
+        text_mask_path=text_mask_path,
+        background_path=background_path,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=hashlib.sha256(
+            (tmp_path / "component-graph.json").read_bytes()
+        ).hexdigest(),
+        output_dir=evidence_dir,
+        text_items=[],
+    )
+    with Image.open(evidence["component-isolation.png"]) as isolation:
+        assert np.any(np.asarray(isolation))
+
+
+def test_presentation_assets_allow_empty_active_graph(tmp_path: Path) -> None:
+    source_path = tmp_path / "source.png"
+    background_path = tmp_path / "background.png"
+    text_mask_path = tmp_path / "text-mask.png"
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    Image.new("RGB", (4, 4), "white").save(background_path)
+    Image.new("L", (4, 4), 0).save(text_mask_path)
+    Image.new("L", (4, 4), 255).save(mask_path)
+    graph = {"nodes": [{
+        "id": "inactive", "kind": "parent", "parent_id": None,
+        "state": "inactive", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+    manifest_path, graph_sha256 = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["components"] == []
+    evidence = legacy._render_component_evidence(
+        source_path=source_path,
+        graph=graph,
+        text_mask_path=text_mask_path,
+        background_path=background_path,
+        presentation_manifest_path=manifest_path,
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        graph_sha256=graph_sha256,
+        output_dir=tmp_path,
+        text_items=[],
+    )
+    with Image.open(evidence["reconstructed.png"]) as reconstructed:
+        assert reconstructed.getpixel((0, 0)) == (255, 255, 255)
+
+
+def test_presentation_asset_decode_rejects_post_validation_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
+    real_validate = legacy._validate_presentation_manifest
+
+    def replace_after_validation(*args, **kwargs):
+        manifest = real_validate(*args, **kwargs)
+        rgba_path = _manifest_asset_path(tmp_path, manifest, 0, "rgba")
+        Image.new("RGBA", (4, 4), (0, 255, 0, 255)).save(rgba_path)
+        return manifest
+
+    monkeypatch.setattr(
+        legacy, "_validate_presentation_manifest", replace_after_validation
+    )
+    with pytest.raises(RuntimeError, match="presentation asset hash mismatch"):
+        for _ in legacy._load_presentation_assets(
+            run_root=tmp_path,
+            reconstruction=tmp_path,
+            manifest_path=manifest_path,
+            source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            graph_sha256=graph_sha256,
+            graph=graph,
+            page_size=(4, 4),
+        ):
+            pass
+
+
+def test_presentation_higher_masks_use_one_reverse_z_accumulator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.component_underlay as component_underlay
+
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (4, 1), "red").save(source_path)
+    specs = (("mid_a", 1, 0), ("low", 0, 1), ("top", 2, 2), ("mid_b", 1, 3))
+    nodes = []
+    for component_id, z_index, x in specs:
+        mask_path = tmp_path / f"{component_id}.png"
+        mask = np.zeros((1, 4), dtype=np.uint8)
+        mask[0, x] = 255
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": mask_path.name,
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [x, 0, x + 1, 1], "z_index": z_index, "text_ids": [],
+        })
+    captured = {}
+
+    def capture_layer(**kwargs):
+        ownership = kwargs["ownership_mask"]
+        x = int(np.flatnonzero(ownership)[0])
+        captured[x] = kwargs["higher_layer_mask"].copy()
+        return {
+            "rgb": kwargs["source_rgb"].copy(),
+            "ownership_mask": ownership.copy(),
+            "presentation_alpha_mask": ownership.copy(),
+            "generated_underlay_mask": np.zeros_like(ownership),
+            "metrics": {
+                "boundary_color_mae": 0.0,
+                "gradient_jump_p95": 0.0,
+                "added_high_frequency_pixels": 0.0,
+            },
+        }
+
+    real_zeros = np.zeros
+    zero_calls = []
+
+    def counted_zeros(*args, **kwargs):
+        zero_calls.append((args, kwargs))
+        return real_zeros(*args, **kwargs)
+
+    monkeypatch.setattr(component_underlay, "build_presentation_layer", capture_layer)
+    monkeypatch.setattr(np, "zeros", counted_zeros)
+    manifest_path, _ = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph={"nodes": nodes},
+        graph_dir=tmp_path,
+        output_dir=tmp_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert [item["component_id"] for item in manifest["components"]] == [
+        item[0] for item in specs
+    ]
+    assert len(zero_calls) == 3
+    assert not np.any(captured[2])
+    assert np.array_equal(captured[0], np.array([[False, False, True, False]]))
+    assert np.array_equal(captured[3], np.array([[False, False, True, False]]))
+    assert np.array_equal(captured[1], np.array([[True, False, True, True]]))
+
+
+def test_presentation_loader_and_compositor_consume_layers_incrementally(
+    tmp_path: Path,
+) -> None:
+    import gc
+    import weakref
+
+    source, graph, manifest_path, graph_sha256 = (
+        _presentation_asset_validation_case(tmp_path)
+    )
+    loaded = legacy._load_presentation_assets(
+        run_root=tmp_path,
+        reconstruction=tmp_path,
+        manifest_path=manifest_path,
+        source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        graph_sha256=graph_sha256,
+        graph=graph,
+        page_size=(4, 4),
+    )
+    assert iter(loaded) is loaded
+    assert next(loaded)["component_id"] == "component"
+    with pytest.raises(StopIteration):
+        next(loaded)
+
+    class Layer(dict):
+        pass
+
+    first_reference = None
+
+    def layers():
+        nonlocal first_reference
+        first = Layer(component_id="first", rgba=np.zeros((1, 1, 4), dtype=np.uint8))
+        first_reference = weakref.ref(first)
+        yield first
+        del first
+        gc.collect()
+        assert first_reference() is None
+        yield Layer(component_id="second", rgba=np.zeros((1, 1, 4), dtype=np.uint8))
+        yield Layer(component_id="third", rgba=np.zeros((1, 1, 4), dtype=np.uint8))
+
+    stream_graph = {"nodes": [
+        {"id": component_id, "kind": "parent", "state": "pending", "z_index": index}
+        for index, component_id in enumerate(("first", "second", "third"))
+    ]}
+    background = Image.new("RGB", (1, 1), "black")
+    try:
+        composited = legacy._composite_presentation_layers(
+            background, stream_graph, layers()
+        )
+        composited.close()
+    finally:
+        background.close()
+
+
 def _local_receipt(tmp_path: Path) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -1569,7 +1949,7 @@ def _load_test_presentation_assets(
     manifest_path: Path,
     graph_sha256: str,
 ) -> None:
-    legacy._load_presentation_assets(
+    for _ in legacy._load_presentation_assets(
         run_root=tmp_path,
         reconstruction=tmp_path,
         manifest_path=manifest_path,
@@ -1577,7 +1957,8 @@ def _load_test_presentation_assets(
         graph_sha256=graph_sha256,
         graph=graph,
         page_size=(4, 4),
-    )
+    ):
+        pass
 
 
 def test_presentation_assets_reject_non_binary_rgba_alpha(tmp_path: Path) -> None:
