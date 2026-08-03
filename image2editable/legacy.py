@@ -1191,9 +1191,13 @@ def _execute_legacy_round(
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
-    def sam_runner(**prompt):
+    def sam_runner(*, image, box, positive, negative):
         return run_component_prompt_worker(
-            pixels, work_dir=output_dir.parent, **prompt
+            image,
+            box=box,
+            positive=positive,
+            negative=negative,
+            work_dir=output_dir.parent,
         )
 
     next_graph = execute_component_action_round(

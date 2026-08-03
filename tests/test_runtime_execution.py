@@ -262,6 +262,57 @@ def test_image_component_plan_e2e_pauses_then_assembles_once(
     assert result["final_component_ids"] == ["component_0001"]
 
 
+def test_image_component_retry_passes_source_image_once_to_sam_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(monkeypatch)
+    calls: list[dict[str, Any]] = []
+
+    def fake_sam_worker(image, *, box, positive, negative, work_dir):
+        calls.append({
+            "shape": image.shape,
+            "box": box,
+            "positive": positive,
+            "negative": negative,
+            "work_dir": Path(work_dir),
+        })
+        mask = np.zeros(image.shape[:2], dtype=bool)
+        mask[8:24, 8:24] = True
+        return mask
+
+    monkeypatch.setattr(
+        "scripts.sam_worker.run_component_prompt_worker", fake_sam_worker
+    )
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", slide_size="16:9",
+        agent_provider="host",
+    )
+    assert runtime.run_job(run_dir)["status"] == "awaiting_agent"
+    _record_current_component_plan(
+        run_dir,
+        tmp_path / "retry-plan.json",
+        [{
+            "action": "retry_with_box",
+            "object_ids": ["component_0001"],
+            "parameters": {"box": [0.25, 0.25, 0.75, 0.75]},
+            "confidence": 0.95,
+            "evidence": ["retry the incomplete component boundary"],
+        }],
+    )
+
+    runtime.run_job(run_dir)
+
+    assert calls == [{
+        "shape": (32, 32, 3),
+        "box": [8.0, 8.0, 24.0, 24.0],
+        "positive": [],
+        "negative": [],
+        "work_dir": run_dir / "pages/page_001/reconstruction",
+    }]
+
+
 def test_local_provider_runs_complete_without_host_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

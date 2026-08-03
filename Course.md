@@ -25,6 +25,7 @@
 - 保留既有 `text_ghost` 兼容报告、`over_merged_component` 跨轮 sticky、merge/collapse 非活动来源 provenance、紧 bbox 低内存与 TOCTOU 门禁；Agent confidence 不能放宽任何硬失败。
 - 页面质量门禁现显式使用当前 validated graph 的活动视觉组件数，不再用历史 `initial_component_count` 猜测本轮候选。仅剩 frozen 组件且本轮报告为空时仍执行页级文字残留等检查，不解冻或重评 frozen；初始非空但当前活动视觉组件为零仍硬拒绝，不能通过丢弃整页组件绕过门禁。
 - 组件执行现会在像素 ownership 生效前识别近乎完全套叠的活动父级 pair，以 `contained_parent_review` 暂停双方冻结；精确 pair 会写入下一批 Agent 可见的质量证据。Agent 查看两个隔离单元后可选择唯一像素所有者；若两者确实独立，则必须对双方显式高置信 `accept`，且两条 evidence 都引用 pair 的两个 ID，才允许共同保留，不再由固定面积规则替 Agent 决定。原始候选遮罩不被独占结果覆盖写回；最终发布仍使用唯一 ownership，并把去字区域的连续底色交给唯一组件，避免 PowerPoint 分别缩放重复父层时产生字形白边、浅灰残影或矩形补丁。
+- Host/Local 重修适配层现严格按回调契约把源图、框和正负点各传一次；修复 `retry_with_box` / `retry_with_points` 首次执行时重复传入 `image` 导致整页安全失败的问题，不改变 SAM 分割算法或五批上限。
 
 ## 关键文件
 
@@ -58,7 +59,8 @@ image2editable models status
 ## 验证事实
 
 - 本轮 TDD 红灯覆盖多项 OCR 只取 max、部分已知文字导致整候选跳过、OCR 返回顺序变化、逐项 conflict bbox/ID、跨轮 diagnostics 删除/置空/替换、伪造空批次、整页 hash/RGB 副本和首轮视觉残留；32/96 上限另以 40/97 mutation 验证测试确实能捕获旧缺陷。
-- 最新核心回归为 `507 passed, 9 skipped`，历史回归与 Task10 E2E 为 `258 passed`，全量为 `1493 passed, 20 skipped`。prepared-page 继续兼容读取 v1/v2；独立代码复审确认原始遮罩恢复、页级失败拦截、pair 语义批准与重复计划保护均无未关闭的 Critical/Important。
+- 最新核心回归为 `507 passed, 9 skipped`，历史回归与 Task10 E2E 为 `258 passed`，全量为 `1494 passed, 20 skipped`。prepared-page 继续兼容读取 v1/v2；独立代码复审确认原始遮罩恢复、页级失败拦截、pair 语义批准与重复计划保护均无未关闭的 Critical/Important。
+- 重修适配回归已先精确复现 `got multiple values for argument 'image'`，再验证源图只传一次、归一化框正确映射；组件重修与运行时相关回归为 `295 passed, 7 skipped`。
 - `wsl和虚拟机对比.png` 已用全新 r11 Run 完成 Host Agent 两批闭环：首批冻结 13 个独立图标，第二批依据精确包含关系保留完整表格 `parent_0002` 与独立页脚 `parent_0005`，丢弃冗余子区域 `parent_0004`、`parent_0006`。最终含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；原画幅与 16:9 均经 PowerPoint COM 重开和原生渲染，删除全部文字对象后重新保存、重开所得图片层仍保留完整图标与结构，未见文字轮廓、浅灰残影或白色字形补丁。
 - 真实 r3 已确认 targeted OCR 能把全页漏检的小型候选文字恢复为可编辑对象，同时暴露局部 crop 导致的字号放大；该字号回归已有通用自动化测试和修复，仍需重新生成真实输出后再宣称真实验收通过。
 
