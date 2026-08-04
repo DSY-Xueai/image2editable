@@ -1168,6 +1168,26 @@ def test_quality_text_refinement_preserves_structure_crossing_text_box() -> None
     assert not np.any(np.all(refined[glyph] == (245, 245, 245), axis=1))
 
 
+def test_quality_text_refinement_uses_colored_horizontal_container() -> None:
+    from image2editable import legacy
+
+    source = np.full((100, 180, 3), 255, dtype=np.uint8)
+    source[20:80, 20:160] = (30, 150, 70)
+    source[45:56, 70:111] = 245
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[45:56, 70:111] = True
+
+    refined = legacy._refine_quality_text_clean(
+        source, source.copy(), text_mask,
+        [{"box": [70, 22, 41, 56]}],
+    )
+
+    assert np.max(np.abs(
+        refined[50, 90].astype(np.int16) - np.array((30, 150, 70))
+    )) <= 2
+    assert np.all(refined[10, 90] == 255)
+
+
 def test_disconnected_glyph_strokes_are_aggregated_within_one_text_region() -> None:
     case = _text_isolation_case()
     case["source"][case["component_mask"]] = (70, 125, 190)

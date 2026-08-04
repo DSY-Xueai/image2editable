@@ -317,6 +317,10 @@ _ACTION_PARAMETERS = {
     "rebuild_background": frozenset({"margin_ratio"}),
     "absorb_into_parent": frozenset(),
 }
+_OPTIONAL_ACTION_PARAMETERS = {
+    "retry_with_box": frozenset({"independent"}),
+    "retry_with_points": frozenset({"independent"}),
+}
 _SINGLE_OBJECT_ACTIONS = frozenset(
     {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "suppress_text", "collapse_to_parent"}
 )
@@ -472,6 +476,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                 name == "suppress_text"
                 and frozen_targets == {object_ids[0]}
             )
+            or name == "rebuild_background"
         ):
             raise ValueError("component action object is frozen")
         if name != "rebuild_background":
@@ -479,8 +484,15 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                 raise ValueError("component plan has conflicting object actions")
             touched.update(object_ids)
         parameters = action["parameters"]
-        if not isinstance(parameters, dict) or set(parameters) != _ACTION_PARAMETERS[name]:
+        optional_parameters = _OPTIONAL_ACTION_PARAMETERS.get(name, frozenset())
+        if (
+            not isinstance(parameters, dict)
+            or not _ACTION_PARAMETERS[name] <= set(parameters)
+            or not set(parameters) <= _ACTION_PARAMETERS[name] | optional_parameters
+        ):
             raise ValueError("component action parameters are invalid")
+        if "independent" in parameters and type(parameters["independent"]) is not bool:
+            raise ValueError("component action independent parameter is invalid")
         confidence = action["confidence"]
         if type(confidence) not in {int, float} or not math.isfinite(confidence) or not 0 <= confidence <= 1:
             raise ValueError("component action confidence is invalid")

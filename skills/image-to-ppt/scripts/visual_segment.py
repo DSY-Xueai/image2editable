@@ -100,6 +100,11 @@ def execute_component_actions(
                 nodes[parent]["state"] in {"inactive", "pending"}
                 and all(nodes[value]["state"] == "pending" for value in absorbed)
             )
+        elif name == "rebuild_background":
+            valid_states = all(
+                nodes[value]["state"] in {"pending", "frozen"}
+                for value in object_ids
+            )
         else:
             allowed_states = {"pending"}
             valid_states = all(
@@ -218,7 +223,10 @@ def execute_component_actions(
                 raise VisualSegmentationError("SAM component retry returned an invalid mask")
             masks[component_id] = proposed
             parent_id = nodes[component_id]["parent_id"]
-            if parent_id is not None and np.any(proposed & ~masks[parent_id]):
+            if parent_id is not None and (
+                parameters.get("independent") is True
+                or np.any(proposed & ~masks[parent_id])
+            ):
                 nodes[component_id]["kind"] = "parent"
                 nodes[component_id]["parent_id"] = None
         else:

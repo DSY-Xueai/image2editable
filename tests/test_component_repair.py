@@ -1939,6 +1939,22 @@ def test_execute_background_rebuild_action_preserves_component_graph(tmp_path: P
     assert result == graph
 
 
+def test_execute_background_rebuild_can_clear_frozen_visuals(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    next(node for node in graph["nodes"] if node["id"] == "left")[
+        "state"
+    ] = "frozen"
+
+    result = execute_component_actions(
+        image, graph,
+        [_action("rebuild_background", ["left", "right"], {"margin_ratio": 0.01})],
+        sam_runner=None, input_dir=input_dir,
+        output_dir=tmp_path / "round-background-frozen",
+    )
+
+    assert result == graph
+
+
 def test_execute_absorb_unions_visuals_into_one_parent(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     parent = next(node for node in graph["nodes"] if node["id"] == "parent")
@@ -2849,6 +2865,29 @@ def test_sam_prompt_coordinates_and_attach_text_do_not_merge_pixels(tmp_path: Pa
     by_id = {node["id"]: node for node in result["nodes"]}
     assert by_id["right"]["text_ids"] == ["text"]
     assert int((np.asarray(Image.open(output / by_id["right"]["mask"])) > 0).sum()) == 16
+
+
+def test_prompt_retry_promotes_small_visual_from_overbroad_parent(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+
+    result = execute_component_actions(
+        image, graph,
+        [_action("retry_with_points", ["left"], {
+            "positive": [[0.2, 0.2]], "negative": [[0.8, 0.8]],
+            "independent": True,
+        })],
+        sam_runner=lambda **kwargs: np.asarray(
+            Image.open(input_dir / "masks/left.png")
+        ) > 0,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-promote-small-retry",
+    )
+
+    node = next(node for node in result["nodes"] if node["id"] == "left")
+    assert node["kind"] == "parent"
+    assert node["parent_id"] is None
 
 
 def test_expand_stays_inside_parent_and_collapse_activates_parent(tmp_path: Path) -> None:

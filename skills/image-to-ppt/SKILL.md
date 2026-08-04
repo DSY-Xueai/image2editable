@@ -106,7 +106,7 @@ prepare 会在全页 OCR 和首轮视觉候选完成后，对小型候选做两�
 }
 ```
 
-组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认重试结果是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
 
 PPTX 的整页截图候选先使用决策路由：
 

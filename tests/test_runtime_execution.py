@@ -285,6 +285,57 @@ def test_presentation_rgba_zeroes_only_transparent_rgb(tmp_path: Path) -> None:
     assert np.array_equal(rgba[alpha, :3], expected["rgb"][alpha])
 
 
+def test_presentation_assets_assign_text_hole_to_colored_shape(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "source.png"
+    clean_path = tmp_path / "text-clean.png"
+    visual_path = tmp_path / "visual.png"
+    text_path = tmp_path / "text.png"
+    source = np.full((20, 40, 3), 255, dtype=np.uint8)
+    source[4:16, 4:36] = (20, 160, 60)
+    source[8:12, 16:24] = 255
+    clean = source.copy()
+    clean[8:12, 16:24] = (20, 160, 60)
+    visual = np.zeros((20, 40), dtype=np.uint8)
+    visual[4:16, 4:36] = 255
+    visual[8:12, 16:24] = 0
+    text = np.zeros((20, 40), dtype=np.uint8)
+    text[8:12, 16:24] = 255
+    Image.fromarray(source).save(source_path)
+    Image.fromarray(clean).save(clean_path)
+    Image.fromarray(visual).save(visual_path)
+    Image.fromarray(text).save(text_path)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": visual_path.name,
+        "mask_sha256": hashlib.sha256(visual_path.read_bytes()).hexdigest(),
+        "bbox": [4, 4, 36, 16], "z_index": 0, "text_ids": [],
+    }, {
+        "id": "text", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": text_path.name,
+        "mask_sha256": hashlib.sha256(text_path.read_bytes()).hexdigest(),
+        "bbox": [16, 8, 24, 12], "z_index": 1, "text_ids": [],
+    }]}
+
+    manifest_path, _ = _build_test_presentation_manifest(
+        tmp_path, source_path=source_path, text_clean_path=clean_path,
+        graph=graph, graph_dir=tmp_path, output_dir=tmp_path,
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    with Image.open(_manifest_asset_path(
+        tmp_path, manifest, 0, "ownership_mask"
+    )) as image:
+        ownership = np.asarray(image.convert("L")) > 0
+    with Image.open(_manifest_asset_path(
+        tmp_path, manifest, 0, "rgba"
+    )) as image:
+        rgba = np.asarray(image.convert("RGBA"))
+
+    assert np.all(ownership[8:12, 16:24])
+    assert np.all(rgba[8:12, 16:24, :3] == (20, 160, 60))
+
+
 def test_presentation_assets_publish_atomically_and_retry_after_save_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2409,6 +2460,48 @@ def test_background_rebuild_cleans_discarded_component_residual(
 
     with Image.open(output) as rebuilt:
         assert rebuilt.getpixel((20, 15)) == (255, 255, 255)
+
+
+def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    restored = tmp_path / "text-clean.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    Image.new("RGB", (40, 30), "white").save(source)
+    Image.new("RGB", (40, 30), (210, 210, 210)).save(current)
+    clean = Image.new("RGB", (40, 30), "white")
+    draw = ImageDraw.Draw(clean)
+    draw.line((4, 20, 35, 20), fill="blue", width=1)
+    draw.rectangle((12, 8, 18, 14), fill="red")
+    clean.save(restored)
+    Image.new("L", (40, 30), 0).save(text_mask)
+    selected_mask = masks / "selected.png"
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((12, 8, 18, 14), fill=255)
+    mask.save(selected_mask)
+    graph = {"nodes": [{
+        "id": "selected", "kind": "child", "parent_id": "parent",
+        "state": "frozen", "mask": "masks/selected.png",
+        "mask_sha256": hashlib.sha256(selected_mask.read_bytes()).hexdigest(),
+        "bbox": [12, 8, 19, 15], "z_index": 0, "text_ids": [],
+    }]}
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        restore_background_path=restored, component_ids={"selected"},
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.01, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((15, 11)) == (255, 255, 255)
+        assert rebuilt.getpixel((20, 20)) == (0, 0, 255)
 
 
 def test_background_rebuild_does_not_expand_text_box_into_neighbor_content(

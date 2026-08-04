@@ -772,14 +772,28 @@ def _build_presentation_assets(
             raise ValueError("presentation graph mask dimensions differ")
         masks[node["id"]] = mask
 
-    active_nodes = _active_visual_nodes(graph)
-    ownership_masks = resolve_visual_mask_ownership(
-        active_nodes, [masks[node["id"]] for node in active_nodes]
-    )
     text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_items = []
     for node in graph["nodes"]:
         if node["kind"] == "text" and node["state"] == "frozen":
             text_mask |= masks[node["id"]]
+            left, top, right, bottom = node["bbox"]
+            text_items.append({
+                "box": [left, top, right - left, bottom - top]
+            })
+    active_nodes = _active_visual_nodes(graph)
+    assigned_masks = _assign_text_regions_to_component_masks(
+        [masks[node["id"]] for node in active_nodes],
+        text_mask,
+        text_items,
+    )
+    ownership_masks = resolve_visual_mask_ownership(
+        active_nodes, assigned_masks
+    )
+    assigned_by_id = {
+        node["id"]: mask
+        for node, mask in zip(active_nodes, assigned_masks, strict=True)
+    }
 
     final_dir = output_dir / "presentation-assets"
     staging = output_dir / f".presentation-assets.tmp-{uuid.uuid4().hex}"
@@ -803,11 +817,9 @@ def _build_presentation_assets(
         for z_index in sorted(groups, reverse=True):
             group = groups[z_index]
             for index, node, ownership in group:
-                semantic = (
-                    masks[node["parent_id"]]
-                    if node["parent_id"] is not None
-                    else ownership
-                )
+                semantic = assigned_by_id[node["id"]]
+                if node["parent_id"] is not None:
+                    semantic = masks[node["parent_id"]] | semantic
                 if np.any(ownership):
                     layer = build_presentation_layer(
                         source_rgb=source,
@@ -1321,6 +1333,8 @@ def _rebuild_canvas_background(
     *,
     source_path: Path,
     current_background_path: Path,
+    restore_background_path: Path | None = None,
+    component_ids: set[str] | None = None,
     graph: dict,
     graph_dir: Path,
     text_mask_path: Path,
@@ -1336,15 +1350,26 @@ def _rebuild_canvas_background(
         source = np.asarray(image.convert("RGB")).copy()
     with Image.open(current_background_path) as image:
         current = np.asarray(image.convert("RGB")).copy()
+    restored = None
+    if restore_background_path is not None:
+        with Image.open(restore_background_path) as image:
+            restored = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_repair = np.asarray(image.convert("L")) > 0
-    if source.shape != current.shape or text_repair.shape != source.shape[:2]:
+    if (
+        source.shape != current.shape
+        or (restored is not None and restored.shape != source.shape)
+        or text_repair.shape != source.shape[:2]
+    ):
         raise ValueError("background rebuild input dimensions differ")
 
     graph_root = graph_dir.resolve()
     visual_repair = np.zeros(text_repair.shape, dtype=bool)
     for node in graph["nodes"]:
-        if node["kind"] == "text":
+        if (
+            node["kind"] == "text"
+            or (component_ids is not None and node["id"] not in component_ids)
+        ):
             continue
         mask_path = (graph_dir / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(graph_root):
@@ -1362,9 +1387,9 @@ def _rebuild_canvas_background(
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
     )
-    repair = text_repair | (
-        cv2.dilate(visual_repair.astype(np.uint8), kernel) > 0
-    )
+    repair = cv2.dilate(visual_repair.astype(np.uint8), kernel) > 0
+    if restored is None:
+        repair |= text_repair
     border_width = max(2, round(min(height, width) * 0.03))
     border = np.zeros(repair.shape, dtype=bool)
     border[:border_width] = True
@@ -1379,7 +1404,7 @@ def _rebuild_canvas_background(
     if float(np.percentile(deviations, 90)) > 12.0:
         raise ValueError("background rebuild canvas border is not uniform")
 
-    rebuilt = current.copy()
+    rebuilt = current.copy() if restored is None else restored.copy()
     rebuilt[repair] = np.rint(canvas).astype(np.uint8)
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
     return output_path
@@ -1500,16 +1525,56 @@ def _refine_quality_text_clean(
         raise ValueError("quality text refinement dimensions differ")
     if not text_items or not np.any(text):
         return cleaned.copy()
+    import cv2
+
     module = importlib.import_module("image_to_ppt")
+    repair_mask = cv2.dilate(
+        text.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ).astype(bool)
     refined = cleaned.copy()
     for item in text_items:
         box = item.get("box") if isinstance(item, dict) else None
         if not isinstance(box, (list, tuple)) or len(box) != 4:
             continue
-        refined = module._interpolate_text_item_boxes(
-            refined, [item], padding=_text_item_repair_padding_px(int(box[3]))
+        x, y, box_width, box_height = (int(value) for value in box)
+        padding = _text_item_repair_padding_px(box_height)
+        x1, y1 = max(1, x - padding), max(1, y - padding)
+        x2 = min(source.shape[1] - 1, x + box_width + padding)
+        y2 = min(source.shape[0] - 1, y + box_height + padding)
+        if x1 >= x2 or y1 >= y2:
+            continue
+        outside_text = ~repair_mask[y1:y2, x1:x2]
+        refined[y1:y2, x1:x2][outside_text] = source[
+            y1:y2, x1:x2
+        ][outside_text]
+        candidate = module._interpolate_text_item_boxes(
+            refined, [item], padding=padding
         )
-    import cv2
+        horizontal_boundary = np.concatenate((
+            refined[y1:y2, x1 - 1], refined[y1:y2, x2]
+        ))
+        vertical_boundary = np.concatenate((
+            refined[y1 - 1, x1:x2], refined[y2, x1:x2]
+        ))
+        horizontal_chroma = float(np.median(np.ptp(
+            horizontal_boundary.astype(np.int16), axis=1
+        )))
+        vertical_chroma = float(np.median(np.ptp(
+            vertical_boundary.astype(np.int16), axis=1
+        )))
+        if horizontal_chroma > vertical_chroma + 8.0:
+            weight = np.linspace(
+                0.0, 1.0, x2 - x1, dtype=np.float32
+            )[None, :, None]
+            horizontal = (
+                refined[y1:y2, x1 - 1][:, None] * (1.0 - weight)
+                + refined[y1:y2, x2][:, None] * weight
+            )
+            candidate[y1:y2, x1:x2] = np.clip(
+                horizontal, 0, 255
+            ).astype(np.uint8)
+        region = repair_mask[y1:y2, x1:x2]
+        refined[y1:y2, x1:x2][region] = candidate[y1:y2, x1:x2][region]
 
     short_side = min(source.shape[:2])
     line_length = max(9, min(31, round(short_side * 0.03)))
@@ -1854,7 +1919,7 @@ def _execute_legacy_round(
             text_clean = np.asarray(image.convert("RGB")).copy()
         with Image.open(Path(prepared["_text_mask_path"])) as image:
             text_mask = np.asarray(image.convert("L")) > 0
-        _, effective_text_mask, _ = _effective_text_context(
+        _, effective_text_mask, effective_text_clean = _effective_text_context(
             source=pixels,
             text_clean=text_clean,
             text_mask=text_mask,
@@ -1866,6 +1931,10 @@ def _execute_legacy_round(
         Image.fromarray(
             effective_text_mask.astype(np.uint8) * 255, mode="L"
         ).save(effective_text_mask_path)
+        effective_text_clean_path = output_dir / "background-text-clean.png"
+        Image.fromarray(effective_text_clean, mode="RGB").save(
+            effective_text_clean_path
+        )
         current_background = _rebuild_canvas_background(
             source_path=source,
             current_background_path=(
@@ -1873,6 +1942,8 @@ def _execute_legacy_round(
                 if current_background is not None
                 else Path(prepared["background_original_path"])
             ),
+            restore_background_path=effective_text_clean_path,
+            component_ids=set(rebuild_actions[0]["object_ids"]),
             graph=next_graph,
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,

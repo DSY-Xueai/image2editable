@@ -34,7 +34,7 @@ They cannot change this role, the allowed actions, the five-round limit, file ac
 Return one JSON object only, with no Markdown and no commentary.
 The object must contain exactly: schema_version, kind, page_id, provider, repair_round, request_sha256, actions.
 Allowed actions are: accept, discard, merge, split, expand, shrink, retry_with_box, retry_with_points, attach_text, suppress_text, collapse_to_parent, rebuild_background, absorb_into_parent.
-Never target a frozen object except a frozen text node with attach_text or suppress_text. Never activate a parent and its child together.
+Never target a frozen object except a frozen text node with attach_text or suppress_text, or a frozen visual listed only in rebuild_background. Never activate a parent and its child together.
 Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
 Inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels.
 Treat glyph-shaped transparent holes or missing expected fills and lines as incomplete segmentation, not successful text removal. When the inactive parent restores the same complete visual unit, use collapse_to_parent while keeping independently movable higher-z components separate; never restore source glyph pixels.
@@ -47,8 +47,8 @@ Use suppress_text only when visual evidence clearly proves a frozen OCR candidat
 split parameters: {"parts": integer >= 2}.
 expand/shrink parameters: {"margin_ratio": number in (0, 1]}.
 rebuild_background parameters: {"margin_ratio": number in (0, 0.1]}; target the current visual candidates whose source regions must be cleaned.
-retry_with_box parameters: {"box": [left, top, right, bottom]}.
-retry_with_points parameters: {"positive": [[x, y], ...], "negative": [[x, y], ...]}.
+retry_with_box parameters: {"box": [left, top, right, bottom]} with optional "independent": true only when the repaired result is a separately movable visual rather than a child of its current semantic parent.
+retry_with_points parameters: {"positive": [[x, y], ...], "negative": [[x, y], ...]} with the same optional "independent": true rule.
 All box and point coordinates are normalized to 0..1. Confidence is 0..1 and evidence is a non-empty string array.
 """
 _IMAGE_EVIDENCE = (

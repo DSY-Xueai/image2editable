@@ -33,6 +33,8 @@
 - 组件去字孔洞会逐连通区域比较 inpaint 与局部连续底色，只对足够大的孔洞采用通过质量阈值的干净填充；小孔洞继续保留 inpaint。高频补丁只统计孔洞内部，边界和梯度仍由各自硬指标检查，避免同一边缘被重复判罚。
 - 文字清理会恢复穿过文字框且在框外连续存在的高对比长横线/竖线，避免表格、流程线和科研绘图结构随文字被擦除。父组件回退会复用上一轮背景与所有已冻结 presentation asset，不再重算并触发冻结资产哈希保护。
 - 五批后回退会把顶层 `component_XXXX` 候选映射到同源完整 `parent_XXXX` 资产，并在激活父组件前停用全部失败候选；父组件质量复算可核验已被父组件替换的历史候选，但只对本次待验收父组件评分，避免遗漏回退对象或产生 z-order 冲突。
+- `rebuild_background` 现从本轮有效 `text-clean` 恢复卡片边框、表格线和科研绘图结构，只清除 Agent 明确列出的独立视觉对象；可列入冻结视觉对象以去除背景重复像素，但冻结资产仍不可修改。文字孔洞会分配给承载它的彩色形状，去字插值只覆盖文字及 1 像素晕圈；横向彩色容器优先使用左右边界插值，避免标题胶囊出现浅色矩形补丁。
+- `retry_with_box` / `retry_with_points` 新增可选 `independent: true`：仅由 Agent 依据隔离证据确认重试结果可独立移动时解除错误父关系；普通重试仍保留原语义父级，不使用固定面积自动升级。
 - 所有 OCR、LaMa、SAM、视觉与组件重修重型子进程启动前统一执行 Python GC 和 Windows working-set trim；真实 `test1.pptx` 首次分层观测峰值约 1.68 GiB，低于既定 2.4 GiB 安全线。targeted OCR 的逐候选/逐视图模型冷启动已改成同页批处理。
 
 ## 关键文件
@@ -73,6 +75,7 @@ image2editable models status
 - OCR 批处理、结构长线排除、presentation 安全晕圈及相关组件质量聚焦回归为 `394 passed, 4 skipped`；真实 `test1.pptx` r10 第 2 批计划记录并执行到第 3 轮只耗时约 28 秒，未重跑首次分层。
 - 局部连续底色、孔洞内部高频统计、跨文字结构线恢复和父组件回退冻结复用的联合回归为 `535 passed, 8 skipped`；另有回退参数单点红灯/绿灯测试，覆盖背景、manifest 和冻结组件 ID 的逐项复用。
 - 顶层候选/完整父资产配对、失败候选停用、历史质量身份核验与运行时回退联合回归为 `537 passed, 8 skipped`。
+- 选择性结构背景恢复、彩色形状去字、冻结视觉背景清理和 Agent 显式独立升级的联合回归为 `626 passed, 9 skipped`。
 - 重修适配回归已先精确复现 `got multiple values for argument 'image'`，再验证源图只传一次、归一化框正确映射；组件重修与运行时相关回归为 `295 passed, 7 skipped`。
 - `wsl和虚拟机对比.png` 已用全新 r11 Run 完成 Host Agent 两批闭环：首批冻结 13 个独立图标，第二批依据精确包含关系保留完整表格 `parent_0002` 与独立页脚 `parent_0005`，丢弃冗余子区域 `parent_0004`、`parent_0006`。最终含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；原画幅与 16:9 均经 PowerPoint COM 重开和原生渲染，删除全部文字对象后重新保存、重开所得图片层仍保留完整图标与结构，未见文字轮廓、浅灰残影或白色字形补丁。
 - 真实 r3 已确认 targeted OCR 能把全页漏检的小型候选文字恢复为可编辑对象，同时暴露局部 crop 导致的字号放大；该字号回归已有通用自动化测试和修复，仍需重新生成真实输出后再宣称真实验收通过。
@@ -82,5 +85,5 @@ image2editable models status
 - 真实文件必须串行、一次一个文件/重型页面；监控内存和磁盘，结束后确认无残留 Python/OCR/SAM 进程。禁止下载模型。
 - 待自动闭环复验文件：`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
 - `test1.pptx` 不得再把“每页 3 个整块父组件”视为成功条件；必须通过最小完整视觉单元和三层文字隔离门禁。
-- `test1.pptx` r10/r11 已完成低内存首次分层和第 1 页真实 `suppress_text` 重修：误判为 `Q` 的蓝色放大镜已从文字层移除，并在 r10 中以高 z-order 独立为 `component_0016`，搜索卡片 `component_0011` 不再包含该图标；另外两张顶层文档也已独立补建。r10 第 1 页执行完五批后，12 个完整父组件仍未全部通过硬门禁，因此该页按契约进入 `preserved_with_warning`，未把有缺陷的分层结果伪装为成功；第 2 页已进入第 1 批 Host Agent 判断。
+- `test1.pptx` r10 已安全完成但不是验收成功：第 1 页因 `round_limit`、第 2 页因 `repeated_plan` 均进入 `preserved_with_warning`，最终输出 SHA-256 与输入相同，未发布有缺陷的分层对象。第 2 页验证了选择性背景恢复能保留十行卡片边框和分隔线并清除灰底残影；上述新执行逻辑需在全新 Run 中复验，不能篡改已完成 r10 的记录。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不得 force-add。
