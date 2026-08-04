@@ -745,6 +745,7 @@ def _build_presentation_assets(
     *,
     source_path: Path,
     text_clean_path: Path,
+    text_mask_path: Path | None = None,
     graph_path: Path,
     output_dir: Path,
 ) -> Path:
@@ -781,6 +782,11 @@ def _build_presentation_assets(
             text_items.append({
                 "box": [left, top, right - left, bottom - top]
             })
+    if text_mask_path is not None:
+        with Image.open(text_mask_path) as image:
+            text_mask = np.asarray(image.convert("L")) > 0
+        if text_mask.shape != source.shape[:2]:
+            raise ValueError("presentation text mask dimensions differ")
     active_nodes = _active_visual_nodes(graph)
     assigned_masks = _assign_text_regions_to_component_masks(
         [masks[node["id"]] for node in active_nodes],
@@ -1390,22 +1396,18 @@ def _rebuild_canvas_background(
     repair = cv2.dilate(visual_repair.astype(np.uint8), kernel) > 0
     if restored is None:
         repair |= text_repair
-    border_width = max(2, round(min(height, width) * 0.03))
-    border = np.zeros(repair.shape, dtype=bool)
-    border[:border_width] = True
-    border[-border_width:] = True
-    border[:, :border_width] = True
-    border[:, -border_width:] = True
-    samples = source[border & ~repair]
-    if len(samples) < 64:
-        raise ValueError("background rebuild has insufficient canvas evidence")
-    canvas = np.median(samples.astype(np.float32), axis=0)
-    deviations = np.max(np.abs(samples.astype(np.float32) - canvas), axis=1)
-    if float(np.percentile(deviations, 90)) > 12.0:
-        raise ValueError("background rebuild canvas border is not uniform")
-
     rebuilt = current.copy() if restored is None else restored.copy()
-    rebuilt[repair] = np.rint(canvas).astype(np.uint8)
+    if np.any(repair):
+        from scripts.component_underlay import _choose_visual_fill
+
+        rebuilt, _ = _choose_visual_fill(
+            rgb=rebuilt,
+            source_rgb=source,
+            semantic_mask=repair,
+            donor_mask=~repair,
+            visual_hole=repair,
+            allow_smooth_surface=True,
+        )
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
     return output_path
 
@@ -1463,6 +1465,7 @@ def _assign_text_regions_to_component_masks(
             (labels == label, labels == label) for label in range(1, count)
         ]
     mask_boxes = []
+    silhouette_masks = []
     for mask in assigned:
         ys, xs = np.nonzero(mask)
         mask_boxes.append(
@@ -1470,6 +1473,13 @@ def _assign_text_regions_to_component_masks(
                 int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
             )
         )
+        silhouette = np.zeros_like(mask, dtype=np.uint8)
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if contours:
+            cv2.drawContours(silhouette, contours, -1, 1, thickness=cv2.FILLED)
+        silhouette_masks.append(silhouette.astype(bool))
     for ownership_region, fill_region in regions:
         pixels = int(np.count_nonzero(ownership_region))
         overlaps = [
@@ -1506,7 +1516,11 @@ def _assign_text_regions_to_component_masks(
             for index, mask in enumerate(assigned):
                 if index != best:
                     occupied_by_others |= mask
-            assigned[best] |= fill_region & ~occupied_by_others
+            support = (
+                silhouette_masks[best]
+                if text_items else np.ones(text.shape, dtype=bool)
+            )
+            assigned[best] |= fill_region & support & ~occupied_by_others
     return assigned
 
 
@@ -1641,6 +1655,8 @@ def _effective_text_context(
     text_items: object,
     graph: dict,
     graph_dir: Path,
+    refine_text_clean: bool = True,
+    refine_cleanup_mask: bool = False,
 ) -> tuple[list[dict], Any, Any]:
     import numpy as np
 
@@ -1679,12 +1695,63 @@ def _effective_text_context(
         if component_id in frozen_ids
     ]
     effective_mask = original_mask & frozen_mask
+    authenticated_mask = effective_mask.copy()
     effective_clean = cleaned.copy()
     restore = suppressed_mask & ~frozen_mask
     effective_clean[restore] = source[restore]
-    effective_clean = _refine_quality_text_clean(
-        source, effective_clean, effective_mask, effective_items
-    )
+    if refine_cleanup_mask and effective_items and np.any(effective_mask):
+        module = importlib.import_module("image_to_ppt")
+        refined_mask = module._build_text_cleanup_mask(
+            source,
+            effective_mask.astype(np.uint8) * 255,
+            effective_items,
+        ) > 0
+        effective_mask &= refined_mask
+        from image2editable.component_quality import (
+            _prepare_page_quality_context,
+            calibrate_page,
+        )
+        import cv2
+
+        calibration = calibrate_page(source, effective_mask)
+        context = _prepare_page_quality_context(
+            source,
+            effective_clean,
+            effective_clean,
+            effective_mask,
+            calibration=calibration,
+            text_items=effective_items,
+        )
+        residual = context.background_residual_text_ink & effective_mask
+        if np.any(residual):
+            count, labels, _, _ = cv2.connectedComponentsWithStats(
+                effective_mask.astype(np.uint8), 8
+            )
+            donor = effective_clean.copy()
+            for label in range(1, count):
+                component = labels == label
+                if not np.any(component & residual):
+                    continue
+                repair = cv2.dilate(
+                    component.astype(np.uint8),
+                    np.ones((3, 3), dtype=np.uint8),
+                ).astype(bool) & authenticated_mask
+                area = int(np.count_nonzero(repair))
+                radius = max(3, min(12, int(np.ceil(np.sqrt(area) * 0.18))))
+                ring = cv2.dilate(
+                    repair.astype(np.uint8),
+                    np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8),
+                ).astype(bool) & ~authenticated_mask
+                if not np.any(ring):
+                    continue
+                effective_clean[repair] = np.median(
+                    donor[ring], axis=0
+                ).astype(np.uint8)
+                effective_mask |= repair
+    if refine_text_clean:
+        effective_clean = _refine_quality_text_clean(
+            source, effective_clean, effective_mask, effective_items
+        )
     return effective_items, effective_mask, effective_clean
 
 
@@ -1716,7 +1783,9 @@ def _quality_assets(
         if background_path_override is None
         else background_path_override
     )
-    text_mask_path = Path(prepared["_text_mask_path"])
+    text_mask_path = Path(prepared.get(
+        "_text_cleanup_mask_path", prepared["_text_mask_path"]
+    ))
     with Image.open(source_path) as image:
         source = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_clean_path) as image:
@@ -1730,9 +1799,15 @@ def _quality_assets(
         text_items=prepared.get("text_items", []),
         graph=graph,
         graph_dir=graph_dir,
+        refine_text_clean="_text_cleanup_mask_path" not in prepared,
+        refine_cleanup_mask="_text_cleanup_mask_path" in prepared,
     )
     text_clean_output = output_dir / "text-clean.png"
     Image.fromarray(text_clean, mode="RGB").save(text_clean_output)
+    text_mask_output = output_dir / "text-mask.png"
+    Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
+        text_mask_output
+    )
     component_nodes = []
     component_masks = []
     for node in graph["nodes"]:
@@ -1755,6 +1830,7 @@ def _quality_assets(
         store,
         source_path=source_path,
         text_clean_path=text_clean_output,
+        text_mask_path=text_mask_output,
         graph_path=graph_path,
         output_dir=output_dir,
     )
@@ -1917,7 +1993,9 @@ def _execute_legacy_round(
         )
         with Image.open(Path(prepared.get("_text_clean_path", source))) as image:
             text_clean = np.asarray(image.convert("RGB")).copy()
-        with Image.open(Path(prepared["_text_mask_path"])) as image:
+        with Image.open(Path(prepared.get(
+            "_text_cleanup_mask_path", prepared["_text_mask_path"]
+        ))) as image:
             text_mask = np.asarray(image.convert("L")) > 0
         _, effective_text_mask, effective_text_clean = _effective_text_context(
             source=pixels,
@@ -1926,6 +2004,8 @@ def _execute_legacy_round(
             text_items=prepared.get("text_items", []),
             graph=next_graph,
             graph_dir=output_dir,
+            refine_text_clean="_text_cleanup_mask_path" not in prepared,
+            refine_cleanup_mask="_text_cleanup_mask_path" in prepared,
         )
         effective_text_mask_path = output_dir / "background-text-mask.png"
         Image.fromarray(
@@ -2125,10 +2205,18 @@ def _execute_legacy_parent_fallback(
     )
     quality_options = {}
     quality_ref = state["current_round"].get("quality_ref")
-    if isinstance(quality_ref, dict):
-        previous_quality = json.loads(
-            _state_artifact(store, quality_ref).read_text(encoding="utf-8")
-        )
+    previous_quality_path = (
+        _state_artifact(store, quality_ref)
+        if isinstance(quality_ref, dict)
+        else graph_path.with_name("quality-report.json")
+    )
+    if previous_quality_path.is_file():
+        previous_quality = json.loads(_read_bound_file(
+            previous_quality_path,
+            store.root,
+            max_bytes=4 * 1024 * 1024,
+            label="previous component quality",
+        ).decode("utf-8"))
         previous_refs = previous_quality["input_refs"]
         if isinstance(previous_refs.get("background"), dict):
             quality_options["background_path_override"] = _state_artifact(

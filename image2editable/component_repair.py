@@ -1434,6 +1434,29 @@ def _approved_contained_parent_pairs(
     return approved
 
 
+def _unowned_raster_text_check(
+    diagnostics: list[dict], text_items: list[dict]
+) -> str:
+    for diagnostic in diagnostics:
+        x1, y1, x2, y2 = diagnostic["bbox"]
+        diagnostic_area = max(1, (x2 - x1) * (y2 - y1))
+        covered = False
+        for item in text_items:
+            box = item.get("box") if isinstance(item, dict) else None
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            tx, ty, width, height = (int(value) for value in box)
+            intersection = max(0, min(x2, tx + width) - max(x1, tx)) * max(
+                0, min(y2, ty + height) - max(y1, ty)
+            )
+            if intersection / diagnostic_area >= 0.80:
+                covered = True
+                break
+        if not covered:
+            return "fail"
+    return "pass"
+
+
 def _recompute_quality_artifact(
     store, state: dict, *, expected_component_ids: list[str],
     quality_input_refs: dict, filename: str,
@@ -1521,8 +1544,9 @@ def _recompute_quality_artifact(
     checks = {
         "protected_native_overlap": native["protected_native_overlap"],
         "pptx_reopen": "unknown",
-        "unowned_raster_text": (
-            "fail" if native.get("initial_diagnostics") else "pass"
+        "unowned_raster_text": _unowned_raster_text_check(
+            native.get("initial_diagnostics", []),
+            native.get("text_items", []),
         ),
     }
     from scripts.visual_segment import visual_difference

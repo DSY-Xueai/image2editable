@@ -37,6 +37,24 @@ from PIL import Image
 import numpy as np
 
 
+def test_unowned_raster_text_check_accepts_diagnostic_owned_by_editable_text() -> None:
+    diagnostics = [{"bbox": [1045, 335, 1461, 366]}]
+    text_items = [{"box": [1047, 337, 436, 30]}]
+
+    assert component_repair._unowned_raster_text_check(
+        diagnostics, text_items
+    ) == "pass"
+
+
+def test_unowned_raster_text_check_rejects_spatially_uncovered_diagnostic() -> None:
+    diagnostics = [{"bbox": [1045, 335, 1461, 366]}]
+    text_items = [{"box": [200, 100, 300, 30]}]
+
+    assert component_repair._unowned_raster_text_check(
+        diagnostics, text_items
+    ) == "fail"
+
+
 def _rounded_rectangle_mask(height: int, width: int) -> np.ndarray:
     mask = np.zeros((height, width), dtype=np.uint8)
     cv2.rectangle(mask, (22, 8), (73, 55), 255, thickness=-1)
@@ -94,10 +112,84 @@ def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
         >= (semantic & ~ownership & (child | text))
     )
     assert np.all(layer["presentation_alpha_mask"][layer["generated_underlay_mask"]])
-    assert np.array_equal(layer["rgb"][text], text_clean[text])
+    assert np.abs(
+        layer["rgb"][text].astype(np.int16) - source[text].astype(np.int16)
+    ).mean() <= 4.0
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
     assert layer["metrics"]["gradient_jump_p95"] <= 6.0
     assert all(np.isfinite(value) for value in layer["metrics"].values())
+
+
+def test_presentation_layer_keeps_source_pixels_owned_by_visual() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.full((7, 7, 3), 240, dtype=np.uint8)
+    source[2:5, 2:5] = (20, 80, 180)
+    text_clean = source.copy()
+    text_clean[2:5, 2:5] = 240
+    ownership = np.zeros((7, 7), dtype=bool)
+    ownership[2:5, 2:5] = True
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=ownership,
+        semantic_mask=ownership,
+        higher_layer_mask=np.zeros_like(ownership),
+        text_mask=np.zeros_like(ownership),
+    )
+
+    assert np.array_equal(layer["rgb"][ownership], source[ownership])
+
+
+def test_presentation_layer_removes_active_text_from_visual_ownership() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.full((9, 11, 3), (30, 150, 70), dtype=np.uint8)
+    source[3:6, 4:7] = 255
+    text_clean = np.full_like(source, (30, 150, 70))
+    semantic = np.ones((9, 11), dtype=bool)
+    text = np.zeros_like(semantic)
+    text[3:6, 4:7] = True
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=np.zeros_like(semantic),
+        text_mask=text,
+    )
+
+    assert not np.any(layer["ownership_mask"] & text)
+    assert np.all(layer["generated_underlay_mask"][text])
+    assert np.array_equal(layer["rgb"][text], text_clean[text])
+
+
+def test_presentation_layer_repairs_bad_text_clean_fill_from_visual_neighbors() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    green = np.array((30, 150, 70), dtype=np.uint8)
+    source = np.full((15, 21, 3), green, dtype=np.uint8)
+    text = np.zeros((15, 21), dtype=bool)
+    text[6:9, 8:13] = True
+    source[text] = 255
+    text_clean = source.copy()
+    text_clean[4:11, 5:16] = 255
+    semantic = np.ones(text.shape, dtype=bool)
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=np.zeros_like(semantic),
+        text_mask=text,
+    )
+
+    assert np.max(np.abs(
+        layer["rgb"][text].astype(np.int16) - green.astype(np.int16)
+    )) <= 3
 
 
 def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
@@ -202,7 +294,7 @@ def test_visual_fill_selects_smaller_lexicographic_candidate(
     assert np.array_equal(layer["rgb"][hole], source[hole])
 
 
-def test_visual_fill_exact_tie_keeps_telea(
+def test_visual_fill_prefers_existing_clean_candidate_when_better(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from scripts import component_underlay
@@ -238,7 +330,7 @@ def test_visual_fill_exact_tie_keeps_telea(
         text_mask=np.zeros_like(semantic),
     )
 
-    assert np.all(layer["rgb"][hole] == 90)
+    assert np.all(layer["rgb"][hole] == 100)
     assert np.array_equal(layer["rgb"][~hole], source[~hole])
 
 
@@ -325,6 +417,38 @@ def test_visual_fill_handles_multiple_holes_near_page_edge() -> None:
     assert all(np.isfinite(value) for value in layer["metrics"].values())
 
 
+def test_visual_fill_rebuilds_smooth_canvas_hole_from_outside_ring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    y, x = np.mgrid[:70, :100]
+    source = np.dstack((180 + x // 3, 190 + y // 4, 200 + (x + y) // 6))
+    source = source.astype(np.uint8)
+    hole = np.zeros(source.shape[:2], dtype=bool)
+    hole[20:50, 25:75] = True
+    damaged = source.copy()
+    damaged[hole] = np.where(((x + y)[hole] % 2)[:, None], 0, 255)
+
+    monkeypatch.setattr(
+        component_underlay.cv2,
+        "inpaint",
+        lambda image, mask, radius, method: np.where(
+            mask[:, :, None] > 0, 255, image
+        ).astype(np.uint8),
+    )
+    rebuilt, _ = component_underlay._choose_visual_fill(
+        rgb=damaged,
+        source_rgb=source,
+        semantic_mask=hole,
+        donor_mask=~hole,
+        visual_hole=hole,
+        allow_smooth_surface=True,
+    )
+
+    assert float(np.abs(rebuilt[hole].astype(int) - source[hole]).mean()) <= 2.0
+
+
 def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
     from scripts.component_underlay import build_presentation_layer
 
@@ -362,21 +486,23 @@ def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
     assert repaired_error.mean() <= 8.0
 
 
-def test_presentation_layer_rejects_visual_hole_without_ownership_donor() -> None:
+def test_presentation_layer_skips_visual_hole_without_ownership_donor() -> None:
     from scripts.component_underlay import build_presentation_layer
 
     source = np.zeros((5, 5, 3), dtype=np.uint8)
     semantic = np.ones((5, 5), dtype=bool)
 
-    with pytest.raises(ValueError, match="visual hole.*ownership donor"):
-        build_presentation_layer(
-            source_rgb=source,
-            text_clean_rgb=source,
-            ownership_mask=np.zeros_like(semantic),
-            semantic_mask=semantic,
-            higher_layer_mask=semantic,
-            text_mask=np.zeros_like(semantic),
-        )
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=np.zeros_like(semantic),
+        semantic_mask=semantic,
+        higher_layer_mask=semantic,
+        text_mask=np.zeros_like(semantic),
+    )
+
+    assert not np.any(layer["presentation_alpha_mask"])
+    assert not np.any(layer["generated_underlay_mask"])
 
 
 def test_visual_fill_never_changes_pixels_outside_hole(
@@ -1872,6 +1998,24 @@ def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path
     assert (output / "component-graph.json").is_file()
 
 
+def test_execute_accept_can_detach_confirmed_independent_visual(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    assert left["parent_id"] == "parent"
+
+    result = execute_component_actions(
+        image, graph,
+        [_action("accept", ["left"], {"independent": True})],
+        sam_runner=None, input_dir=input_dir,
+        output_dir=tmp_path / "round-independent-accept",
+    )
+
+    accepted = next(node for node in result["nodes"] if node["id"] == "left")
+    assert accepted["state"] == "pending_gate"
+    assert accepted["kind"] == "parent"
+    assert accepted["parent_id"] is None
+
+
 def test_execute_suppress_text_only_deactivates_selected_frozen_text(
     tmp_path: Path,
 ) -> None:
@@ -3163,6 +3307,153 @@ def test_retry_outside_semantic_parent_builds_bound_presentation_assets(
     assert component_report["metrics"]["component_pixels"] == 0
     assert component_report["violations"] == ["empty_component"]
     assert component_report["accepted"] is False
+
+
+def test_presentation_assets_use_refined_text_mask_instead_of_ocr_box(
+    tmp_path: Path,
+) -> None:
+    import types
+    from image2editable import legacy
+
+    height, width = 24, 48
+    source = np.zeros((height, width, 3), dtype=np.uint8)
+    source[:, :, 0] = np.arange(width, dtype=np.uint8) * 4
+    source[:, :, 1] = 90
+    source[:, :, 2] = 40
+    visual = np.zeros((height, width), dtype=bool)
+    visual[4:20, 4:44] = True
+    ocr_box = np.zeros_like(visual)
+    ocr_box[8:16, 14:34] = True
+    refined = np.zeros_like(visual)
+    refined[10:14, 20:28] = True
+
+    graph_dir = tmp_path / "graph"
+    masks_dir = graph_dir / "masks"
+    masks_dir.mkdir(parents=True)
+    nodes = []
+    for component_id, kind, mask, bbox, z_index in (
+        ("visual", "parent", visual, [4, 4, 44, 20], 0),
+        ("text", "text", ocr_box, [14, 8, 34, 16], 1),
+    ):
+        path = masks_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+        nodes.append({
+            "id": component_id,
+            "kind": kind,
+            "parent_id": None,
+            "state": "pending" if kind == "parent" else "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": bbox,
+            "z_index": z_index,
+            "text_ids": ["text"] if kind == "parent" else [],
+        })
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps({"nodes": nodes}), encoding="utf-8")
+    source_path = tmp_path / "source.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+    refined_path = tmp_path / "refined-text-mask.png"
+    Image.fromarray(refined.astype(np.uint8) * 255).save(refined_path)
+
+    manifest_path = legacy._build_presentation_assets(
+        types.SimpleNamespace(root=tmp_path),
+        source_path=source_path,
+        text_clean_path=source_path,
+        text_mask_path=refined_path,
+        graph_path=graph_path,
+        output_dir=graph_dir,
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    generated_path = tmp_path / manifest["components"][0][
+        "generated_underlay_mask"
+    ]["path"]
+    generated = np.asarray(Image.open(generated_path).convert("L")) > 0
+    assert np.all(generated[refined])
+    assert not np.any(generated[ocr_box & ~refined])
+
+
+def test_opaque_mask_completion_repairs_solid_holes_but_keeps_line_art() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    solid = np.zeros((40, 80), dtype=bool)
+    solid[5:35, 5:35] = True
+    solid[12:28, 12:28:3] = False
+    solid[14:20, 5] = False
+    line_art = np.zeros_like(solid)
+    line_art = cv2.circle(
+        np.zeros_like(solid, dtype=np.uint8), (58, 20), 12, 1, 2
+    ).astype(bool)
+    source = solid | line_art
+
+    completed = _complete_opaque_mask_regions(source)
+
+    assert np.all(completed[5:35, 5:35])
+    assert np.array_equal(completed[:, 40:], line_art[:, 40:])
+
+
+def test_opaque_mask_completion_restores_colored_node_on_smooth_canvas() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    image = np.full((80, 120, 3), 248, dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.line(mask, (20, 40), (100, 40), 1, 3)
+    cv2.circle(mask, (60, 40), 12, 1, 3)
+    cv2.line(image, (20, 40), (100, 40), (20, 70, 140), 3)
+    cv2.circle(image, (60, 40), 12, (40, 130, 220), cv2.FILLED)
+
+    completed = _complete_opaque_mask_regions(mask > 0, image)
+
+    assert completed[40, 60]
+    assert not completed[20, 60]
+
+
+def test_opaque_mask_completion_preserves_legitimate_transparent_hole() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    image = np.full((70, 70, 3), 250, dtype=np.uint8)
+    image[10:60, 10:60] = (30, 110, 210)
+    cv2.circle(image, (35, 35), 8, (250, 250, 250), cv2.FILLED)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    mask[10:60, 10:60] = 1
+    cv2.circle(mask, (35, 35), 8, 0, cv2.FILLED)
+
+    completed = _complete_opaque_mask_regions(mask > 0, image)
+
+    assert not completed[35, 35]
+
+
+def test_opaque_mask_completion_does_not_absorb_touching_different_color() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    image = np.full((60, 100, 3), 248, dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.line(mask, (20, 30), (60, 30), 1, 3)
+    cv2.line(image, (20, 30), (60, 30), (30, 90, 210), 3)
+    image[27:34, 62:66] = (60, 120, 180)
+
+    completed = _complete_opaque_mask_regions(mask > 0, image)
+
+    assert not np.any(
+        completed[27:34, 62:66] & ~(mask[27:34, 62:66] > 0)
+    )
+
+
+def test_opaque_mask_completion_follows_contact_continuity_across_gradient() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    image = np.full((80, 120, 3), 248, dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    cv2.line(mask, (20, 40), (100, 40), 1, 3)
+    cv2.line(image, (20, 40), (100, 40), (20, 70, 140), 3)
+    for y in range(33, 48):
+        color = (40 + (y - 33), 120 + (y - 33), 200)
+        cv2.line(image, (58, y), (62, y), color, 1)
+
+    completed = _complete_opaque_mask_regions(mask > 0, image)
+
+    assert completed[34, 60]
+    assert completed[46, 60]
 
 
 def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> None:

@@ -450,6 +450,45 @@ def test_targeted_ocr_deduplicates_known_overlapping_text(
     assert result["diagnostics"] == []
 
 
+def test_targeted_ocr_treats_highly_overlapping_ocr_variant_as_known() -> None:
+    item = {
+        "normalized_text": "planningmaybetoofine",
+        "box": [1045, 335, 416, 31],
+    }
+    known = [{
+        "text": "Planning may be too detailed for flexible execution",
+        "box": [1047, 337, 436, 30],
+    }]
+
+    assert image_to_ppt._matches_known_text(item, known)
+
+
+def test_targeted_ocr_keeps_different_text_inside_larger_known_box() -> None:
+    item = {"normalized_text": "newlabel", "box": [40, 10, 30, 10]}
+    known = [{"text": "existing heading", "box": [0, 0, 200, 40]}]
+
+    assert not image_to_ppt._matches_known_text(item, known)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "known_text"),
+    [
+        ("existingfooter", "existingheading"),
+        ("planningbeta", "planningalpha"),
+        ("sectionone", "sectiontwo"),
+        ("risklow", "riskhigh"),
+    ],
+)
+def test_targeted_ocr_keeps_similar_but_semantically_different_short_labels(
+    candidate: str,
+    known_text: str,
+) -> None:
+    item = {"normalized_text": candidate, "box": [10, 10, 120, 20]}
+    known = [{"text": known_text, "box": [11, 10, 118, 20]}]
+
+    assert not image_to_ppt._matches_known_text(item, known)
+
+
 def test_targeted_ocr_keeps_recovery_signal_when_new_text_merges_with_known_line(
     tmp_path: Path,
     monkeypatch,
@@ -1110,6 +1149,7 @@ def test_prepared_page_v2_loads_with_empty_initial_diagnostics(
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = 2
     manifest.pop("initial_diagnostics")
+    manifest["assets"].pop("text_cleanup_mask")
     _rewrite_prepared_manifest(state_path, manifest)
 
     loaded = image_to_ppt.load_component_layers(state_path)

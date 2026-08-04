@@ -33,4 +33,10 @@ def trim_parent_working_set_before_worker() -> None:
 
 def run_isolated_worker(command: list[str], **kwargs):
     trim_parent_working_set_before_worker()
+    env = os.environ.copy()
+    env.update(kwargs.pop("env", {}))
+    env["PYTHONUTF8"] = "1"
+    kwargs["env"] = env
+    if kwargs.get("text") and "encoding" not in kwargs:
+        kwargs["encoding"] = "utf-8"
     return subprocess.run(command, **kwargs)

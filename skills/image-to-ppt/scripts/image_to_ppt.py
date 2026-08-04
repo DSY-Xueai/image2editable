@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import cv2
@@ -122,15 +123,97 @@ def _box_intersection_ratio(left: list[int], right: list[int]) -> float:
 
 
 def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
-    return any(
-        _normalized_candidate_text(known.get("text", ""))
-        == item["normalized_text"]
-        and _box_intersection_ratio(
-            [int(value) for value in known.get("box", [0, 0, 0, 0])],
-            item["box"],
-        ) >= 0.50
-        for known in known_items
-    )
+    for known in known_items:
+        known_box = [int(value) for value in known.get("box", [0, 0, 0, 0])]
+        item_box = [int(value) for value in item["box"]]
+        overlap = _box_intersection_ratio(
+            known_box,
+            item_box,
+        )
+        known_text = _normalized_candidate_text(known.get("text", ""))
+        item_text = item["normalized_text"]
+        same_text = known_text == item_text
+        contained_text = (
+            min(len(known_text), len(item_text)) >= 4
+            and (known_text in item_text or item_text in known_text)
+        )
+        _, _, known_width, known_height = known_box
+        _, _, item_width, item_height = item_box
+        width_ratio = min(known_width, item_width) / max(1, known_width, item_width)
+        height_ratio = min(known_height, item_height) / max(1, known_height, item_height)
+        known_center = (
+            known_box[0] + known_width / 2,
+            known_box[1] + known_height / 2,
+        )
+        item_center = (
+            item_box[0] + item_width / 2,
+            item_box[1] + item_height / 2,
+        )
+        similar_geometry = (
+            width_ratio >= 0.75
+            and height_ratio >= 0.70
+            and abs(known_center[0] - item_center[0]) <= max(known_width, item_width) * 0.20
+            and abs(known_center[1] - item_center[1]) <= max(known_height, item_height) * 0.25
+        )
+        text_similarity = SequenceMatcher(None, known_text, item_text).ratio()
+        length_ratio = min(len(known_text), len(item_text)) / max(
+            1, len(known_text), len(item_text)
+        )
+        similar_text = similar_geometry and (
+            text_similarity >= 0.88
+            or (
+                max(len(known_text), len(item_text)) >= 20
+                and length_ratio <= 0.75
+                and text_similarity >= 0.50
+            )
+        )
+        if overlap >= 0.80 and (same_text or contained_text or similar_text):
+            return True
+        if overlap >= 0.50 and same_text:
+            return True
+    return False
+
+
+def _deduplicate_overlapping_text_items(items: list[dict]) -> list[dict]:
+    """Keep the most complete OCR reading for the same spatial text line."""
+    kept: list[dict] = []
+    for item in items:
+        text = _normalized_candidate_text(item.get("text", ""))
+        box = item.get("box")
+        if not text or not isinstance(box, (list, tuple)) or len(box) != 4:
+            kept.append(item)
+            continue
+        duplicate_index = None
+        for index, existing in enumerate(kept):
+            existing_text = _normalized_candidate_text(existing.get("text", ""))
+            existing_box = existing.get("box")
+            if (
+                not existing_text
+                or not isinstance(existing_box, (list, tuple))
+                or len(existing_box) != 4
+            ):
+                continue
+            overlap = _box_intersection_ratio(
+                [int(value) for value in existing_box],
+                [int(value) for value in box],
+            )
+            if overlap >= 0.80 and (
+                text in existing_text or existing_text in text
+            ):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            kept.append(item)
+            continue
+        existing = kept[duplicate_index]
+        existing_text = _normalized_candidate_text(existing.get("text", ""))
+        if (
+            len(text), float(item.get("confidence", 0.0))
+        ) > (
+            len(existing_text), float(existing.get("confidence", 0.0))
+        ):
+            kept[duplicate_index] = item
+    return kept
 
 
 def _targeted_candidate_ocr_sweep(
@@ -393,8 +476,10 @@ def _targeted_candidate_ocr_sweep(
                 "align": 1,
                 "confidence": item["confidence"],
                 })
-    all_items = text_detection._merge_adjacent_text_items(
+    all_items = _deduplicate_overlapping_text_items(
+        text_detection._merge_adjacent_text_items(
         [dict(item) for item in known_items] + recovered
+        )
     )
     all_items = text_detection._refine_alignment(all_items, page_width)
     updated_mask = text_detection._build_text_mask(
@@ -508,8 +593,9 @@ def _filter_probable_icon_text_analysis(
 ) -> tuple[list[dict], np.ndarray]:
     detected = np.asarray(text_mask, dtype=np.uint8)
     filtered = _filter_probable_icon_text_items(items)
+    deduplicated = _deduplicate_overlapping_text_items(filtered)
     if len(filtered) == len(items):
-        return filtered, detected.copy()
+        return deduplicated, detected.copy()
 
     result = detected.copy()
     height, width = result.shape
@@ -523,7 +609,7 @@ def _filter_probable_icon_text_analysis(
             max(0, y):min(height, y + box_height),
             max(0, x):min(width, x + box_width),
         ] = 0
-    for item in filtered:
+    for item in deduplicated:
         box = item.get("box")
         if not isinstance(box, (list, tuple)) or len(box) != 4:
             continue
@@ -531,7 +617,7 @@ def _filter_probable_icon_text_analysis(
         y1, y2 = max(0, y), min(height, y + box_height)
         x1, x2 = max(0, x), min(width, x + box_width)
         result[y1:y2, x1:x2] = detected[y1:y2, x1:x2]
-    return filtered, result
+    return deduplicated, result
 
 
 def _build_text_cleanup_mask(
@@ -581,10 +667,25 @@ def _build_text_cleanup_mask(
         )
         background = np.median(border_pixels, axis=0)
         target_distance = float(np.linalg.norm(target - background))
-        color_tolerance = min(120.0, max(18.0, target_distance * 0.6))
-        matching = (
-            np.linalg.norm(region - target, axis=2) <= color_tolerance
-        ).astype(np.uint8)
+        color_axis = target - background
+        axis_length = float(np.dot(color_axis, color_axis))
+        if axis_length > 0:
+            opacity = np.sum(
+                (region - background) * color_axis,
+                axis=2,
+            ) / axis_length
+            expected = background + np.clip(opacity, 0.0, 1.0)[..., None] * color_axis
+            corridor_error = np.linalg.norm(region - expected, axis=2)
+            corridor_tolerance = min(28.0, max(12.0, target_distance * 0.08))
+            matching = (
+                (opacity >= 0.05)
+                & (opacity <= 1.15)
+                & (corridor_error <= corridor_tolerance)
+            ).astype(np.uint8)
+        else:
+            matching = (
+                np.linalg.norm(region - target, axis=2) <= 18.0
+            ).astype(np.uint8)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             matching,
             connectivity=8,
@@ -639,12 +740,9 @@ def _build_text_cleanup_mask(
         x, y, box_width, box_height = (int(value) for value in item["box"])
         font_size = item.get("font_size")
         if isinstance(font_size, (int, float)) and font_size > 0:
-            radius = max(3, min(6, int(round(font_size * 0.5))))
+            radius = max(1, min(3, int(round(font_size * 0.08))))
         else:
-            radius = max(
-                2,
-                min(4, int(round(max(box_height, 1) * 0.02))),
-            )
+            radius = max(1, min(2, int(round(max(box_height, 1) * 0.05))))
         search_pad = max(
             radius,
             max(4, min(12, int(round(max(box_height, 1) * 0.15)))),
@@ -1860,7 +1958,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 3
+_PREPARED_PAGE_SCHEMA_VERSION = 4
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -1894,6 +1992,7 @@ _PREPARED_ASSET_FIELDS_V1 = {
     "background_difference",
 }
 _PREPARED_ASSET_FIELDS_V2 = _PREPARED_ASSET_FIELDS_V1 | {"semantic_masks"}
+_PREPARED_ASSET_FIELDS_V4 = _PREPARED_ASSET_FIELDS_V2 | {"text_cleanup_mask"}
 _PREPARED_COMPONENT_FIELDS = {"x", "y", "w", "h", "area", "z_index"}
 _PREPARED_TEXT_FIELDS = {
     "box",
@@ -2245,6 +2344,15 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
             if slide_data.get("_text_clean_path") is not None
             else None
         ),
+        "text_cleanup_mask": (
+            _prepared_asset_record(
+                work_dir,
+                slide_data["_text_cleanup_mask_path"],
+                "text cleanup mask",
+            )
+            if slide_data.get("_text_cleanup_mask_path") is not None
+            else None
+        ),
         "element_masks": [
             _prepared_asset_record(work_dir, path, "element mask")
             for path in slide_data["_element_mask_paths"]
@@ -2357,11 +2465,11 @@ def _load_component_layer_state(
     if not isinstance(manifest, dict):
         raise ValueError("prepared page state fields are invalid")
     schema_version = manifest.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4}:
         raise ValueError("prepared page schema_version is invalid")
     legacy_fields = _PREPARED_PAGE_FIELDS - {"initial_diagnostics"}
     expected_fields = (
-        _PREPARED_PAGE_FIELDS if schema_version == 3 else legacy_fields
+        _PREPARED_PAGE_FIELDS if schema_version >= 3 else legacy_fields
     )
     if set(manifest) != expected_fields:
         raise ValueError("prepared page state fields are invalid")
@@ -2382,8 +2490,8 @@ def _load_component_layer_state(
     dimensions = manifest["dimensions"]
     assets = manifest["assets"]
     expected_asset_fields = (
-        _PREPARED_ASSET_FIELDS_V2
-        if schema_version >= 2
+        _PREPARED_ASSET_FIELDS_V4 if schema_version >= 4
+        else _PREPARED_ASSET_FIELDS_V2 if schema_version >= 2
         else _PREPARED_ASSET_FIELDS_V1
     )
     if not isinstance(assets, dict) or set(assets) != expected_asset_fields:
@@ -2415,6 +2523,11 @@ def _load_component_layer_state(
     if text_clean is not None:
         loaded_assets["text_clean"] = _load_prepared_asset(
             work_dir, text_clean, "text_clean"
+        )
+    text_cleanup_mask = assets.get("text_cleanup_mask")
+    if text_cleanup_mask is not None:
+        loaded_assets["text_cleanup_mask"] = _load_prepared_asset(
+            work_dir, text_cleanup_mask, "text_cleanup_mask"
         )
     element_mask_paths = []
     semantic_mask_paths = None
@@ -2496,6 +2609,11 @@ def _load_component_layer_state(
         "background_difference_path": loaded_assets["background_difference"],
         "_work_dir": str(work_dir),
         "_text_mask_path": loaded_assets["ocr_mask"],
+        **(
+            {"_text_cleanup_mask_path": loaded_assets["text_cleanup_mask"]}
+            if "text_cleanup_mask" in loaded_assets
+            else {}
+        ),
         "_element_mask_paths": element_mask_paths,
         **(
             {"_semantic_mask_paths": semantic_mask_paths}
@@ -2533,6 +2651,7 @@ def prepare_component_layers(
         shutil.copyfile(source, owned_source)
 
     text_mask = None
+    cleanup_mask_path = None
     exception_boundary = sys.exc_info()[1]
     primary_exception = None
     primary_traceback = None
@@ -2585,8 +2704,10 @@ def prepare_component_layers(
                 stored_mask,
                 text_items,
             )
-            removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
-            Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+            cleanup_mask_path = (
+                owned_work_dir / "text-clean-removal-mask.png"
+            ).resolve()
+            Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
             text_clean_path = owned_work_dir / "text-clean.png"
             text_clean = _repair_text_background(
                 source_image,
@@ -2696,8 +2817,10 @@ def prepare_component_layers(
                     stored_mask,
                     text_items,
                 )
-                removal_mask_path = owned_work_dir / "text-clean-removal-mask.png"
-                Image.fromarray(removal_mask, mode="L").save(removal_mask_path)
+                cleanup_mask_path = (
+                    owned_work_dir / "text-clean-removal-mask.png"
+                ).resolve()
+                Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
                 text_clean_path = owned_work_dir / "text-clean.png"
                 text_clean = _repair_text_background(
                     source_image,
@@ -2728,6 +2851,30 @@ def prepare_component_layers(
     slide_data["original_image_path"] = str(owned_source)
     slide_data["_resource_isolation"] = resource_isolation
     slide_data["_initial_diagnostics"] = initial_diagnostics
+    if (
+        cleanup_mask_path is None
+        and text_items
+        and all("box" in item for item in text_items)
+    ):
+        source_image = _load_rgb(owned_source)
+        with Image.open(text_analysis["mask_path"]) as stored_text_mask:
+            stored_mask = np.asarray(stored_text_mask.convert("L")).copy()
+        removal_mask = _build_text_cleanup_mask(
+            source_image,
+            stored_mask,
+            text_items,
+        )
+        cleanup_mask_path = (
+            owned_work_dir / "text-clean-removal-mask.png"
+        ).resolve()
+        Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
+        source_image = None
+        stored_mask = None
+        removal_mask = None
+        gc.collect()
+    slide_data.pop("_text_cleanup_mask_path", None)
+    if cleanup_mask_path is not None:
+        slide_data["_text_cleanup_mask_path"] = str(cleanup_mask_path)
     state_path = _write_prepared_page(slide_data, owned_work_dir)
     return load_component_layers(state_path)
 

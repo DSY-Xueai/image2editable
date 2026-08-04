@@ -115,14 +115,33 @@ def test_runner_spawns_after_best_effort_windows_oserror(monkeypatch) -> None:
     )
 
     assert actual is expected
-    assert events == [
-        "gc",
-        (
-            "spawn",
-            ["worker"],
-            {"capture_output": True, "text": True, "check": False},
-        ),
-    ]
+    assert events[0] == "gc"
+    _, command, kwargs = events[1]
+    assert command == ["worker"]
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["check"] is False
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["env"]["PYTHONUTF8"] == "1"
+
+
+def test_runner_preserves_custom_environment_and_forces_utf8(monkeypatch) -> None:
+    worker_resources = _load_worker_resources()
+    monkeypatch.setattr(worker_resources, "trim_parent_working_set_before_worker", lambda: None)
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(worker_resources.subprocess, "run", fake_run)
+
+    worker_resources.run_isolated_worker(
+        ["worker"], env={"CUSTOM_WORKER_SETTING": "kept", "PYTHONUTF8": "0"}
+    )
+
+    assert captured["env"]["CUSTOM_WORKER_SETTING"] == "kept"
+    assert captured["env"]["PYTHONUTF8"] == "1"
 
 
 def test_trim_does_not_hide_windows_programming_error(monkeypatch) -> None:

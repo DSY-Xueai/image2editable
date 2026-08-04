@@ -425,6 +425,7 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         'split parameters: {"parts"',
         'expand/shrink parameters: {"margin_ratio"',
         'rebuild_background parameters: {"margin_ratio"',
+        "smallest margin that covers the visible residual",
         'absorb_into_parent parameters: {}',
         'retry_with_box parameters: {"box"',
         'retry_with_points parameters: {"positive"',

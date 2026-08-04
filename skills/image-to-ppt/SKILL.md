@@ -106,7 +106,7 @@ prepare 会在全页 OCR 和首轮视觉候选完成后，对小型候选做两�
 }
 ```
 
-组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认重试结果是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。`accept`、`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认对象是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
 
 PPTX 的整页截图候选先使用决策路由：
 
@@ -124,6 +124,8 @@ image2editable decision record runs/pptx-job \
 组件计划必须以可独立移动的最小完整视觉单元为单位。使用反事实标准：单独移动一个单元后，该单元及其余视觉单元是否仍各自完整；语义相关不构成合并理由。`component-isolation.png` 中沿 OCR 字形出现的透明孔洞，或本应连续的底色、填充、线条缺失，都属于残缺分割而不是成功去字；若失活父组件能恢复同一完整视觉单元，应使用 `collapse_to_parent`，同时保留可独立移动的高层组件且不得恢复源字形。质量报告出现 `contained_parent_review` 时，必须使用质量证据中的精确 `contained_parent_pairs` 对照两个隔离单元：若一个只是重复子集，选择唯一像素所有者并丢弃重复层；若两者确实都是可独立移动的视觉单元，双方必须分别使用 `accept`、置信度不低于 `0.92`，且每条 evidence 都把该 pair 的两个精确 ID 作为两个独立字符串列出，才允许共同保留，否则门禁继续硬失败。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`。`absorb_into_parent` 只允许合并同一物理实体的重复掩码、碎边、阴影或分割缺口证据，禁止把多个可独立移动对象烘焙为一张父图；语义父级只用于分组，不参与最终像素渲染。仅当外缘画布颜色一致且证据显示背景残影时使用 `rebuild_background`，`margin_ratio` 必须在 `(0, 0.1]`。OCR 文字以冻结的 `text_XXXX` 节点出现，可作为 `attach_text` 的第二对象；只有视觉证据足以明确证明 OCR 候选实际为非文字时，才可对该文字节点使用 `suppress_text`，不确定或真实文字不得抑制。被抑制文字会从后续可编辑文字、文字蒙版、质量检查和 PPTX 中移除，并恢复源图区域供视觉元素重建；文字区域不能挖透明文字框。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
 
 Runtime 只有在 `confidence >= 0.92` 时才重建完整截图。通过门禁后只原位替换命中的截图对象；既有原生文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生。未通过页面保留原截图并给出 warning，不伪装成可编辑组件。
+
+`rebuild_background.margin_ratio` 必须由 Agent 根据当前残影和抗锯齿范围自适应选择：使用能完整覆盖残影、又不触及相邻结构线的最小值，禁止固定使用同一数值。
 
 ## 严格管线
 

@@ -4638,6 +4638,42 @@ def test_text_cleanup_mask_preserves_long_graphic_line_near_text() -> None:
     assert np.count_nonzero(cleanup[line]) < 12
 
 
+def test_text_cleanup_mask_preserves_colored_card_edge_at_text_box_boundary() -> None:
+    import cv2
+    import numpy as np
+
+    source = np.full((70, 150, 3), (240, 249, 240), dtype=np.uint8)
+    cv2.line(source, (20, 8), (20, 62), (25, 110, 50), 3)
+    cv2.putText(
+        source,
+        "Label",
+        (24, 43),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (45, 47, 46),
+        2,
+        cv2.LINE_AA,
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[14:52, 20:105] = 255
+
+    cleanup = image_to_ppt._build_text_cleanup_mask(
+        source,
+        text_mask,
+        [{"box": [20, 14, 85, 38], "text": "Label", "color": "#2d2f2e"}],
+    )
+
+    glyph = (
+        (source[:, :, 0] < 100)
+        & (np.max(source, axis=2) - np.min(source, axis=2) < 20)
+        & (np.indices(source.shape[:2])[1] > 22)
+    )
+    card_edge = np.zeros(cleanup.shape, dtype=bool)
+    card_edge[8:63, 18:23] = True
+    assert np.count_nonzero(cleanup[glyph]) >= np.count_nonzero(glyph) * 0.95
+    assert np.count_nonzero(cleanup[card_edge]) == 0
+
+
 def test_low_confidence_short_square_ocr_candidate_is_treated_as_icon() -> None:
     items = [
         {
@@ -4683,6 +4719,20 @@ def test_probable_icon_filter_removes_discarded_item_from_ocr_mask() -> None:
     assert filtered == [items[1]]
     assert np.count_nonzero(filtered_mask[20:50, 20:50]) == 0
     assert np.all(filtered_mask[60:85, 70:150] == 255)
+
+
+def test_overlapping_ocr_prefixes_keep_only_the_complete_text() -> None:
+    items = [
+        {"box": [1046, 451, 413, 34], "text": "3.大仓库成本高：规划阶段依赖文", "confidence": 0.98},
+        {"box": [1047, 455, 506, 28], "text": "3.大仓库成本高：规划阶段依赖文件遍历，", "confidence": 0.97},
+        {"box": [733, 802, 81, 48], "text": "一句", "confidence": 0.99},
+        {"box": [738, 803, 182, 46], "text": "一句话总结", "confidence": 0.98},
+        {"box": [100, 100, 120, 30], "text": "独立文本", "confidence": 0.99},
+    ]
+
+    assert image_to_ppt._deduplicate_overlapping_text_items(items) == [
+        items[1], items[3], items[4]
+    ]
 
 
 def test_text_cleanup_recovers_detached_same_color_glyph_outside_box_boundary(
@@ -5276,6 +5326,7 @@ def _prepare_component_layers_fixture(
     *,
     resource_isolation: bool = False,
     before_visual_worker=None,
+    before_prepare=None,
 ) -> tuple[dict, Path]:
     source_path = tmp_path / "outside-source.png"
     Image.new("RGB", (16, 10), "white").save(source_path)
@@ -5404,6 +5455,8 @@ def _prepare_component_layers_fixture(
         "_finalize_slide_quality",
         lambda *args, **kwargs: pytest.fail("prepare must not finalize quality"),
     )
+    if before_prepare is not None:
+        before_prepare(work_dir)
     prepared = image_to_ppt.prepare_component_layers(
         source_path,
         work_dir,
@@ -5531,7 +5584,10 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
+    cleanup_path = Path(prepared["_text_cleanup_mask_path"])
+    assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
+    assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
     assert manifest["initial_diagnostics"] == []
     assert manifest["phase"] == "initial_layers"
     assert len(manifest["assets"]["semantic_masks"]) == 2
@@ -5559,6 +5615,49 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
             assert_asset(value)
     for component in manifest["components"]:
             assert_asset(component["asset"])
+
+
+def test_prepare_component_layers_authenticates_text_cleanup_mask(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(
+        tmp_path, monkeypatch, resource_isolation=True,
+    )
+
+    cleanup_path = Path(prepared["_text_cleanup_mask_path"])
+    assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
+    manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
+    record = manifest["assets"]["text_cleanup_mask"]
+    assert record["path"] == "text-clean-removal-mask.png"
+    assert record["sha256"] == hashlib.sha256(cleanup_path.read_bytes()).hexdigest()
+
+
+def test_prepare_component_layers_overwrites_stale_text_cleanup_mask(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def write_stale_mask(work_dir: Path) -> None:
+        work_dir.mkdir()
+        Image.new("L", (16, 10), 77).save(
+            work_dir / "text-clean-removal-mask.png"
+        )
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_build_text_cleanup_mask",
+        lambda source, mask, items: image_to_ppt.np.full(
+            (10, 16), 255, dtype=image_to_ppt.np.uint8
+        ),
+    )
+    prepared, _ = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        before_prepare=write_stale_mask,
+    )
+
+    with Image.open(prepared["_text_cleanup_mask_path"]) as cleanup:
+        assert set(cleanup.getdata()) == {255}
 
 
 def test_prepare_component_layers_does_not_authorize_state_replaced_after_publish(
@@ -5933,10 +6032,11 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 4
     manifest["schema_version"] = 1
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("semantic_masks")
+    manifest["assets"].pop("text_cleanup_mask")
     _write_prepared_manifest(state_path, manifest)
 
     restored = image_to_ppt.load_component_layers(state_path)

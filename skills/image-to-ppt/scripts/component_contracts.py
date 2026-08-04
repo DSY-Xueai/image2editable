@@ -318,6 +318,7 @@ _ACTION_PARAMETERS = {
     "absorb_into_parent": frozenset(),
 }
 _OPTIONAL_ACTION_PARAMETERS = {
+    "accept": frozenset({"independent"}),
     "retry_with_box": frozenset({"independent"}),
     "retry_with_points": frozenset({"independent"}),
 }

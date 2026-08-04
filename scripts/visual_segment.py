@@ -30,6 +30,87 @@ class VisualSegmentationError(RuntimeError):
     pass
 
 
+def _complete_opaque_mask_regions(
+    mask: np.ndarray, image: np.ndarray | None = None
+) -> np.ndarray:
+    """Fill small topology gaps only inside already-solid visual regions."""
+    source = np.asarray(mask, dtype=bool)
+    completed = source.copy()
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        source.astype(np.uint8), 8
+    )
+    for label in range(1, count):
+        x, y, width, height, area = (int(value) for value in stats[label])
+        box_area = width * height
+        if min(width, height) < 8 or area < 64 or area / max(1, box_area) < 0.78:
+            continue
+        component = (labels[y:y + height, x:x + width] == label).astype(np.uint8)
+        closed = cv2.morphologyEx(
+            component, cv2.MORPH_CLOSE, np.ones((3, 3), dtype=np.uint8)
+        )
+        if np.count_nonzero(closed) <= area * 1.25:
+            completed[y:y + height, x:x + width] |= closed.astype(bool)
+    if image is None or not np.any(completed):
+        return completed
+    pixels = np.asarray(image, dtype=np.uint8)
+    if pixels.shape[:2] != completed.shape or pixels.ndim != 3:
+        raise ValueError("mask completion image dimensions differ")
+    ys, xs = np.nonzero(completed)
+    pad = max(4, min(12, round(min(ys.max() - ys.min() + 1, xs.max() - xs.min() + 1) * 0.05)))
+    y0, y1 = max(0, int(ys.min()) - pad), min(completed.shape[0], int(ys.max()) + pad + 1)
+    x0, x1 = max(0, int(xs.min()) - pad), min(completed.shape[1], int(xs.max()) + pad + 1)
+    local = completed[y0:y1, x0:x1]
+    dilated = cv2.dilate(local.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    near = cv2.dilate(local.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    ring = dilated & ~near
+    if np.count_nonzero(ring) < 32:
+        return completed
+    crop = pixels[y0:y1, x0:x1]
+    background = np.median(crop[ring], axis=0)
+    distance = np.linalg.norm(crop.astype(np.float32) - background, axis=2)
+    quiet = distance[ring] <= 14.0
+    if np.count_nonzero(quiet) < np.count_nonzero(ring) * 0.6:
+        return completed
+    foreground = distance > 18.0
+    foreground &= ~local
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground.astype(np.uint8), 8
+    )
+    touching = cv2.dilate(local.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    recovered = local.copy()
+    for label in range(1, count):
+        candidate = labels == label
+        contact = candidate & touching
+        contact_count = int(np.count_nonzero(contact))
+        if stats[label, cv2.CC_STAT_AREA] < 9 or contact_count < 3:
+            continue
+        compatible = 0
+        for contact_y, contact_x in zip(*np.nonzero(contact)):
+            neighbor_y0 = max(0, int(contact_y) - 2)
+            neighbor_y1 = min(local.shape[0], int(contact_y) + 3)
+            neighbor_x0 = max(0, int(contact_x) - 2)
+            neighbor_x1 = min(local.shape[1], int(contact_x) + 3)
+            neighbor_mask = local[
+                neighbor_y0:neighbor_y1,
+                neighbor_x0:neighbor_x1,
+            ]
+            if not np.any(neighbor_mask):
+                continue
+            neighbor_colors = crop[
+                neighbor_y0:neighbor_y1,
+                neighbor_x0:neighbor_x1,
+            ][neighbor_mask].astype(np.float32)
+            contact_color = crop[contact_y, contact_x].astype(np.float32)
+            color_distance = np.linalg.norm(neighbor_colors - contact_color, axis=1)
+            if np.count_nonzero(color_distance <= 30.0) >= 3:
+                compatible += 1
+        if compatible >= max(3, round(contact_count * 0.6)):
+            recovered |= candidate
+    if np.count_nonzero(recovered) <= np.count_nonzero(local) * 1.5:
+        completed[y0:y1, x0:x1] = recovered
+    return completed
+
+
 def execute_component_actions(
     image: np.ndarray,
     graph: dict,
@@ -122,7 +203,14 @@ def execute_component_actions(
         if name == "accept":
             if nodes[object_ids[0]]["state"] != "pending":
                 raise ValueError("accept requires a pending component")
-            nodes[object_ids[0]]["state"] = "pending_gate"
+            accepted = nodes[object_ids[0]]
+            if action["parameters"].get("independent") is True:
+                accepted["kind"] = "parent"
+                accepted["parent_id"] = None
+            masks[object_ids[0]] = _complete_opaque_mask_regions(
+                masks[object_ids[0]], image
+            )
+            accepted["state"] = "pending_gate"
         elif name == "discard":
             nodes[object_ids[0]]["state"] = "inactive"
         elif name == "rebuild_background":

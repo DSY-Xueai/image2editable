@@ -1188,6 +1188,111 @@ def test_quality_text_refinement_uses_colored_horizontal_container() -> None:
     assert np.all(refined[10, 90] == 255)
 
 
+def test_effective_text_context_reuses_authenticated_clean_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import hashlib
+
+    from image2editable import legacy
+
+    source = np.full((20, 30, 3), 255, dtype=np.uint8)
+    cleaned = source.copy()
+    cleaned[8:12, 10:20] = (235, 245, 238)
+    cleanup_mask = np.zeros((20, 30), dtype=np.uint8)
+    cleanup_mask[9:11, 12:18] = 255
+    mask_path = tmp_path / "text.png"
+    Image.fromarray(cleanup_mask, mode="L").save(mask_path)
+    graph = {"nodes": [{
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [10, 8, 20, 12], "z_index": 1, "text_ids": [],
+    }]}
+    monkeypatch.setattr(
+        legacy, "_refine_quality_text_clean",
+        lambda *args, **kwargs: pytest.fail("authenticated clean image must not be repainted"),
+    )
+
+    _, effective_mask, effective_clean = legacy._effective_text_context(
+        source=source,
+        text_clean=cleaned,
+        text_mask=cleanup_mask,
+        text_items=[{"box": [10, 8, 10, 4], "text": "A"}],
+        graph=graph,
+        graph_dir=tmp_path,
+        refine_text_clean=False,
+    )
+
+    assert np.array_equal(effective_mask, cleanup_mask > 0)
+    assert np.array_equal(effective_clean, cleaned)
+
+
+def test_effective_text_context_refines_mask_without_reintroducing_text(
+    tmp_path: Path,
+) -> None:
+    import cv2
+    import hashlib
+
+    from image2editable import legacy
+
+    source = np.full((60, 100, 3), (240, 249, 240), dtype=np.uint8)
+    cv2.line(source, (20, 6), (20, 54), (25, 110, 50), 3)
+    cv2.putText(
+        source, "A", (28, 40), cv2.FONT_HERSHEY_SIMPLEX,
+        0.9, (45, 47, 46), 2, cv2.LINE_AA,
+    )
+    contaminated = np.zeros(source.shape[:2], dtype=np.uint8)
+    contaminated[10:49, 18:23] = 255
+    contaminated[np.max(source, axis=2) < 100] = 255
+    cleaned = source.copy()
+    cleaned[contaminated > 0] = (240, 249, 240)
+    glyph_source = (np.max(source, axis=2) < 100) & (
+        np.indices(source.shape[:2])[1] > 24
+    )
+    cleaned[glyph_source & (np.indices(source.shape[:2])[1] < 40)] = (
+        228, 240, 229
+    )
+    mask_path = tmp_path / "text.png"
+    Image.fromarray(contaminated, mode="L").save(mask_path)
+    graph = {"nodes": [{
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [20, 12, 55, 36], "z_index": 1, "text_ids": [],
+    }]}
+
+    _, effective_mask, effective_clean = legacy._effective_text_context(
+        source=source,
+        text_clean=cleaned,
+        text_mask=contaminated,
+        text_items=[{
+            "box": [20, 12, 55, 36], "text": "A", "color": "#2d2f2e",
+        }],
+        graph=graph,
+        graph_dir=tmp_path,
+        refine_text_clean=False,
+        refine_cleanup_mask=True,
+    )
+
+    assert not np.any(effective_mask[10:49, 18:23])
+    glyph = (np.max(source, axis=2) < 100) & (np.indices(source.shape[:2])[1] > 24)
+    assert np.count_nonzero(effective_mask[glyph]) >= np.count_nonzero(glyph) * 0.9
+    calibration = component_quality.calibrate_page(source, effective_mask)
+    context = component_quality._prepare_page_quality_context(
+        source,
+        effective_clean,
+        effective_clean,
+        effective_mask,
+        calibration=calibration,
+        text_items=[{"box": [20, 12, 55, 36]}],
+    )
+    residual_pixels = context.background_text_residual_ratio * np.count_nonzero(
+        context.text_ink
+    )
+    assert residual_pixels == 0
+
+
 def test_disconnected_glyph_strokes_are_aggregated_within_one_text_region() -> None:
     case = _text_isolation_case()
     case["source"][case["component_mask"]] = (70, 125, 190)

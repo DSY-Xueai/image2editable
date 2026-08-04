@@ -1219,9 +1219,9 @@ def _build_text_ink_mask(
                 ).astype(np.float32)
                 target_gray = float(np.mean(target))
                 if target_gray < float(np.mean(border)):
-                    ink = isolated_match | (region <= thresh)
+                    ink = isolated_match | _remove_border_connected(region <= thresh)
                 else:
-                    ink = isolated_match | (region > thresh)
+                    ink = isolated_match | _remove_border_connected(region > thresh)
         if ink is None:
             ink = _select_text_ink(region, float(thresh))
 

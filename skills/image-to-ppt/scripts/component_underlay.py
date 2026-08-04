@@ -116,6 +116,7 @@ def _visual_metrics(
 def _choose_visual_fill(
     *, rgb: np.ndarray, source_rgb: np.ndarray, semantic_mask: np.ndarray,
     donor_mask: np.ndarray, visual_hole: np.ndarray,
+    allow_smooth_surface: bool = False,
 ) -> tuple[np.ndarray, dict[str, float]]:
     ys, xs = np.nonzero(semantic_mask)
     if not len(ys):
@@ -127,9 +128,112 @@ def _choose_visual_fill(
     candidates = [
         cv2.inpaint(crop, mask, 3, cv2.INPAINT_TELEA),
         cv2.inpaint(crop, mask, 3, cv2.INPAINT_NS),
+        crop.copy(),
     ]
     hole_crop = visual_hole[y0:y1, x0:x1]
     donor_crop = donor_mask[y0:y1, x0:x1]
+    semantic_crop = semantic_mask[y0:y1, x0:x1]
+    hole_area = int(np.count_nonzero(hole_crop))
+    if hole_area and allow_smooth_surface:
+        semantic_y, semantic_x = np.nonzero(semantic_crop)
+        short_side = min(
+            int(semantic_y.max() - semantic_y.min() + 1),
+            int(semantic_x.max() - semantic_x.min() + 1),
+        )
+        edge_radius = max(2, min(6, int(round(short_side * 0.06))))
+        ring_radius = max(8, min(24, int(round(np.sqrt(hole_area) * 0.65))))
+        core = cv2.erode(
+            semantic_crop.astype(np.uint8),
+            np.ones((2 * edge_radius + 1, 2 * edge_radius + 1), dtype=np.uint8),
+        ).astype(bool)
+        ring = (
+            cv2.dilate(
+                hole_crop.astype(np.uint8),
+                np.ones((2 * ring_radius + 1, 2 * ring_radius + 1), dtype=np.uint8),
+            ).astype(bool)
+            & donor_crop
+            & core
+            & cv2.erode(
+                donor_crop.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+            ).astype(bool)
+        )
+        if np.count_nonzero(ring) < 32 and np.array_equal(
+            semantic_crop, hole_crop
+        ):
+            ring = (
+                cv2.dilate(
+                    hole_crop.astype(np.uint8),
+                    np.ones(
+                        (2 * ring_radius + 1, 2 * ring_radius + 1),
+                        dtype=np.uint8,
+                    ),
+                ).astype(bool)
+                & donor_crop
+                & ~cv2.dilate(
+                    hole_crop.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+                ).astype(bool)
+            )
+        if np.count_nonzero(ring) >= 32:
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0)
+            gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1)
+            gradient = np.sqrt(gx * gx + gy * gy)
+            if float(np.percentile(gradient[ring], 95)) <= 24.0:
+                safe_donor = donor_crop & ~cv2.dilate(
+                    hole_crop.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+                ).astype(bool)
+                ring &= safe_donor
+                ring_y, ring_x = np.nonzero(ring)
+                hole_y, hole_x = np.nonzero(hole_crop)
+                mean_x, mean_y = float(ring_x.mean()), float(ring_y.mean())
+                scale_x = max(1.0, float(ring_x.std()))
+                scale_y = max(1.0, float(ring_y.std()))
+                design = np.column_stack((
+                    np.ones(ring_x.size, dtype=np.float32),
+                    ((ring_x - mean_x) / scale_x).astype(np.float32),
+                    ((ring_y - mean_y) / scale_y).astype(np.float32),
+                ))
+                normalized_hole_x = (
+                    (hole_x - mean_x) / scale_x
+                ).astype(np.float32)
+                normalized_hole_y = (
+                    (hole_y - mean_y) / scale_y
+                ).astype(np.float32)
+                smooth = crop.copy()
+                for channel in range(3):
+                    coefficients = np.linalg.lstsq(
+                        design,
+                        crop[ring_y, ring_x, channel].astype(np.float32),
+                        rcond=None,
+                    )[0]
+                    prediction = (
+                        coefficients[0]
+                        + normalized_hole_x * coefficients[1]
+                        + normalized_hole_y * coefficients[2]
+                    )
+                    smooth[hole_y, hole_x, channel] = np.clip(
+                        np.rint(prediction), 0, 255
+                    ).astype(np.uint8)
+                smooth_full = rgb.copy()
+                smooth_full[y0:y1, x0:x1][hole_crop] = smooth[hole_crop]
+                smooth_metrics = _visual_metrics(
+                    smooth_full, source_rgb, donor_mask, visual_hole
+                )
+                smooth_limits = (
+                    6.0,
+                    12.0,
+                    float(max(4, round(np.count_nonzero(visual_hole) * 0.005))),
+                )
+                smooth_values = (
+                    smooth_metrics["boundary_color_mae"],
+                    smooth_metrics["gradient_jump_p95"],
+                    smooth_metrics["added_high_frequency_pixels"],
+                )
+                if all(
+                    value <= limit
+                    for value, limit in zip(smooth_values, smooth_limits)
+                ):
+                    return smooth_full, smooth_metrics
     count, labels = cv2.connectedComponents(hole_crop.astype(np.uint8), 8)
     areas = [int(np.count_nonzero(labels == label)) for label in range(1, count)]
     if any(area >= 25 for area in areas):
@@ -231,21 +335,34 @@ def build_presentation_layer(
     expanded_higher = higher_layer | _higher_layer_halo(
         ownership, semantic, higher_layer,
     )
-    ownership = ownership & ~expanded_higher
+    ownership = ownership & ~expanded_higher & ~text
+    if not np.any(ownership):
+        empty = np.zeros(shape, dtype=bool)
+        return {
+            "rgb": np.asarray(text_clean_rgb, dtype=np.uint8).copy(),
+            "ownership_mask": empty,
+            "presentation_alpha_mask": empty.copy(),
+            "generated_underlay_mask": empty.copy(),
+            "metrics": {
+                "boundary_color_mae": 0.0,
+                "gradient_jump_p95": 0.0,
+                "added_high_frequency_pixels": 0.0,
+            },
+        }
     text_hole = semantic & ~ownership & text
     visual_hole = semantic & ~ownership & expanded_higher & ~text_hole
-    if np.any(visual_hole) and not np.any(ownership):
-        raise ValueError("visual hole requires at least one visible ownership donor")
     generated = text_hole | visual_hole
     rgb = np.asarray(text_clean_rgb, dtype=np.uint8).copy()
-    if np.any(visual_hole):
+    rgb[ownership] = source[ownership]
+    if np.any(generated):
         visual_fill, metrics = _choose_visual_fill(
             rgb=rgb, source_rgb=source, semantic_mask=semantic,
-            donor_mask=ownership, visual_hole=visual_hole,
+            donor_mask=ownership, visual_hole=generated,
+            allow_smooth_surface=not np.any(visual_hole),
         )
-        rgb[visual_hole] = visual_fill[visual_hole]
+        rgb[generated] = visual_fill[generated]
     else:
-        metrics = _visual_metrics(rgb, source, ownership, visual_hole)
+        metrics = _visual_metrics(rgb, source, ownership, generated)
 
     return {
         "rgb": rgb,

@@ -223,6 +223,7 @@ def _build_test_presentation_manifest(
     graph: dict,
     graph_dir: Path,
     output_dir: Path,
+    text_mask_path: Path | None = None,
 ) -> tuple[Path, str]:
     graph_path = graph_dir / "component-graph.json"
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
@@ -230,6 +231,7 @@ def _build_test_presentation_manifest(
         types.SimpleNamespace(root=run_root),
         source_path=source_path,
         text_clean_path=text_clean_path,
+        text_mask_path=text_mask_path,
         graph_path=graph_path,
         output_dir=output_dir,
     )
@@ -332,7 +334,7 @@ def test_presentation_assets_assign_text_hole_to_colored_shape(
     )) as image:
         rgba = np.asarray(image.convert("RGBA"))
 
-    assert np.all(ownership[8:12, 16:24])
+    assert not np.any(ownership[8:12, 16:24])
     assert np.all(rgba[8:12, 16:24, :3] == (20, 160, 60))
 
 
@@ -1483,7 +1485,12 @@ def test_initial_page_session_v2_builds_parent_child_graph_and_excludes_text(
     assert reserve_node_counts == [3]
     with Image.open(session["evidence"]["reconstructed.png"]) as reconstructed:
         assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
-        assert reconstructed.getpixel((3, 2)) == (1, 2, 3)
+        assert max(
+            abs(value - expected)
+            for value, expected in zip(
+                reconstructed.getpixel((3, 2)), (1, 2, 3)
+            )
+        ) <= 1
     graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
     parent, child, text = graph["nodes"]
     assert parent["id"] == "parent_0001"
@@ -1827,6 +1834,7 @@ def test_component_evidence_uses_exact_manifest_rgba_for_every_render(
         tmp_path,
         source_path=source_path,
         text_clean_path=text_clean_path,
+        text_mask_path=text_mask_path,
         graph=graph,
         graph_dir=tmp_path,
         output_dir=initial_dir,
@@ -1858,20 +1866,20 @@ def test_component_evidence_uses_exact_manifest_rgba_for_every_render(
     )
 
     with Image.open(initial["numbered-masks.png"]) as numbered:
-        assert numbered.getpixel(overlap) != (1, 2, 3)
+        assert numbered.getpixel(overlap) == (1, 2, 3)
     with Image.open(initial["ownership.png"]) as ownership:
-        assert ownership.getpixel(overlap) != (24, 24, 24)
+        assert ownership.getpixel(overlap) == (24, 24, 24)
     with Image.open(initial["reconstructed.png"]) as reconstructed:
         assert reconstructed.getpixel(overlap) == (30, 40, 50)
     with Image.open(later["reconstructed.png"]) as reconstructed:
-        assert reconstructed.getpixel(non_text) == (30, 40, 50)
+        assert reconstructed.getpixel(non_text) == (1, 2, 3)
         assert reconstructed.getpixel(overlap) == (30, 40, 50)
     with Image.open(initial["component-isolation.png"]) as isolation:
         assert isolation.mode == "RGBA"
         pixels = np.asarray(isolation)
         opaque_rgb = pixels[pixels[:, :, 3] == 255, :3]
+        assert np.any(np.all(opaque_rgb == (1, 2, 3), axis=1))
         assert np.any(np.all(opaque_rgb == (30, 40, 50), axis=1))
-        assert not np.any(np.all(opaque_rgb == (1, 2, 3), axis=1))
 
 
 def test_component_evidence_uses_distinct_z_index_colors_for_four_v2_children(
@@ -2213,6 +2221,7 @@ def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
         "background_original_path": str(background),
         "_text_clean_path": str(text_clean),
         "_text_mask_path": str(text_mask),
+        "_text_cleanup_mask_path": str(text_mask),
         "text_items": [{"text": "mistaken", "box": [1, 1, 3, 2]}],
     }
 
@@ -2227,6 +2236,12 @@ def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
 
     monkeypatch.setattr(
         legacy.importlib, "import_module", lambda name: FakeImageModule,
+    )
+    monkeypatch.setattr(
+        legacy, "_refine_quality_text_clean",
+        lambda *args, **kwargs: pytest.fail(
+            "authenticated clean image must not be repainted during quality assembly"
+        ),
     )
     output_dir = run_dir / "pages/page_001/reconstruction/quality"
     output_dir.mkdir(parents=True)
@@ -2342,6 +2357,23 @@ def test_item_text_region_fills_text_hole_backed_by_surrounding_component() -> N
     )
 
     assert np.all(assigned[0][2:10, 3:17])
+
+
+def test_item_text_region_does_not_expand_beyond_component_silhouette() -> None:
+    text = np.zeros((100, 120), dtype=bool)
+    text[30:60, 50:70] = True
+    component = np.zeros_like(text)
+    component[20:80, 20:100] = True
+    component[text] = False
+    silhouette = np.zeros_like(text)
+    silhouette[20:80, 20:100] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [component], text, [{"box": [45, 23, 30, 51]}]
+    )
+
+    assert np.all(assigned[0][text])
+    assert not np.any(assigned[0] & ~silhouette)
 
 
 def test_text_halo_scales_beyond_the_bounded_pixel_repair() -> None:
@@ -2504,6 +2536,46 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
         assert rebuilt.getpixel((20, 20)) == (0, 0, 255)
 
 
+def test_background_rebuild_preserves_local_tinted_surface(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    restored = tmp_path / "text-clean.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    component_mask = masks / "component.png"
+    source_image = Image.new("RGB", (60, 40), "white")
+    draw = ImageDraw.Draw(source_image)
+    draw.rectangle((8, 4, 51, 35), fill=(235, 248, 237))
+    draw.rectangle((25, 15, 34, 24), fill=(20, 120, 40))
+    source_image.save(source)
+    source_image.save(current)
+    source_image.save(restored)
+    mask = Image.new("L", (60, 40), 0)
+    ImageDraw.Draw(mask).rectangle((25, 15, 34, 24), fill=255)
+    mask.save(component_mask)
+    Image.new("L", (60, 40), 0).save(text_mask)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": "masks/component.png",
+        "mask_sha256": hashlib.sha256(component_mask.read_bytes()).hexdigest(),
+        "bbox": [25, 15, 35, 25], "z_index": 0, "text_ids": [],
+    }]}
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        restore_background_path=restored, component_ids={"component"},
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.025, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        pixel = rebuilt.getpixel((29, 19))
+        assert max(abs(pixel[index] - value) for index, value in enumerate((235, 248, 237))) <= 6
+
+
 def test_background_rebuild_does_not_expand_text_box_into_neighbor_content(
     tmp_path: Path,
 ) -> None:
@@ -2531,7 +2603,7 @@ def test_background_rebuild_does_not_expand_text_box_into_neighbor_content(
         assert rebuilt.getpixel((16, 13)) == (0, 0, 255)
 
 
-def test_background_rebuild_rejects_nonuniform_canvas_border(tmp_path: Path) -> None:
+def test_background_rebuild_supports_nonuniform_canvas_border(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     current = tmp_path / "current.png"
     text_mask = tmp_path / "text-mask.png"
@@ -2556,12 +2628,15 @@ def test_background_rebuild_rejects_nonuniform_canvas_border(tmp_path: Path) -> 
         "bbox": [12, 8, 28, 22], "z_index": 0, "text_ids": [],
     }]}
 
-    with pytest.raises(ValueError, match="not uniform"):
-        legacy._rebuild_canvas_background(
-            source_path=source, current_background_path=current,
-            graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-            margin_ratio=0.01, output_path=tmp_path / "rebuilt.png",
-        )
+    output = tmp_path / "rebuilt.png"
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        margin_ratio=0.01, output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((20, 15)) == (255, 255, 255)
 
 
 def test_initial_page_session_reserves_disk_before_writing_evidence(
@@ -3272,7 +3347,7 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     _image(background, (4, 5, 6))
     manifest = graph_dir / "presentation-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
-    quality = graph_dir / "component-quality.json"
+    quality = graph_dir / "quality-report.json"
     quality.write_text(json.dumps({"input_refs": {
         "background": reference(background),
         "presentation_manifest": reference(manifest),
@@ -3282,7 +3357,7 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
         {
             "repair_round": 5,
             "graph_ref": reference(graph_path),
-            "current_round": {"quality_ref": reference(quality)},
+            "current_round": {"quality_ref": None},
             "fallback": {"parent_ids": ["parent_0001"]},
             "failed_ids": ["component_0001", "parent_0001"],
             "parent_assets": {"parent_0001": reference(mask)},

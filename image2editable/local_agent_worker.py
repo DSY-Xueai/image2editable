@@ -46,8 +46,9 @@ absorb_into_parent parameters: {}; list the inactive parent first, followed only
 Use suppress_text only when visual evidence clearly proves a frozen OCR candidate is non-text; never suppress real or uncertain text. It removes that text from editable output and restores its source region for visual reconstruction.
 split parameters: {"parts": integer >= 2}.
 expand/shrink parameters: {"margin_ratio": number in (0, 1]}.
-rebuild_background parameters: {"margin_ratio": number in (0, 0.1]}; target the current visual candidates whose source regions must be cleaned.
-retry_with_box parameters: {"box": [left, top, right, bottom]} with optional "independent": true only when the repaired result is a separately movable visual rather than a child of its current semantic parent.
+rebuild_background parameters: {"margin_ratio": number in (0, 0.1]}; target the current visual candidates whose source regions must be cleaned. Choose the smallest margin that covers the visible residual and its antialiasing, but stops before neighboring structural lines; infer it from the current evidence instead of using a fixed value.
+accept parameters may include optional "independent": true only when the accepted mask is a separately movable visual rather than a child of its current semantic parent.
+retry_with_box parameters: {"box": [left, top, right, bottom]} with optional "independent": true under the same evidence rule.
 retry_with_points parameters: {"positive": [[x, y], ...], "negative": [[x, y], ...]} with the same optional "independent": true rule.
 All box and point coordinates are normalized to 0..1. Confidence is 0..1 and evidence is a non-empty string array.
 """
