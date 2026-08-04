@@ -161,6 +161,84 @@ def run_recognition(
     _write_json(result_path, {"items": mapped})
 
 
+def run_batch(
+    image_paths: list[str | Path],
+    result_path: str | Path,
+    lang: str = "ch",
+) -> None:
+    detector_type, sorter_type, cropper_type = _load_detection_tools()
+    detector = detector_type(
+        model_name="PP-OCRv5_mobile_det",
+        cpu_threads=1,
+        enable_mkldnn=False,
+        limit_side_len=64,
+        limit_type="min",
+        thresh=0.3,
+        box_thresh=0.6,
+        unclip_ratio=1.5,
+    )
+    records = []
+    all_crops = []
+    try:
+        for image_path in map(Path, image_paths):
+            results = detector.predict(str(image_path), max_side_limit=4000)
+            result = results[0] if results else {}
+            polys = list(sorter_type()(_value(result, "dt_polys", [])))
+            crops = cropper_type(det_box_type="quad")(
+                _read_bgr(image_path), polys,
+            )
+            kept_polys = []
+            crop_indices = []
+            for crop, poly in zip(crops, polys):
+                if crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
+                    continue
+                kept_polys.append(np.asarray(poly).tolist())
+                crop_indices.append(len(all_crops))
+                all_crops.append(crop)
+            records.append({
+                "path": str(image_path),
+                "polys": kept_polys,
+                "crop_indices": crop_indices,
+            })
+    finally:
+        detector.close()
+
+    recognized = [None] * len(all_crops)
+    if all_crops:
+        order = sorted(
+            range(len(all_crops)),
+            key=lambda index: all_crops[index].shape[1] / all_crops[index].shape[0],
+        )
+        recognizer_type = _load_recognition_model()
+        recognizer = recognizer_type(
+            model_name=_resolve_recognition_model_name(lang),
+            cpu_threads=1,
+            enable_mkldnn=False,
+        )
+        try:
+            for start in range(0, len(order), 64):
+                batch = order[start:start + 64]
+                results = list(recognizer.predict([all_crops[index] for index in batch]))
+                if len(results) != len(batch):
+                    raise RuntimeError("OCR recognition result count does not match crops")
+                for index, result in zip(batch, results):
+                    recognized[index] = {
+                        "text": str(_value(result, "rec_text", "")),
+                        "score": float(_value(result, "rec_score", 0.0)),
+                    }
+        finally:
+            recognizer.close()
+
+    images = []
+    for record in records:
+        items = []
+        for poly, crop_index in zip(record["polys"], record["crop_indices"]):
+            item = recognized[crop_index]
+            items.append({"poly": poly, **item})
+        images.append({"path": record["path"], "items": items})
+    _write_json(Path(result_path), {"images": images})
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="mode", required=True)
@@ -172,6 +250,10 @@ def _build_parser() -> argparse.ArgumentParser:
     recognize.add_argument("--detection-result", required=True)
     recognize.add_argument("--result", required=True)
     recognize.add_argument("--lang", default="ch")
+    batch = subparsers.add_parser("batch")
+    batch.add_argument("--manifest", required=True)
+    batch.add_argument("--result", required=True)
+    batch.add_argument("--lang", default="ch")
     return parser
 
 
@@ -180,8 +262,11 @@ def main() -> int:
     try:
         if args.mode == "detect":
             run_detection(args.image, args.work_dir, args.result)
-        else:
+        elif args.mode == "recognize":
             run_recognition(args.detection_result, args.result, args.lang)
+        else:
+            manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+            run_batch(manifest["images"], args.result, args.lang)
     except Exception as error:
         print(f"OCR {args.mode} worker failed: {error}", file=sys.stderr)
         return 1

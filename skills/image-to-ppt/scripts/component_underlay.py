@@ -146,6 +146,26 @@ def _choose_visual_fill(
     )
 
 
+def _higher_layer_halo(
+    ownership: np.ndarray,
+    semantic: np.ndarray,
+    higher_layer: np.ndarray,
+) -> np.ndarray:
+    ys, xs = np.nonzero(semantic)
+    if not len(ys) or not np.any(higher_layer):
+        return np.zeros_like(semantic)
+    short_side = min(int(ys.max() - ys.min() + 1), int(xs.max() - xs.min() + 1))
+    if short_side < 20:
+        return np.zeros_like(semantic)
+    radius = max(1, min(4, int(np.ceil(short_side * 0.02))))
+    kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+    return (
+        cv2.dilate(higher_layer.astype(np.uint8), kernel).astype(bool)
+        & ownership
+        & semantic
+    )
+
+
 def build_presentation_layer(
     *,
     source_rgb: np.ndarray,
@@ -168,8 +188,12 @@ def build_presentation_layer(
     if np.any(ownership & ~semantic):
         raise ValueError("ownership_mask must be contained by semantic_mask")
 
+    expanded_higher = higher_layer | _higher_layer_halo(
+        ownership, semantic, higher_layer,
+    )
+    ownership = ownership & ~expanded_higher
     text_hole = semantic & ~ownership & text
-    visual_hole = semantic & ~ownership & higher_layer & ~text_hole
+    visual_hole = semantic & ~ownership & expanded_higher & ~text_hole
     if np.any(visual_hole) and not np.any(ownership):
         raise ValueError("visual hole requires at least one visible ownership donor")
     generated = text_hole | visual_hole

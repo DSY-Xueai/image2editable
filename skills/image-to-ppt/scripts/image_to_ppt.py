@@ -61,7 +61,7 @@ from scripts.object_detect import (
     generate_object_proposals,
 )
 from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
-from scripts.text_detect import close_ocr_engines, detect_text
+from scripts.text_detect import close_ocr_engines, detect_text, detect_text_batch
 from scripts import text_detect as text_detection
 from scripts.initial_diagnostics import (
     MAX_INITIAL_DIAGNOSTICS,
@@ -201,6 +201,7 @@ def _targeted_candidate_ocr_sweep(
     try:
         with tempfile.TemporaryDirectory(prefix="targeted-ocr-", dir=work_dir) as temporary:
             crop_root = Path(temporary)
+            pending_views = []
             with Image.open(source_path) as source:
                 for component_index, box in selected:
                     x, y, width, height = box
@@ -226,7 +227,6 @@ def _targeted_candidate_ocr_sweep(
                     if used_pixels + sum(candidate_pixels) > total_pixel_limit:
                         break
 
-                    recognized = []
                     with source.crop((x, y, x + width, y + height)) as raw_crop:
                         with raw_crop.convert("RGB") as base_crop:
                             for view_index, (scale, view_width, view_height) in enumerate(views):
@@ -238,91 +238,113 @@ def _targeted_candidate_ocr_sweep(
                                 ) as resized:
                                     resized.save(crop_path)
                                 used_pixels += view_width * view_height
-                                items, _ = detect_text(
-                                    crop_path, lang=lang, confidence_threshold=0.70,
-                                    isolated=isolated,
-                                    worker_root=work_dir if isolated else None,
-                                )
-                                mapped_items = []
-                                for item in text_detection._merge_adjacent_text_items(items):
-                                    raw_box = item.get("box")
-                                    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
-                                        continue
-                                    mapped_box = [
-                                        max(0, int(round(x + raw_box[0] / scale))),
-                                        max(0, int(round(y + raw_box[1] / scale))),
-                                        max(1, int(round(raw_box[2] / scale))),
-                                        max(1, int(round(raw_box[3] / scale))),
-                                    ]
-                                    mapped_box[2] = min(mapped_box[2], page_width - mapped_box[0])
-                                    mapped_box[3] = min(mapped_box[3], page_height - mapped_box[1])
-                                    normalized = _normalized_candidate_text(item.get("text", ""))
-                                    confidence = float(item.get("confidence", 0.0))
-                                    if (
-                                        normalized
-                                        and confidence >= _TARGETED_OCR_MIN_CONFIDENCE
-                                        and _box_intersection_ratio(mapped_box, box) >= 0.50
-                                    ):
-                                        mapped_items.append({
-                                            "text": str(item.get("text", "")).strip(),
-                                            "normalized_text": normalized,
-                                            "confidence": confidence,
-                                            "box": mapped_box,
-                                        })
-                                recognized.append(sorted(
-                                    mapped_items,
-                                    key=lambda value: (value["box"][1], value["box"][0]),
-                                )[:_TARGETED_OCR_MAX_ITEMS_PER_VIEW])
+                                pending_views.append({
+                                    "component_index": component_index,
+                                    "component_box": box,
+                                    "scale": scale,
+                                    "path": crop_path,
+                                })
 
-                    unmatched = set(range(len(recognized[1])))
-                    pairs = []
-                    for left in recognized[0]:
-                        choices = [
-                            (index, _box_intersection_ratio(left["box"], recognized[1][index]["box"]))
-                            for index in unmatched
-                        ]
-                        choices = [choice for choice in choices if choice[1] >= 0.50]
-                        if not choices:
-                            continue
-                        right_index = max(choices, key=lambda choice: choice[1])[0]
-                        unmatched.remove(right_index)
-                        pairs.append((left, recognized[1][right_index]))
-                    pairs.sort(key=lambda pair: (
-                        min(pair[0]["box"][1], pair[1]["box"][1]),
-                        min(pair[0]["box"][0], pair[1]["box"][0]),
-                    ))
-                    for pair_index, (left, right) in enumerate(pairs, start=1):
-                        if _matches_known_text(left, known_items) or _matches_known_text(
-                            right, known_items
-                        ):
-                            continue
-                        if left["normalized_text"] == right["normalized_text"]:
-                            consistent.append(max(
-                                (left, right), key=lambda item: item["confidence"]
-                            ))
-                            continue
-                        left_box, right_box = left["box"], right["box"]
-                        if len(diagnostics) >= MAX_INITIAL_DIAGNOSTICS:
-                            continue
-                        diagnostics.append({
-                            "kind": "unowned_raster_text",
-                            "source_sha256": source_sha256,
-                            "candidate_id": (
-                                f"candidate_{component_index:04d}_{pair_index:02d}"
-                            ),
-                            "bbox": [
-                                min(left_box[0], right_box[0]),
-                                min(left_box[1], right_box[1]),
-                                max(left_box[0] + left_box[2], right_box[0] + right_box[2]),
-                                max(left_box[1] + left_box[3], right_box[1] + right_box[3]),
-                            ],
-                            "views": [
-                                {"normalized_text": left["normalized_text"],
-                                 "confidence": left["confidence"]},
-                                {"normalized_text": right["normalized_text"],
-                                 "confidence": right["confidence"]},
-                            ],
+            view_results = detect_text_batch(
+                [view["path"] for view in pending_views],
+                lang=lang,
+                confidence_threshold=0.70,
+                isolated=isolated,
+                worker_root=work_dir if isolated else None,
+            )
+            recognized_by_component = {}
+            for view, (items, _) in zip(pending_views, view_results):
+                x, y, _, _ = view["component_box"]
+                scale = view["scale"]
+                mapped_items = []
+                for item in text_detection._merge_adjacent_text_items(items):
+                    raw_box = item.get("box")
+                    if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+                        continue
+                    mapped_box = [
+                        max(0, int(round(x + raw_box[0] / scale))),
+                        max(0, int(round(y + raw_box[1] / scale))),
+                        max(1, int(round(raw_box[2] / scale))),
+                        max(1, int(round(raw_box[3] / scale))),
+                    ]
+                    mapped_box[2] = min(mapped_box[2], page_width - mapped_box[0])
+                    mapped_box[3] = min(mapped_box[3], page_height - mapped_box[1])
+                    normalized = _normalized_candidate_text(item.get("text", ""))
+                    confidence = float(item.get("confidence", 0.0))
+                    if (
+                        normalized
+                        and confidence >= _TARGETED_OCR_MIN_CONFIDENCE
+                        and _box_intersection_ratio(
+                            mapped_box, view["component_box"],
+                        ) >= 0.50
+                    ):
+                        mapped_items.append({
+                            "text": str(item.get("text", "")).strip(),
+                            "normalized_text": normalized,
+                            "confidence": confidence,
+                            "box": mapped_box,
                         })
+                recognized_by_component.setdefault(
+                    view["component_index"], []
+                ).append(sorted(
+                    mapped_items,
+                    key=lambda value: (value["box"][1], value["box"][0]),
+                )[:_TARGETED_OCR_MAX_ITEMS_PER_VIEW])
+
+            for component_index, recognized in recognized_by_component.items():
+                if len(recognized) != 2:
+                    continue
+                unmatched = set(range(len(recognized[1])))
+                pairs = []
+                for left in recognized[0]:
+                    choices = [
+                        (index, _box_intersection_ratio(
+                            left["box"], recognized[1][index]["box"],
+                        ))
+                        for index in unmatched
+                    ]
+                    choices = [choice for choice in choices if choice[1] >= 0.50]
+                    if not choices:
+                        continue
+                    right_index = max(choices, key=lambda choice: choice[1])[0]
+                    unmatched.remove(right_index)
+                    pairs.append((left, recognized[1][right_index]))
+                pairs.sort(key=lambda pair: (
+                    min(pair[0]["box"][1], pair[1]["box"][1]),
+                    min(pair[0]["box"][0], pair[1]["box"][0]),
+                ))
+                for pair_index, (left, right) in enumerate(pairs, start=1):
+                    if _matches_known_text(left, known_items) or _matches_known_text(
+                        right, known_items
+                    ):
+                        continue
+                    if left["normalized_text"] == right["normalized_text"]:
+                        consistent.append(max(
+                            (left, right), key=lambda item: item["confidence"]
+                        ))
+                        continue
+                    left_box, right_box = left["box"], right["box"]
+                    if len(diagnostics) >= MAX_INITIAL_DIAGNOSTICS:
+                        continue
+                    diagnostics.append({
+                        "kind": "unowned_raster_text",
+                        "source_sha256": source_sha256,
+                        "candidate_id": (
+                            f"candidate_{component_index:04d}_{pair_index:02d}"
+                        ),
+                        "bbox": [
+                            min(left_box[0], right_box[0]),
+                            min(left_box[1], right_box[1]),
+                            max(left_box[0] + left_box[2], right_box[0] + right_box[2]),
+                            max(left_box[1] + left_box[3], right_box[1] + right_box[3]),
+                        ],
+                        "views": [
+                            {"normalized_text": left["normalized_text"],
+                             "confidence": left["confidence"]},
+                            {"normalized_text": right["normalized_text"],
+                             "confidence": right["confidence"]},
+                        ],
+                    })
     except BaseException as exc:
         primary_exception = exc
         primary_traceback = exc.__traceback__

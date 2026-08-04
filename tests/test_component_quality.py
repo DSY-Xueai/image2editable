@@ -1104,6 +1104,19 @@ def test_single_glyph_sized_text_imprint_fails_component_isolation_gate() -> Non
     assert "component_text_residual" in report["violations"]
 
 
+def test_component_isolation_ignores_structural_line_continuing_outside_text_box() -> None:
+    case = _text_isolation_case()
+    case["source"][case["component_mask"]] = (70, 125, 190)
+    structural_line = np.zeros(case["text_mask"].shape, dtype=bool)
+    structural_line[48:50, 20:100] = True
+    case["source"][structural_line] = (35, 70, 110)
+    case["reconstructed"][structural_line] = case["source"][structural_line]
+
+    report = _evaluate_synthetic(case)
+
+    assert "component_text_residual" not in report["violations"]
+
+
 def test_quality_text_refinement_rebuilds_the_confirmed_text_box_and_halo() -> None:
     from image2editable import legacy
 

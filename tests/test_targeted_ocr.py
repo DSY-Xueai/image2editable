@@ -16,6 +16,17 @@ from image2editable.store import RunStore
 from scripts.initial_diagnostics import validate_initial_diagnostics
 
 
+@pytest.fixture(autouse=True)
+def _batch_ocr_uses_the_test_single_image_detector(monkeypatch):
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text_batch",
+        lambda paths, **kwargs: [
+            image_to_ppt.detect_text(path, **kwargs) for path in paths
+        ],
+    )
+
+
 def _label_fixture(tmp_path: Path) -> Path:
     path = tmp_path / "generic-technical-label.png"
     image = Image.new("RGB", (120, 70), "white")

@@ -86,6 +86,57 @@ def test_isolated_ocr_runs_detection_then_recognition_workers(
     assert not any(path.name.startswith("ocr-") for path in tmp_path.iterdir())
 
 
+def test_isolated_ocr_batch_uses_one_worker_for_multiple_images(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (20, 10), "white").save(first)
+    Image.new("RGB", (30, 12), "white").save(second)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        manifest_path = Path(command[command.index("--manifest") + 1])
+        result_path = Path(command[command.index("--result") + 1])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        result_path.write_text(
+            json.dumps({
+                "images": [
+                    {
+                        "path": path,
+                        "items": [{
+                            "poly": [[1, 2], [9, 2], [9, 7], [1, 7]],
+                            "text": f"T{index}",
+                            "score": 0.99,
+                        }],
+                    }
+                    for index, path in enumerate(manifest["images"], start=1)
+                ],
+            }),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(text_detect, "run_isolated_worker", fake_run)
+
+    results = text_detect.detect_text_batch(
+        [first, second], lang="en", isolated=True, worker_root=tmp_path,
+    )
+
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[2] == "batch"
+    assert command[command.index("--lang") + 1] == "en"
+    assert kwargs == {"capture_output": True, "text": True, "check": False}
+    assert [[item["text"] for item in items] for items, _ in results] == [
+        ["T1"], ["T2"],
+    ]
+    assert [mask.shape for _, mask in results] == [(10, 20), (12, 30)]
+    assert not any(path.name.startswith("ocr-batch-") for path in tmp_path.iterdir())
+
+
 def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
     tmp_path: Path,
     monkeypatch,
@@ -191,6 +242,74 @@ def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
             {"poly": bottom.tolist(), "text": "wide", "score": 0.92},
         ]
     }
+
+
+def test_batch_worker_loads_each_model_once_for_multiple_images(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from scripts import ocr_worker
+
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (20, 10), "white").save(first)
+    Image.new("RGB", (20, 10), "white").save(second)
+    result_path = tmp_path / "result.json"
+    poly = np.array([[1, 1], [9, 1], [9, 6], [1, 6]])
+    loads = {"detector": 0, "recognizer": 0}
+
+    class FakeDetector:
+        def __init__(self, **kwargs):
+            loads["detector"] += 1
+
+        def predict(self, image, **kwargs):
+            return [{"dt_polys": [poly]}]
+
+        def close(self):
+            pass
+
+    class FakeSorter:
+        def __call__(self, polys):
+            return list(polys)
+
+    class FakeCropper:
+        def __init__(self, det_box_type):
+            pass
+
+        def __call__(self, image, polys):
+            return [np.zeros((5, 8, 3), dtype=np.uint8)]
+
+    class FakeRecognizer:
+        def __init__(self, **kwargs):
+            loads["recognizer"] += 1
+
+        def predict(self, crops):
+            return [
+                {"rec_text": f"T{index}", "rec_score": 0.99}
+                for index, _ in enumerate(crops, start=1)
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        ocr_worker, "_load_detection_tools",
+        lambda: (FakeDetector, FakeSorter, FakeCropper),
+    )
+    monkeypatch.setattr(
+        ocr_worker, "_load_recognition_model", lambda: FakeRecognizer,
+    )
+    monkeypatch.setattr(
+        ocr_worker, "_resolve_recognition_model_name", lambda lang: "model",
+    )
+
+    ocr_worker.run_batch([first, second], result_path, lang="en")
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert loads == {"detector": 1, "recognizer": 1}
+    assert [item["items"][0]["text"] for item in payload["images"]] == [
+        "T1", "T2",
+    ]
 
 
 def test_recognition_worker_skips_model_for_empty_detection(

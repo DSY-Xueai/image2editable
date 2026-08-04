@@ -519,6 +519,18 @@ def _text_ink_mask(
             cv2.absdiff(source_rgb[:, :, channel], local_background),
         )
     local_ink = local_delta > ink_threshold
+    structural_line = np.zeros(shape, dtype=bool)
+    line_count, line_labels, line_stats, _ = cv2.connectedComponentsWithStats(
+        local_ink.astype(np.uint8), 8
+    )
+    for line_label in range(1, line_count):
+        width = int(line_stats[line_label, cv2.CC_STAT_WIDTH])
+        height = int(line_stats[line_label, cv2.CC_STAT_HEIGHT])
+        if width < max(8, height * 6) and height < max(8, width * 6):
+            continue
+        component = line_labels == line_label
+        if np.any(component & text) and np.any(component & ~text):
+            structural_line |= component
     text_ink = np.zeros(shape, dtype=bool)
     for label in range(1, text_count):
         region = text_labels == label
@@ -541,6 +553,7 @@ def _text_ink_mask(
         )
         dense_region = local_region & dense_text[y1:y2, x1:x2]
         candidate[dense_region] = local_ink[y1:y2, x1:x2][dense_region]
+        candidate[structural_line[y1:y2, x1:x2] & local_region] = 0
         count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
         for component_label in range(1, count):
             component = labels == component_label

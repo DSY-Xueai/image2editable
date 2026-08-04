@@ -87,11 +87,11 @@ def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
         "rgb", "ownership_mask", "presentation_alpha_mask",
         "generated_underlay_mask", "metrics",
     }
-    assert np.array_equal(layer["ownership_mask"], ownership)
+    assert np.all(layer["ownership_mask"] <= ownership)
     assert not np.any(layer["presentation_alpha_mask"] & ~semantic)
-    assert np.array_equal(
-        layer["generated_underlay_mask"],
-        semantic & ~ownership & (child | text),
+    assert np.all(
+        layer["generated_underlay_mask"]
+        >= (semantic & ~ownership & (child | text))
     )
     assert np.all(layer["presentation_alpha_mask"][layer["generated_underlay_mask"]])
     assert np.array_equal(layer["rgb"][text], text_clean[text])
@@ -262,6 +262,43 @@ def test_visual_fill_handles_multiple_holes_near_page_edge() -> None:
 
     assert np.array_equal(layer["rgb"][~holes], source[~holes])
     assert all(np.isfinite(value) for value in layer["metrics"].values())
+
+
+def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 80, 120
+    y, x = np.mgrid[:height, :width]
+    truth = np.dstack((220 + x // 30, 225 + y // 30, 230 + x // 40)).astype(
+        np.uint8
+    )
+    semantic = np.zeros((height, width), dtype=bool)
+    semantic[10:70, 10:110] = True
+    higher = np.zeros((height, width), dtype=bool)
+    higher[32:48, 52:68] = True
+    contaminated = cv2.dilate(
+        higher.astype(np.uint8), np.ones((5, 5), dtype=np.uint8)
+    ).astype(bool)
+    source = truth.copy()
+    source[contaminated] = (30, 80, 190)
+    ownership = semantic & ~higher
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=ownership,
+        semantic_mask=semantic,
+        higher_layer_mask=higher,
+        text_mask=np.zeros_like(higher),
+    )
+
+    assert not np.any(layer["ownership_mask"] & contaminated)
+    assert np.all(layer["generated_underlay_mask"][contaminated & semantic])
+    repaired_error = np.abs(
+        layer["rgb"][contaminated].astype(np.int16)
+        - truth[contaminated].astype(np.int16)
+    )
+    assert repaired_error.mean() <= 8.0
 
 
 def test_presentation_layer_rejects_visual_hole_without_ownership_donor() -> None:

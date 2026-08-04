@@ -77,6 +77,58 @@ def detect_text(
         worker_root=worker_root,
     )
 
+    return _build_text_result(
+        img_rgb, raw_boxes, confidence_threshold, mask_padding,
+    )
+
+
+def detect_text_batch(
+    image_paths: list[str | Path],
+    lang: str = "ch",
+    confidence_threshold: float = 0.7,
+    mask_padding: int = 6,
+    *,
+    isolated: bool = False,
+    worker_root: str | Path | None = None,
+) -> list[tuple[list[dict], np.ndarray]]:
+    """Detect text in several images while sharing one isolated OCR lifecycle."""
+    paths = [Path(path) for path in image_paths]
+    if not paths:
+        return []
+    if not isolated:
+        return [
+            detect_text(
+                path, lang=lang, confidence_threshold=confidence_threshold,
+                mask_padding=mask_padding,
+            )
+            for path in paths
+        ]
+    raw_results = _try_isolated_paddleocr_batch(
+        paths, lang, confidence_threshold, worker_root=worker_root,
+    )
+    if raw_results is None:
+        return [
+            detect_text(
+                path, lang=lang, confidence_threshold=confidence_threshold,
+                mask_padding=mask_padding, isolated=True, worker_root=worker_root,
+            )
+            for path in paths
+        ]
+    return [
+        _build_text_result(
+            _load_rgb(path), raw_boxes, confidence_threshold, mask_padding,
+        )
+        for path, raw_boxes in zip(paths, raw_results)
+    ]
+
+
+def _build_text_result(
+    img_rgb: np.ndarray,
+    raw_boxes: list[dict],
+    confidence_threshold: float,
+    mask_padding: int,
+) -> tuple[list[dict], np.ndarray]:
+    h, w = img_rgb.shape[:2]
     if not raw_boxes:
         logger.warning("No text detected by OCR.")
         return [], np.zeros((h, w), dtype=np.uint8)
@@ -247,6 +299,71 @@ def _try_isolated_paddleocr(
             }
         )
     return boxes
+
+
+def _try_isolated_paddleocr_batch(
+    image_paths: list[Path],
+    lang: str,
+    conf_threshold: float,
+    *,
+    worker_root: str | Path | None,
+) -> list[list[dict]] | None:
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="ocr-batch-", dir=worker_root,
+        ) as temporary:
+            work_dir = Path(temporary)
+            manifest_path = work_dir / "manifest.json"
+            result_path = work_dir / "result.json"
+            manifest_path.write_text(
+                json.dumps({"images": [str(path.resolve()) for path in image_paths]}),
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable,
+                str(Path(__file__).with_name("ocr_worker.py").resolve()),
+                "batch",
+                "--manifest", str(manifest_path),
+                "--result", str(result_path),
+                "--lang", lang,
+            ]
+            completed = run_isolated_worker(
+                command, capture_output=True, text=True, check=False,
+            )
+            if completed.returncode or not result_path.is_file():
+                logger.warning(
+                    "Isolated OCR batch failed (exit=%s): %s",
+                    completed.returncode,
+                    completed.stderr.strip() or f"missing result {result_path}",
+                )
+                return None
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception as error:
+        logger.warning("Isolated OCR batch failed: %s", error)
+        return None
+
+    images = payload.get("images", [])
+    if len(images) != len(image_paths):
+        logger.warning("Isolated OCR batch returned the wrong image count")
+        return None
+    results = []
+    for image in images:
+        boxes = []
+        for item in image.get("items", []):
+            confidence = float(item.get("score", 0.0))
+            text = str(item.get("text", "")).strip()
+            if confidence < conf_threshold or not text:
+                continue
+            bx, by, width, height = _poly_to_box(item["poly"])
+            if width < 2 or height < 2:
+                continue
+            boxes.append({
+                "box": (bx, by, width, height),
+                "text": text,
+                "confidence": confidence,
+            })
+        results.append(boxes)
+    return results
 
 
 def _poly_to_box(poly: object) -> tuple[int, int, int, int]:
