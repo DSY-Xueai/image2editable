@@ -3170,6 +3170,10 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
         "id": "parent_0001", "mask": "masks/parent_0001.png",
         "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
         "bbox": [0, 0, 12, 8], "state": "pending_gate",
+    }, {
+        "id": "component_0001", "mask": "masks/parent_0001.png",
+        "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 12, 8], "state": "pending",
     }]}), encoding="utf-8")
     background = graph_dir / "background.png"
     _image(background, (4, 5, 6))
@@ -3187,6 +3191,7 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
             "graph_ref": reference(graph_path),
             "current_round": {"quality_ref": reference(quality)},
             "fallback": {"parent_ids": ["parent_0001"]},
+            "failed_ids": ["component_0001", "parent_0001"],
             "parent_assets": {"parent_0001": reference(mask)},
             "frozen": {"component_0004": "frozen-hash"},
         },
@@ -3199,7 +3204,11 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
         return copy.deepcopy(graph)
 
     captured = {}
-    monkeypatch.setattr(legacy, "execute_component_action_round", execute)
+    captured_actions = []
+    def capture_execute(pixels, graph, actions, **kwargs):
+        captured_actions.extend(actions)
+        return execute(pixels, graph, actions, **kwargs)
+    monkeypatch.setattr(legacy, "execute_component_action_round", capture_execute)
     monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         legacy, "_quality_assets",
@@ -3212,6 +3221,9 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     assert captured["background_path_override"] == background
     assert captured["frozen_manifest_path"] == manifest
     assert captured["frozen_component_ids"] == {"component_0004"}
+    assert [action["action"] for action in captured_actions] == [
+        "discard", "collapse_to_parent",
+    ]
 
 
 def _image(path: Path, color: tuple[int, int, int] = (1, 2, 3)) -> None:

@@ -1108,6 +1108,18 @@ def _presentation_component_ids(graph: dict) -> list[str]:
     ]
 
 
+def _quality_history_component_ids(
+    graph: dict, *, parent_fallback: bool,
+) -> list[str]:
+    if not parent_fallback:
+        return _presentation_component_ids(graph)
+    validated = validate_component_graph(graph)
+    return [
+        node["id"] for node in validated["nodes"]
+        if node["kind"] != "text"
+    ]
+
+
 def _validate_frozen_presentation_assets(
     previous_manifest: dict,
     current_manifest: dict,
@@ -1494,7 +1506,9 @@ def _recompute_quality_artifact(
         quality_evidence,
         state=state,
         request=request,
-        active_component_ids=_presentation_component_ids(graph),
+        active_component_ids=_quality_history_component_ids(
+            graph, parent_fallback=filename == "parent-quality.json"
+        ),
     )
     contained_parent_pairs = {
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
@@ -1563,6 +1577,17 @@ def _recompute_quality_artifact(
     }
 
 
+def _fallback_parent_id(node: dict, parent_assets: dict) -> str | None:
+    if node["kind"] != "parent":
+        parent_id = node["parent_id"]
+    else:
+        parent_id = node["id"]
+        paired_id = node["id"].replace("component_", "parent_", 1)
+        if parent_id not in parent_assets and paired_id in parent_assets:
+            parent_id = paired_id
+    return parent_id if parent_id in parent_assets else None
+
+
 def _commit_fallback_required(store, state: dict, page_id: str, reason: str) -> dict:
     graph = json.loads(_load_state_artifact(
         store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
@@ -1571,8 +1596,8 @@ def _commit_fallback_required(store, state: dict, page_id: str, reason: str) -> 
     parent_ids = set()
     for component_id in state["failed_ids"]:
         node = by_id[component_id]
-        parent_id = component_id if node["kind"] == "parent" else node["parent_id"]
-        if parent_id in state["parent_assets"]:
+        parent_id = _fallback_parent_id(node, state["parent_assets"])
+        if parent_id is not None:
             parent_ids.add(parent_id)
     updated = dict(state)
     updated["phase"] = "fallback_required"

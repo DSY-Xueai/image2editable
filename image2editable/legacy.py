@@ -2018,7 +2018,13 @@ def _execute_legacy_parent_fallback(
     )
     with Image.open(source) as image:
         pixels = np.asarray(image.convert("RGB")).copy()
+    fallback_parent_ids = set(state["fallback"]["parent_ids"])
     actions = [{
+        "action": "discard", "object_ids": [component_id],
+        "parameters": {}, "confidence": 1.0,
+        "evidence": ["deterministic parent fallback"],
+    } for component_id in state["failed_ids"]
+      if component_id not in fallback_parent_ids] + [{
         "action": "collapse_to_parent", "object_ids": [parent_id],
         "parameters": {}, "confidence": 1.0,
         "evidence": ["deterministic parent fallback"],

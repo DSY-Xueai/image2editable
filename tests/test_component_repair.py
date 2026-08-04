@@ -1637,6 +1637,33 @@ def test_parent_fallback_rejects_replaced_frozen_presentation_asset(
         )
 
 
+def test_parent_fallback_quality_history_keeps_replaced_child_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = {"nodes": [
+        {"id": "parent_0001", "kind": "parent", "state": "pending_gate"},
+        {"id": "component_0001", "kind": "visual", "state": "inactive"},
+        {"id": "text_0001", "kind": "text", "state": "frozen"},
+    ]}
+    monkeypatch.setattr(
+        component_repair, "validate_component_graph", lambda value: value
+    )
+
+    assert component_repair._quality_history_component_ids(
+        graph, parent_fallback=True
+    ) == ["parent_0001", "component_0001"]
+
+
+def test_parent_candidate_falls_back_to_its_intact_paired_parent() -> None:
+    node = {
+        "id": "component_0008", "kind": "parent", "parent_id": None,
+    }
+
+    assert component_repair._fallback_parent_id(
+        node, {"parent_0008": {"path": "intact-parent.png"}}
+    ) == "parent_0008"
+
+
 def _node(component_id: str, state: str, z_index: int) -> dict:
     return {
         "id": component_id,
