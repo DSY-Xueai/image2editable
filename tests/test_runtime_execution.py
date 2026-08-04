@@ -7,6 +7,7 @@ from datetime import datetime
 import multiprocessing
 import os
 import re
+import shutil
 import subprocess
 import types
 from pathlib import Path, PurePosixPath
@@ -3138,6 +3139,79 @@ def test_host_agent_next_times_out_explicitly_while_execution_lease_is_held(
     with ExecutionLease(run_dir / "execution.lock", run_root=run_dir):
         with pytest.raises(RuntimeError, match="Timed out waiting for Run execution lock"):
             runtime.next_host_agent_item(run_dir)
+
+
+def test_parent_fallback_reuses_previous_background_and_frozen_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    page_dir = run_dir / "pages/page_001"
+    graph_dir = page_dir / "reconstruction/execution-05"
+    (graph_dir / "masks").mkdir(parents=True)
+    source = page_dir / "source.png"
+    _image(source)
+    store = RunStore(run_dir)
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    store.write_json("pages/page_001/page_request.json", {
+        "schema_version": 1,
+        "source": "pages/page_001/source.png",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    })
+    mask = graph_dir / "masks/parent_0001.png"
+    Image.new("L", (12, 8), 255).save(mask)
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps({"nodes": [{
+        "id": "parent_0001", "mask": "masks/parent_0001.png",
+        "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 12, 8], "state": "pending_gate",
+    }]}), encoding="utf-8")
+    background = graph_dir / "background.png"
+    _image(background, (4, 5, 6))
+    manifest = graph_dir / "presentation-manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    quality = graph_dir / "component-quality.json"
+    quality.write_text(json.dumps({"input_refs": {
+        "background": reference(background),
+        "presentation_manifest": reference(manifest),
+    }}), encoding="utf-8")
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {
+            "repair_round": 5,
+            "graph_ref": reference(graph_path),
+            "current_round": {"quality_ref": reference(quality)},
+            "fallback": {"parent_ids": ["parent_0001"]},
+            "parent_assets": {"parent_0001": reference(mask)},
+            "frozen": {"component_0004": "frozen-hash"},
+        },
+    )
+
+    def execute(pixels, graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        (output_dir / "masks").mkdir(parents=True)
+        shutil.copy2(mask, output_dir / "masks/parent_0001.png")
+        return copy.deepcopy(graph)
+
+    captured = {}
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute)
+    monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        legacy, "_quality_assets",
+        lambda *args, **kwargs: captured.update(kwargs) or {},
+    )
+    monkeypatch.setattr(legacy, "record_parent_fallback_execution", lambda *args, **kwargs: None)
+
+    legacy._execute_legacy_parent_fallback(store, "page_001", object())
+
+    assert captured["background_path_override"] == background
+    assert captured["frozen_manifest_path"] == manifest
+    assert captured["frozen_component_ids"] == {"component_0004"}
 
 
 def _image(path: Path, color: tuple[int, int, int] = (1, 2, 3)) -> None:

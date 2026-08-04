@@ -100,8 +100,11 @@ def _visual_metrics(
         float(np.percentile(source_detail[donor_ring], 95)) + 12.0
         if np.any(donor_ring) else 12.0
     )
+    interior = cv2.erode(
+        visual_hole.astype(np.uint8), np.ones((5, 5), dtype=np.uint8)
+    ).astype(bool)
     high_frequency = float(np.count_nonzero(
-        visual_hole & (candidate_detail > detail_threshold)
+        interior & (candidate_detail > detail_threshold)
     ))
     return {
         "boundary_color_mae": boundary_mae,
@@ -121,23 +124,60 @@ def _choose_visual_fill(
     x0, x1 = max(0, int(xs.min()) - 8), min(rgb.shape[1], int(xs.max()) + 9)
     crop = rgb[y0:y1, x0:x1]
     mask = visual_hole[y0:y1, x0:x1].astype(np.uint8) * 255
-    candidates = (
+    candidates = [
         cv2.inpaint(crop, mask, 3, cv2.INPAINT_TELEA),
         cv2.inpaint(crop, mask, 3, cv2.INPAINT_NS),
-    )
+    ]
+    hole_crop = visual_hole[y0:y1, x0:x1]
+    donor_crop = donor_mask[y0:y1, x0:x1]
+    count, labels = cv2.connectedComponents(hole_crop.astype(np.uint8), 8)
+    areas = [int(np.count_nonzero(labels == label)) for label in range(1, count)]
+    if any(area >= 25 for area in areas):
+        local_fill = candidates[1].copy()
+        filled = False
+        for label, area in zip(range(1, count), areas):
+            if area < 25:
+                continue
+            component = labels == label
+            radius = max(3, min(21, int(np.ceil(np.sqrt(area) * 0.15))))
+            ring = (
+                cv2.dilate(
+                    component.astype(np.uint8),
+                    np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8),
+                ).astype(bool)
+                & donor_crop
+            )
+            if not np.any(ring):
+                continue
+            local_fill[component] = np.median(crop[ring], axis=0).astype(np.uint8)
+            filled = True
+        if filled:
+            candidates.append(local_fill)
     selected = rgb.copy()
     selected_metrics: dict[str, float] | None = None
-    selected_key: tuple[float, float, float] | None = None
+    selected_key: tuple[float, ...] | None = None
     for candidate_crop in candidates:
         candidate = rgb.copy()
         candidate[y0:y1, x0:x1][visual_hole[y0:y1, x0:x1]] = candidate_crop[
             visual_hole[y0:y1, x0:x1]
         ]
         metrics = _visual_metrics(candidate, source_rgb, donor_mask, visual_hole)
-        key = (
+        limits = (
+            6.0,
+            12.0,
+            float(max(4, round(np.count_nonzero(visual_hole) * 0.005))),
+        )
+        values = (
             metrics["boundary_color_mae"],
             metrics["gradient_jump_p95"],
             metrics["added_high_frequency_pixels"],
+        )
+        ratios = tuple(value / limit for value, limit in zip(values, limits))
+        key = (
+            float(sum(value > limit for value, limit in zip(values, limits))),
+            max(ratios),
+            sum(ratios),
+            *values,
         )
         if selected_key is None or key < selected_key:
             selected, selected_metrics, selected_key = candidate, metrics, key

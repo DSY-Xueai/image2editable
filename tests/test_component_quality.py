@@ -1141,6 +1141,33 @@ def test_quality_text_refinement_rebuilds_the_confirmed_text_box_and_halo() -> N
     assert "component_text_residual" not in _evaluate_synthetic(case)["violations"]
 
 
+def test_quality_text_refinement_preserves_structure_crossing_text_box() -> None:
+    import cv2
+
+    from image2editable import legacy
+
+    source = np.full((100, 180, 3), 235, dtype=np.uint8)
+    source[20:80, 20:160] = (70, 125, 190)
+    source[77:80, 20:160] = (20, 65, 120)
+    cv2.putText(
+        source, "EDIT", (52, 72), cv2.FONT_HERSHEY_SIMPLEX,
+        0.8, (245, 245, 245), 2, cv2.LINE_AA,
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[48:82, 45:140] = True
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        source.copy(),
+        text_mask,
+        [{"box": [45, 48, 95, 34]}],
+    )
+
+    assert np.all(refined[78, 45:140] == (20, 65, 120))
+    glyph = text_mask & np.all(source == (245, 245, 245), axis=2)
+    assert not np.any(np.all(refined[glyph] == (245, 245, 245), axis=1))
+
+
 def test_disconnected_glyph_strokes_are_aggregated_within_one_text_region() -> None:
     case = _text_isolation_case()
     case["source"][case["component_mask"]] = (70, 125, 190)

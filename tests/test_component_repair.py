@@ -242,6 +242,67 @@ def test_visual_fill_exact_tie_keeps_telea(
     assert np.array_equal(layer["rgb"][~hole], source[~hole])
 
 
+def test_visual_fill_prefers_clean_local_fill_over_interior_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.full((50, 70, 3), 220, dtype=np.uint8)
+    semantic = np.ones((50, 70), dtype=bool)
+    hole = np.zeros((50, 70), dtype=bool)
+    large_hole = np.zeros_like(hole)
+    large_hole[12:38, 20:50] = True
+    hole |= large_hole
+    hole[3, 3] = True
+
+    def patched_inpaint(image, mask, radius, method):
+        candidate = image.copy()
+        y, x = np.indices(mask.shape)
+        selected = mask.astype(bool)
+        checker = ((x + y) % 2)[selected][:, None]
+        candidate[selected] = np.where(checker, 255, 0)
+        return candidate
+
+    monkeypatch.setattr(component_underlay.cv2, "inpaint", patched_inpaint)
+    layer = component_underlay.build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~hole,
+        semantic_mask=semantic,
+        higher_layer_mask=hole,
+        text_mask=np.zeros_like(hole),
+    )
+
+    assert (
+        np.max(layer["rgb"][large_hole])
+        - np.min(layer["rgb"][large_hole])
+        <= 1
+    )
+    assert layer["metrics"]["added_high_frequency_pixels"] == 0
+
+
+def test_visual_metrics_count_only_interior_high_frequency() -> None:
+    from scripts.component_underlay import _visual_metrics
+
+    source = np.full((30, 40, 3), 120, dtype=np.uint8)
+    hole = np.zeros((30, 40), dtype=bool)
+    hole[8:22, 10:30] = True
+    donor = ~hole
+    boundary_only = source.copy()
+    boundary = hole & ~cv2.erode(
+        hole.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ).astype(bool)
+    boundary_only[boundary] = 200
+    patched = boundary_only.copy()
+    patched[12:18, 15:25:2] = 255
+
+    boundary_metrics = _visual_metrics(boundary_only, source, donor, hole)
+    patched_metrics = _visual_metrics(patched, source, donor, hole)
+
+    assert boundary_metrics["added_high_frequency_pixels"] == 0
+    assert patched_metrics["added_high_frequency_pixels"] > 0
+
+
 def test_visual_fill_handles_multiple_holes_near_page_edge() -> None:
     from scripts.component_underlay import build_presentation_layer
 

@@ -1509,6 +1509,39 @@ def _refine_quality_text_clean(
         refined = module._interpolate_text_item_boxes(
             refined, [item], padding=_text_item_repair_padding_px(int(box[3]))
         )
+    import cv2
+
+    short_side = min(source.shape[:2])
+    line_length = max(9, min(31, round(short_side * 0.03)))
+    local_delta = np.zeros(source.shape[:2], dtype=np.uint8)
+    for channel in range(3):
+        local_delta = np.maximum(
+            local_delta,
+            cv2.absdiff(
+                source[:, :, channel],
+                cv2.medianBlur(source[:, :, channel], 9),
+            ),
+        )
+    contrast = (local_delta > 12).astype(np.uint8)
+    horizontal = cv2.morphologyEx(
+        contrast, cv2.MORPH_OPEN,
+        np.ones((1, line_length), dtype=np.uint8),
+    )
+    vertical = cv2.morphologyEx(
+        contrast, cv2.MORPH_OPEN,
+        np.ones((line_length, 1), dtype=np.uint8),
+    )
+    line_mask = (horizontal | vertical).astype(bool)
+    line_count, line_labels = cv2.connectedComponents(
+        line_mask.astype(np.uint8), 8
+    )
+    for line_label in range(1, line_count):
+        component = line_labels == line_label
+        inside = component & text
+        outside = component & ~text
+        if not np.any(inside) or not np.any(outside):
+            continue
+        refined[inside] = np.median(source[outside], axis=0).astype(np.uint8)
     return refined
 
 
@@ -2013,8 +2046,28 @@ def _execute_legacy_parent_fallback(
         json.dumps(next_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    quality_options = {}
+    quality_ref = state["current_round"].get("quality_ref")
+    if isinstance(quality_ref, dict):
+        previous_quality = json.loads(
+            _state_artifact(store, quality_ref).read_text(encoding="utf-8")
+        )
+        previous_refs = previous_quality["input_refs"]
+        if isinstance(previous_refs.get("background"), dict):
+            quality_options["background_path_override"] = _state_artifact(
+                store, previous_refs["background"]
+            )
+        frozen_ids = set(state["frozen"])
+        if frozen_ids and isinstance(
+            previous_refs.get("presentation_manifest"), dict
+        ):
+            quality_options["frozen_manifest_path"] = _state_artifact(
+                store, previous_refs["presentation_manifest"]
+            )
+            quality_options["frozen_component_ids"] = frozen_ids
     refs = _quality_assets(
-        store, page_id, next_graph, output_dir, output_dir
+        store, page_id, next_graph, output_dir, output_dir,
+        **quality_options,
     )
     record_parent_fallback_execution(
         store, page_id, graph_path=output_graph,
