@@ -68,6 +68,7 @@ def execute_component_actions(
     masks = {component_id: loaded[0] for component_id, loaded in loaded_masks.items()}
     mask_payloads = {component_id: loaded[1] for component_id, loaded in loaded_masks.items()}
     touched = set()
+    suppressed_text_ids = set()
     for action in actions:
         validate_component_action(action, graph=validated)
         object_ids = action["object_ids"]
@@ -80,6 +81,14 @@ def execute_component_actions(
             )
             if not valid_states:
                 raise ValueError("attach_text requires pending visual and frozen text")
+        elif name == "suppress_text":
+            valid_states = (
+                nodes[object_ids[0]]["kind"] == "text"
+                and nodes[object_ids[0]]["state"] == "frozen"
+            )
+            if not valid_states:
+                raise ValueError("suppress_text requires a frozen text object")
+            suppressed_text_ids.add(object_ids[0])
         elif name == "collapse_to_parent":
             allowed_states = {"inactive", "pending"}
             valid_states = all(
@@ -116,6 +125,13 @@ def execute_component_actions(
         elif name == "attach_text":
             visual, text = object_ids
             nodes[visual]["text_ids"] = sorted(set(nodes[visual]["text_ids"] + [text]))
+        elif name == "suppress_text":
+            text_id = object_ids[0]
+            nodes[text_id]["state"] = "inactive"
+            for node in nodes.values():
+                node["text_ids"] = [
+                    value for value in node["text_ids"] if value != text_id
+                ]
         elif name == "collapse_to_parent":
             parent = object_ids[0]
             nodes[parent]["state"] = "pending"
@@ -228,7 +244,11 @@ def execute_component_actions(
             node["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             ys, xs = np.where(mask)
             node["bbox"] = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
-        validate_graph_transition(before=validated, after=result)
+        validate_graph_transition(
+            before=validated,
+            after=result,
+            allowed_suppressed_text_ids=suppressed_text_ids,
+        )
         (staging / "component-graph.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

@@ -414,6 +414,7 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         "retry_with_box",
         "retry_with_points",
         "attach_text",
+        "suppress_text",
         "collapse_to_parent",
         "rebuild_background",
         "absorb_into_parent",
@@ -427,6 +428,7 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         'absorb_into_parent parameters: {}',
         'retry_with_box parameters: {"box"',
         'retry_with_points parameters: {"positive"',
+        "suppress_text only when visual evidence clearly proves",
         '"negative"',
         "normalized to 0..1",
     ):

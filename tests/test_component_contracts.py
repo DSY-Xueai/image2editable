@@ -47,6 +47,7 @@ def test_quality_input_contract_requires_presentation_manifest_ref() -> None:
         ("retry_with_box", ["component_0001"], {"box": [0.1, 0.1, 0.5, 0.5]}),
         ("retry_with_points", ["component_0001"], {"positive": [[0.2, 0.2]], "negative": []}),
         ("attach_text", ["component_0001", "text_0001"], {}),
+        ("suppress_text", ["text_0001"], {}),
         ("collapse_to_parent", ["parent_0001"], {}),
     ],
 )
@@ -158,6 +159,7 @@ def test_validate_agent_provider_rejects_unsupported_values(value: object) -> No
         ("merge", ["visual"]),
         ("split", ["visual", "visual2"]),
         ("attach_text", ["visual"]),
+        ("suppress_text", ["text", "visual"]),
         ("collapse_to_parent", ["visual", "visual2"]),
     ],
 )
@@ -172,6 +174,7 @@ def test_component_plan_rejects_invalid_action_object_count(action: str, object_
     ("action", "object_ids"),
     [
         ("attach_text", ["text", "visual"]),
+        ("suppress_text", ["visual"]),
         ("collapse_to_parent", ["child_a",]),
         ("accept", ["text"]),
         ("merge", ["child_a", "child_b"]),
@@ -197,6 +200,22 @@ def test_component_plan_rejects_attach_text_to_pending_text() -> None:
             request=request,
             graph=graph,
         )
+
+
+def test_component_plan_allows_suppressing_linked_frozen_text() -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, "suppress_text", ["text"])
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+    next(node for node in graph["nodes"] if node["id"] == "visual")[
+        "text_ids"
+    ] = ["text"]
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
 
 
 def test_component_plan_allows_collapse_to_parent_of_requested_child() -> None:
@@ -408,6 +427,71 @@ def test_frozen_component_cannot_change(field: str, value: object) -> None:
         component_contracts.validate_graph_transition(
             before=before,
             after={"nodes": mutated},
+        )
+
+
+def test_frozen_text_suppression_requires_explicit_transition_authorization() -> None:
+    text = _node(
+        "text_0001", kind="text", parent_id=None, state="frozen",
+    )
+    before = {"nodes": [text]}
+    suppressed = {"nodes": [{**text, "state": "inactive"}]}
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before=before, after=suppressed,
+        )
+
+    assert component_contracts.validate_graph_transition(
+        before=before,
+        after=suppressed,
+        allowed_suppressed_text_ids={"text_0001"},
+    ) is suppressed
+
+
+def test_authorized_text_suppression_cannot_change_any_other_frozen_field() -> None:
+    text = _node(
+        "text_0001", kind="text", parent_id=None, state="frozen",
+    )
+    mutated = {"nodes": [{
+        **text,
+        "state": "inactive",
+        "bbox": [1, 2, 8, 10],
+    }]}
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before={"nodes": [text]},
+            after=mutated,
+            allowed_suppressed_text_ids={"text_0001"},
+        )
+
+
+def test_authorized_text_suppression_may_only_unlink_it_from_frozen_visuals() -> None:
+    text = _node(
+        "text_0001", kind="text", parent_id=None, state="frozen",
+    )
+    visual = _node(
+        "visual_0001", kind="parent", parent_id=None, state="frozen",
+        text_ids=["text_0001"],
+    )
+    after = {"nodes": [
+        {**text, "state": "inactive"},
+        {**visual, "text_ids": []},
+    ]}
+
+    assert component_contracts.validate_graph_transition(
+        before={"nodes": [text, visual]},
+        after=after,
+        allowed_suppressed_text_ids={"text_0001"},
+    ) is after
+
+    after["nodes"][1]["bbox"] = [1, 2, 8, 10]
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before={"nodes": [text, visual]},
+            after=after,
+            allowed_suppressed_text_ids={"text_0001"},
         )
 
 

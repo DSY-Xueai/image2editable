@@ -600,6 +600,95 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
     assert preserved["status"] == "preserved_with_warning"
 
 
+def test_record_suppress_text_preserves_linked_frozen_visual_assets(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    graph_path = page_session["evidence"]["component-graph.json"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    frozen_visual = next(
+        node for node in graph["nodes"] if node["id"] == "frozen_a"
+    )
+    frozen_visual["text_ids"] = ["text_0001"]
+    text = _node("text_0001", "frozen", 2)
+    text["kind"] = "text"
+    graph["nodes"].append(text)
+    text_mask = graph_path.parent / text["mask"]
+    Image.fromarray(np.full((2, 2), 255, dtype=np.uint8)).save(text_mask)
+    text["mask_sha256"] = hashlib.sha256(text_mask.read_bytes()).hexdigest()
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1,
+        "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    plan = {
+        "schema_version": 1, "kind": "component_plan",
+        "page_id": "page_001", "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("suppress_text", ["text_0001"])],
+    }
+    record_local_component_plan(store, "page_001", plan=plan)
+    output_dir = request_path.parents[2] / "execution-01"
+    next_graph = execute_component_actions(
+        np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
+        sam_runner=None, input_dir=request_path.parent, output_dir=output_dir,
+    )
+    next_graph_path = output_dir / "component-graph.json"
+    refs = _quality_input_refs(output_dir, store, next_graph_path)
+    execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "output_graph_sha256": hashlib.sha256(next_graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1, "quality_input_refs": refs,
+    }
+    execution_path = output_dir / "execution.json"
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    state = record_component_execution(
+        store, "page_001", execution_path=execution_path,
+        output_graph_path=next_graph_path,
+    )
+
+    assert state["phase"] == "actions_executed"
+    before_manifest = json.loads(
+        (request_path.parent / "presentation-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    after_manifest = json.loads(
+        (store.root / refs["presentation_manifest"]["path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    before_frozen = next(
+        item for item in before_manifest["components"]
+        if item["component_id"] == "frozen_a"
+    )
+    after_frozen = next(
+        item for item in after_manifest["components"]
+        if item["component_id"] == "frozen_a"
+    )
+    for field in (
+        "rgba", "ownership_mask", "presentation_alpha_mask",
+        "generated_underlay_mask",
+    ):
+        assert after_frozen[field]["sha256"] == before_frozen[field]["sha256"]
+    assert next(
+        node for node in next_graph["nodes"] if node["id"] == "frozen_a"
+    )["text_ids"] == []
+
+
 def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     page_session: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1656,6 +1745,47 @@ def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path
     assert by_id["left"]["state"] == "pending_gate"
     assert by_id["frozen"] == next(node for node in graph["nodes"] if node["id"] == "frozen")
     assert (output / "component-graph.json").is_file()
+
+
+def test_execute_suppress_text_only_deactivates_selected_frozen_text(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    next(node for node in graph["nodes"] if node["id"] == "frozen")[
+        "text_ids"
+    ] = ["text"]
+    before = {
+        node["id"]: dict(node)
+        for node in graph["nodes"]
+    }
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("suppress_text", ["text"])],
+        sam_runner=None,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-suppress-text",
+    )
+
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["text"] == {**before["text"], "state": "inactive"}
+    assert by_id["frozen"] == {**before["frozen"], "text_ids": []}
+    assert by_id["left"] == before["left"]
+
+
+def test_execute_suppress_text_rejects_frozen_visual(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+
+    with pytest.raises(ValueError, match="text"):
+        execute_component_actions(
+            image,
+            graph,
+            [_action("suppress_text", ["frozen"])],
+            sam_runner=None,
+            input_dir=input_dir,
+            output_dir=tmp_path / "round-invalid-suppress-text",
+        )
 
 
 def test_execute_discard_inactivates_redundant_candidate(tmp_path: Path) -> None:

@@ -654,11 +654,12 @@ def _build_initial_page_session(
     }
 
 
-def _component_text_items(items: object, page_size: tuple[int, int]) -> list[dict]:
+def _component_text_records(items: object, page_size: tuple[int, int]) -> list[dict]:
     if not isinstance(items, list):
         return []
     width, height = page_size
     normalized = []
+    used_ids = set()
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get("text"), str):
             continue
@@ -687,12 +688,33 @@ def _component_text_items(items: object, page_size: tuple[int, int]) -> list[dic
         top = max(0, min(height - 1, int(y)))
         right = max(left + 1, min(width, math.ceil(x + box_width)))
         bottom = max(top + 1, min(height, math.ceil(y + box_height)))
+        component_id = item.get(
+            "_component_id", f"text_{len(normalized) + 1:04d}"
+        )
+        if (
+            type(component_id) is not str
+            or not component_id.startswith("text_")
+            or not component_id[5:].isdigit()
+            or component_id in used_ids
+        ):
+            raise ValueError("component text id is invalid")
+        used_ids.add(component_id)
         normalized.append({
-            "id": f"text_{len(normalized) + 1:04d}",
-            "text": item["text"],
-            "box": [left, top, right, bottom],
+            "raw": item,
+            "normalized": {
+                "id": component_id,
+                "text": item["text"],
+                "box": [left, top, right, bottom],
+            },
         })
     return normalized
+
+
+def _component_text_items(items: object, page_size: tuple[int, int]) -> list[dict]:
+    return [
+        record["normalized"]
+        for record in _component_text_records(items, page_size)
+    ]
 
 
 def _ensure_component_disk_reserve(
@@ -1490,6 +1512,84 @@ def _refine_quality_text_clean(
     return refined
 
 
+def _reuse_frozen_presentation_records(
+    current: dict, previous: dict, frozen_ids: set[str]
+) -> dict:
+    previous_by_id = {
+        component["component_id"]: component
+        for component in previous["components"]
+    }
+    current_ids = {
+        component["component_id"] for component in current["components"]
+    }
+    if frozen_ids - set(previous_by_id) or frozen_ids - current_ids:
+        raise ValueError("frozen presentation component is missing")
+    return {
+        **current,
+        "components": [
+            previous_by_id[component["component_id"]]
+            if component["component_id"] in frozen_ids
+            else component
+            for component in current["components"]
+        ],
+    }
+
+
+def _effective_text_context(
+    *,
+    source,
+    text_clean,
+    text_mask,
+    text_items: object,
+    graph: dict,
+    graph_dir: Path,
+) -> tuple[list[dict], Any, Any]:
+    import numpy as np
+
+    source = np.asarray(source, dtype=np.uint8)
+    cleaned = np.asarray(text_clean, dtype=np.uint8)
+    original_mask = np.asarray(text_mask) > 0
+    if cleaned.shape != source.shape or original_mask.shape != source.shape[:2]:
+        raise ValueError("effective text dimensions differ")
+    records = _component_text_records(
+        text_items, (source.shape[1], source.shape[0])
+    )
+    records_by_id = {
+        record["normalized"]["id"]: record for record in records
+    }
+    frozen_mask = np.zeros(original_mask.shape, dtype=bool)
+    suppressed_mask = np.zeros(original_mask.shape, dtype=bool)
+    frozen_ids = set()
+    for node in graph["nodes"]:
+        if node["kind"] != "text" or node["id"] not in records_by_id:
+            continue
+        mask_path = graph_dir / Path(node["mask"])
+        if sha256_file(mask_path) != node["mask_sha256"]:
+            raise ValueError("effective text graph mask sha256 mismatch")
+        with Image.open(mask_path) as image:
+            node_mask = np.asarray(image.convert("L")) > 0
+        if node_mask.shape != original_mask.shape:
+            raise ValueError("effective text graph mask dimensions differ")
+        if node["state"] == "frozen":
+            frozen_ids.add(node["id"])
+            frozen_mask |= node_mask
+        elif node["state"] == "inactive":
+            suppressed_mask |= node_mask
+    effective_items = [
+        {**record["raw"], "_component_id": component_id}
+        for component_id, record in records_by_id.items()
+        if component_id in frozen_ids
+    ]
+    effective_mask = original_mask & frozen_mask
+    effective_clean = cleaned.copy()
+    restore = suppressed_mask & ~frozen_mask
+    effective_clean[restore] = source[restore]
+    effective_clean = _refine_quality_text_clean(
+        source, effective_clean, effective_mask, effective_items
+    )
+    return effective_items, effective_mask, effective_clean
+
+
 def _quality_assets(
     store: RunStore,
     page_id: str,
@@ -1498,6 +1598,8 @@ def _quality_assets(
     output_dir: Path,
     *,
     background_path_override: Path | None = None,
+    frozen_manifest_path: Path | None = None,
+    frozen_component_ids: set[str] | None = None,
 ) -> dict:
     import numpy as np
 
@@ -1523,10 +1625,13 @@ def _quality_assets(
         text_clean = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_mask = np.asarray(image.convert("L")) > 0
-    if text_mask.shape != source.shape[:2] or text_clean.shape != source.shape:
-        raise ValueError("quality text-clean dimensions differ")
-    text_clean = _refine_quality_text_clean(
-        source, text_clean, text_mask, prepared.get("text_items", [])
+    effective_items, text_mask, text_clean = _effective_text_context(
+        source=source,
+        text_clean=text_clean,
+        text_mask=text_mask,
+        text_items=prepared.get("text_items", []),
+        graph=graph,
+        graph_dir=graph_dir,
     )
     text_clean_output = output_dir / "text-clean.png"
     Image.fromarray(text_clean, mode="RGB").save(text_clean_output)
@@ -1555,6 +1660,28 @@ def _quality_assets(
         graph_path=graph_path,
         output_dir=output_dir,
     )
+    frozen_ids = set() if frozen_component_ids is None else frozen_component_ids
+    if frozen_ids:
+        if frozen_manifest_path is None:
+            raise ValueError("frozen presentation manifest is missing")
+        current_manifest = json.loads(
+            presentation_manifest.read_text(encoding="utf-8")
+        )
+        previous_manifest = json.loads(
+            frozen_manifest_path.read_text(encoding="utf-8")
+        )
+        reused_manifest = _reuse_frozen_presentation_records(
+            current_manifest, previous_manifest, frozen_ids
+        )
+        presentation_manifest.write_text(
+            json.dumps(
+                reused_manifest,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
     with Image.open(background_path) as image:
         background_image = image.convert("RGB")
     try:
@@ -1597,7 +1724,9 @@ def _quality_assets(
     }
     shutil.copyfile(background_path, assets["background"])
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
-    shutil.copyfile(text_mask_path, assets["text_mask"])
+    Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
+        assets["text_mask"]
+    )
     assets["native_check"].write_text(json.dumps({
         "schema_version": 1, "page_id": page_id,
         "source_sha256": sha256_file(source_path),
@@ -1605,7 +1734,7 @@ def _quality_assets(
         "contained_parent_pairs": [
             list(pair) for pair in sorted(contained_parent_pairs)
         ],
-        "text_items": prepared.get("text_items", []),
+        "text_items": effective_items,
         "initial_diagnostics": prepared.get("initial_diagnostics", []),
     }, ensure_ascii=False), encoding="utf-8")
     return {
@@ -1638,9 +1767,15 @@ def _execute_legacy_round(
     )
     previous_quality = json.loads(quality_evidence.read_text(encoding="utf-8"))
     current_background = None
+    previous_presentation_manifest = request_path.parent / Path(
+        request["evidence"]["presentation-manifest.json"]["path"]
+    )
     if isinstance(previous_quality.get("input_refs"), dict):
         current_background = _state_artifact(
             store, previous_quality["input_refs"]["background"]
+        )
+        previous_presentation_manifest = _state_artifact(
+            store, previous_quality["input_refs"]["presentation_manifest"]
         )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
@@ -1682,6 +1817,22 @@ def _execute_legacy_round(
         prepared = module.load_component_layers(
             reconstruction / "initial/prepared_page.json"
         )
+        with Image.open(Path(prepared.get("_text_clean_path", source))) as image:
+            text_clean = np.asarray(image.convert("RGB")).copy()
+        with Image.open(Path(prepared["_text_mask_path"])) as image:
+            text_mask = np.asarray(image.convert("L")) > 0
+        _, effective_text_mask, _ = _effective_text_context(
+            source=pixels,
+            text_clean=text_clean,
+            text_mask=text_mask,
+            text_items=prepared.get("text_items", []),
+            graph=next_graph,
+            graph_dir=output_dir,
+        )
+        effective_text_mask_path = output_dir / "background-text-mask.png"
+        Image.fromarray(
+            effective_text_mask.astype(np.uint8) * 255, mode="L"
+        ).save(effective_text_mask_path)
         current_background = _rebuild_canvas_background(
             source_path=source,
             current_background_path=(
@@ -1691,13 +1842,15 @@ def _execute_legacy_round(
             ),
             graph=next_graph,
             graph_dir=output_dir,
-            text_mask_path=Path(prepared["_text_mask_path"]),
+            text_mask_path=effective_text_mask_path,
             margin_ratio=rebuild_actions[0]["parameters"]["margin_ratio"],
             output_path=output_dir / "background-rebuilt.png",
         )
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
         background_path_override=current_background,
+        frozen_manifest_path=previous_presentation_manifest,
+        frozen_component_ids=set(state["frozen"]),
     )
     execution = {
         "schema_version": 1, "page_id": page_id,
@@ -1735,13 +1888,15 @@ def _publish_next_legacy_request(
     source = _state_artifact(store, refs["source"])
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    module = importlib.import_module("image_to_ppt")
-    prepared = module.load_component_layers(
-        reconstruction / "initial" / "prepared_page.json"
+    native_check = json.loads(
+        _state_artifact(store, refs["native_check"]).read_text(encoding="utf-8")
     )
+    raw_text_items = native_check.get("text_items")
+    if not isinstance(raw_text_items, list):
+        raise ValueError("legacy native text_items are invalid")
     with Image.open(source) as image:
         text_items = _component_text_items(
-            prepared.get("text_items", []), image.size
+            raw_text_items, image.size
         )
     _ensure_component_disk_reserve(
         reconstruction,
@@ -2160,6 +2315,9 @@ def _accepted_slide_data(
             })
         return {
             **prepared,
+            "text_items": result.get(
+                "text_items", prepared.get("text_items", [])
+            ),
             "background_path": str(asset_paths["background"]),
             "background_original_path": str(asset_paths["background"]),
             "background_widescreen_path": str(asset_paths["background"]),

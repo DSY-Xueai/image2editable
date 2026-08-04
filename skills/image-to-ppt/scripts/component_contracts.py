@@ -312,12 +312,13 @@ _ACTION_PARAMETERS = {
     "retry_with_box": frozenset({"box"}),
     "retry_with_points": frozenset({"positive", "negative"}),
     "attach_text": frozenset(),
+    "suppress_text": frozenset(),
     "collapse_to_parent": frozenset(),
     "rebuild_background": frozenset({"margin_ratio"}),
     "absorb_into_parent": frozenset(),
 }
 _SINGLE_OBJECT_ACTIONS = frozenset(
-    {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "collapse_to_parent"}
+    {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "suppress_text", "collapse_to_parent"}
 )
 
 
@@ -347,10 +348,10 @@ def validate_component_action(action: object, *, graph: dict | None = None) -> d
     if (
         validated_graph is None
         and isinstance(action, dict)
-        and action.get("action") == "attach_text"
-        and len(object_ids) == 2
+        and action.get("action") in {"attach_text", "suppress_text"}
+        and len(object_ids) == (2 if action.get("action") == "attach_text" else 1)
     ):
-        frozen_ids = [object_ids[1]]
+        frozen_ids = [object_ids[-1]]
     candidate_ids = sorted(
         (set(object_ids) | {
             node["id"] for node in graph_nodes
@@ -463,8 +464,14 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             raise ValueError("attach_text requires a frozen text object")
         frozen_targets = set(object_ids) & set(request["frozen_ids"])
         if frozen_targets and not (
-            name == "attach_text"
-            and frozen_targets == {object_ids[1]}
+            (
+                name == "attach_text"
+                and frozen_targets == {object_ids[1]}
+            )
+            or (
+                name == "suppress_text"
+                and frozen_targets == {object_ids[0]}
+            )
         ):
             raise ValueError("component action object is frozen")
         if name != "rebuild_background":
@@ -527,6 +534,10 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
             raise ValueError("attach_text requires visual then text roles")
         if selected[1].get("state") != "frozen":
             raise ValueError("attach_text requires a frozen text object")
+        return
+    if action == "suppress_text":
+        if selected[0].get("kind") != "text" or selected[0].get("state") != "frozen":
+            raise ValueError("suppress_text requires a frozen text object")
         return
     if action == "collapse_to_parent":
         if selected[0].get("kind") != "parent":
@@ -717,8 +728,31 @@ def validate_component_graph(graph: object) -> dict:
     return graph
 
 
-def validate_graph_transition(*, before: object, after: object) -> dict:
+def validate_graph_transition(
+    *,
+    before: object,
+    after: object,
+    allowed_suppressed_text_ids: set[str] | frozenset[str] | None = None,
+) -> dict:
     before_graph = validate_component_graph(before)
+    allowed = (
+        frozenset()
+        if allowed_suppressed_text_ids is None
+        else frozenset(allowed_suppressed_text_ids)
+    )
+    if (
+        allowed_suppressed_text_ids is not None
+        and not isinstance(allowed_suppressed_text_ids, (set, frozenset))
+    ) or any(type(value) is not str or not value for value in allowed):
+        raise ValueError("suppressed text authorization is invalid")
+    before_nodes = {node["id"]: node for node in before_graph["nodes"]}
+    if any(
+        component_id not in before_nodes
+        or before_nodes[component_id]["kind"] != "text"
+        or before_nodes[component_id]["state"] != "frozen"
+        for component_id in allowed
+    ):
+        raise ValueError("suppressed text authorization is invalid")
     if not isinstance(after, dict) or set(after) != {"nodes"}:
         raise ValueError("component graph fields are invalid")
     if not isinstance(after["nodes"], list):
@@ -732,8 +766,19 @@ def validate_graph_transition(*, before: object, after: object) -> dict:
         if node["state"] != "frozen":
             continue
         replacement = after_nodes.get(node["id"])
-        if replacement is None or any(
-            replacement.get(field) != node[field] for field in _FROZEN_FIELDS
+        fields = _FROZEN_FIELDS
+        if node["id"] in allowed:
+            fields = tuple(field for field in fields if field != "state")
+            valid = replacement is not None and replacement.get("state") == "inactive"
+        elif node["kind"] != "text" and set(node["text_ids"]) & allowed:
+            fields = tuple(field for field in fields if field != "text_ids")
+            valid = replacement is not None and replacement.get("text_ids") == [
+                text_id for text_id in node["text_ids"] if text_id not in allowed
+            ]
+        else:
+            valid = replacement is not None
+        if not valid or any(
+            replacement.get(field) != node[field] for field in fields
         ):
             raise ValueError(f"frozen component {node['id']} cannot change")
     return validate_component_graph(after)

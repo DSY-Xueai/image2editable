@@ -2118,6 +2118,128 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     assert all(path.read_bytes() == payload for path, payload in original_masks.items())
 
 
+def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    text_clean = tmp_path / "text-clean.png"
+    background = tmp_path / "background.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    mask_dir = graph_dir / "masks"
+    mask_dir.mkdir(parents=True)
+    source_pixels = np.full((4, 6, 3), 255, dtype=np.uint8)
+    source_pixels[1:3, 1:4] = (47, 111, 237)
+    Image.fromarray(source_pixels, mode="RGB").save(source)
+    Image.new("RGB", (6, 4), "white").save(text_clean)
+    Image.new("RGB", (6, 4), "white").save(background)
+    mistaken_region = np.zeros((4, 6), dtype=np.uint8)
+    mistaken_region[1:3, 1:4] = 255
+    Image.fromarray(mistaken_region, mode="L").save(text_mask)
+    visual_mask = mask_dir / "visual.png"
+    frozen_text_mask = mask_dir / "text_0001.png"
+    Image.fromarray(mistaken_region, mode="L").save(visual_mask)
+    Image.fromarray(mistaken_region, mode="L").save(frozen_text_mask)
+    graph = {"nodes": [{
+        "id": "visual", "kind": "parent", "parent_id": None,
+        "state": "pending_gate", "mask": "masks/visual.png",
+        "mask_sha256": hashlib.sha256(visual_mask.read_bytes()).hexdigest(),
+        "bbox": [1, 1, 4, 3], "z_index": 0, "text_ids": [],
+    }, {
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "inactive", "mask": "masks/text_0001.png",
+        "mask_sha256": hashlib.sha256(frozen_text_mask.read_bytes()).hexdigest(),
+        "bbox": [1, 1, 4, 3], "z_index": 1, "text_ids": [],
+    }]}
+    (graph_dir / "component-graph.json").write_text(
+        json.dumps(graph), encoding="utf-8",
+    )
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    prepared = {
+        "original_image_path": str(source),
+        "background_original_path": str(background),
+        "_text_clean_path": str(text_clean),
+        "_text_mask_path": str(text_mask),
+        "text_items": [{"text": "mistaken", "box": [1, 1, 3, 2]}],
+    }
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return prepared
+
+        @staticmethod
+        def _interpolate_text_item_boxes(image, items, padding):
+            return image
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule,
+    )
+    output_dir = run_dir / "pages/page_001/reconstruction/quality"
+    output_dir.mkdir(parents=True)
+
+    refs = legacy._quality_assets(
+        store, "page_001", graph, graph_dir, output_dir,
+    )
+
+    native = json.loads(
+        (run_dir / refs["native_check"]["path"]).read_text(encoding="utf-8")
+    )
+    assert native["text_items"] == []
+    with Image.open(run_dir / refs["text_mask"]["path"]) as effective_mask:
+        assert effective_mask.getbbox() is None
+    with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
+        assert reconstructed.getpixel((2, 1)) == (47, 111, 237)
+
+
+def test_filtered_text_items_keep_their_original_component_ids() -> None:
+    items = [{
+        "_component_id": "text_0002",
+        "text": "keep",
+        "box": [2, 1, 3, 2],
+    }]
+
+    assert legacy._component_text_items(items, (8, 6)) == [{
+        "id": "text_0002",
+        "text": "keep",
+        "box": [2, 1, 5, 3],
+    }]
+
+
+def test_frozen_presentation_records_are_reused_without_changing_graph_binding() -> None:
+    old_frozen = {
+        "component_id": "frozen",
+        "rgba": {"path": "old-rgba.png", "sha256": "a" * 64},
+        "ownership_mask": {"path": "old-own.png", "sha256": "b" * 64},
+        "presentation_alpha_mask": {"path": "old-alpha.png", "sha256": "c" * 64},
+        "generated_underlay_mask": {"path": "old-underlay.png", "sha256": "d" * 64},
+        "metrics": {},
+    }
+    new_frozen = {
+        **old_frozen,
+        "rgba": {"path": "new-rgba.png", "sha256": "e" * 64},
+    }
+    current = {
+        "schema_version": 1,
+        "source_sha256": "f" * 64,
+        "graph_sha256": "1" * 64,
+        "components": [new_frozen, {"component_id": "pending"}],
+    }
+    previous = {
+        **current,
+        "graph_sha256": "0" * 64,
+        "components": [old_frozen],
+    }
+
+    reused = legacy._reuse_frozen_presentation_records(
+        current, previous, {"frozen"}
+    )
+
+    assert reused["graph_sha256"] == "1" * 64
+    assert reused["components"] == [old_frozen, {"component_id": "pending"}]
+
+
 def test_text_region_is_assigned_to_the_best_component_owner() -> None:
     text = np.zeros((8, 10), dtype=bool)
     text[2:6, 3:7] = True
@@ -2620,6 +2742,20 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
     return store, reconstruction, result, manifest_path, reconstructed
 
 
+def test_accepted_slide_uses_effective_text_items_from_result(tmp_path: Path) -> None:
+    store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
+    result["text_items"] = []
+
+    slide = legacy._accepted_slide_data(
+        store,
+        reconstruction,
+        {"text_items": [{"text": "mistaken", "box": [1, 1, 2, 2]}]},
+        result,
+    )
+
+    assert slide["text_items"] == []
+
+
 def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
     import image_to_ppt
 
@@ -2704,6 +2840,34 @@ def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
     assert any(shape.shape_type == 13 for shape in reopened.slides[0].shapes)
     assert output.is_file()
     assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_suppressed_text_does_not_reappear_in_assembled_pptx(
+    tmp_path: Path,
+) -> None:
+    store, reconstruction, _ = _accepted_assembly_job(tmp_path)
+    result_path = reconstruction / "component_result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["text_items"] = []
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    state["result_ref"]["sha256"] = hashlib.sha256(
+        result_path.read_bytes()
+    ).hexdigest()
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json", state
+    )
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    reopened = Presentation(outputs["16:9"])
+    assert not any(
+        getattr(shape, "text", "") == "editable"
+        for shape in reopened.slides[0].shapes
+    )
+    assert any(shape.shape_type == 13 for shape in reopened.slides[0].shapes)
 
 
 def test_accepted_presentation_assembly_failure_cleans_temporary_assets(

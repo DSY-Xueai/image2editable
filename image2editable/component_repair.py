@@ -407,6 +407,13 @@ def record_component_execution(
             store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
         ).decode("utf-8"))
         after = json.loads(graph_payload.decode("utf-8"))
+        plan = json.loads(_load_state_artifact(
+            store.root, state["current_round"]["plan_ref"]
+        ).decode("utf-8"))
+        suppressed_text_ids = {
+            action["object_ids"][0] for action in plan["actions"]
+            if action["action"] == "suppress_text"
+        }
         _, _, presentation_manifest, _ = _verify_quality_input_refs(
             store, state, execution["quality_input_refs"],
             request=request,
@@ -445,7 +452,11 @@ def record_component_execution(
             frozen_ids=set(state["frozen"]),
         )
         from image2editable.component_contracts import validate_graph_transition
-        validate_graph_transition(before=before, after=after)
+        validate_graph_transition(
+            before=before,
+            after=after,
+            allowed_suppressed_text_ids=suppressed_text_ids,
+        )
         for node in after["nodes"]:
             mask_path = Path(output_graph_path).parent / Path(
                 *PurePosixPath(node["mask"]).parts
@@ -463,9 +474,6 @@ def record_component_execution(
                 *PurePosixPath(graph_ref["path"]).parts
             ),
         )
-        plan = json.loads(_load_state_artifact(
-            store.root, state["current_round"]["plan_ref"]
-        ).decode("utf-8"))
         normalized = _normalized_plan_sha256(plan)
         action_count = len(plan["actions"])
         if (

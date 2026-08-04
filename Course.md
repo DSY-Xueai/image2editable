@@ -4,7 +4,7 @@
 
 - 项目提供图片、PDF、图片版 PPTX 与混合 PPTX 到分层可编辑 PowerPoint 的统一 Runtime。
 - 图片、PDF、图片版 PPTX 和获批的混合 PPTX 整页截图共用组件重建与硬质量门禁；混合 PPTX 中未命中的原生文字、形状、表格、图表、备注、z-order 和图片保持不变。
-- Agent Provider 在 Run 创建时冻结为 `host` 或 `local`。两者共享相同的严格请求/证据契约、十二类动作、确定性执行、最多五批修复和质量门禁；Host 不读取本地模型状态，Local 不读取 Host 握手状态。
+- Agent Provider 在 Run 创建时冻结为 `host` 或 `local`。两者共享相同的严格请求/证据契约、十三类动作、确定性执行、最多五批修复和质量门禁；Host 不读取本地模型状态，Local 不读取 Host 握手状态。
 - 本地模型只在用户明确安装后离线使用；转换过程不下载模型。模型权重可缓存，但图片语义、组件计划和证据不得跨图片、跨页或跨批复用。
 - 每页以可独立移动的最小完整视觉单元为组件。已通过组件冻结；五批后完整父组件仍失败时仅该页进入 `preserved_with_warning`，不发布 donor，不允许通过清空组件或保留栅格文字伪装成功。
 - 全页 OCR 漏检时，prepare 会对未被文字遮罩覆盖的小型组件候选做双视图有界复查；一致高置信文字回灌后从 source 重建全部真实资产。
@@ -26,6 +26,9 @@
 - 页面质量门禁现显式使用当前 validated graph 的活动视觉组件数，不再用历史 `initial_component_count` 猜测本轮候选。仅剩 frozen 组件且本轮报告为空时仍执行页级文字残留等检查，不解冻或重评 frozen；初始非空但当前活动视觉组件为零仍硬拒绝，不能通过丢弃整页组件绕过门禁。
 - 组件执行现会在像素 ownership 生效前识别近乎完全套叠的活动父级 pair，以 `contained_parent_review` 暂停双方冻结；精确 pair 会写入下一批 Agent 可见的质量证据。Agent 查看两个隔离单元后可选择唯一像素所有者；若两者确实独立，则必须对双方显式高置信 `accept`，且两条 evidence 都引用 pair 的两个 ID，才允许共同保留，不再由固定面积规则替 Agent 决定。原始候选遮罩不被独占结果覆盖写回；最终发布仍使用唯一 ownership，并把去字区域的连续底色交给唯一组件，避免 PowerPoint 分别缩放重复父层时产生字形白边、浅灰残影或矩形补丁。
 - Host/Local 重修适配层现严格按回调契约把源图、框和正负点各传一次；修复 `retry_with_box` / `retry_with_points` 首次执行时重复传入 `image` 导致整页安全失败的问题，不改变 SAM 分割算法或五批上限。
+- Agent 新增 `suppress_text`：仅当视觉证据明确证明冻结 OCR 候选并非文字时，才允许把该文字节点从 `frozen` 转为 `inactive`，同步撤销既有 `attach_text` 关联；普通错字或不确定文字仍禁止删除。被抑制区域从 source 恢复给非冻结视觉修复层，并从有效文字列表、文字遮罩、质量统计和最终 PPTX 中移除。
+- 文字重分类保持原始 `text_XXXX` ID，不因过滤首项或中间项而重新编号；已冻结视觉组件继续复用上一轮四类 presentation asset 引用与 SHA-256，不能因文字重分类暗中换图。Host/Local 使用同一动作契约和提示词，Skill 镜像已同步。
+- 所有 OCR、LaMa、SAM、视觉与组件重修重型子进程启动前统一执行 Python GC 和 Windows working-set trim；真实 `test1.pptx` 首次分层观测峰值约 1.68 GiB，低于既定 2.4 GiB 安全线。当前主要性能债务是 targeted OCR 逐候选/逐视图反复冷启动模型，尚未改成同页批处理。
 
 ## 关键文件
 
@@ -61,7 +64,7 @@ image2editable models status
 ## 验证事实
 
 - 本轮 TDD 红灯覆盖多项 OCR 只取 max、部分已知文字导致整候选跳过、OCR 返回顺序变化、逐项 conflict bbox/ID、跨轮 diagnostics 删除/置空/替换、伪造空批次、整页 hash/RGB 副本和首轮视觉残留；32/96 上限另以 40/97 mutation 验证测试确实能捕获旧缺陷。
-- 最新核心回归为 `507 passed, 9 skipped`，历史回归与 Task10 E2E 为 `258 passed`，全量为 `1494 passed, 20 skipped`。prepared-page 继续兼容读取 v1/v2；独立代码复审确认原始遮罩恢复、页级失败拦截、pair 语义批准与重复计划保护均无未关闭的 Critical/Important。
+- 误 OCR 重分类相关聚焦回归为 `456 passed, 8 skipped`；覆盖动作契约、显式冻结转换授权、既有文字关联撤销、有效文字遮罩与 source 像素恢复、稳定文字 ID、冻结视觉资产哈希不变，以及最终 PPTX 不复活被抑制文字。此前全量回归为 `1586 passed, 20 skipped`，本轮最终全量仍待真实验收后重跑。
 - 重修适配回归已先精确复现 `got multiple values for argument 'image'`，再验证源图只传一次、归一化框正确映射；组件重修与运行时相关回归为 `295 passed, 7 skipped`。
 - `wsl和虚拟机对比.png` 已用全新 r11 Run 完成 Host Agent 两批闭环：首批冻结 13 个独立图标，第二批依据精确包含关系保留完整表格 `parent_0002` 与独立页脚 `parent_0005`，丢弃冗余子区域 `parent_0004`、`parent_0006`。最终含 15 个视觉组件、1 个背景、32 个可编辑文字，共 48 个 PowerPoint 对象；原画幅与 16:9 均经 PowerPoint COM 重开和原生渲染，删除全部文字对象后重新保存、重开所得图片层仍保留完整图标与结构，未见文字轮廓、浅灰残影或白色字形补丁。
 - 真实 r3 已确认 targeted OCR 能把全页漏检的小型候选文字恢复为可编辑对象，同时暴露局部 crop 导致的字号放大；该字号回归已有通用自动化测试和修复，仍需重新生成真实输出后再宣称真实验收通过。
@@ -71,5 +74,5 @@ image2editable models status
 - 真实文件必须串行、一次一个文件/重型页面；监控内存和磁盘，结束后确认无残留 Python/OCR/SAM 进程。禁止下载模型。
 - 待自动闭环复验文件：`research_layout_demo_3pages.pdf`、`test1.pptx`、`混合.pptx`。验收需检查隔离联系表、background-only、最终渲染、可编辑文字、叶组件数、warning、PowerPoint COM reopen，以及混合 PPTX 未命中原生对象不变。
 - `test1.pptx` 不得再把“每页 3 个整块父组件”视为成功条件；必须通过最小完整视觉单元和三层文字隔离门禁。
-- `test1.pptx` 全新 r6 已完成两页初始分层并执行第 1 页首批真实 box/points 重修，确认重复 `image` 参数修复生效；第二批证据暴露 ownership mask 与可移动组件 alpha 共用导致父组件空洞、色带和放射补丁。Run 安全停在 `awaiting_agent`，不得继续消耗第 3–5 批掩盖表示层根因；双遮罩设计实现后应使用全新 Run 复验。
+- `test1.pptx` r10/r11 已完成低内存首次分层和第 1 页真实 `suppress_text` 重修：误判为 `Q` 的蓝色放大镜已从文字层移除，并在 r10 中以高 z-order 独立为 `component_0016`，搜索卡片 `component_0011` 不再包含该图标；另外两张顶层文档也已独立补建。当前剩余硬失败是表格/大面板/卡片底层的 `component_text_residual`、`underlay_seam` 与 `underlay_gradient_break`，不得通过继续冻结整块组件或放宽门禁掩盖。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不得 force-add。
