@@ -21,6 +21,12 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--lang", default="ch")
     parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("pptx", "psd"),
+        default="pptx",
+    )
+    parser.add_argument(
         "--agent-provider",
         choices=("host", "local"),
         default="host",
@@ -181,6 +187,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
     if args.command == "convert":
+        format_kwargs = (
+            {"output_format": args.output_format}
+            if args.output_format != "pptx"
+            else {}
+        )
         with redirect_stdout(sys.stderr):
             summary = runtime.convert(
                 args.sources,
@@ -189,11 +200,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slide_size=args.slide_size,
                 lang=args.lang,
                 agent_provider=args.agent_provider,
+                **format_kwargs,
             )
         _print_json(summary)
         return 0
 
     if args.command == "prepare":
+        format_kwargs = (
+            {"output_format": args.output_format}
+            if args.output_format != "pptx"
+            else {}
+        )
         with redirect_stdout(sys.stderr):
             run_dir = runtime.prepare_job(
                 args.sources,
@@ -202,6 +219,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slide_size=args.slide_size,
                 lang=args.lang,
                 agent_provider=args.agent_provider,
+                **format_kwargs,
             )
         _print_json({"run_dir": str(Path(run_dir).resolve()), "status": "prepared"})
         return 0

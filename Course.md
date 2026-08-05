@@ -2,13 +2,16 @@
 
 ## 当前状态
 
-- 项目把图片、PDF、图片版 PPTX 和混合 PPTX 转成分层可编辑 PowerPoint；混合 PPTX 中未命中的原生文字、形状、表格、图表、备注和 z-order 保持不变。
+- 项目把图片、PDF、图片版 PPTX 和混合 PPTX 转成分层可编辑 PowerPoint，也可把图片转成分层 PSD；混合 PPTX 中未命中的原生文字、形状、表格、图表、备注和 z-order 保持不变。
 - Agent Provider 支持 `host` 与 `local`。两者共用证据、动作和质量门契约；每页最多 5 个重修批次，失败时保留原页并给出 warning，不以清空组件或保留栅格文字冒充成功。
 - 输出契约为：文字单独可编辑；视觉组件不携带文字像素；背景不保留文字或视觉残影；Agent 决定组件拆分、合并、重试、独立性和背景重建，传统 OCR/SAM/CV 负责确定性执行。
 - 本地模式只使用用户明确安装的模型，转换时不自动下载；Host 模式可使用 Codex、Claude Code 等宿主视觉模型，两种模式互不读取对方状态。
 
 ## 本轮变更
 
+- PSD 不再使用独立的固定阈值 CV 管线；`--format psd` 复用图片转 PPTX 的 Host/Local Agent 决策、OCR、组件 ownership、背景修复和每页最多 5 批的硬质量门。
+- PSD 当前只接受图片文件或图片目录。单图输出一个 PSD，多图输出每图一个 PSD；PDF/PPTX 请求会在创建任务前拒绝，Aspose.PSD 包或授权缺失也会提前失败，不留下半成品 run。
+- PSD 只组装最终通过质量门的背景、视觉组件和可编辑文字；`preserved_with_warning` 页面不会伪装成成功 PSD。根入口与 `skills/image-to-psd` 兼容入口都转发到统一 Runtime，skill 内旧 OCR/CV 脚本已删除。
 - prepared-page 升级到 schema v4，认证保存精炼后的文字清理蒙版；旧 v1/v2/v3 仍可读取。
 - presentation 层改用精炼字形蒙版而非 OCR 整框，视觉 ownership 明确排除文字；源文字像素不会被重新带回组件。
 - 新增 OCR 前缀/包含关系去重，保留完整文本行，避免同一区域重复可编辑文字。
@@ -23,13 +26,14 @@
 - 输入与原生 PPTX 保留：`image2editable/inputs.py`、`image2editable/pptx_reconstruct.py`
 - Agent 重修与质量：`image2editable/legacy.py`、`image2editable/component_contracts.py`、`image2editable/component_repair.py`、`image2editable/component_quality.py`
 - OCR、分割和背景：`image_to_ppt.py`、`scripts/visual_segment.py`、`scripts/component_underlay.py`、`scripts/fg_extract.py`、`scripts/worker_resources.py`
-- Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/`
+- Skill 镜像：`skills/image-to-ppt/SKILL.md`、`skills/image-to-ppt/scripts/`、`skills/image-to-psd/SKILL.md`
 - 主要回归：`tests/test_component_repair.py`、`tests/test_component_quality.py`、`tests/test_runtime_execution.py`、`tests/test_targeted_ocr.py`、`tests/test_regressions.py`
 
 ## 运行入口
 
 ```bash
 image2editable convert input.png -o output.pptx --agent-provider host
+image2editable convert input.png -o output.psd --format psd --agent-provider host
 image2editable convert input.pdf -o output.pptx --agent-provider local
 image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
 image2editable run execute runs/pptx-job
@@ -46,7 +50,7 @@ image2editable models status
 
 ## 验证事实
 
-- 全量自动化：`1651 passed, 20 skipped`。
+- 本轮全量自动化：`1596 passed, 21 skipped`；PSD skill 官方结构校验通过；Python 3.12 下 wheel 构建通过。
 - `test1.pptx` 双页真实验收输出：`tmp/task13-host-test1-r16/acceptance-final-r11/output.pptx`。
 - 第 1 页为 10 个独立视觉组件、1 个底图、35 个可编辑文本框；第 2 页为 13 个独立视觉组件、1 个底图、26 个可编辑文本框。不存在重叠的 OCR 前缀重复文本。
 - PowerPoint 渲染和 `slides_test.py` 通过；第 1 页文档图标、关系图节点无缺口/星芒/虚线残影，第 2 页无重复文字或浅灰文字印子。
@@ -54,6 +58,7 @@ image2editable models status
 ## 当前注意事项
 
 - 真实重型文件仍应串行运行并监控内存、磁盘和残留 Python/OCR/SAM 进程；禁止在转换过程中自动下载模型。
+- PSD 生成依赖 `pip install .[psd]` 和有效的 `ASPOSE_PSD_LICENSE`；未配置授权的环境只能完成自动化模拟验证，不能生成真实 PSD。
 - 后续仍需用 `research_layout_demo_3pages.pdf`、`混合.pptx` 等继续覆盖科研图、表格和原生对象不变性；不要把针对单一测试文件的坐标或类别规则写入实现。
 - `scripts/` 与 `skills/image-to-ppt/scripts/` 的同名运行脚本必须保持一致。
 - `tests/test_component_acceptance.py` 是 ignored 的本地历史文件，不要 force-add。

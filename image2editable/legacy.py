@@ -42,6 +42,7 @@ from image2editable.component_repair import (
 from image2editable.inputs import sha256_file
 from image2editable.store import RunStore
 from image2editable.execution import ExecutionLease
+from scripts.psd_assemble import assemble_psd
 
 
 def _absolute_outputs(value: Any) -> Any:
@@ -2243,12 +2244,23 @@ def _execute_legacy_parent_fallback(
 def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     manifest = store.read_json("job_manifest.json")
     page_ids = manifest["pages"]
+    output_format = manifest.get("output_format", "pptx")
     output_path = manifest["options"]["output_path"]
     if output_path is None:
-        output_path = store.root / "final" / "output.pptx"
+        output_path = (
+            store.root / "final" / "output.psd"
+            if output_format == "psd" and len(page_ids) == 1
+            else store.root / "final"
+            if output_format == "psd"
+            else store.root / "final" / "output.pptx"
+        )
     output_path = Path(output_path).resolve()
     slide_size = manifest["options"]["slide_size"]
-    targets = _legacy_output_targets(output_path, slide_size)
+    targets = (
+        _legacy_psd_output_targets(manifest, output_path)
+        if output_format == "psd"
+        else _legacy_output_targets(output_path, slide_size)
+    )
     if any(path.exists() or path.is_symlink() for path in targets.values()):
         existing = next(
             path for path in targets.values()
@@ -2265,6 +2277,10 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             state = store.read_json(
                 f"pages/{page_id}/reconstruction/component_state.json"
             )
+            if output_format == "psd" and state["status"] == "preserved_with_warning":
+                raise RuntimeError(
+                    f"PSD output requires every page to pass the quality gate: {page_id}"
+                )
             prepared = module.load_component_layers(
                 reconstruction / "initial" / "prepared_page.json"
             )
@@ -2302,16 +2318,30 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     published = {}
     published_targets = []
     try:
-        for variant, target in targets.items():
+        for index, (variant, target) in enumerate(targets.items()):
             target.parent.mkdir(parents=True, exist_ok=True)
             fd, staging_name = tempfile.mkstemp(
-                prefix=f".{target.name}.", suffix=".staging", dir=target.parent
+                prefix=f".{target.stem}.",
+                suffix=".staging.psd" if output_format == "psd" else ".staging",
+                dir=target.parent,
             )
             os.close(fd)
             staging = Path(staging_name)
             staging.unlink()
             try:
-                if len(slides) == 1:
+                if output_format == "psd":
+                    slide = slides[index]
+                    assemble_psd(
+                        background_path=slide["background_original_path"],
+                        components=slide["components"],
+                        text_items=slide["text_items"],
+                        img_width=slide["img_width"],
+                        img_height=slide["img_height"],
+                        output_path=staging,
+                    )
+                    if not staging.is_file() or staging.stat().st_size == 0:
+                        raise RuntimeError("PSD assembler did not produce output")
+                elif len(slides) == 1:
                     module._assemble_prepared_slide(
                         slides[0], staging, False, variant
                     )
@@ -2323,9 +2353,10 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
                             "page_aspect_ratio"
                         ),
                     )
-                presentation = Presentation(staging)
-                if len(presentation.slides) != len(slides):
-                    raise RuntimeError("PPTX reopen slide count mismatch")
+                if output_format != "psd":
+                    presentation = Presentation(staging)
+                    if len(presentation.slides) != len(slides):
+                        raise RuntimeError("PPTX reopen slide count mismatch")
                 staged[variant] = staging
             except Exception:
                 if staging.exists():
@@ -2350,7 +2381,9 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             staging.unlink(missing_ok=True)
         _cleanup_legacy_assembly_assets(assembly_asset_dirs)
 
-    _record_legacy_delivery(store, page_records, published)
+    _record_legacy_delivery(
+        store, page_records, published, output_format=output_format
+    )
     return published
 
 
@@ -2371,10 +2404,31 @@ def _legacy_output_targets(output_path: Path, slide_size: str) -> dict[str, Path
     }
 
 
+def _legacy_psd_output_targets(
+    manifest: dict[str, Any], output_path: Path
+) -> dict[str, Path]:
+    page_ids = manifest["pages"]
+    if len(page_ids) == 1:
+        return {page_ids[0]: output_path}
+    items = manifest.get("input", {}).get("items", [])
+    if len(items) != len(page_ids):
+        raise ValueError("PSD image manifest does not match page count")
+    stems = [Path(item["original_path"]).stem for item in items]
+    duplicate_stems = {stem for stem in stems if stems.count(stem) > 1}
+    return {
+        page_id: output_path / (
+            f"{index:03d}_{stem}.psd" if stem in duplicate_stems else f"{stem}.psd"
+        )
+        for index, (page_id, stem) in enumerate(zip(page_ids, stems), start=1)
+    }
+
+
 def _record_legacy_delivery(
     store: RunStore,
     page_records: list[tuple[str, dict, dict | None]],
     outputs: dict[str, str],
+    *,
+    output_format: str = "pptx",
 ) -> None:
     output_refs = {
         name: {"path": path, "sha256": sha256_file(path)}
@@ -2385,7 +2439,9 @@ def _record_legacy_delivery(
             "schema_version": 1,
             "page_id": page_id,
             "status": state["status"],
-            "delivery_checks": {"pptx_reopen": "pass"},
+            "delivery_checks": {
+                "psd_save" if output_format == "psd" else "pptx_reopen": "pass"
+            },
             "outputs": output_refs,
         }
         if result is None:

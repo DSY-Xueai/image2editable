@@ -32,12 +32,12 @@ Convert PowerPoint screenshots, page captures, or design images into separate ba
 
 | Feature | Description |
 |---------|-------------|
-| Background repair | PPTX uses OpenCV for small or narrow masks and LaMa for large or deep masks; PSD uses two-pass background modeling and inpainting |
-| Foreground separation | PPTX uses Grounding DINO semantic proposals and SAM 2.1 segmentation; PSD uses differences, edges, and connected components |
+| Background repair | PPTX and PSD share the Agent quality pipeline: OpenCV for small or narrow masks and LaMa for large or deep masks |
+| Foreground separation | PPTX and PSD share Grounding DINO semantic proposals, SAM 2.1 segmentation, and unique ownership |
 | OCR text reconstruction | Runs full-page OCR, then bounded two-view rechecks on small visual candidates not covered by the text mask; consistent high-confidence results become editable text with estimated size, color, weight, and alignment |
 | PPTX export | Passing pages use minimal complete transparent visual components and editable text boxes; a page still failing after five batches is preserved unchanged; outputs original-aspect-ratio and 16:9 versions by default |
 | Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
-| PSD export | Generates a layered PSD with a background layer, foreground pixel layers, and Photoshop text layers |
+| PSD export | Accepts image inputs only; reuses the PPTX Agent segmentation and quality gates to create background, visual-component, and Photoshop text layers |
 | Batch processing | Accepts multiple images or a directory; PPTX files are combined into multiple slides, while PSD exports one file per image |
 | Agent screenshot routing | Produces auditable candidates for structurally safe PPTX images covering at least 80% of a slide; only high-confidence full-slide screenshot decisions enter the shadow-run queue |
 
@@ -66,7 +66,7 @@ pip install .[psd]
 
 ### Models and First Run
 
-PPTX conversion depends on Grounding DINO, SAM 2.1, and LaMa. The required models are downloaded to the local cache on first run; model weights are not included in this repository. The pipeline uses CUDA when available and also supports CPU execution, although CPU mode is significantly slower. If you already have a local LaMa TorchScript model, set `LAMA_MODEL` to its path.
+Image-layer conversion depends on Grounding DINO, SAM 2.1, and LaMa. The required models are downloaded to the local cache on first run; model weights are not included in this repository. The pipeline uses CUDA when available and also supports CPU execution, although CPU mode is significantly slower. If you already have a local LaMa TorchScript model, set `LAMA_MODEL` to its path.
 
 ### Resource and Quality Policy
 
@@ -200,7 +200,7 @@ For Host, the Skill loops through `run execute → agent next → visually inspe
 
 For PPTX input, existing native text, shapes, tables, charts, notes, z-order, unmatched images, and unmatched slides are preserved. Reconstructed components are normally movable transparent image objects; arbitrary conversion into native vectors or SmartArt is not promised.
 
-The Unified CLI calls its positional inputs `sources`. It accepts image files/directories, one PDF, or one PPTX. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
+The Unified CLI calls its positional inputs `sources`. PPTX output accepts image files/directories, one PDF, or one PPTX; PSD output accepts image files or image directories only. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
 
 `run recover` only resumes an orphaned task whose execution lock is gone; it does not terminate an active conversion process.
 
@@ -238,20 +238,19 @@ python image_to_psd.py img1.png img2.png -o psd_output_dir
 # Directory input → one PSD per image
 python image_to_psd.py ./my_slides/ -o psd_output_dir
 
-# Adjust PSD parameters
-python image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
+# Use the local visual Agent; Host Agent is the default
+python image_to_psd.py input.png --lang en --agent-provider local
 ```
 
 ### Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `images` | Required | An image file, multiple image files, or a directory; directory input scans only the first level |
+| `sources` | Required | An image file, multiple image files, or a directory; directory input scans only the first level |
 | `-o, --output` | Same name as input | PPTX: a file path for `original` or `16:9`; an output base name for the default `both` mode. PSD: a file path for one image or an output directory for multiple images |
 | `--lang` | `ch` | OCR language, commonly `ch` or `en` |
-| `--period` | `32` | PPTX: retained for compatibility and has no effect. PSD: background-model tile period |
-| `--diff-threshold` | `20.0` | PPTX: retained for compatibility and has no effect. PSD: foreground detection threshold |
-| `--min-area` | `20` | PPTX: retained for compatibility and has no effect. PSD: minimum component area |
+| `--format` | `pptx` | Unified CLI output format; use `--format psd` for PSD, which accepts image inputs only |
+| `--agent-provider` | `host` | Use the host visual Agent, or an explicitly installed model in `local` mode |
 | `--reference` | Disabled | PPTX only: add the original image as a reference slide after each content slide |
 | `--no-reference` | Default behavior | PPTX only: explicitly disable original-image reference slides |
 | `--slide-size` | `both` | PPTX only: `original` preserves the input ratio, `16:9` outputs widescreen slides, and `both` generates both sizes |
@@ -291,7 +290,7 @@ image2editable/
 | PSD generation | Aspose.PSD |
 | Background repair | OpenCV inpainting (small/narrow masks) + LaMa (large/deep masks) |
 | PPTX visual segmentation | Grounding DINO semantic proposals + SAM 2.1 masks + unique ownership |
-| PSD foreground detection | Difference thresholding + Canny edges + morphological operations |
+| PSD layering | Shared Agent decisions, Grounding DINO, SAM 2.1, OCR, background repair, and hard quality gates |
 
 ---
 

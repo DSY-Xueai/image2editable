@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 from image2editable import runtime
+from image2editable import inputs as input_module
 from image2editable.inputs import prepare_image_job, resolve_image_inputs, sha256_file
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
@@ -176,6 +177,104 @@ def test_prepare_image_job_copies_sources_and_writes_prepared_run(tmp_path: Path
     }
     assert manifest["pages"] == ["page_001"]
     assert RunStore.open(run_root).read_json("run_state.json")["status"] == "prepared"
+
+
+def test_prepare_image_job_records_psd_output_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    output = tmp_path / "output.psd"
+    _write_image(source, (1, 2, 3))
+    monkeypatch.setattr(input_module, "preflight_psd_runtime", lambda: None)
+
+    run_root = prepare_image_job(
+        source,
+        run_dir=tmp_path / "run",
+        output_path=output,
+        output_format="psd",
+    )
+
+    manifest = RunStore.open(run_root).read_json("job_manifest.json")
+    assert manifest["output_format"] == "psd"
+    assert manifest["options"]["output_path"] == str(output.resolve())
+
+
+def test_prepare_image_job_checks_psd_license_before_creating_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    run_dir = tmp_path / "run"
+    _write_image(source, (1, 2, 3))
+    monkeypatch.setattr(
+        input_module,
+        "preflight_psd_runtime",
+        lambda: (_ for _ in ()).throw(RuntimeError("PSD license unavailable")),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="PSD license unavailable"):
+        prepare_image_job(
+            source,
+            run_dir=run_dir,
+            output_format="psd",
+        )
+
+    assert not run_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("output_format", "suffix"),
+    [("pptx", ".psd"), ("psd", ".pptx")],
+)
+def test_prepare_image_job_rejects_output_extension_for_format(
+    tmp_path: Path,
+    output_format: str,
+    suffix: str,
+) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, (1, 2, 3))
+
+    with pytest.raises(ValueError, match="output"):
+        prepare_image_job(
+            source,
+            run_dir=tmp_path / "run",
+            output_path=tmp_path / f"output{suffix}",
+            output_format=output_format,
+        )
+
+
+@pytest.mark.parametrize("output_format", ["", "PSD", "pdf", None])
+def test_prepare_image_job_rejects_invalid_output_format(
+    tmp_path: Path,
+    output_format: object,
+) -> None:
+    source = tmp_path / "source.png"
+    _write_image(source, (1, 2, 3))
+
+    with pytest.raises(ValueError, match="output_format"):
+        prepare_image_job(
+            source,
+            run_dir=tmp_path / "run",
+            output_format=output_format,
+        )
+
+
+@pytest.mark.parametrize("suffix", [".pdf", ".pptx"])
+def test_public_prepare_rejects_psd_output_for_document_input(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    source = tmp_path / f"source{suffix}"
+    source.write_bytes(b"document")
+
+    with pytest.raises(ValueError, match="only supports image"):
+        runtime.prepare_job(
+            source,
+            run_dir=tmp_path / "run",
+            output_format="psd",
+        )
 
 
 @pytest.mark.parametrize("agent_provider", ["host", "local"])

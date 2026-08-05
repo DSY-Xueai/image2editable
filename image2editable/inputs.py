@@ -12,11 +12,19 @@ from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
+from scripts.psd_assemble import preflight_psd_runtime
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 _HASH_CHUNK_SIZE = 1024 * 1024
 InputType = Literal["images", "pdf", "pptx"]
+OutputFormat = Literal["pptx", "psd"]
+
+
+def validate_output_format(value: object) -> OutputFormat:
+    if value not in {"pptx", "psd"}:
+        raise ValueError(f"Unsupported output_format: {value}")
+    return value
 
 
 def classify_inputs(
@@ -121,6 +129,37 @@ def validate_pptx_output_path(
     return resolved_output
 
 
+def validate_psd_output_path(
+    output_path: str | Path | None,
+    *,
+    source_paths: Sequence[Path],
+    run_root: Path,
+) -> Path | None:
+    if output_path is None:
+        return None
+    resolved_output = Path(output_path).resolve()
+    if len(source_paths) == 1:
+        if resolved_output.suffix.casefold() != ".psd" or resolved_output.is_dir():
+            raise ValueError(
+                f"Invalid output path; expected .psd file: {resolved_output}"
+            )
+    elif resolved_output.suffix.casefold() == ".psd" or resolved_output.is_file():
+        raise ValueError(
+            f"Invalid output path; multiple PSD outputs require a directory: "
+            f"{resolved_output}"
+        )
+    if any(resolved_output == source.resolve() for source in source_paths):
+        raise ValueError(f"Invalid output path; overwrites source: {resolved_output}")
+    root = run_root.resolve()
+    if resolved_output.is_relative_to(root) and not resolved_output.is_relative_to(
+        root / "final"
+    ):
+        raise ValueError(
+            f"Invalid output path; run outputs must be under final: {resolved_output}"
+        )
+    return resolved_output
+
+
 def prepare_image_job(
     inputs: str | Path | Iterable[str | Path],
     *,
@@ -129,17 +168,26 @@ def prepare_image_job(
     slide_size: str = "both",
     lang: str = "ch",
     agent_provider: str = "host",
+    output_format: str = "pptx",
 ) -> Path:
     agent_provider = validate_agent_provider(agent_provider)
+    output_format = validate_output_format(output_format)
     if slide_size not in {"original", "16:9", "both"}:
         raise ValueError(f"Unsupported slide_size: {slide_size}")
 
     source_paths = resolve_image_inputs(inputs)
     job_id = new_job_id()
     root = Path(run_dir).resolve() if run_dir is not None else Path.cwd() / "runs" / job_id
-    resolved_output = validate_pptx_output_path(
+    output_validator = (
+        validate_pptx_output_path
+        if output_format == "pptx"
+        else validate_psd_output_path
+    )
+    resolved_output = output_validator(
         output_path, source_paths=source_paths, run_root=root
     )
+    if output_format == "psd":
+        preflight_psd_runtime()
     store = RunStore.create(root)
     try:
         items = []
@@ -174,7 +222,7 @@ def prepare_image_job(
             "schema_version": SCHEMA_VERSION,
             "job_id": job_id,
             "input": {"type": "images", "items": items},
-            "output_format": "pptx",
+            "output_format": output_format,
             "options": {
                 "agent_provider": agent_provider,
                 "lang": lang,

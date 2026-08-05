@@ -3008,7 +3008,99 @@ def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
     )
     assert any(shape.shape_type == 13 for shape in reopened.slides[0].shapes)
     assert output.is_file()
+
+
+def test_accepted_presentation_psd_uses_final_agent_layers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, reconstruction, _ = _accepted_assembly_job(tmp_path)
+    output = tmp_path / "accepted-output.psd"
+    manifest = store.read_json("job_manifest.json")
+    manifest["output_format"] = "psd"
+    manifest["options"]["output_path"] = str(output)
+    store.write_json("job_manifest.json", manifest)
+    captured = {}
+
+    def fake_assemble_psd(**kwargs: object) -> str:
+        captured.update(kwargs)
+        captured["background_exists"] = Path(kwargs["background_path"]).is_file()
+        Path(kwargs["output_path"]).write_bytes(b"psd")
+        return str(kwargs["output_path"])
+
+    monkeypatch.setattr(legacy, "assemble_psd", fake_assemble_psd, raising=False)
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    assert outputs == {"page_001": str(output)}
+    assert captured["background_exists"] is True
+    assert len(captured["components"]) == 1
+    assert captured["text_items"][0]["text"] == "editable"
+    assert captured["img_width"] == 16
+    assert captured["img_height"] == 9
+    assert output.read_bytes() == b"psd"
     assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_psd_assembly_rejects_preserved_warning_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, reconstruction, _ = _accepted_assembly_job(tmp_path)
+    output = tmp_path / "accepted-output.psd"
+    manifest = store.read_json("job_manifest.json")
+    manifest["output_format"] = "psd"
+    manifest["options"]["output_path"] = str(output)
+    store.write_json("job_manifest.json", manifest)
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {"status": "preserved_with_warning"},
+    )
+    monkeypatch.setattr(
+        legacy,
+        "assemble_psd",
+        lambda **kwargs: pytest.fail("PSD assembler must not run"),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="quality gate"):
+        legacy.assemble_legacy_results(store)
+
+    assert not output.exists()
+    assert not list(reconstruction.glob("assembly-assets-*"))
+
+
+def test_psd_recovery_tracks_only_the_declared_output(tmp_path: Path) -> None:
+    output = (tmp_path / "output.psd").resolve()
+    manifest = {
+        "output_format": "psd",
+        "pages": ["page_001"],
+        "input": {"type": "images", "items": []},
+        "options": {"output_path": str(output), "slide_size": "both"},
+    }
+
+    assert runtime._expected_legacy_output_entries(manifest, "images") == [output]
+
+
+def test_psd_batch_targets_disambiguate_duplicate_source_names(tmp_path: Path) -> None:
+    manifest = {
+        "pages": ["page_001", "page_002", "page_003"],
+        "input": {
+            "type": "images",
+            "items": [
+                {"original_path": str(tmp_path / "first" / "slide.png")},
+                {"original_path": str(tmp_path / "second" / "slide.png")},
+                {"original_path": str(tmp_path / "third" / "other.png")},
+            ],
+        },
+    }
+    output_dir = tmp_path / "psd"
+
+    assert legacy._legacy_psd_output_targets(manifest, output_dir) == {
+        "page_001": output_dir / "001_slide.psd",
+        "page_002": output_dir / "002_slide.psd",
+        "page_003": output_dir / "other.psd",
+    }
 
 
 def test_suppressed_text_does_not_reappear_in_assembled_pptx(

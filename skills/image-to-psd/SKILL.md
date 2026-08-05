@@ -1,86 +1,77 @@
 ---
 name: image-to-psd
-description: 将一张或多张图片转换为分层 PSD 文件。自动完成 OCR 文本识别、背景建模修复、前景组件拆分，并使用 Aspose.PSD 生成 Photoshop 文本图层。当用户需要把截图、设计稿、幻灯片图片还原为可在 Photoshop 中编辑的分层 PSD 时使用此 skill。
+description: 将一张或多张图片通过共享的 OCR、SAM、Host/Local 视觉 Agent、最多五批组件重修和严格质量门转换为分层 PSD；输出独立透明视觉组件、修复背景和可编辑 Photoshop 文字图层。用于截图、科研绘图、设计稿或幻灯片图片的 PSD 分层重建；仅支持图片输入，不用于 PDF 或 PPTX。
 ---
 
 # Image to PSD
 
-将图片转换为分层 PSD 文件。每张图片生成一个 PSD，包含三类图层：修复后的背景、独立前景图层、Photoshop 文本图层。
+使用项目统一 Runtime 完成图片分层判断，只把通过质量门的最终层写入 PSD。不要调用旧版 `build_background`、`extract_foreground_mask` 或 `split_components` 管线。
 
-## 环境准备
+## 环境
 
-```bash
-pip install -r references/requirements.txt
-```
-
-PSD 文本图层导出依赖 Aspose.PSD 授权。配置方式：
+从完整仓库安装 Runtime 和 PSD 依赖：
 
 ```bash
-set ASPOSE_PSD_LICENSE=C:\path\to\Aspose.PSD.lic
+pip install -e ".[psd]"
 ```
 
-macOS/Linux:
+PSD 文字图层依赖已授权的 Aspose.PSD。转换前设置：
+
+```powershell
+$env:ASPOSE_PSD_LICENSE="C:\path\to\Aspose.PSD.lic"
+```
+
+Linux/macOS 使用：
 
 ```bash
 export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 ```
 
-## 使用方式
+授权缺失或无效时必须在创建 Run、加载 OCR/SAM 或调用 Agent 前失败。不得把文字降级为图片图层。
 
-所有脚本位于 `scripts/` 目录下。
+## 输入与输出
+
+- 仅支持图片：PNG、JPEG、BMP、TIFF、WebP。
+- 单图输出一个 `.psd`；多图输出到目录，同名源文件自动增加序号。
+- 每个 PSD 包含修复背景、按 z-order 排列的透明视觉组件以及可编辑文字图层。
+- 不接受 PDF 或 PPTX。需要这些输入时使用 `image-to-ppt`。
+
+## Provider
+
+优先使用当前宿主视觉模型：
 
 ```bash
-# 单张图片转换
-python scripts/image_to_psd.py input.png
-
-# 指定输出 PSD
-python scripts/image_to_psd.py input.png -o output.psd
-
-# 多张图片，每张图片输出一个 PSD
-python scripts/image_to_psd.py img1.png img2.png -o psd_output_dir
-
-# 传入目录，目录第一层每张图片输出一个 PSD
-python scripts/image_to_psd.py ./my_slides/ -o psd_output_dir
-
-# 调整参数
-python scripts/image_to_psd.py input.png --lang en --diff-threshold 15 --min-area 30
+image2editable prepare input.png -o output.psd \
+  --run-dir runs/psd-job --format psd --agent-provider host
+image2editable run execute runs/psd-job
+image2editable agent next runs/psd-job
+image2editable agent record runs/psd-job --plan response.json
+image2editable run execute runs/psd-job
 ```
 
-## Python API
+Host 必须支持视觉识别、本地文件读取、工具调用和结构化 JSON。实际查看 `agent next` 返回的全部证据后再记录计划，不从文件名或 metadata 猜测。
 
-```python
-import sys
-sys.path.insert(0, "path/to/skills/image-to-psd/scripts")
+只有用户明确要求离线/自托管时才使用 Local：
 
-from image_to_psd import convert, convert_batch
-
-result = convert("input.png", output_path="output.psd")
-
-results = convert_batch(
-    ["img1.png", "img2.png"],
-    output_path="psd_output_dir",
-)
+```bash
+image2editable models recommend --json
+image2editable models status
+image2editable convert input.png -o output.psd \
+  --format psd --agent-provider local
 ```
 
-## 参数说明
+只使用用户明确安装且 `installed=true`、`valid=true` 的模型；转换期间不自动下载，也不自动切换 Provider。
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| images | 路径 | （必填） | 图片文件、多个图片文件、或包含图片的目录 |
-| -o / --output | 路径 | 单图同名 `.psd`；多图同目录同名 `.psd` | 单图可传 PSD 文件；多图应传输出目录 |
-| --lang | 字符串 | ch | OCR 语言代码（ch=中文, en=英文） |
-| --period | 整数 | 32 | 背景建模瓦片周期 |
-| --diff-threshold | 浮点数 | 20.0 | 前景检测灵敏度（越小越敏感） |
-| --min-area | 整数 | 20 | 最小组件面积（像素），过滤噪点 |
+## 质量契约
 
-## 输出结构
+- 每页最多 5 个重修批次；已通过组件立即冻结。
+- 文字必须且只能由可编辑文字图层贡献一次，视觉组件和背景不得保留文字像素。
+- 每个视觉组件应是可独立移动的最小完整单元，不得残缺、重叠、带阴影残片或吸收相邻对象。
+- `rebuild_background.margin_ratio` 根据当前证据选择能覆盖残影且不触及相邻结构的最小值，不固定写死。
+- 页面最终成为 `preserved_with_warning` 时不生成伪分层 PSD；保留诊断目录并明确报告质量门失败。
 
-1. `Background` — 修复后的背景图层
-2. `Foreground 001...` — 独立前景像素图层
-3. `Text 001...` — Photoshop 文本图层
+兼容入口 `scripts/image_to_psd.py` 只负责把旧命令形式转发给共享 Runtime：
 
-## 注意
-
-- 本 skill 不依赖 `image-to-ppt` skill。
-- 项目代码以 MIT 发布；Aspose.PSD 是第三方商业依赖，受其官方 EULA 和授权约束。
-- 未配置 `ASPOSE_PSD_LICENSE` 时，脚本会明确失败，不会把文本降级为图片图层。
+```bash
+python scripts/image_to_psd.py input.png -o output.psd --agent-provider local
+```

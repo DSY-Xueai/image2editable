@@ -19,6 +19,11 @@ class AsposePsdLicenseError(RuntimeError):
     """Raised when PSD text-layer export cannot use a licensed Aspose.PSD."""
 
 
+def preflight_psd_runtime() -> None:
+    """Validate the licensed PSD runtime before expensive reconstruction."""
+    ensure_aspose_psd_license()
+
+
 def assemble_psd(
     background_path: str | Path,
     components: list[dict],

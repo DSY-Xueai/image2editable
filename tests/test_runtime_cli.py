@@ -235,6 +235,29 @@ def test_cli_convert_forwards_all_image_options(
     assert "conversion progress" in captured.err
 
 
+@pytest.mark.parametrize("command", ["prepare", "convert"])
+def test_cli_forwards_psd_output_format(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    calls = []
+
+    def fake_method(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return Path("run") if command == "prepare" else {"status": "completed"}
+
+    monkeypatch.setattr(
+        cli.runtime,
+        "prepare_job" if command == "prepare" else "convert",
+        fake_method,
+    )
+
+    assert cli.main([command, "source.png", "--format", "psd"]) == 0
+    capsys.readouterr()
+    assert calls[0][1]["output_format"] == "psd"
+
+
 def test_cli_json_keeps_non_ascii_text(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

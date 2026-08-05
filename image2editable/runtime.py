@@ -152,21 +152,31 @@ def prepare_job(
     slide_size: str = "both",
     lang: str = "ch",
     agent_provider: str = "host",
+    output_format: str = "pptx",
 ) -> Path:
     input_type, paths = classify_inputs(inputs)
+    if output_format not in {"pptx", "psd"}:
+        raise ValueError(f"Unsupported output_format: {output_format}")
+    if output_format == "psd" and input_type != "images":
+        raise ValueError("PSD output only supports image input")
     prepare = {
         "images": prepare_image_job,
         "pdf": prepare_pdf_job,
         "pptx": prepare_pptx_job,
     }[input_type]
     source: Path | list[Path] = paths if input_type == "images" else paths[0]
+    prepare_kwargs = {
+        "run_dir": run_dir,
+        "output_path": output_path,
+        "slide_size": slide_size,
+        "lang": lang,
+        "agent_provider": agent_provider,
+    }
+    if input_type == "images" and output_format != "pptx":
+        prepare_kwargs["output_format"] = output_format
     return prepare(
         source,
-        run_dir=run_dir,
-        output_path=output_path,
-        slide_size=slide_size,
-        lang=lang,
-        agent_provider=agent_provider,
+        **prepare_kwargs,
     )
 
 
@@ -1723,6 +1733,8 @@ def _expected_legacy_output_entries(
     if output is None:
         return []
     entries = [output]
+    if manifest.get("output_format", "pptx") == "psd":
+        return entries
     options = manifest["options"]
     slide_size = options.get("slide_size")
     if slide_size == "16:9":
@@ -1905,13 +1917,16 @@ def convert(
     slide_size: str = "both",
     lang: str = "ch",
     agent_provider: str = "host",
+    output_format: str = "pptx",
 ) -> dict[str, Any]:
-    prepared = prepare_job(
-        inputs,
-        run_dir=run_dir,
-        output_path=output_path,
-        slide_size=slide_size,
-        lang=lang,
-        agent_provider=agent_provider,
-    )
+    prepare_kwargs: dict[str, Any] = {
+        "run_dir": run_dir,
+        "output_path": output_path,
+        "slide_size": slide_size,
+        "lang": lang,
+        "agent_provider": agent_provider,
+    }
+    if output_format != "pptx":
+        prepare_kwargs["output_format"] = output_format
+    prepared = prepare_job(inputs, **prepare_kwargs)
     return run_job(prepared)

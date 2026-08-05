@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import json
 from numbers import Integral
@@ -413,44 +412,17 @@ def test_image_to_psd_skill_cli_help_starts() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_image_to_psd_skill_uses_current_text_reconstruction() -> None:
-    module_path = (
+def test_image_to_psd_skill_uses_shared_text_reconstruction() -> None:
+    scripts_dir = (
         Path(__file__).resolve().parents[1]
         / "skills"
         / "image-to-psd"
         / "scripts"
-        / "text_detect.py"
     )
-    spec = importlib.util.spec_from_file_location("image_to_psd_text_detect", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    launcher = (scripts_dir / "image_to_psd.py").read_text(encoding="utf-8")
 
-    assert module._select_font("Hello", 24) == "Arial"
-    merged = module._merge_adjacent_text_items(
-        [
-            {
-                "text": "Kylian",
-                "box": [20, 30, 60, 24],
-                "font_size": 20,
-                "font": "Arial",
-                "bold": False,
-                "color": "#202020",
-                "confidence": 0.98,
-            },
-            {
-                "text": "Mbappé",
-                "box": [86, 30, 72, 24],
-                "font_size": 20,
-                "font": "Arial",
-                "bold": False,
-                "color": "#202020",
-                "confidence": 0.97,
-            },
-        ]
-    )
-
-    assert [item["text"] for item in merged] == ["Kylian Mbappé"]
+    assert "image2editable.cli" in launcher
+    assert not (scripts_dir / "text_detect.py").exists()
 
 
 def test_filter_noise_keeps_meaningful_all_caps_text() -> None:
