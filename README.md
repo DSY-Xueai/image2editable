@@ -12,7 +12,7 @@
 
 </div>
 
-![image-20260806233042468](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806233042468.png)
+![image2editable 介绍](docs/images/readme-intro.png)
 
 image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修改的 PowerPoint。它适合课件截图、设计稿、报告页面和图片化幻灯片，减少从零复刻整页版式的工作。
 
@@ -24,9 +24,9 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 
 |                             原图                             |                      转换后的可编辑效果                     |
 | :----------------------------------------------------------: | :----------------------------------------------------------: |
-| ![image-20260806225430398](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225430398.png) | ![image-20260806225405060](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225405060.png) |
-| ![image-20260806225457358](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225457358.png) | ![image-20260806225517754](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225517754.png) |
-| ![image-20260806225623095](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225623095.png) | ![image-20260806225545070](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260806225545070.png) |
+| ![原图 1](docs/images/demo-source-1.png) | ![转换结果 1](docs/images/demo-result-1.png) |
+| ![原图 2](docs/images/demo-source-2.png) | ![转换结果 2](docs/images/demo-result-2.png) |
+| ![原图 3](docs/images/demo-source-3.png) | ![转换结果 3](docs/images/demo-result-3.png) |
 
 **若是单独一张图片，为获得最佳的 16:9 PPT 视觉效果，建议输入图片采用 16:9 比例。**
 

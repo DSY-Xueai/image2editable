@@ -1,6 +1,8 @@
 # --- Project patterns ---
 .worktrees/
 /.superpowers/
+.agents/
+.codex/
 /runs/
 .tmp-pytest/
 .pytest_cache/
@@ -64,5 +66,4 @@ Thumbs.db
 docs/*
 !docs/images/
 docs/images/*
-!docs/images/readme-workflow.png
-!docs/images/readme-workflow-en.png
+!docs/images/*.png
