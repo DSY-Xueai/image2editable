@@ -131,19 +131,30 @@ sources = ["input.pdf"]
 
 ```
 image2editable/
-├── .claude-plugin/        # Claude Code 插件清单
-├── image2editable/        # 统一 CLI、运行时和本地模型管理
-├── image_to_ppt.py        # 兼容的图片转 PPTX 入口
-├── scripts/               # 识别、重建和 PPTX 组装模块
-├── skills/image-to-ppt/   # 可安装的 Agent Skill
-├── third_party/licenses/  # 第三方许可证资料
-├── docs/images/           # README 图片资源
-├── tests/                 # 自动化测试，不参与用户转换
-├── pyproject.toml         # Python 包与 CLI 配置
-├── requirements.txt       # 核心依赖
-├── README.md              # 中文说明
-├── README_EN.md           # English documentation
-└── LICENSE                # MIT 许可证
+├── .claude-plugin/            # Claude Code 插件清单
+│   └── plugin.json
+├── docs/
+│   └── images/                # README 图片资源
+├── image2editable/            # 统一 CLI、运行时和转换模块
+├── scripts/                   # 识别、重建和 PPTX/PSD 组装模块
+├── skills/
+│   ├── image-to-ppt/          # 可安装的图片转 PPT Skill
+│   └── image-to-psd/          # 兼容的图片转 PSD Skill
+├── tests/                     # 自动化测试
+├── third_party/
+│   └── licenses/              # 第三方许可证资料
+├── .env.example               # Local Agent 配置示例
+├── .gitignore
+├── AGENTS.md                  # 项目协作规则
+├── CITATION.cff               # 引用信息
+├── image_to_ppt.py            # 兼容的图片转 PPTX 入口
+├── image_to_psd.py            # 兼容的图片转 PSD 入口
+├── LICENSE                    # MIT 许可证
+├── pyproject.toml             # Python 包与 CLI 配置
+├── README.md                  # 中文说明
+├── README_EN.md               # English documentation
+├── requirements.txt           # 核心依赖
+└── THIRD_PARTY_NOTICES.md     # 第三方依赖与许可证说明
 ```
 
 ## 已知问题

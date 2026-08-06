@@ -129,19 +129,30 @@ sources = ["input.pdf"]
 
 ```
 image2editable/
-├── .claude-plugin/        # Claude Code plugin manifest
-├── image2editable/        # Unified CLI, runtime, and local-model management
-├── image_to_ppt.py        # Compatible image-to-PPTX entry point
-├── scripts/               # Recognition, reconstruction, and PPTX assembly modules
-├── skills/image-to-ppt/   # Installable Agent Skill
-├── third_party/licenses/  # Third-party license materials
-├── docs/images/           # README image assets
-├── tests/                 # Automated tests; not involved in user conversion
-├── pyproject.toml         # Python package and CLI configuration
-├── requirements.txt       # Core dependencies
-├── README.md              # Chinese documentation
-├── README_EN.md           # English documentation
-└── LICENSE                # MIT license
+├── .claude-plugin/            # Claude Code plugin manifest
+│   └── plugin.json
+├── docs/
+│   └── images/                # README image assets
+├── image2editable/            # Unified CLI, runtime, and conversion modules
+├── scripts/                   # Recognition, reconstruction, and PPTX/PSD assembly modules
+├── skills/
+│   ├── image-to-ppt/          # Installable image-to-PPT Skill
+│   └── image-to-psd/          # Compatible image-to-PSD Skill
+├── tests/                     # Automated tests
+├── third_party/
+│   └── licenses/              # Third-party license materials
+├── .env.example               # Local Agent configuration example
+├── .gitignore
+├── AGENTS.md                  # Project collaboration rules
+├── CITATION.cff               # Citation information
+├── image_to_ppt.py            # Compatible image-to-PPTX entry point
+├── image_to_psd.py            # Compatible image-to-PSD entry point
+├── LICENSE                    # MIT license
+├── pyproject.toml             # Python package and CLI configuration
+├── README.md                  # Chinese documentation
+├── README_EN.md               # English documentation
+├── requirements.txt           # Core dependencies
+└── THIRD_PARTY_NOTICES.md     # Third-party dependency and license notices
 ```
 
 ## Known limitations
