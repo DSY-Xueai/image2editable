@@ -817,11 +817,11 @@ def test_local_provider_runs_complete_without_host_receipt(
         slide_size="16:9",
         agent_provider="local",
     )
-    receipt = _local_receipt(tmp_path)
+    expected_service = object()
     plans = []
-    monkeypatch.setattr(runtime, "_local_model_receipt", lambda store: receipt)
+    monkeypatch.setattr(runtime, "_local_service_config", lambda: expected_service)
 
-    def fake_local_agent(request_path, *, model_receipt, resource_policy):
+    def fake_local_agent(request_path, *, service_config):
         request_path = Path(request_path)
         request = json.loads(request_path.read_text(encoding="utf-8"))
         plan = {
@@ -834,16 +834,14 @@ def test_local_provider_runs_complete_without_host_receipt(
             "actions": [_accept_action()],
         }
         plans.append(plan)
-        assert model_receipt is receipt
-        assert resource_policy["name"] == "safe-default"
+        assert service_config is expected_service
         return plan
 
-    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
 
     completed = runtime.run_job(run_dir)
 
     assert completed["status"] == "completed"
-    assert completed["agent_model"]["resolved_revision"] == "a" * 40
     assert initial_calls == ["page_001"]
     assert assembly_calls == ["single"]
     assert [plan["provider"] for plan in plans] == ["local"]
@@ -854,9 +852,6 @@ def test_local_provider_runs_complete_without_host_receipt(
     )
     assert state["provider"] == "local"
     assert state["plan_count"] == 1
-    provenance = RunStore.open(run_dir).read_json("local-agent-model.json")
-    assert provenance["receipt"]["resolved_revision"] == "a" * 40
-    assert len(provenance["receipt_sha256"]) == 64
 
 
 def test_local_provider_runs_multiple_rounds_serially_without_pausing(
@@ -875,11 +870,7 @@ def test_local_provider_runs_multiple_rounds_serially_without_pausing(
         slide_size="16:9",
         agent_provider="local",
     )
-    monkeypatch.setattr(
-        runtime,
-        "_local_model_receipt",
-        lambda store: _local_receipt(tmp_path),
-    )
+    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
     rounds = []
 
     def fake_local_agent(request_path, **kwargs):
@@ -897,7 +888,7 @@ def test_local_provider_runs_multiple_rounds_serially_without_pausing(
             "actions": [_accept_action()] if request["repair_round"] == 1 else [],
         }
 
-    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
 
     completed = runtime.run_job(run_dir)
 
@@ -969,11 +960,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
         slide_size="16:9",
         agent_provider="local",
     )
-    monkeypatch.setattr(
-        runtime,
-        "_local_model_receipt",
-        lambda store: _local_receipt(tmp_path),
-    )
+    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
 
     def fake_local_agent(request_path, **kwargs):
         request_path = Path(request_path)
@@ -988,7 +975,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
             "actions": [_accept_action()],
         }
 
-    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
     real_reserve = legacy._ensure_component_disk_reserve
     reserve_calls = 0
 
@@ -1029,11 +1016,7 @@ def test_local_provider_stops_at_five_page_batches_and_falls_back(
         slide_size="16:9",
         agent_provider="local",
     )
-    monkeypatch.setattr(
-        runtime,
-        "_local_model_receipt",
-        lambda store: _local_receipt(tmp_path),
-    )
+    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
     rounds = []
 
     def fake_local_agent(request_path, **kwargs):
@@ -1059,7 +1042,7 @@ def test_local_provider_stops_at_five_page_batches_and_falls_back(
             ],
         }
 
-    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
+    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
 
     completed = runtime.run_job(run_dir)
 
@@ -1076,7 +1059,7 @@ def test_local_provider_stops_at_five_page_batches_and_falls_back(
     ).exists()
 
 
-def test_local_missing_model_stops_before_heavy_page_initialization(
+def test_local_missing_service_configuration_stops_before_heavy_page_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1089,21 +1072,18 @@ def test_local_missing_model_stops_before_heavy_page_initialization(
     )
     initialized = False
 
-    def missing_model(store):
-        raise RuntimeError(
-            "Local Agent model is unavailable; run: "
-            "image2editable models install agent"
-        )
+    def missing_service():
+        raise RuntimeError("Local model service is not configured")
 
     def unexpected_initialize(*args, **kwargs):
         nonlocal initialized
         initialized = True
         raise AssertionError("heavy page initialization must not start")
 
-    monkeypatch.setattr(runtime, "_local_model_receipt", missing_model)
+    monkeypatch.setattr(runtime, "_local_service_config", missing_service)
     monkeypatch.setattr(runtime, "initialize_legacy_page", unexpected_initialize)
 
-    with pytest.raises(RuntimeError, match="models install agent"):
+    with pytest.raises(RuntimeError, match="not configured"):
         runtime.run_job(run_dir)
 
     assert initialized is False

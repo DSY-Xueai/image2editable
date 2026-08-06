@@ -12,7 +12,7 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 - 使用 Python 3.10–3.12；上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束。
 - 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
 - 安装 `simple-lama-inpainting==0.1.2`。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，wrapper 首次运行可把模型下载到本地 cache。
-- 安装 PaddleOCR 或 Tesseract 作为 OCR 引擎。
+- 开始转换前运行 `image2editable doctor`。若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。** 我确认后安装所选项、再次运行 `doctor`，通过后继续转换。
 - 优先使用 Linux/WSL；SAM 官方建议 Windows 用户使用 WSL。
 - 自动使用可用的 CUDA；CPU 也受支持，但推理较慢。
 
@@ -62,16 +62,9 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。两种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
 
-只有用户要求离线/自托管 Agent 时才选择 `local`。不要硬编码模型；先读取当前电脑配置和版本化目录：
+只有我已经部署本地视觉模型服务时才选择 `local`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口；项目不下载、推荐或默认绑定模型。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Host。
 
-```bash
-image2editable models recommend --json
-image2editable models status
-```
-
-推荐结果必须 `compatible=true`，状态必须 `installed=true` 且 `valid=true`。若未安装，先向用户说明推荐模型、revision、`experimental/stable` 状态、内存/显存和磁盘结论；只有取得明确下载授权后才运行 `image2editable models install agent`。转换期间不会自动下载，也不自动回退到 Host。
-
-模型缓存只复用已下载权重，不缓存图片语义判断。每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分结果。
+每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分决策。
 
 Local 运行由 Runtime 内部串行完成：
 

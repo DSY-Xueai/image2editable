@@ -253,8 +253,8 @@ def _advance_legacy_pages(
     }
     provider = _manifest_agent_provider(manifest)
     pages = store.read_json("page_jobs.json")["pages"]
-    local_receipt = (
-        _bind_local_model_receipt(store, _local_model_receipt(store))
+    local_service = (
+        _local_service_config()
         if provider == "local"
         and any(pages[page_id]["status"] not in completed for page_id in page_ids)
         else None
@@ -269,10 +269,9 @@ def _advance_legacy_pages(
             outcome = advance_legacy_page(store, page_id, _lease=lease)
             if outcome["status"] == "awaiting_agent" and provider == "local":
                 request_path = _local_component_request_path(store, page_id)
-                plan = _run_local_agent(
+                plan = _run_local_service_agent(
                     request_path,
-                    model_receipt=local_receipt,
-                    resource_policy=_manifest_resource_policy(manifest),
+                    service_config=local_service,
                 )
                 record_local_component_plan(
                     store,
@@ -516,6 +515,22 @@ def _run_local_agent(
         model_receipt=model_receipt,
         resource_policy=resource_policy,
     )
+
+
+def _local_service_config() -> object:
+    from image2editable.local_service import load_config
+
+    return load_config()
+
+
+def _run_local_service_agent(
+    request_path: str | Path,
+    *,
+    service_config: object,
+) -> dict:
+    from image2editable.local_agent import run_local_service_agent
+
+    return run_local_service_agent(request_path, service_config=service_config)
 
 
 def _ensure_legacy_pages_processing(

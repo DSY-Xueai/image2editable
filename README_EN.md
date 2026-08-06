@@ -4,7 +4,7 @@
 
 [中文](README.md) | English
 
-**Images → Editable PPTX / Layered PSD**
+**Images, PDFs, and image-based PPTX → Editable PPTX**
 
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-orange)](LICENSE)
@@ -12,301 +12,155 @@
 
 </div>
 
-Convert PowerPoint screenshots, page captures, or design images into separate background, foreground component, and text layers, then export them as editable PPTX or layered PSD files.
+image2editable turns images, PDFs, and screenshot-based PowerPoint slides into PowerPoint files that can be edited again. It is designed for courseware screenshots, design mockups, report pages, and image-based slides, reducing the work of recreating a page from scratch.
+
+After conversion, you can edit recovered text, move separated visual elements, and keep refining the page in PowerPoint. When processing a mixed PPTX, existing editable content is retained in the file.
+
+![image2editable workflow](docs/images/readme-workflow-en.png)
 
 ---
 
-## Demo
+## Conversion examples
 
 > Input image | Multiple images are also supported
-<img width="2154" height="1127" alt="image" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
+<img width="2154" height="1127" alt="Input slide" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
 
-> Pages that pass the hard gates keep visual components movable and free of text pixels. Every reliable OCR string is contributed exactly once by a native editable text box; a failing page alone is preserved with a warning.
->
-> For the best visual results in a 16:9 PPT, using a 16:9 input image is recommended.
-<img width="2022" height="1058" alt="image" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
+> For the best visual result in a 16:9 deck, use a 16:9 input image when possible.
+<img width="2022" height="1058" alt="Editable PowerPoint result" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
 
----
+## Features
 
-## Core Features
+| Capability | What it does |
+|------------|--------------|
+| Editable text | Recovers readable text as native PowerPoint text boxes whenever possible. |
+| Movable visual elements | Separates independently processable visuals into transparent image components that can be moved or replaced. |
+| Mixed PPTX preservation | Native text, shapes, tables, charts, notes, and z-order that are not rebuilt remain unchanged. |
+| Multiple inputs | Supports images, image directories, PDFs, image-based PPTX files, and mixed PPTX files. |
+| Batch conversion | Converts multiple images or document pages into a multi-slide PPTX in order. |
+| Quality protection | Makes up to five repair rounds per page; pages that do not pass checks retain their source content with a warning. |
 
-| Feature | Description |
-|---------|-------------|
-| Background repair | PPTX and PSD share the Agent quality pipeline: OpenCV for small or narrow masks and LaMa for large or deep masks |
-| Foreground separation | PPTX and PSD share Grounding DINO semantic proposals, SAM 2.1 segmentation, and unique ownership |
-| OCR text reconstruction | Runs full-page OCR, then bounded two-view rechecks on small visual candidates not covered by the text mask; consistent high-confidence results become editable text with estimated size, color, weight, and alignment |
-| PPTX export | Passing pages use minimal complete transparent visual components and editable text boxes; a page still failing after five batches is preserved unchanged; outputs original-aspect-ratio and 16:9 versions by default |
-| Resource protection | Processes heavy pages serially and isolates OCR, LaMa, DINO, SAM, and full-page visual phases in sequential subprocesses; SAM2.1 Large uses a batch size of one by default |
-| PSD export | Accepts image inputs only; reuses the PPTX Agent segmentation and quality gates to create background, visual-component, and Photoshop text layers |
-| Batch processing | Accepts multiple images or a directory; PPTX files are combined into multiple slides, while PSD exports one file per image |
-| Agent screenshot routing | Produces auditable candidates for structurally safe PPTX images covering at least 80% of a slide; only high-confidence full-slide screenshot decisions enter the shadow-run queue |
+## Before you start
 
----
+- This is a tool for rebuilding **existing pages** into editable PowerPoint files. It does not create a new presentation from an article or outline.
+- **⚠️ Complex visuals are usually kept as movable image components.** Their internal elements are not guaranteed to become native PowerPoint shapes.
+- **🔒 Host Agent mode may send diagnostic images to the current host service.** Choose Local Agent for sensitive files.
 
-## Quick Start
+## Quick start
 
-### Requirements
+### Install with the **skills CLI**
 
-- Python 3.10–3.12 (the upper limit comes from the NumPy/Pillow constraints of `simple-lama-inpainting 0.1.2`)
-- `torch>=2.5.1`, `torchvision>=0.20.1`, `transformers>=4.40.0`, `accelerate>=0.26.0`, and `simple-lama-inpainting==0.1.2`
-- SAM officially recommends Linux/WSL; WSL is recommended on Windows
-- OCR requires at least one complete route: `paddleocr` + `paddlepaddle`, or `pytesseract` + a system Tesseract executable; `doctor` uses this requirement when deciding whether the environment is ready
-- PSD export additionally requires the Aspose.PSD package and license, plus the `ASPOSE_PSD_LICENSE` environment variable
+```bash
+npx skills add DSY-Xueai/image2editable --skill image-to-ppt
+```
 
-### Installation
+### **Let an Agent install it**
+
+```text
+Install the <image-to-ppt> skill from https://github.com/DSY-Xueai/image2editable.
+```
+
+After installation, describe the task to an Agent that supports vision, file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:
+
+```text
+# Codex
+$image-to-ppt Convert input.pptx to an editable PPTX and preserve native objects that are not selected for reconstruction.
+$image-to-ppt Convert input.png to an editable PPTX.
+$image-to-ppt Convert <input.pdf> to an editable PPTX.
+
+# Claude Code
+/image-to-ppt Convert input.pptx to an editable PPTX and preserve native objects that are not selected for reconstruction.
+/image-to-ppt Convert input.png to an editable PPTX.
+/image-to-ppt Convert <input.pdf> to an editable PPTX.
+```
+
+> **💡 Tip:** Use the Skill when Codex, Claude Code, or a similar host is available. Use Local CLI when images or PDFs need to stay on your own machine.
+
+### Local CLI
+
+Deploy and start a local service with **vision capability** first. The service must expose an **OpenAI-compatible `/v1/chat/completions` API**, accept image input, and return JSON. vLLM, LM Studio, or Ollama with its OpenAI-compatible interface enabled can be used.
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
 cd image2editable
 pip install .
-
-# Install the optional dependency when PSD export is needed
-pip install .[psd]
 ```
 
-### Models and First Run
-
-Image-layer conversion depends on Grounding DINO, SAM 2.1, and LaMa. The required models are downloaded to the local cache on first run; model weights are not included in this repository. The pipeline uses CUDA when available and also supports CPU execution, although CPU mode is significantly slower. If you already have a local LaMa TorchScript model, set `LAMA_MODEL` to its path.
-
-### Resource and Quality Policy
-
-The default policy limits heavy-page concurrency to one, numerical threads to at most eight, and SAM `points_per_batch` to one. OCR detection/recognition, LaMa, DINO, SAM prompted/automatic/final hole recheck, and full-page visual processing run in sequential subprocess phases, so process exit becomes the resource-release boundary. Candidate OCR checks at most 24 candidates per page with two deterministic views whose longest edges are capped at 512 and 448 pixels, caps all crop pixels at 6 MiPixel, skips large candidates by bbox and alpha summaries, and deduplicates known text per result. This still uses SAM2.1 Large and does not reduce the 200 DPI PDF baseline, SAM sampling points, or candidate thresholds; conversion takes longer as a tradeoff.
-
-The final quality gate checks components, the component-free background, and the composed result. Reliable OCR text must appear exactly once as editable text, with no source glyphs left in component alpha or background text regions. Multiple OCR items in one candidate are paired by page coordinates: consistent items are recovered individually, while up to 96 high-confidence conflicts are recorded in deterministic order as `unowned_raster_text` violations bound to the source SHA-256, stable `candidate_id`, and text bbox. Additional conflicts are truncated, but the page remains hard-failed. Accepted leaves stay frozen. If no real component failures remain, the page is preserved immediately with a warning; otherwise it gets at most five real repair batches. Raster text is never an accepted fallback.
-
-### OCR Engines
-
-**Option A: PaddleOCR (higher accuracy for Chinese text)**
-
-```bash
-pip install paddleocr paddlepaddle
-```
-
-**Option B: Tesseract (lighter weight)**
-
-```bash
-pip install pytesseract
-# Install Tesseract on the system:
-# Windows: https://github.com/UB-Mannheim/tesseract/wiki
-# macOS:   brew install tesseract
-# Ubuntu:  sudo apt install tesseract-ocr tesseract-ocr-chi-sim
-```
-
-Configure the PSD export license:
-
-Windows PowerShell:
+For first-time setup, copy the template in the project root and **fill in your own service settings**.
 
 ```powershell
-$env:ASPOSE_PSD_LICENSE = "C:\path\to\Aspose.PSD.lic"
+Copy-Item .env.example .env
 ```
 
-macOS/Linux:
+Edit `.env`: set `IMAGE2EDITABLE_LOCAL_BASE_URL` to the **service address** and `IMAGE2EDITABLE_LOCAL_MODEL` to the **model name exposed by the service**. Leave `IMAGE2EDITABLE_LOCAL_API_KEY` empty when the service does not require a key.
+
+After configuration, use `--agent-provider local` to call the local service:
 
 ```bash
-export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
+# Image → editable PPTX
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local
+
+# PDF → editable PPTX
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
 ```
 
-Aspose.PSD is a commercial component. Make sure you have a license that complies with its official EULA before use. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for other third-party dependencies and licenses, and [CITATION.cff](CITATION.cff) for citation information.
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `sources` | Required | Input to convert: image(s), an image directory, one PDF, or one PPTX. Document inputs cannot be mixed with other sources. |
+| `-o, --output` | Derived from input name | Sets the output file. With `--slide-size both`, it is used as the output base name. |
+| `--lang` | `ch` | OCR language; common values are `ch` and `en`. |
+| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, while `local` uses the configured local vision service. |
+| `--slide-size` | `both` | Selects output layout: `original` keeps the input ratio, `16:9` makes widescreen slides, and `both` creates both. |
+| `--run-dir` | Generated automatically | Sets a run directory so you can inspect progress, resume an unfinished task, or troubleshoot. |
 
----
-
-## Usage
-
-### Skill Installation
-
-The project provides two independent Skills:
-
-- `skills/image-to-ppt/`: convert images to editable PPTX files
-- `skills/image-to-psd/`: convert images to layered PSD files
-
-**Method 1: Use the skills CLI**
-
-```bash
-npx skills add DSY-Xueai/image2editable --skill <skill_name>
-```
-
-Replace `<skill_name>` with the Skill directory name, such as `image-to-ppt`.
-
-**Method 2: Let an Agent install it automatically**
+In the command above, `input.pdf` is `sources`, equivalent to:
 
 ```text
-Install the <skill_name> skill from https://github.com/DSY-Xueai/image2editable.
+sources = ["input.pdf"]
 ```
 
-**Method 3: Claude Code plugin**
+## Choose a processing mode
 
-```bash
-claude plugin marketplace add https://github.com/DSY-Xueai/image2editable
-claude plugin install image2editable@image2editable --scope user
-```
+| Mode | Best for | How it works |
+|------|----------|--------------|
+| Host Agent | Users already working in Codex, Claude Code, or a similar host and who want Agent assistance with page-structure decisions. | The Skill gives diagnostic material to the current host Agent; **the CLI does not call a fixed cloud AI API directly**. |
+| Local Agent | Users who have deployed their own local vision-model service and want to process images or PDFs on their own device. | Uses the configured OpenAI-compatible local service. |
 
-**Method 4: Manual installation**
-
-```bash
-git clone https://github.com/DSY-Xueai/image2editable.git
-mkdir -p ~/.claude/skills
-cp -R image2editable/skills/image-to-ppt ~/.claude/skills/<skill_name>
-```
-
-### Command Line
-
-#### Unified Runtime (P1)
-
-Component reconstruction has two mutually exclusive Agent Providers. The Provider is frozen when a Run is created and never changes through an automatic fallback:
-
-- `host` (default) uses the current vision-capable Codex, Claude Code, or equivalent host. It downloads no additional component-decision model. The host must support vision, local-file reads, tool calls, and structured JSON.
-- `local` uses a user-approved local vision model. The Runtime performs at most five repair rounds per page in isolated subprocesses and stays offline during conversion.
-
-Both Providers currently have `experimental` stability because real-file acceptance has not been completed for both paths. Host services may receive diagnostic images; use fully offline Local for sensitive content. A model cache only avoids repeated model downloads—it is not a semantic decision cache. Every image and page is analyzed again, and split decisions are never reused across unrelated images.
-
-Never hard-code a Local model. Inspect the versioned catalog and current hardware first:
-
-```bash
-image2editable models recommend --json
-image2editable models status
-```
-
-If the recommended model is not installed, explain its model ID, revision, stability, resource requirements, and cache location, then obtain explicit user authorization before running `image2editable models install agent`. Host does not probe, load, or download the Local model.
-
-```bash
-# Images, PDFs, and screenshot-based PPTX files can use either Provider
-image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider host
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
-
-# Convert a PDF directly, or prepare it and request one detail rerender per page before execution
-image2editable convert input.pdf -o output.pptx --slide-size 16:9
-image2editable prepare input.pdf --run-dir runs/pdf-job
-image2editable run render-detail runs/pdf-job --page page_001
-image2editable run execute runs/pdf-job
-image2editable run recover runs/pdf-job
-
-# PPTX P2.1: prepare high-confidence candidates, inspect image_path, then record the Agent decision
-image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
-image2editable run next runs/pptx-job
-image2editable decision record runs/pptx-job \
-  --page page_001 --object 7 \
-  --decision replace --confidence 0.96 \
-  --category full_slide_screenshot \
-  --evidence "complete slide layout"
-
-# Execution still preserves PPTX bytes; OOXML replacement follows in the shadow-run stage
-image2editable convert input.pptx -o preserved.pptx
-
-# Inspect local dependencies
-image2editable doctor
-```
-
-For Host, the Skill loops through `run execute → agent next → visually inspect all nine evidence artifacts, including component-isolation.png → agent record → run execute` until completion or the five-batch page limit. Local inspects the same evidence and uses the same hard gates; neither Provider's confidence can relax them. Passed components are frozen. Each component is the smallest independently movable complete visual unit and is rendered from text-clean RGB with its final full alpha. Component and background views must contain no source glyph residual, while reliable OCR text must be contributed exactly once by an editable text box. Raster text is never an accepted fallback. If the parent still fails, only that page is retained with `preserved_with_warning`; clearing components cannot report success.
-
-For PPTX input, existing native text, shapes, tables, charts, notes, z-order, unmatched images, and unmatched slides are preserved. Reconstructed components are normally movable transparent image objects; arbitrary conversion into native vectors or SmartArt is not promised.
-
-The Unified CLI calls its positional inputs `sources`. PPTX output accepts image files/directories, one PDF, or one PPTX; PSD output accepts image files or image directories only. A document cannot be mixed with other sources or supplied more than once. The existing `python image_to_ppt.py` and `python image_to_psd.py` image entry points remain compatible.
-
-`run recover` only resumes an orphaned task whose execution lock is gone; it does not terminate an active conversion process.
-
-PDF pages are rendered adaptively and then reuse the existing image-to-editable-PPTX pipeline. The standard target is 200 DPI. Small pages are raised to a 1200 px short-edge floor without exceeding 300 DPI; every render is capped at a 6000 px long edge and 24 MP. An Agent or user may call `render-detail` once per page to rerender it with a 300 DPI target. PDF pages with the same physical aspect ratio can be combined into a ratio-preserving multi-slide PPTX. With mixed aspect ratios, `original` produces one output per page while a uniform 16:9 version remains available. Layout is always scaled uniformly, with no non-uniform stretching.
-
-For PPTX inputs, the Runtime read-only scans native OOXML objects, notes, image relationships, and stable fingerprints. Only structurally safe images covering at least 80% of a slide are candidates. The Agent receives bound hashes, coverage, edge gaps, and native-object counts. Only `replace + full_slide_screenshot + confidence >= 0.92` enters component reconstruction; photos, logos, decorative assets, and uncertain cases are preserved without asking the user about every object. A candidate is replaced in place only after component quality gates and PPTX reopen checks pass; otherwise its original screenshot is retained with a warning.
-
-Python 3.10–3.12 is supported; `doctor` now checks PDFium as well.
-
-#### Compatible Entry Points
-
-```bash
-# One image → generates input_original.pptx and input_16x9.pptx by default
-python image_to_ppt.py input.png
-
-# Generate only one slide size
-python image_to_ppt.py input.png --slide-size original
-python image_to_ppt.py input.png --slide-size 16:9
-
-# Multiple images → generates a multi-slide 16:9 PPTX and original-size single-slide PPTX files in the *_original directory
-python image_to_ppt.py img1.png img2.png img3.png -o slides.pptx
-
-# Directory input → also supports original, 16:9, or both
-python image_to_ppt.py ./my_slides/ -o presentation.pptx
-
-# Add the original image as a reference slide after each content slide
-python image_to_ppt.py img1.png img2.png --reference
-
-# One image → PSD
-python image_to_psd.py input.png
-
-# Multiple images → one PSD per image
-python image_to_psd.py img1.png img2.png -o psd_output_dir
-
-# Directory input → one PSD per image
-python image_to_psd.py ./my_slides/ -o psd_output_dir
-
-# Use the local visual Agent; Host Agent is the default
-python image_to_psd.py input.png --lang en --agent-provider local
-```
-
-### Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `sources` | Required | An image file, multiple image files, or a directory; directory input scans only the first level |
-| `-o, --output` | Same name as input | PPTX: a file path for `original` or `16:9`; an output base name for the default `both` mode. PSD: a file path for one image or an output directory for multiple images |
-| `--lang` | `ch` | OCR language, commonly `ch` or `en` |
-| `--format` | `pptx` | Unified CLI output format; use `--format psd` for PSD, which accepts image inputs only |
-| `--agent-provider` | `host` | Use the host visual Agent, or an explicitly installed model in `local` mode |
-| `--reference` | Disabled | PPTX only: add the original image as a reference slide after each content slide |
-| `--no-reference` | Default behavior | PPTX only: explicitly disable original-image reference slides |
-| `--slide-size` | `both` | PPTX only: `original` preserves the input ratio, `16:9` outputs widescreen slides, and `both` generates both sizes |
-
----
-
-## Project Structure
+## Project layout
 
 ```
 image2editable/
-├── .claude-plugin/
-│   └── plugin.json        # Claude Code plugin configuration exposing two independent Skills
-├── image_to_ppt.py        # Image-to-PPTX entry point (CLI + Python API)
-├── image_to_psd.py        # Image-to-PSD entry point (CLI + Python API)
-├── scripts/               # Core processing and export modules
-│   ├── text_detect.py     # OCR text detection and style estimation
-│   ├── bg_model.py        # Background modeling and repair
-│   ├── fg_extract.py      # Foreground component extraction and separation
-│   ├── ppt_assemble.py    # Layered PPTX assembly
-│   ├── psd_assemble.py    # Layered PSD assembly (Aspose.PSD)
-│   └── visual_compare_qa.py # Manual visual comparison QA tool
-├── skills/                # Distributable Agent Skills
-│   ├── image-to-ppt/      # Image-to-PPTX Skill
-│   └── image-to-psd/      # Image-to-PSD Skill
-└── requirements.txt       # Python dependencies
+├── .claude-plugin/        # Claude Code plugin manifest
+├── image2editable/        # Unified CLI, runtime, and local-model management
+├── image_to_ppt.py        # Compatible image-to-PPTX entry point
+├── scripts/               # Recognition, reconstruction, and PPTX assembly modules
+├── skills/image-to-ppt/   # Installable Agent Skill
+├── third_party/licenses/  # Third-party license materials
+├── docs/images/           # README image assets
+├── tests/                 # Automated tests; not involved in user conversion
+├── pyproject.toml         # Python package and CLI configuration
+├── requirements.txt       # Core dependencies
+├── README.md              # Chinese documentation
+├── README_EN.md           # English documentation
+└── LICENSE                # MIT license
 ```
 
----
+## Known limitations
 
-## Tech Stack
+- **⚠️ Review complex pages manually.** Decorative text, dense tables, gradients, and complex illustrations may not be restored pixel for pixel. Check text, component positions, and layout before delivery.
+- Clear text and regular backgrounds generally reconstruct more reliably. Decorative text, dense tables, gradients, and complex illustrations are not guaranteed to match pixel for pixel.
+- **💳 Host Agent consumes the current model's token/context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity. Local mode does not use project tokens, but consumes inference resources from the local model service. CPU inference may be slow.
+- **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five repair rounds. Host mode also waits for Agent visual decisions.
 
-| Area | Technology |
-|------|------------|
-| Image processing | OpenCV, Pillow, NumPy |
-| OCR | PaddleOCR, Tesseract |
-| PPTX generation | python-pptx |
-| PSD generation | Aspose.PSD |
-| Background repair | OpenCV inpainting (small/narrow masks) + LaMa (large/deep masks) |
-| PPTX visual segmentation | Grounding DINO semantic proposals + SAM 2.1 masks + unique ownership |
-| PSD layering | Shared Agent decisions, Grounding DINO, SAM 2.1, OCR, background repair, and hard quality gates |
+## Supported inputs and common options
 
----
+| Input | Recommended route | Notes |
+|-------|-------------------|-------|
+| Images or an image directory | Skill or Local CLI | PNG, JPG/JPEG, BMP, TIFF/TIF, and WebP are supported. Directories scan images in the first level only. |
+| PDF | Skill or Local CLI | Pages are rendered and rebuilt into a multi-slide PPTX in order. |
+| Image-based or mixed PPTX | Skill recommended | Processable image pages are selected for reconstruction; unmatched native objects stay unchanged. |
 
-## Use Cases
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party dependencies and licenses, and [CITATION.cff](CITATION.cff) for citation information.
 
-- Convert PowerPoint screenshots, course pages, or design previews into editable PPTX files
-- Convert screenshots or design images into layered Photoshop PSD files
-- Images with relatively regular backgrounds and clear text produce better results
-- Supports Chinese and English content
-
----
-
-## Supported Image Formats
-
-PNG · JPG / JPEG · BMP · TIFF / TIF · WebP
-
-## LICENSE
+## License
 
 MIT

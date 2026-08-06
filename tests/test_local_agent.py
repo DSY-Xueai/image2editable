@@ -199,6 +199,33 @@ def test_local_agent_starts_one_worker_with_offline_bounded_environment(
     assert observed["timeout_seconds"] == 600
 
 
+def test_local_service_agent_uses_the_user_configured_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.local_service import LocalServiceConfig
+
+    request_path = _request_path(tmp_path)
+    observed: dict[str, object] = {}
+
+    def complete(config, *, messages, timeout_seconds):
+        observed["config"] = config
+        observed["messages"] = messages
+        observed["timeout_seconds"] = timeout_seconds
+        return json.dumps(_plan(request_path))
+
+    monkeypatch.setattr("image2editable.local_service.complete", complete)
+
+    result = local_agent.run_local_service_agent(
+        request_path,
+        service_config=LocalServiceConfig("http://127.0.0.1:8000/v1", "my-vlm", None),
+    )
+
+    assert result == _plan(request_path)
+    assert observed["config"].model == "my-vlm"
+    assert observed["timeout_seconds"] == 600
+
+
 def test_local_plan_passes_the_same_strict_validator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

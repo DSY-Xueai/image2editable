@@ -11,7 +11,6 @@ verify-main-temp/
 test_output_files/
 Course.md
 docs/
-tests/
 
 # --- Environment ---
 .env
@@ -59,3 +58,11 @@ Thumbs.db
 # Downloaded visual-segmentation checkpoints
 *.pt
 .model-cache/
+
+# README assets tracked in the repository
+!docs/
+docs/*
+!docs/images/
+docs/images/*
+!docs/images/readme-workflow.png
+!docs/images/readme-workflow-en.png

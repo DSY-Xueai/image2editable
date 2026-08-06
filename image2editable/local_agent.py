@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import mimetypes
 import os
 from pathlib import Path
 import shutil
@@ -131,6 +133,70 @@ def run_local_agent(
             )
             raise
         return plan
+
+
+def run_local_service_agent(
+    request_path: str | Path,
+    *,
+    service_config: object,
+    timeout_seconds: int = 600,
+) -> dict:
+    from image2editable.component_repair import (
+        load_component_agent_graph,
+        load_component_agent_request,
+    )
+    from image2editable.local_agent_worker import _messages
+    from image2editable.local_service import complete
+
+    request_path = Path(request_path).resolve()
+    request = load_component_agent_request(request_path)
+    if request["provider"] != "local":
+        raise RuntimeError("Local Agent requires provider local")
+    graph = load_component_agent_graph(request_path)
+    _ensure_page_disk_budget(request_path, request, graph)
+    evidence = {
+        name: request_path.parent / Path(*record["path"].split("/"))
+        for name, record in request["evidence"].items()
+    }
+    quality_text = evidence["quality-report.json"].read_text(
+        encoding="utf-8", errors="replace"
+    )
+    request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    messages = _service_messages(
+        _messages(request, graph, quality_text, evidence, request_sha256)
+    )
+    plan = json.loads(
+        complete(service_config, messages=messages, timeout_seconds=timeout_seconds)
+    )
+    validate_component_plan(plan, request=request, graph=graph)
+    if plan.get("request_sha256") != request_sha256:
+        raise ValueError("component plan request_sha256 does not match current request")
+    return plan
+
+
+def _service_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    converted: list[dict[str, object]] = []
+    for message in messages:
+        content = message["content"]
+        if not isinstance(content, list):
+            converted.append(message)
+            continue
+        parts = []
+        for part in content:
+            if part.get("type") != "image":
+                parts.append(part)
+                continue
+            path = Path(part["image"])
+            media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+                }
+            )
+        converted.append({**message, "content": parts})
+    return converted
 
 
 def _model_snapshot(receipt: object) -> Path:
