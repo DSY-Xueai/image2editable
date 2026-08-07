@@ -145,7 +145,6 @@ image2editable/
 │   └── licenses/              # Third-party license materials
 ├── .env.example               # Local Agent configuration example
 ├── .gitignore
-├── AGENTS.md                  # Project collaboration rules
 ├── CITATION.cff               # Citation information
 ├── image_to_ppt.py            # Compatible image-to-PPTX entry point
 ├── image_to_psd.py            # Compatible image-to-PSD entry point

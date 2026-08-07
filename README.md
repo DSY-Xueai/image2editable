@@ -145,7 +145,6 @@ image2editable/
 │   └── licenses/              # 第三方许可证资料
 ├── .env.example               # Local Agent 配置示例
 ├── .gitignore
-├── AGENTS.md                  # 项目协作规则
 ├── CITATION.cff               # 引用信息
 ├── image_to_ppt.py            # 兼容的图片转 PPTX 入口
 ├── image_to_psd.py            # 兼容的图片转 PSD 入口
