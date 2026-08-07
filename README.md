@@ -69,7 +69,6 @@ $image-to-ppt 把 input.pptx 转成可编辑 PPTX，保留没有命中的原生�
 $image-to-ppt 把 input.png 转成可编辑 PPTX。
 $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 #claude code
-#Codex
 /image-to-ppt 把 input.pptx 转成可编辑 PPTX，保留没有命中的原生对象。
 /image-to-ppt 把 input.png 转成可编辑 PPTX。
 /image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
