@@ -12,21 +12,23 @@
 
 </div>
 
+![image2editable workflow](docs/images/readme-workflow-en.png)
+
 image2editable turns images, PDFs, and screenshot-based PowerPoint slides into PowerPoint files that can be edited again. It is designed for courseware screenshots, design mockups, report pages, and image-based slides, reducing the work of recreating a page from scratch.
 
 After conversion, you can edit recovered text, move separated visual elements, and keep refining the page in PowerPoint. When processing a mixed PPTX, existing editable content is retained in the file.
-
-![image2editable workflow](docs/images/readme-workflow-en.png)
 
 ---
 
 ## Conversion examples
 
-> Input image | Multiple images are also supported
-<img width="2154" height="1127" alt="Input slide" src="https://github.com/user-attachments/assets/867e95ba-a7ba-4966-8fd4-a3208a5fc924" />
+| Source | Editable result |
+| :----: | :-------------: |
+| ![Source 1](docs/images/demo-source-1.png) | ![Conversion result 1](docs/images/demo-result-1.png) |
+| ![Source 2](docs/images/demo-source-2.png) | ![Conversion result 2](docs/images/demo-result-2.png) |
+| ![Source 3](docs/images/demo-source-3.png) | ![Conversion result 3](docs/images/demo-result-3.png) |
 
-> For the best visual result in a 16:9 deck, use a 16:9 input image when possible.
-<img width="2022" height="1058" alt="Editable PowerPoint result" src="https://github.com/user-attachments/assets/cf86c0dc-515e-4d86-a6fb-a42f084518fd" />
+**For the best visual result in a 16:9 PowerPoint deck, use a 16:9 input image when converting a single image.**
 
 ## Features
 
