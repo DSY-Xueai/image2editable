@@ -21,6 +21,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
@@ -109,6 +110,7 @@ def assemble_pptx(
     canvas_height: int | None = None,
     content_offset_x: int = 0,
     content_offset_y: int = 0,
+    visual_elements: list[dict] | None = None,
 ) -> str:
     """Assemble a PPTX from background, foreground components, and text.
 
@@ -169,11 +171,21 @@ def assemble_pptx(
     )
     logger.info("Added background layer.")
 
-    # Layer 2 (middle): Foreground components
-    for comp in components:
-        _add_component(
+    # Layer 2 (middle): Foreground visual objects
+    elements = visual_elements
+    if elements is None:
+        elements = [
+            {
+                "route": "raster_component",
+                "z_index": index,
+                "component": component,
+            }
+            for index, component in enumerate(components)
+        ]
+    for element in sorted(elements, key=lambda item: item["z_index"]):
+        _add_visual_element(
             slide,
-            comp,
+            element,
             img_width,
             img_height,
             transform,
@@ -183,7 +195,7 @@ def assemble_pptx(
             content_offset_y if use_canvas else 0,
         )
 
-    logger.info("Added %d foreground components.", len(components))
+    logger.info("Added %d foreground visual objects.", len(elements))
 
     # Layer 3 (top): Editable text boxes
     for item in text_items:
@@ -391,11 +403,21 @@ def assemble_pptx_multi(
                 Inches(transform.content_height),
             )
 
-        # Layer 2: Foreground components
-        for comp in data["components"]:
-            _add_component(
+        # Layer 2: Foreground visual objects
+        elements = data.get("visual_elements")
+        if elements is None:
+            elements = [
+                {
+                    "route": "raster_component",
+                    "z_index": index,
+                    "component": component,
+                }
+                for index, component in enumerate(data["components"])
+            ]
+        for element in sorted(elements, key=lambda item: item["z_index"]):
+            _add_visual_element(
                 slide,
-                comp,
+                element,
                 img_w,
                 img_h,
                 transform,
@@ -581,6 +603,123 @@ def _add_component(
         Inches(width),
         Inches(height),
     )
+
+
+def _add_visual_element(
+    slide,
+    element: dict,
+    img_w: int,
+    img_h: int,
+    transform: ContainTransform,
+    canvas_width: int | None = None,
+    canvas_height: int | None = None,
+    content_offset_x: int = 0,
+    content_offset_y: int = 0,
+) -> None:
+    canvas_args = (
+        canvas_width,
+        canvas_height,
+        content_offset_x,
+        content_offset_y,
+    )
+    route = element["route"]
+    if route == "raster_component":
+        _add_component(
+            slide,
+            element["component"],
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+        )
+        return
+    if route == "native_shape":
+        _add_native_shape(
+            slide,
+            element,
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+        )
+        return
+    raise ValueError(f"Unsupported visual route: {route}")
+
+
+def _add_native_shape(
+    slide,
+    element: dict,
+    img_w: int,
+    img_h: int,
+    transform: ContainTransform,
+    canvas_width: int | None = None,
+    canvas_height: int | None = None,
+    content_offset_x: int = 0,
+    content_offset_y: int = 0,
+) -> None:
+    payload = element["shape"]
+    shape_type = payload["shape_type"]
+    fill_rgb = payload["fill_rgb"]
+    canvas_args = (
+        canvas_width,
+        canvas_height,
+        content_offset_x,
+        content_offset_y,
+    )
+    if shape_type == "line":
+        start = payload["line_start"]
+        end = payload["line_end"]
+        start_left, start_top, _, _ = _map_bbox(
+            start[0], start[1], 0, 0, img_w, img_h, transform, *canvas_args
+        )
+        end_left, end_top, _, _ = _map_bbox(
+            end[0], end[1], 0, 0, img_w, img_h, transform, *canvas_args
+        )
+        _, _, line_width, _ = _map_bbox(
+            0,
+            0,
+            payload["line_width"],
+            payload["line_width"],
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+        )
+        shape = slide.shapes.add_connector(
+            MSO_CONNECTOR.STRAIGHT,
+            Inches(start_left),
+            Inches(start_top),
+            Inches(end_left),
+            Inches(end_top),
+        )
+        shape.line.color.rgb = RGBColor(*fill_rgb)
+        shape.line.width = Inches(line_width)
+    else:
+        shape_types = {
+            "rectangle": MSO_SHAPE.RECTANGLE,
+            "rounded_rectangle": MSO_SHAPE.ROUNDED_RECTANGLE,
+            "ellipse": MSO_SHAPE.OVAL,
+        }
+        if shape_type not in shape_types:
+            raise ValueError(f"Unsupported native shape: {shape_type}")
+        left, top, right, bottom = element["bbox"]
+        mapped = _map_bbox(
+            left,
+            top,
+            right - left,
+            bottom - top,
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+        )
+        shape = slide.shapes.add_shape(
+            shape_types[shape_type], *(Inches(value) for value in mapped)
+        )
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(*fill_rgb)
+        shape.line.fill.background()
+    shape.name = f"image2editable:{element['object_id']}"
 
 
 def _add_textbox(

@@ -81,6 +81,9 @@ def test_line_produces_native_candidate() -> None:
     assert candidate is not None
     assert candidate["shape_type"] == "line"
     assert candidate["geometry_score"] >= 0.95
+    assert candidate["line_width"] > 0
+    assert len(candidate["line_start"]) == 2
+    assert len(candidate["line_end"]) == 2
 
 
 def test_gradient_fill_records_high_color_variation() -> None:

@@ -74,7 +74,9 @@ def _best_rounded(mask: np.ndarray) -> tuple[float, np.ndarray] | None:
     return best[0], best[2]
 
 
-def _best_line(mask: np.ndarray) -> tuple[float, np.ndarray] | None:
+def _best_line(
+    mask: np.ndarray,
+) -> tuple[float, np.ndarray, list[int], list[int], int] | None:
     height, width = mask.shape
     fill_ratio = np.count_nonzero(mask) / mask.size
     if max(height, width) / max(1, min(height, width)) < 3 and fill_ratio > 0.35:
@@ -101,8 +103,21 @@ def _best_line(mask: np.ndarray) -> tuple[float, np.ndarray] | None:
             thickness,
             cv2.LINE_8,
         )
-        measured.append((_iou(mask, prototype.astype(bool)), prototype.astype(bool)))
-    return max(measured, key=lambda item: item[0])
+        measured.append(
+            (
+                _iou(mask, prototype.astype(bool)),
+                prototype.astype(bool),
+                thickness,
+            )
+        )
+    score, prototype, thickness = max(measured, key=lambda item: item[0])
+    return (
+        score,
+        prototype,
+        np.rint(start).astype(int).tolist(),
+        np.rint(end).astype(int).tolist(),
+        thickness,
+    )
 
 
 def _has_hole(mask: np.ndarray) -> bool:
@@ -181,10 +196,17 @@ def analyze_shape_candidate(
     if fill is None:
         return None
     fill_rgb, color_mad = fill
-    return {
+    result = {
         "shape_type": shape_type,
         "bbox": [left, top, right, bottom],
         "geometry_score": geometry_score,
         "fill_rgb": fill_rgb,
         "color_mad": color_mad,
     }
+    if shape_type == "line" and line is not None:
+        result.update(
+            line_start=[line[2][0] + left, line[2][1] + top],
+            line_end=[line[3][0] + left, line[3][1] + top],
+            line_width=line[4],
+        )
+    return result
