@@ -2487,6 +2487,33 @@ def _legacy_ref_path(store: RunStore, reference: dict) -> Path:
     return path
 
 
+def _accepted_reconstruction_inputs(
+    store: RunStore,
+    *,
+    prepared: dict,
+    result: dict,
+    graph: dict,
+    components: list[dict],
+) -> dict:
+    root = store.root.resolve()
+    component_assets = {}
+    for component in components:
+        path = Path(component["path"]).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError("accepted component asset escapes Run directory")
+        component_assets[component["component_id"]] = {
+            "path": path.relative_to(root).as_posix(),
+            "sha256": sha256_file(path),
+        }
+    return {
+        "page_id": result["page_id"],
+        "canvas": (prepared["img_width"], prepared["img_height"]),
+        "graph": graph,
+        "component_assets": component_assets,
+        "text_items": result.get("text_items", prepared.get("text_items", [])),
+    }
+
+
 def _accepted_slide_data(
     store: RunStore, reconstruction: Path, prepared: dict, result: dict
 ) -> dict:
@@ -2587,6 +2614,13 @@ def _accepted_slide_data(
                 "w": right - left, "h": bottom - top,
                 "z_index": node["z_index"],
             })
+        reconstruction_inputs = _accepted_reconstruction_inputs(
+            store,
+            prepared=prepared,
+            result=result,
+            graph=graph,
+            components=components,
+        )
         return {
             **prepared,
             "text_items": result.get(
@@ -2597,6 +2631,7 @@ def _accepted_slide_data(
             "background_widescreen_path": str(asset_paths["background"]),
             "original_image_path": str(asset_paths["source"]),
             "components": sorted(components, key=lambda item: item["z_index"]),
+            "_reconstruction_ir_inputs": reconstruction_inputs,
             "_assembly_assets_dir": str(output_dir),
         }
     except Exception:

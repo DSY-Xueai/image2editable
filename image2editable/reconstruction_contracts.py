@@ -151,8 +151,6 @@ def validate_reconstruction_ir(value: object) -> dict:
             raise ValueError("reconstruction object bbox is invalid")
         if type(item["z_index"]) is not int or item["z_index"] < 0:
             raise ValueError("reconstruction object z_index is invalid")
-        if not item["source_refs"]:
-            raise ValueError("reconstruction object source refs are invalid")
         _artifact_refs(item["source_refs"])
         if item["mask_ref"] is not None:
             _artifact_ref(item["mask_ref"])
