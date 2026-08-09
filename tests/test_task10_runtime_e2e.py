@@ -7,7 +7,9 @@ import shutil
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from pptx import Presentation
+from pptx.util import Inches
 from image2editable.agent import record_decision
 from image2editable.pptx_input import prepare_pptx_job
 from image2editable.pptx_input import scan_pptx
@@ -16,7 +18,38 @@ from image2editable.legacy import initialize_legacy_page
 from image2editable.store import RunStore
 from image2editable import runtime, legacy, component_repair
 
-from test_agent_decision import _candidate_pptx
+
+def _candidate_pptx(
+    tmp_path: Path,
+    *,
+    candidate_count: int = 1,
+) -> tuple[Path, bytes]:
+    image_path = tmp_path / "candidate.png"
+    Image.new("RGB", (400, 200), "navy").save(image_path)
+    image_bytes = image_path.read_bytes()
+    presentation = Presentation()
+    presentation.slide_width = Inches(10)
+    presentation.slide_height = Inches(5)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    for index in range(candidate_count):
+        picture = slide.shapes.add_picture(
+            str(image_path),
+            Inches(0.5),
+            Inches(0.25),
+            Inches(9),
+            Inches(4.5),
+        )
+        picture.name = f"Candidate {index + 1}"
+    textbox = slide.shapes.add_textbox(
+        Inches(1),
+        Inches(1),
+        Inches(2),
+        Inches(1),
+    )
+    textbox.text = "native"
+    source = tmp_path / "candidate.pptx"
+    presentation.save(source)
+    return source, image_bytes
 
 
 def _write_json(path: Path, document: dict) -> Path:
