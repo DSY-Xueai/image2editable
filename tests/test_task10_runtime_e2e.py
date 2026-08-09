@@ -19,27 +19,21 @@ from image2editable.store import RunStore
 from image2editable import runtime, legacy, component_repair
 
 
-def _candidate_pptx(
-    tmp_path: Path,
-    *,
-    candidate_count: int = 1,
-) -> tuple[Path, bytes]:
+def _candidate_pptx(tmp_path: Path) -> Path:
     image_path = tmp_path / "candidate.png"
     Image.new("RGB", (400, 200), "navy").save(image_path)
-    image_bytes = image_path.read_bytes()
     presentation = Presentation()
     presentation.slide_width = Inches(10)
     presentation.slide_height = Inches(5)
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    for index in range(candidate_count):
-        picture = slide.shapes.add_picture(
-            str(image_path),
-            Inches(0.5),
-            Inches(0.25),
-            Inches(9),
-            Inches(4.5),
-        )
-        picture.name = f"Candidate {index + 1}"
+    picture = slide.shapes.add_picture(
+        str(image_path),
+        Inches(0.5),
+        Inches(0.25),
+        Inches(9),
+        Inches(4.5),
+    )
+    picture.name = "Candidate 1"
     textbox = slide.shapes.add_textbox(
         Inches(1),
         Inches(1),
@@ -49,7 +43,7 @@ def _candidate_pptx(
     textbox.text = "native"
     source = tmp_path / "candidate.pptx"
     presentation.save(source)
-    return source, image_bytes
+    return source
 
 
 def _write_json(path: Path, document: dict) -> Path:
@@ -58,7 +52,7 @@ def _write_json(path: Path, document: dict) -> Path:
 
 
 def test_task10_pptx_approval_is_the_only_page_request_gate(tmp_path: Path) -> None:
-    source, _ = _candidate_pptx(tmp_path)
+    source = _candidate_pptx(tmp_path)
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
     page = run_dir / "pages/page_001"
     assert not (page / "page_request.json").exists()
@@ -287,7 +281,7 @@ def test_only_approved_page_is_initialized_before_host_boundary(
 def test_pptx_initialization_failure_records_failed_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source, _ = _candidate_pptx(tmp_path)
+    source = _candidate_pptx(tmp_path)
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
     record_decision(
         run_dir, page_id="page_001", object_id="2",
