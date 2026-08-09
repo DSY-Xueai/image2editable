@@ -22,6 +22,7 @@ agent-local = [
     "accelerate>=1.8.0",
 ]
 psd = ["aspose-psd>=26.5.0"]
+render-qa = ["pywin32>=306; sys_platform == 'win32'"]
 test = [
     "pytest",
     "pypdf>=5",
@@ -37,6 +38,11 @@ include = ["image2editable*", "scripts*"]
 
 [tool.setuptools.package-data]
 image2editable = ["model_catalog.json"]
+
+[tool.pytest.ini_options]
+markers = [
+    "powerpoint: requires Windows and an installed Microsoft PowerPoint",
+]
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
