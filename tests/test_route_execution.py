@@ -9,7 +9,12 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from image2editable.route_execution import RouteContext, finalize_page_route
+from image2editable.route_execution import (
+    RouteContext,
+    finalize_page_route,
+    load_published_route,
+    route_visual_elements,
+)
 from image2editable.store import RunStore
 
 
@@ -233,6 +238,18 @@ def test_failed_native_candidate_reassembles_only_failed_object(route_context) -
     plan = _load_ref(context, result["plan_ref"])
     assert _route_for(plan, "shape_1") == "raster_component"
     assert _route_for(plan, "shape_2") == "native_shape"
+    published = load_published_route(
+        context.store, context.component_result_path, page_id=context.page_id
+    )
+    elements = route_visual_elements(
+        context.store, published["ir"], published["plan"]
+    )
+    assert [element["route"] for element in elements] == [
+        "raster_component",
+        "native_shape",
+    ]
+    assert published["result"] == result
+    assert published["result_ref"]["path"].endswith("route_result.json")
     assert len(assemble_calls) == 3
     assert renderer.calls == 4
 

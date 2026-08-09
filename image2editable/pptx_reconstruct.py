@@ -287,39 +287,90 @@ def build_reconstruction_donor_from_result(
         text_items = _validated_text_items(data.get("text_items", []), width, height)
         raster_text_preserved = False
         component_manifest = []
-        for node in active_nodes:
-            if native_graph_path is None:
-                raise ValueError("component result graph path is missing")
-            mask_payload = native_mask_payloads.get(node["id"])
-            if mask_payload is None:
-                raise ValueError("component result mask snapshot is missing")
-            mask = Image.open(io.BytesIO(mask_payload)).convert("L")
-            if mask.size != reconstructed.size:
-                raise ValueError("component result mask dimensions differ")
-            alpha = mask
-            bbox = alpha.getbbox()
-            if bbox is None:
-                raise ValueError("accepted component mask is empty")
-            cropped = reconstructed.crop(bbox)
-            cropped.putalpha(alpha.crop(bbox))
-            component_path = work_root_path / f"component-{node['id']}.png"
-            component_stream = io.BytesIO()
-            cropped.save(component_stream, format="PNG")
-            _publish_bytes_no_clobber(
-                component_path, component_stream.getvalue(), reuse_identical=True
+        component_assets = []
+        published_route = None
+        if isinstance(data.get("page_id"), str):
+            from image2editable.route_execution import load_published_route
+            from image2editable.store import RunStore
+
+            published_route = load_published_route(
+                RunStore(native_root), result_file, page_id=data["page_id"]
             )
-            left, top, right, bottom = bbox
-            donor_slide.shapes.add_picture(
-                str(component_path),
-                int(left / width * donor_presentation.slide_width),
-                int(top / height * donor_presentation.slide_height),
-                int((right - left) / width * donor_presentation.slide_width),
-                int((bottom - top) / height * donor_presentation.slide_height),
+        if published_route is not None:
+            from image2editable.route_execution import route_visual_elements
+            from scripts.ppt_assemble import ContainTransform, _add_visual_element
+
+            route_store = RunStore(native_root)
+            elements = route_visual_elements(
+                route_store, published_route["ir"], published_route["plan"]
             )
-            component_manifest.append({
-                "id": node["id"], "kind": node["kind"],
-                "path": str(component_path), "sha256": _sha256(component_path),
-            })
+            slide_width = donor_presentation.slide_width / 914400
+            slide_height = donor_presentation.slide_height / 914400
+            transform = ContainTransform(
+                slide_width,
+                slide_height,
+                slide_width,
+                slide_height,
+                0,
+                0,
+            )
+            for element in elements:
+                _add_visual_element(
+                    donor_slide, element, width, height, transform
+                )
+                entry = {
+                    "id": element["object_id"],
+                    "kind": element["route"],
+                }
+                if element["route"] == "raster_component":
+                    component_path = Path(element["component"]["path"])
+                    entry.update(
+                        path=str(component_path), sha256=_sha256(component_path)
+                    )
+                    component_assets.append(
+                        {"path": entry["path"], "sha256": entry["sha256"]}
+                    )
+                component_manifest.append(entry)
+        else:
+            for node in active_nodes:
+                if native_graph_path is None:
+                    raise ValueError("component result graph path is missing")
+                mask_payload = native_mask_payloads.get(node["id"])
+                if mask_payload is None:
+                    raise ValueError("component result mask snapshot is missing")
+                mask = Image.open(io.BytesIO(mask_payload)).convert("L")
+                if mask.size != reconstructed.size:
+                    raise ValueError("component result mask dimensions differ")
+                alpha = mask
+                bbox = alpha.getbbox()
+                if bbox is None:
+                    raise ValueError("accepted component mask is empty")
+                cropped = reconstructed.crop(bbox)
+                cropped.putalpha(alpha.crop(bbox))
+                component_path = work_root_path / f"component-{node['id']}.png"
+                component_stream = io.BytesIO()
+                cropped.save(component_stream, format="PNG")
+                _publish_bytes_no_clobber(
+                    component_path,
+                    component_stream.getvalue(),
+                    reuse_identical=True,
+                )
+                left, top, right, bottom = bbox
+                donor_slide.shapes.add_picture(
+                    str(component_path),
+                    int(left / width * donor_presentation.slide_width),
+                    int(top / height * donor_presentation.slide_height),
+                    int((right - left) / width * donor_presentation.slide_width),
+                    int((bottom - top) / height * donor_presentation.slide_height),
+                )
+                component_manifest.append({
+                    "id": node["id"], "kind": node["kind"],
+                    "path": str(component_path), "sha256": _sha256(component_path),
+                })
+            component_assets = [
+                {"path": item["path"], "sha256": item["sha256"]}
+                for item in component_manifest
+            ]
         for item in text_items:
             left, top, right, bottom = item["box"]
             text_shape = donor_slide.shapes.add_textbox(
@@ -331,10 +382,7 @@ def build_reconstruction_donor_from_result(
             _style_reconstruction_textbox(text_shape, item)
         data["components"] = component_manifest
         data["text_items"] = text_items
-        data["assets"] = list(data.get("assets", [])) + [
-            {"path": item["path"], "sha256": item["sha256"]}
-            for item in component_manifest
-        ]
+        data["assets"] = list(data.get("assets", [])) + component_assets
         active_components = component_manifest
     donor_stream = io.BytesIO()
     donor_presentation.save(donor_stream)

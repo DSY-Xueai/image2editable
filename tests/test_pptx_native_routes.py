@@ -82,6 +82,7 @@ def test_visual_elements_follow_z_order_and_text_stays_on_top(tmp_path: Path) ->
         MSO_SHAPE_TYPE.AUTO_SHAPE,
         MSO_SHAPE_TYPE.TEXT_BOX,
     ]
+    assert content[0].name == "image2editable:raster_1"
 
 
 def test_native_line_uses_measured_endpoints(tmp_path: Path) -> None:

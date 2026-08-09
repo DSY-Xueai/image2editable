@@ -3407,6 +3407,7 @@ def _assemble_prepared_slide(
         canvas_height=slide_data.get("canvas_height") if use_canvas else None,
         content_offset_x=slide_data.get("content_offset_x", 0) if use_canvas else 0,
         content_offset_y=slide_data.get("content_offset_y", 0) if use_canvas else 0,
+        visual_elements=slide_data.get("visual_elements"),
     )
 
 

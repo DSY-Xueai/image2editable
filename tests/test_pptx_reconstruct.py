@@ -356,6 +356,8 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
     source_sha = ref(source)["sha256"]
     result = {
+        "schema_version": 1, "page_id": "page_001",
+        "status": "ready_for_assembly",
         "provider": "host", "source_sha256": source_sha,
         "final_component_ids": ["component_0001"],
         "graph_ref": ref(graph_path),
@@ -399,3 +401,82 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     assert run_text.font.size.pt == 14.5
     assert run_text.font.bold is True
     assert str(run_text.font.color.rgb) == "F5FAF6"
+
+    assert presentation.slides[0].shapes[0].shape_type == 13
+    route = result_path.parent / "route"
+    route.mkdir()
+    ir = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "canvas": {"width": 4, "height": 4},
+        "objects": [{
+            "id": "component_0001",
+            "bbox": [0, 0, 4, 4],
+            "z_index": 0,
+            "source_refs": [ref(source)],
+            "mask_ref": ref(mask),
+            "relations": [],
+            "candidate_representations": [
+                {
+                    "kind": "raster_component",
+                    "confidence": 1.0,
+                    "payload": {"asset_ref": ref(source)},
+                    "evidence_refs": [],
+                    "required_qa_checks": [],
+                },
+                {
+                    "kind": "native_shape",
+                    "confidence": 1.0,
+                    "payload": {
+                        "shape_type": "rectangle",
+                        "fill_rgb": [255, 0, 0],
+                    },
+                    "evidence_refs": [],
+                    "required_qa_checks": ["render_difference"],
+                },
+            ],
+        }],
+    }
+    ir_path = route / "reconstruction-ir.json"
+    ir_path.write_text(json.dumps(ir), encoding="utf-8")
+    plan = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "ir_sha256": ref(ir_path)["sha256"],
+        "adapter": "pptx",
+        "routes": [{
+            "object_id": "component_0001",
+            "selected_route": "native_shape",
+            "fallback_route": "raster_component",
+            "candidate_confidence": 1.0,
+            "evidence_refs": [],
+            "qa_requirements": ["render_difference"],
+        }],
+    }
+    plan_path = route / "reconstruction-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    route_result_path = route / "route_result.json"
+    route_result_path.write_text(json.dumps({
+        "schema_version": 1,
+        "page_id": "page_001",
+        "status": "native_accepted",
+        "component_result_sha256": ref(result_path)["sha256"],
+        "ir_ref": ref(ir_path),
+        "plan_ref": ref(plan_path),
+        "qa_ref": None,
+        "reason": None,
+    }), encoding="utf-8")
+
+    native_donor = tmp_path / "native-donor.pptx"
+    build_reconstruction_donor_from_result(
+        result_path, native_donor, tmp_path / "native-work",
+        source_screenshot_sha256=source_sha,
+        provider="host",
+        expected_result_sha256=ref(result_path)["sha256"],
+        run_root=run,
+    )
+
+    native_presentation = Presentation(native_donor)
+    native_shape = native_presentation.slides[0].shapes[0]
+    assert native_shape.shape_type == 1
+    assert native_shape.name == "image2editable:component_0001"

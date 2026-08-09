@@ -2952,6 +2952,8 @@ def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
             "confidence": 1.0,
         }],
     }, initial)
+    result["schema_version"] = 1
+    result["page_id"] = "page_001"
     result["status"] = "ready_for_assembly"
     result_path = reconstruction / "component_result.json"
     result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -2973,6 +2975,92 @@ def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
     return store, reconstruction, output
 
 
+def _publish_native_route_sidecar(
+    store: RunStore, reconstruction: Path, *, object_id: str
+) -> dict:
+    result_path = reconstruction / "component_result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    graph_path = store.root / result["graph_ref"]["path"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    node = next(item for item in graph["nodes"] if item["id"] == object_id)
+    mask_path = graph_path.parent / node["mask"]
+
+    def ref(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    source_ref = result["accepted_asset_refs"]["source"]
+    route_dir = reconstruction / "route"
+    route_dir.mkdir()
+    ir = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "canvas": {"width": 4, "height": 4},
+        "objects": [{
+            "id": object_id,
+            "bbox": node["bbox"],
+            "z_index": node["z_index"],
+            "source_refs": [source_ref],
+            "mask_ref": ref(mask_path),
+            "relations": [],
+            "candidate_representations": [
+                {
+                    "kind": "raster_component",
+                    "confidence": 1.0,
+                    "payload": {"asset_ref": source_ref},
+                    "evidence_refs": [],
+                    "required_qa_checks": [],
+                },
+                {
+                    "kind": "native_shape",
+                    "confidence": 1.0,
+                    "payload": {
+                        "shape_type": "rectangle",
+                        "fill_rgb": [255, 0, 0],
+                    },
+                    "evidence_refs": [],
+                    "required_qa_checks": ["render_difference"],
+                },
+            ],
+        }],
+    }
+    ir_path = route_dir / "reconstruction-ir.json"
+    ir_path.write_text(json.dumps(ir), encoding="utf-8")
+    plan = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "ir_sha256": hashlib.sha256(ir_path.read_bytes()).hexdigest(),
+        "adapter": "pptx",
+        "routes": [{
+            "object_id": object_id,
+            "selected_route": "native_shape",
+            "fallback_route": "raster_component",
+            "candidate_confidence": 1.0,
+            "evidence_refs": [],
+            "qa_requirements": ["render_difference"],
+        }],
+    }
+    plan_path = route_dir / "reconstruction-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    route_result = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "status": "native_accepted",
+        "component_result_sha256": hashlib.sha256(
+            result_path.read_bytes()
+        ).hexdigest(),
+        "ir_ref": ref(ir_path),
+        "plan_ref": ref(plan_path),
+        "qa_ref": None,
+        "reason": None,
+    }
+    route_result_path = route_dir / "route_result.json"
+    route_result_path.write_text(json.dumps(route_result), encoding="utf-8")
+    return ref(route_result_path)
+
+
 def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
     tmp_path: Path,
 ) -> None:
@@ -2988,6 +3076,79 @@ def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
     )
     assert any(shape.shape_type == 13 for shape in reopened.slides[0].shapes)
     assert output.is_file()
+
+
+def test_accepted_presentation_consumes_published_native_route(tmp_path: Path) -> None:
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    store, reconstruction, _ = _accepted_assembly_job(tmp_path)
+    expected_route_ref = _publish_native_route_sidecar(
+        store, reconstruction, object_id="component_0001"
+    )
+
+    outputs = legacy.assemble_legacy_results(store)
+
+    presentation = Presentation(outputs["16:9"])
+    content = list(presentation.slides[0].shapes)[1:]
+    assert content[0].shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE
+    assert content[0].name == "image2editable:component_0001"
+    delivery = store.read_json(
+        "pages/page_001/reconstruction/component_delivery.json"
+    )
+    assert delivery["route_result"] == expected_route_ref
+
+
+def test_runtime_finalizes_ready_route_with_target_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RunStore(tmp_path / "run")
+    source = store.root / "pages/page_001/source.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGB", (4, 4), "white").save(source)
+    result_path = store.root / "pages/page_001/reconstruction/component_result.json"
+    result_path.parent.mkdir()
+    result_path.write_text("{}", encoding="utf-8")
+
+    def ref(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    store.write_json("pages/page_001/page_request.json", {
+        "schema_version": 1,
+        "source": source.relative_to(store.root).as_posix(),
+        "sha256": ref(source)["sha256"],
+    })
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "status": "ready_for_assembly",
+        "result_ref": ref(result_path),
+    })
+    captured = {}
+
+    def finalize(context, *, renderer, policy):
+        captured.update(context=context, renderer=renderer, policy=policy)
+        return {"status": "raster_fallback"}
+
+    monkeypatch.setattr(runtime, "_finalize_reconstruction_route", finalize)
+    monkeypatch.setattr(
+        runtime,
+        "_discover_powerpoint_renderer",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("PSD route must not discover PowerPoint")
+        ),
+    )
+
+    runtime._finalize_reconstruction_routes(
+        store, {"output_format": "psd"}, ["page_001"]
+    )
+
+    assert captured["context"].component_result_path == result_path
+    assert captured["context"].capabilities == frozenset(
+        {"editable_text", "raster_component"}
+    )
+    assert captured["policy"]["native_shape_enabled"] is False
+    assert captured["renderer"].available() is False
 
 
 def test_accepted_presentation_psd_uses_final_agent_layers(

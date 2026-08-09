@@ -582,6 +582,7 @@ def _add_component(
     canvas_height: int | None = None,
     content_offset_x: int = 0,
     content_offset_y: int = 0,
+    component_id: str | None = None,
 ) -> None:
     left, top, width, height = _map_bbox(
         component["x"],
@@ -596,13 +597,16 @@ def _add_component(
         content_offset_x,
         content_offset_y,
     )
-    slide.shapes.add_picture(
+    picture = slide.shapes.add_picture(
         component["path"],
         Inches(left),
         Inches(top),
         Inches(width),
         Inches(height),
     )
+    component_id = component_id or component.get("component_id")
+    if isinstance(component_id, str) and component_id:
+        picture.name = f"image2editable:{component_id}"
 
 
 def _add_visual_element(
@@ -631,6 +635,7 @@ def _add_visual_element(
             img_h,
             transform,
             *canvas_args,
+            element.get("object_id"),
         )
         return
     if route == "native_shape":

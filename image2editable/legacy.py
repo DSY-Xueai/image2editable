@@ -2295,21 +2295,28 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
                     "components": [],
                     "text_items": [],
                 })
-                page_records.append((page_id, state, None))
+                page_records.append((page_id, state, None, None))
                 continue
-            _, result_payload = _load_legacy_ref(store, state["result_ref"])
+            result_path, result_payload = _load_legacy_ref(
+                store, state["result_ref"]
+            )
             result = json.loads(result_payload.decode("utf-8"))
             if result["status"] != "ready_for_assembly":
                 raise ValueError("component result is not ready for assembly")
             slide = _accepted_slide_data(
-                store, reconstruction, prepared, result
+                store,
+                reconstruction,
+                prepared,
+                result,
+                component_result_path=result_path,
             )
+            route_result_ref = slide.pop("_route_result_ref")
             asset_dir = Path(slide.pop("_assembly_assets_dir"))
             assembly_asset_dirs.append(
                 (asset_dir, _directory_identity(asset_dir.lstat()))
             )
             slides.append(slide)
-            page_records.append((page_id, state, result))
+            page_records.append((page_id, state, result, route_result_ref))
     except Exception:
         _cleanup_legacy_assembly_assets(assembly_asset_dirs)
         raise
@@ -2425,7 +2432,7 @@ def _legacy_psd_output_targets(
 
 def _record_legacy_delivery(
     store: RunStore,
-    page_records: list[tuple[str, dict, dict | None]],
+    page_records: list[tuple[str, dict, dict | None, dict | None]],
     outputs: dict[str, str],
     *,
     output_format: str = "pptx",
@@ -2434,7 +2441,7 @@ def _record_legacy_delivery(
         name: {"path": path, "sha256": sha256_file(path)}
         for name, path in outputs.items()
     }
-    for page_id, state, result in page_records:
+    for page_id, state, result, route_result_ref in page_records:
         delivery = {
             "schema_version": 1,
             "page_id": page_id,
@@ -2449,6 +2456,8 @@ def _record_legacy_delivery(
                 "Component reconstruction did not pass the parent gate; "
                 "the full source image was preserved."
             )
+        if route_result_ref is not None:
+            delivery["route_result"] = route_result_ref
         store.write_json(
             f"pages/{page_id}/reconstruction/component_delivery.json",
             delivery,
@@ -2515,7 +2524,12 @@ def _accepted_reconstruction_inputs(
 
 
 def _accepted_slide_data(
-    store: RunStore, reconstruction: Path, prepared: dict, result: dict
+    store: RunStore,
+    reconstruction: Path,
+    prepared: dict,
+    result: dict,
+    *,
+    component_result_path: Path | None = None,
 ) -> dict:
     import numpy as np
 
@@ -2616,11 +2630,46 @@ def _accepted_slide_data(
             })
         reconstruction_inputs = _accepted_reconstruction_inputs(
             store,
-            prepared=prepared,
-            result=result,
+            prepared={
+                **prepared,
+                "img_width": prepared.get("img_width", page_size[0]),
+                "img_height": prepared.get("img_height", page_size[1]),
+            },
+            result={
+                **result,
+                "page_id": result.get("page_id", reconstruction.parent.name),
+            },
             graph=graph,
             components=components,
         )
+        visual_elements = [
+            {
+                "object_id": component["component_id"],
+                "route": "raster_component",
+                "z_index": component["z_index"],
+                "component": component,
+            }
+            for component in components
+        ]
+        route_result_ref = None
+        if component_result_path is not None:
+            from image2editable.route_execution import (
+                load_published_route,
+                route_visual_elements,
+            )
+
+            published_route = load_published_route(
+                store,
+                component_result_path,
+                page_id=result["page_id"],
+            )
+            if published_route is not None:
+                visual_elements = route_visual_elements(
+                    store,
+                    published_route["ir"],
+                    published_route["plan"],
+                )
+                route_result_ref = published_route["result_ref"]
         return {
             **prepared,
             "text_items": result.get(
@@ -2631,9 +2680,51 @@ def _accepted_slide_data(
             "background_widescreen_path": str(asset_paths["background"]),
             "original_image_path": str(asset_paths["source"]),
             "components": sorted(components, key=lambda item: item["z_index"]),
+            "visual_elements": visual_elements,
             "_reconstruction_ir_inputs": reconstruction_inputs,
             "_assembly_assets_dir": str(output_dir),
+            "_route_result_ref": route_result_ref,
         }
     except Exception:
         _safe_rmtree(output_dir, output_identity)
         raise
+
+
+def assemble_route_candidate(
+    store: RunStore,
+    component_result_path: Path,
+    plan: dict,
+    output_path: Path,
+) -> None:
+    """Assemble one unpublished candidate used only by authoritative render QA."""
+
+    reconstruction = component_result_path.parent
+    component_payload = _read_bound_file(
+        component_result_path,
+        store.root,
+        max_bytes=256 * 1024 * 1024,
+        label="component result",
+    )
+    result = json.loads(component_payload.decode("utf-8"))
+    module = importlib.import_module("image_to_ppt")
+    prepared = module.load_component_layers(
+        reconstruction / "initial" / "prepared_page.json"
+    )
+    slide = _accepted_slide_data(store, reconstruction, prepared, result)
+    asset_dir = Path(slide["_assembly_assets_dir"])
+    asset_identity = _directory_identity(asset_dir.lstat())
+    try:
+        ir_payload = _read_bound_file(
+            reconstruction / "route" / "reconstruction-ir.json",
+            store.root,
+            max_bytes=256 * 1024 * 1024,
+            label="reconstruction IR",
+        )
+        from image2editable.route_execution import route_visual_elements
+
+        slide["visual_elements"] = route_visual_elements(
+            store, json.loads(ir_payload.decode("utf-8")), plan
+        )
+        module._assemble_prepared_slide(slide, output_path, False, "original")
+    finally:
+        _safe_rmtree(asset_dir, asset_identity)

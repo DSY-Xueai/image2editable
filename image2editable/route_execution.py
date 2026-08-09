@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from image2editable.reconstruction_contracts import (
+    validate_reconstruction_ir,
     validate_reconstruction_plan,
     validate_route_result,
 )
@@ -153,25 +154,114 @@ def _json_reference(store: RunStore, reference: object, label: str) -> tuple[Pat
 
 
 def _load_existing_result(
-    context: RouteContext, result_path: Path, component_sha256: str
+    store: RunStore,
+    result_path: Path,
+    component_sha256: str,
+    *,
+    page_id: str,
 ) -> dict | None:
     if not result_path.exists() and not result_path.is_symlink():
         return None
-    payload = _read_file(result_path, context.store.root, "route result")
+    payload = _read_file(result_path, store.root, "route result")
     try:
         result = validate_route_result(json.loads(payload.decode("utf-8")))
     except json.JSONDecodeError as error:
         raise ValueError("route result JSON is invalid") from error
     if result["component_result_sha256"] != component_sha256:
         raise RuntimeError("route result component hash mismatch")
-    _, ir = _json_reference(context.store, result["ir_ref"], "reconstruction IR")
+    if result["page_id"] != page_id:
+        raise RuntimeError("route result page identity mismatch")
+    _, ir = _json_reference(store, result["ir_ref"], "reconstruction IR")
     _, plan = _json_reference(
-        context.store, result["plan_ref"], "reconstruction plan"
+        store, result["plan_ref"], "reconstruction plan"
     )
     validate_reconstruction_plan(plan, ir=ir)
     if result["qa_ref"] is not None:
-        _json_reference(context.store, result["qa_ref"], "render QA")
+        _json_reference(store, result["qa_ref"], "render QA")
     return result
+
+
+def load_published_route(
+    store: RunStore,
+    component_result_path: str | Path,
+    *,
+    page_id: str,
+) -> dict | None:
+    """Load a published sidecar only when every binding still verifies."""
+
+    component_path = Path(component_result_path)
+    component_payload = _read_file(component_path, store.root, "component result")
+    component_sha256 = _sha256(component_payload)
+    result_path = component_path.parent / "route" / "route_result.json"
+    result = _load_existing_result(
+        store, result_path, component_sha256, page_id=page_id
+    )
+    if result is None:
+        return None
+    ir_path, ir = _json_reference(store, result["ir_ref"], "reconstruction IR")
+    plan_path, plan = _json_reference(
+        store, result["plan_ref"], "reconstruction plan"
+    )
+    ir = validate_reconstruction_ir(ir)
+    plan = validate_reconstruction_plan(plan, ir=ir)
+    result_payload = _read_file(result_path, store.root, "route result")
+    return {
+        "result": result,
+        "result_ref": _artifact_ref(store, result_path, result_payload),
+        "ir": ir,
+        "ir_path": ir_path,
+        "plan": plan,
+        "plan_path": plan_path,
+    }
+
+
+def route_visual_elements(store: RunStore, ir: dict, plan: dict) -> list[dict]:
+    """Convert one validated route plan into the shared visual Adapter input."""
+
+    validated_ir = validate_reconstruction_ir(ir)
+    validated_plan = validate_reconstruction_plan(plan, ir=validated_ir)
+    objects = {item["id"]: item for item in validated_ir["objects"]}
+    elements = []
+    for route in validated_plan["routes"]:
+        item = objects[route["object_id"]]
+        selected = next(
+            candidate
+            for candidate in item["candidate_representations"]
+            if candidate["kind"] == route["selected_route"]
+        )
+        if route["selected_route"] == "editable_text":
+            continue
+        if route["selected_route"] == "native_shape":
+            elements.append(
+                {
+                    "object_id": item["id"],
+                    "route": "native_shape",
+                    "z_index": item["z_index"],
+                    "bbox": deepcopy(item["bbox"]),
+                    "shape": deepcopy(selected["payload"]),
+                }
+            )
+            continue
+        asset_ref = selected["payload"]["asset_ref"]
+        asset_path, _ = _read_reference(store, asset_ref, "route raster asset")
+        left, top, right, bottom = item["bbox"]
+        elements.append(
+            {
+                "object_id": item["id"],
+                "route": "raster_component",
+                "z_index": item["z_index"],
+                "component": {
+                    "component_id": item["id"],
+                    "path": str(asset_path),
+                    "x": left,
+                    "y": top,
+                    "w": right - left,
+                    "h": bottom - top,
+                    "z_index": item["z_index"],
+                },
+            }
+        )
+    return sorted(elements, key=lambda element: element["z_index"])
 
 
 def _build_ir(context: RouteContext, component_result: dict) -> dict:
@@ -393,7 +483,12 @@ def finalize_page_route(
     route_root.mkdir(parents=True, exist_ok=True)
     _plain_path(route_root, context.store.root)
     result_path = route_root / "route_result.json"
-    existing = _load_existing_result(context, result_path, component_sha256)
+    existing = _load_existing_result(
+        context.store,
+        result_path,
+        component_sha256,
+        page_id=context.page_id,
+    )
     if existing is not None:
         return existing
 

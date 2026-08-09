@@ -32,7 +32,10 @@ from image2editable.inputs import classify_inputs, prepare_image_job, sha256_fil
 from image2editable.execution import ExecutionLease
 from image2editable.legacy import (
     _safe_rmtree,
+    _load_legacy_ref,
+    _source_path,
     advance_legacy_page,
+    assemble_route_candidate,
     assemble_legacy_results,
     execute_legacy,  # noqa: F401 - retained as the legacy-boundary test seam
     initialize_legacy_page,
@@ -50,6 +53,68 @@ _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
 COMPONENT_QUALITY_GATE_VERSION = "component-quality-v1"
 _LOCAL_MODEL_PROVENANCE = "local-agent-model.json"
 _LOCAL_MODEL_PROVENANCE_LIMIT = 16 * 1024 * 1024
+
+
+def _discover_powerpoint_renderer():
+    from image2editable.powerpoint_renderer import PowerPointRenderer
+
+    return PowerPointRenderer.discover()
+
+
+def _finalize_reconstruction_route(context, *, renderer, policy):
+    from image2editable.route_execution import finalize_page_route
+
+    return finalize_page_route(context, renderer=renderer, policy=policy)
+
+
+def _finalize_reconstruction_routes(
+    store: RunStore,
+    manifest: dict[str, Any],
+    page_ids: list[str],
+) -> None:
+    from image2editable.powerpoint_renderer import PowerPointRenderer
+    from image2editable.route_execution import RouteContext
+
+    output_format = manifest.get("output_format", "pptx")
+    is_psd = output_format == "psd"
+    capabilities = frozenset(
+        {"editable_text", "raster_component"}
+        if is_psd
+        else {"editable_text", "native_shape", "raster_component"}
+    )
+    renderer = PowerPointRenderer(None) if is_psd else _discover_powerpoint_renderer()
+    policy = {
+        "schema_version": 1,
+        "native_shape_enabled": False,
+        "allowed_shapes": ["rectangle", "rounded_rectangle", "ellipse", "line"],
+        "min_geometry_score": 0.99,
+        "max_color_mad": 3.0,
+    }
+    for page_id in page_ids:
+        state_path = (
+            store.root / "pages" / page_id / "reconstruction"
+            / "component_state.json"
+        )
+        if not state_path.is_file():
+            continue
+        state = store.read_json(
+            f"pages/{page_id}/reconstruction/component_state.json"
+        )
+        if state.get("status") != "ready_for_assembly":
+            continue
+        component_result_path, _ = _load_legacy_ref(store, state["result_ref"])
+        context = RouteContext(
+            store=store,
+            page_id=page_id,
+            component_result_path=component_result_path,
+            adapter="psd" if is_psd else "pptx",
+            capabilities=capabilities,
+            source_image_path=_source_path(store, page_id),
+            assemble_page=lambda plan, output, result_path=component_result_path: (
+                assemble_route_candidate(store, result_path, plan, output)
+            ),
+        )
+        _finalize_reconstruction_route(context, renderer=renderer, policy=policy)
 
 
 def _pdf_function(name: str) -> Any:
@@ -1452,6 +1517,9 @@ def _run_job(
                 )
                 store.write_json("run_summary.json", summary)
                 return summary
+            _finalize_reconstruction_routes(
+                store, manifest, existing_component_pages
+            )
             pptx_shadow_plans = shadow_replacement_plans(store, manifest)
             pptx_expected_output = _pptx_output_path(store, manifest)
             pptx_output_existed = _path_entry_exists(pptx_expected_output)
@@ -1586,6 +1654,7 @@ def _run_job(
             waiting = _advance_legacy_pages(store, manifest, page_ids, _lease)
             if waiting is not None:
                 return waiting
+            _finalize_reconstruction_routes(store, manifest, page_ids)
             outputs = assemble_legacy_results(store)
             for page_id in page_ids:
                 store.write_json(
