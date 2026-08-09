@@ -317,6 +317,7 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     from pptx.enum.text import MSO_VERTICAL_ANCHOR, PP_ALIGN
 
     from image2editable.pptx_reconstruct import build_reconstruction_donor_from_result
+    from image2editable.reconstruction_contracts import reconstruction_ir_sha256
 
     run = tmp_path / "run"
     accepted = run / "pages/page_001/reconstruction/accepted"
@@ -328,6 +329,8 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     text_mask = accepted / "text-mask.png"
     native = accepted / "native.json"
     mask = masks / "component_0001.png"
+    mask_2 = masks / "component_0002.png"
+    raster_2 = accepted / "component_0002.png"
     Image.new("RGB", (4, 4), "white").save(source)
     Image.new("RGB", (4, 4), "white").save(background)
     Image.new("RGB", (4, 4), "red").save(reconstructed)
@@ -335,7 +338,14 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     with Image.open(text_mask) as image:
         image.putpixel((1, 1), 255)
         image.save(text_mask)
-    Image.new("L", (4, 4), 255).save(mask)
+    mask_pixels = Image.new("L", (4, 4), 0)
+    for x_range, path in ((range(0, 2), mask), (range(2, 4), mask_2)):
+        pixels = mask_pixels.copy()
+        for x in x_range:
+            for y in range(4):
+                pixels.putpixel((x, y), 255)
+        pixels.save(path)
+    Image.new("RGBA", (2, 4), (255, 0, 0, 255)).save(raster_2)
     native.write_text("{}", encoding="utf-8")
 
     def ref(path: Path) -> dict:
@@ -345,12 +355,20 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
         }
 
     graph = {
-        "nodes": [{
-            "id": "component_0001", "kind": "parent", "parent_id": None,
-            "state": "frozen", "mask": "masks/component_0001.png",
-            "mask_sha256": ref(mask)["sha256"], "bbox": [0, 0, 4, 4],
-            "z_index": 0, "text_ids": [],
-        }]
+        "nodes": [
+            {
+                "id": "component_0001", "kind": "parent", "parent_id": None,
+                "state": "frozen", "mask": "masks/component_0001.png",
+                "mask_sha256": ref(mask)["sha256"], "bbox": [0, 0, 2, 4],
+                "z_index": 0, "text_ids": [],
+            },
+            {
+                "id": "component_0002", "kind": "parent", "parent_id": None,
+                "state": "frozen", "mask": "masks/component_0002.png",
+                "mask_sha256": ref(mask_2)["sha256"], "bbox": [2, 0, 4, 4],
+                "z_index": 1, "text_ids": [],
+            },
+        ]
     }
     graph_path = accepted / "component-graph.json"
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
@@ -359,7 +377,7 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
         "schema_version": 1, "page_id": "page_001",
         "status": "ready_for_assembly",
         "provider": "host", "source_sha256": source_sha,
-        "final_component_ids": ["component_0001"],
+        "final_component_ids": ["component_0001", "component_0002"],
         "graph_ref": ref(graph_path),
         "accepted_asset_refs": {
             "source": ref(source), "background": ref(background),
@@ -409,52 +427,98 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
         "schema_version": 1,
         "page_id": "page_001",
         "canvas": {"width": 4, "height": 4},
-        "objects": [{
-            "id": "component_0001",
-            "bbox": [0, 0, 4, 4],
-            "z_index": 0,
-            "source_refs": [ref(source)],
-            "mask_ref": ref(mask),
-            "relations": [],
-            "candidate_representations": [
-                {
+        "objects": [
+            {
+                "id": "component_0001",
+                "bbox": [0, 0, 2, 4],
+                "z_index": 0,
+                "source_refs": [ref(source)],
+                "mask_ref": ref(mask),
+                "relations": [],
+                "candidate_representations": [
+                    {
+                        "kind": "raster_component",
+                        "confidence": 1.0,
+                        "payload": {"asset_ref": ref(raster_2)},
+                        "evidence_refs": [],
+                        "required_qa_checks": [],
+                    },
+                    {
+                        "kind": "native_shape",
+                        "confidence": 1.0,
+                        "payload": {
+                            "shape_type": "rectangle",
+                            "fill_rgb": [255, 0, 0],
+                        },
+                        "evidence_refs": [],
+                        "required_qa_checks": ["render_difference"],
+                    },
+                ],
+            },
+            {
+                "id": "component_0002",
+                "bbox": [2, 0, 4, 4],
+                "z_index": 1,
+                "source_refs": [ref(raster_2)],
+                "mask_ref": ref(mask_2),
+                "relations": [],
+                "candidate_representations": [{
                     "kind": "raster_component",
                     "confidence": 1.0,
-                    "payload": {"asset_ref": ref(source)},
+                    "payload": {"asset_ref": ref(raster_2)},
                     "evidence_refs": [],
                     "required_qa_checks": [],
-                },
-                {
-                    "kind": "native_shape",
-                    "confidence": 1.0,
-                    "payload": {
-                        "shape_type": "rectangle",
-                        "fill_rgb": [255, 0, 0],
-                    },
-                    "evidence_refs": [],
-                    "required_qa_checks": ["render_difference"],
-                },
-            ],
-        }],
+                }],
+            },
+        ],
     }
     ir_path = route / "reconstruction-ir.json"
     ir_path.write_text(json.dumps(ir), encoding="utf-8")
     plan = {
         "schema_version": 1,
         "page_id": "page_001",
-        "ir_sha256": ref(ir_path)["sha256"],
+        "ir_sha256": reconstruction_ir_sha256(ir),
         "adapter": "pptx",
-        "routes": [{
-            "object_id": "component_0001",
-            "selected_route": "native_shape",
-            "fallback_route": "raster_component",
-            "candidate_confidence": 1.0,
-            "evidence_refs": [],
-            "qa_requirements": ["render_difference"],
-        }],
+        "routes": [
+            {
+                "object_id": "component_0001",
+                "selected_route": "native_shape",
+                "fallback_route": "raster_component",
+                "candidate_confidence": 1.0,
+                "evidence_refs": [],
+                "qa_requirements": ["render_difference"],
+            },
+            {
+                "object_id": "component_0002",
+                "selected_route": "raster_component",
+                "fallback_route": None,
+                "candidate_confidence": 1.0,
+                "evidence_refs": [],
+                "qa_requirements": [],
+            },
+        ],
     }
     plan_path = route / "reconstruction-plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    qa = {
+        "schema_version": 1,
+        "renderer": {"renderer": "powerpoint", "available": True},
+        "initial": {"accepted": True},
+        "fallback": None,
+        "final_plan_sha256": hashlib.sha256(
+            (
+                json.dumps(
+                    plan,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    qa_path = route / "render-qa.json"
+    qa_path.write_text(json.dumps(qa), encoding="utf-8")
     route_result_path = route / "route_result.json"
     route_result_path.write_text(json.dumps({
         "schema_version": 1,
@@ -463,7 +527,7 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
         "component_result_sha256": ref(result_path)["sha256"],
         "ir_ref": ref(ir_path),
         "plan_ref": ref(plan_path),
-        "qa_ref": None,
+        "qa_ref": ref(qa_path),
         "reason": None,
     }), encoding="utf-8")
 
@@ -477,6 +541,9 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     )
 
     native_presentation = Presentation(native_donor)
-    native_shape = native_presentation.slides[0].shapes[0]
-    assert native_shape.shape_type == 1
-    assert native_shape.name == "image2editable:component_0001"
+    native_shapes = list(native_presentation.slides[0].shapes)
+    assert [shape.shape_type for shape in native_shapes[:2]] == [1, 13]
+    assert [shape.name for shape in native_shapes[:2]] == [
+        "image2editable:component_0001",
+        "image2editable:component_0002",
+    ]

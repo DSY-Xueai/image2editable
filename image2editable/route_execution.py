@@ -153,6 +153,50 @@ def _json_reference(store: RunStore, reference: object, label: str) -> tuple[Pat
     return path, value
 
 
+def _validate_bound_qa(result: dict, plan: dict, qa: dict | None) -> None:
+    native_routes = {
+        route["object_id"]
+        for route in plan["routes"]
+        if route["selected_route"] == "native_shape"
+    }
+    if result["status"] == "native_accepted" and not native_routes:
+        raise RuntimeError("native route result has no Native route")
+    if (result["status"] == "native_accepted" or native_routes) and qa is None:
+        raise RuntimeError("Native route result is missing authoritative QA")
+    if qa is None:
+        return
+    if not isinstance(qa, dict) or set(qa) != {
+        "schema_version",
+        "renderer",
+        "initial",
+        "fallback",
+        "final_plan_sha256",
+    }:
+        raise RuntimeError("route QA document is invalid")
+    if qa["schema_version"] != 1 or not isinstance(qa["renderer"], dict):
+        raise RuntimeError("route QA document is invalid")
+    if qa["final_plan_sha256"] != _sha256(_json_bytes(plan)):
+        raise RuntimeError("route QA final Plan hash mismatch")
+    initial = qa["initial"]
+    fallback = qa["fallback"]
+    if not isinstance(initial, dict) or type(initial.get("accepted")) is not bool:
+        raise RuntimeError("route QA initial result is invalid")
+    if fallback is not None and (
+        not isinstance(fallback, dict)
+        or type(fallback.get("accepted")) is not bool
+    ):
+        raise RuntimeError("route QA fallback result is invalid")
+    if result["status"] == "native_accepted":
+        if not initial["accepted"] or fallback is not None:
+            raise RuntimeError("native route result contradicts authoritative QA")
+    elif native_routes and (
+        initial["accepted"]
+        or fallback is None
+        or not fallback["accepted"]
+    ):
+        raise RuntimeError("partial Native route lacks accepted fallback QA")
+
+
 def _load_existing_result(
     store: RunStore,
     result_path: Path,
@@ -176,8 +220,10 @@ def _load_existing_result(
         store, result["plan_ref"], "reconstruction plan"
     )
     validate_reconstruction_plan(plan, ir=ir)
+    qa = None
     if result["qa_ref"] is not None:
-        _json_reference(store, result["qa_ref"], "render QA")
+        _, qa = _json_reference(store, result["qa_ref"], "render QA")
+    _validate_bound_qa(result, plan, qa)
     return result
 
 
@@ -431,6 +477,118 @@ def _render_plan(
         return np.asarray(image.convert("RGB")).copy()
 
 
+def _evaluate_native_plan(
+    context: RouteContext,
+    renderer,
+    *,
+    component_result: dict,
+    ir: dict,
+    candidate_plan: dict,
+    raster_plan: dict,
+    native_ids: set[str],
+    route_root: Path,
+) -> tuple[dict, str, str | None, dict]:
+    with Image.open(context.source_image_path) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    height, width = source.shape[:2]
+    baseline = _render_plan(
+        context,
+        renderer,
+        raster_plan,
+        route_root,
+        "raster-baseline",
+        width=width,
+        height=height,
+    )
+    repeated = _render_plan(
+        context,
+        renderer,
+        raster_plan,
+        route_root,
+        "raster-baseline-repeat",
+        width=width,
+        height=height,
+        pptx_name="raster-baseline",
+        assemble=False,
+    )
+    candidate = _render_plan(
+        context,
+        renderer,
+        candidate_plan,
+        route_root,
+        "native-candidate",
+        width=width,
+        height=height,
+    )
+    regions = {
+        item["id"]: item["bbox"]
+        for item in ir["objects"]
+        if item["id"] in native_ids
+    }
+    rendered_text = (
+        context.rendered_text_reader(route_root / "native-candidate.png")
+        if context.rendered_text_reader is not None
+        else None
+    )
+    initial_qa = compare_rendered_page(
+        source,
+        baseline,
+        candidate,
+        object_regions=regions,
+        repeated_baseline=repeated,
+        expected_text_items=(
+            component_result.get("text_items", [])
+            if rendered_text is not None
+            else None
+        ),
+        rendered_text_items=rendered_text,
+    )
+    qa_document = {
+        "schema_version": 1,
+        "renderer": renderer.identity(),
+        "initial": initial_qa,
+        "fallback": None,
+    }
+    if initial_qa["accepted"]:
+        return candidate_plan, "native_accepted", None, qa_document
+
+    failed_ids = set(initial_qa["failed_object_ids"]) & native_ids
+    if not failed_ids:
+        failed_ids = set(native_ids)
+    fallback_plan = _fallback_plan(ir, candidate_plan, failed_ids)
+    fallback_render = _render_plan(
+        context,
+        renderer,
+        fallback_plan,
+        route_root,
+        "native-fallback",
+        width=width,
+        height=height,
+    )
+    fallback_text = (
+        context.rendered_text_reader(route_root / "native-fallback.png")
+        if context.rendered_text_reader is not None
+        else None
+    )
+    fallback_qa = compare_rendered_page(
+        source,
+        baseline,
+        fallback_render,
+        object_regions=regions,
+        repeated_baseline=repeated,
+        expected_text_items=(
+            component_result.get("text_items", [])
+            if fallback_text is not None
+            else None
+        ),
+        rendered_text_items=fallback_text,
+    )
+    qa_document["fallback"] = fallback_qa
+    if fallback_qa["accepted"]:
+        return fallback_plan, "raster_fallback", "native_render_qa_failed", qa_document
+    return raster_plan, "raster_fallback", "fallback_render_qa_failed", qa_document
+
+
 def _result_document(
     context: RouteContext,
     *,
@@ -526,106 +684,28 @@ def finalize_page_route(
         status = "raster_fallback"
         reason = "renderer_unavailable"
     else:
-        with Image.open(context.source_image_path) as image:
-            source = np.asarray(image.convert("RGB")).copy()
-        height, width = source.shape[:2]
-        baseline = _render_plan(
-            context,
-            renderer,
-            raster_plan,
-            route_root,
-            "raster-baseline",
-            width=width,
-            height=height,
-        )
-        repeated = _render_plan(
-            context,
-            renderer,
-            raster_plan,
-            route_root,
-            "raster-baseline-repeat",
-            width=width,
-            height=height,
-            pptx_name="raster-baseline",
-            assemble=False,
-        )
-        candidate = _render_plan(
-            context,
-            renderer,
-            candidate_plan,
-            route_root,
-            "native-candidate",
-            width=width,
-            height=height,
-        )
-        regions = {
-            item["id"]: item["bbox"] for item in ir["objects"] if item["id"] in native_ids
-        }
-        rendered_text = (
-            context.rendered_text_reader(route_root / "native-candidate.png")
-            if context.rendered_text_reader is not None
-            else None
-        )
-        initial_qa = compare_rendered_page(
-            source,
-            baseline,
-            candidate,
-            object_regions=regions,
-            repeated_baseline=repeated,
-            expected_text_items=(component_result.get("text_items", []) if rendered_text is not None else None),
-            rendered_text_items=rendered_text,
-        )
-        qa_document = {
-            "schema_version": 1,
-            "renderer": renderer.identity(),
-            "initial": initial_qa,
-            "fallback": None,
-        }
-        if initial_qa["accepted"]:
-            final_plan = candidate_plan
-            status = "native_accepted"
-            reason = None
-        else:
-            failed_ids = set(initial_qa["failed_object_ids"]) & native_ids
-            if not failed_ids:
-                failed_ids = set(native_ids)
-            fallback_plan = _fallback_plan(ir, candidate_plan, failed_ids)
-            fallback_render = _render_plan(
+        try:
+            final_plan, status, reason, qa_document = _evaluate_native_plan(
                 context,
                 renderer,
-                fallback_plan,
-                route_root,
-                "native-fallback",
-                width=width,
-                height=height,
+                component_result=component_result,
+                ir=ir,
+                candidate_plan=candidate_plan,
+                raster_plan=raster_plan,
+                native_ids=native_ids,
+                route_root=route_root,
             )
-            fallback_text = (
-                context.rendered_text_reader(route_root / "native-fallback.png")
-                if context.rendered_text_reader is not None
-                else None
-            )
-            fallback_qa = compare_rendered_page(
-                source,
-                baseline,
-                fallback_render,
-                object_regions=regions,
-                repeated_baseline=repeated,
-                expected_text_items=(component_result.get("text_items", []) if fallback_text is not None else None),
-                rendered_text_items=fallback_text,
-            )
-            qa_document["fallback"] = fallback_qa
-            if fallback_qa["accepted"]:
-                final_plan = fallback_plan
-                reason = "native_render_qa_failed"
-            else:
-                final_plan = raster_plan
-                reason = "fallback_render_qa_failed"
+        except Exception:
+            final_plan = raster_plan
             status = "raster_fallback"
+            reason = "native_render_error"
+            qa_document = None
 
     plan_ref = _publish_json(
         context.store, route_root / "reconstruction-plan.json", final_plan
     )
     if qa_document is not None:
+        qa_document["final_plan_sha256"] = _sha256(_json_bytes(final_plan))
         qa_ref = _publish_json(
             context.store, route_root / "render-qa.json", qa_document
         )

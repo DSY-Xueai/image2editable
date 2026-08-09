@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
 import math
 from pathlib import PurePosixPath
 
@@ -16,6 +18,14 @@ ROUTE_STATUSES = frozenset({"native_accepted", "raster_fallback"})
 RELATION_KINDS = frozenset(
     {"parent", "child", "contains", "text_owner", "overlaps", "z_order", "aligned_with"}
 )
+
+
+def reconstruction_ir_sha256(ir: dict) -> str:
+    validated = validate_reconstruction_ir(ir)
+    payload = json.dumps(
+        validated, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _exact_fields(value: object, fields: set[str], label: str) -> dict:
@@ -190,6 +200,8 @@ def validate_reconstruction_plan(value: object, *, ir: dict) -> dict:
     if document["page_id"] != validated_ir["page_id"]:
         raise ValueError("reconstruction plan page_id is invalid")
     _sha256(document["ir_sha256"], "reconstruction plan ir_sha256")
+    if document["ir_sha256"] != reconstruction_ir_sha256(validated_ir):
+        raise ValueError("reconstruction plan IR hash mismatch")
     if type(document["adapter"]) is not str or not document["adapter"]:
         raise ValueError("reconstruction plan adapter is invalid")
     routes = document["routes"]

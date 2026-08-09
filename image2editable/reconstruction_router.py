@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import hashlib
-import json
 import math
 
 from image2editable.reconstruction_contracts import (
     REPRESENTATION_KINDS,
+    reconstruction_ir_sha256,
     validate_reconstruction_ir,
     validate_reconstruction_plan,
 )
@@ -48,13 +47,6 @@ def _validate_policy(value: object) -> dict:
     _number(value["min_geometry_score"], "min_geometry_score", maximum=1.0)
     _number(value["max_color_mad"], "max_color_mad")
     return deepcopy(value)
-
-
-def _ir_sha256(ir: dict) -> str:
-    payload = json.dumps(
-        ir, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _native_shape_is_allowed(
@@ -150,7 +142,7 @@ def route_reconstruction(
     plan = {
         "schema_version": 1,
         "page_id": validated_ir["page_id"],
-        "ir_sha256": _ir_sha256(validated_ir),
+        "ir_sha256": reconstruction_ir_sha256(validated_ir),
         "adapter": adapter,
         "routes": routes,
     }

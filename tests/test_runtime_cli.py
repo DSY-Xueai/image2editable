@@ -37,8 +37,9 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
                 "transformers>=4.57.0",
                 "accelerate>=1.8.0",
             ],
-            "psd": ["aspose-psd>=26.5.0"],
-            "test": [
+                "psd": ["aspose-psd>=26.5.0"],
+                "render-qa": ["pywin32>=306; sys_platform == 'win32'"],
+                "test": [
                 "pytest",
                 "pypdf>=5",
                 "reportlab>=4",

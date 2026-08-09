@@ -3028,10 +3028,12 @@ def _publish_native_route_sidecar(
     }
     ir_path = route_dir / "reconstruction-ir.json"
     ir_path.write_text(json.dumps(ir), encoding="utf-8")
+    from image2editable.reconstruction_contracts import reconstruction_ir_sha256
+
     plan = {
         "schema_version": 1,
         "page_id": "page_001",
-        "ir_sha256": hashlib.sha256(ir_path.read_bytes()).hexdigest(),
+        "ir_sha256": reconstruction_ir_sha256(ir),
         "adapter": "pptx",
         "routes": [{
             "object_id": object_id,
@@ -3044,6 +3046,25 @@ def _publish_native_route_sidecar(
     }
     plan_path = route_dir / "reconstruction-plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    qa = {
+        "schema_version": 1,
+        "renderer": {"renderer": "powerpoint", "available": True},
+        "initial": {"accepted": True},
+        "fallback": None,
+        "final_plan_sha256": hashlib.sha256(
+            (
+                json.dumps(
+                    plan,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest(),
+    }
+    qa_path = route_dir / "render-qa.json"
+    qa_path.write_text(json.dumps(qa), encoding="utf-8")
     route_result = {
         "schema_version": 1,
         "page_id": "page_001",
@@ -3053,7 +3074,7 @@ def _publish_native_route_sidecar(
         ).hexdigest(),
         "ir_ref": ref(ir_path),
         "plan_ref": ref(plan_path),
-        "qa_ref": None,
+        "qa_ref": ref(qa_path),
         "reason": None,
     }
     route_result_path = route_dir / "route_result.json"

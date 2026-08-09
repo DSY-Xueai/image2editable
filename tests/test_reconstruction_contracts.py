@@ -1,8 +1,11 @@
 from copy import deepcopy
+import hashlib
+import json
 
 import pytest
 
 from image2editable.reconstruction_contracts import (
+    reconstruction_ir_sha256,
     validate_reconstruction_ir,
     validate_reconstruction_plan,
     validate_route_result,
@@ -52,10 +55,15 @@ def _ir() -> dict:
 
 
 def _plan() -> dict:
+    ir_sha256 = hashlib.sha256(
+        json.dumps(
+            _ir(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "schema_version": 1,
         "page_id": "page_001",
-        "ir_sha256": SHA,
+        "ir_sha256": ir_sha256,
         "adapter": "pptx",
         "routes": [
             {
@@ -70,6 +78,14 @@ def _plan() -> dict:
             }
         ],
     }
+
+
+def test_plan_ir_hash_must_match_actual_ir() -> None:
+    ir = _ir()
+    ir["objects"][0]["candidate_representations"][0]["confidence"] = 0.9
+
+    with pytest.raises(ValueError, match="IR hash"):
+        validate_reconstruction_plan(_plan(), ir=ir)
 
 
 def test_reconstruction_ir_is_strict_and_immutable() -> None:
@@ -147,6 +163,7 @@ def test_plan_requires_raster_fallback_for_native_shape() -> None:
         }
     )
     plan = _plan()
+    plan["ir_sha256"] = reconstruction_ir_sha256(ir)
     plan["routes"][0].update(
         selected_route="native_shape",
         candidate_confidence=0.99,

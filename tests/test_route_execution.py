@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -271,6 +272,83 @@ def test_successful_native_route_binds_qa_and_component_result(route_context) ->
     asset_path = context.store.root / raster["payload"]["asset_ref"]["path"]
     with Image.open(asset_path) as image:
         assert image.size == (30, 25)
+
+
+def test_published_native_route_requires_bound_accepted_qa(route_context) -> None:
+    context, policy, plans, _ = route_context
+    renderer = _FakeRenderer(context.source_image_path, plans)
+    finalize_page_route(context, renderer=renderer, policy=policy)
+    result_path = context.component_result_path.parent / "route/route_result.json"
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    document["qa_ref"] = None
+    result_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="QA"):
+        load_published_route(
+            context.store,
+            context.component_result_path,
+            page_id=context.page_id,
+        )
+
+
+def test_published_native_route_rejects_qa_for_another_plan(route_context) -> None:
+    context, policy, plans, _ = route_context
+    renderer = _FakeRenderer(context.source_image_path, plans)
+    result = finalize_page_route(context, renderer=renderer, policy=policy)
+    qa_path = context.store.root / result["qa_ref"]["path"]
+    qa = json.loads(qa_path.read_text(encoding="utf-8"))
+    qa["final_plan_sha256"] = "0" * 64
+    qa_path.write_text(json.dumps(qa), encoding="utf-8")
+    result_path = context.component_result_path.parent / "route/route_result.json"
+    document = json.loads(result_path.read_text(encoding="utf-8"))
+    document["qa_ref"]["sha256"] = hashlib.sha256(
+        qa_path.read_bytes()
+    ).hexdigest()
+    result_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Plan hash"):
+        load_published_route(
+            context.store,
+            context.component_result_path,
+            page_id=context.page_id,
+        )
+
+
+def test_native_writer_error_publishes_full_raster_fallback(route_context) -> None:
+    context, policy, plans, _ = route_context
+
+    def fail_assembly(plan: dict, path: Path) -> None:
+        raise RuntimeError("native writer failed")
+
+    result = finalize_page_route(
+        replace(context, assemble_page=fail_assembly),
+        renderer=_FakeRenderer(context.source_image_path, plans),
+        policy=policy,
+    )
+
+    assert result["status"] == "raster_fallback"
+    assert result["reason"] == "native_render_error"
+    plan = _load_ref(context, result["plan_ref"])
+    assert {route["selected_route"] for route in plan["routes"]} == {
+        "raster_component"
+    }
+
+
+def test_renderer_error_publishes_full_raster_fallback(route_context) -> None:
+    context, policy, plans, _ = route_context
+
+    class BrokenRenderer(_FakeRenderer):
+        def render_page(self, *args, **kwargs):
+            raise RuntimeError("PowerPoint failed to start")
+
+    result = finalize_page_route(
+        context,
+        renderer=BrokenRenderer(context.source_image_path, plans),
+        policy=policy,
+    )
+
+    assert result["status"] == "raster_fallback"
+    assert result["reason"] == "native_render_error"
 
 
 def test_failed_fallback_publishes_full_raster_without_changing_component_result(
