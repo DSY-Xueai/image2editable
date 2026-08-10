@@ -1341,18 +1341,15 @@ def _rebuild_canvas_background(
     source_path: Path,
     current_background_path: Path,
     restore_background_path: Path | None = None,
-    component_ids: set[str] | None = None,
+    repair_requests: list[tuple[set[str], float]],
     graph: dict,
     graph_dir: Path,
     text_mask_path: Path,
-    margin_ratio: float,
     output_path: Path,
 ) -> Path:
     import cv2
     import numpy as np
 
-    if not 0 < margin_ratio <= 0.1:
-        raise ValueError("background rebuild margin_ratio is invalid")
     with Image.open(source_path) as image:
         source = np.asarray(image.convert("RGB")).copy()
     with Image.open(current_background_path) as image:
@@ -1371,30 +1368,29 @@ def _rebuild_canvas_background(
         raise ValueError("background rebuild input dimensions differ")
 
     graph_root = graph_dir.resolve()
-    visual_repair = np.zeros(text_repair.shape, dtype=bool)
-    for node in graph["nodes"]:
-        if (
-            node["kind"] == "text"
-            or (component_ids is not None and node["id"] not in component_ids)
-        ):
-            continue
-        mask_path = (graph_dir / Path(node["mask"])).resolve()
-        if not mask_path.is_relative_to(graph_root):
-            raise ValueError("background rebuild mask is outside graph directory")
-        if sha256_file(mask_path) != node["mask_sha256"]:
-            raise ValueError("background rebuild mask sha256 mismatch")
-        with Image.open(mask_path) as image:
-            mask = np.asarray(image.convert("L")) > 0
-        if mask.shape != text_repair.shape:
-            raise ValueError("background rebuild mask dimensions differ")
-        visual_repair |= mask
-
-    height, width = text_repair.shape
-    radius = max(1, round(min(height, width) * margin_ratio))
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
-    )
-    repair = cv2.dilate(visual_repair.astype(np.uint8), kernel) > 0
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    repair = np.zeros(text_repair.shape, dtype=bool)
+    for object_ids, margin_ratio in repair_requests:
+        if not 0 < margin_ratio <= 0.1:
+            raise ValueError("background rebuild margin_ratio is invalid")
+        radius = max(1, round(min(text_repair.shape) * margin_ratio))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+        )
+        request_mask = np.zeros(text_repair.shape, dtype=bool)
+        for object_id in object_ids:
+            node = by_id[object_id]
+            mask_path = (graph_dir / Path(node["mask"])).resolve()
+            if not mask_path.is_relative_to(graph_root):
+                raise ValueError("background rebuild mask is outside graph directory")
+            if sha256_file(mask_path) != node["mask_sha256"]:
+                raise ValueError("background rebuild mask sha256 mismatch")
+            with Image.open(mask_path) as image:
+                mask = np.asarray(image.convert("L")) > 0
+            if mask.shape != text_repair.shape:
+                raise ValueError("background rebuild mask dimensions differ")
+            request_mask |= mask
+        repair |= cv2.dilate(request_mask.astype(np.uint8), kernel) > 0
     if restored is None:
         repair |= text_repair
     rebuilt = current.copy() if restored is None else restored.copy()
@@ -1988,6 +1984,10 @@ def _execute_legacy_round(
         if action["action"] == "rebuild_background"
     ]
     if rebuild_actions:
+        repair_requests = [
+            (set(action["object_ids"]), action["parameters"]["margin_ratio"])
+            for action in rebuild_actions
+        ]
         module = importlib.import_module("image_to_ppt")
         prepared = module.load_component_layers(
             reconstruction / "initial/prepared_page.json"
@@ -2024,11 +2024,10 @@ def _execute_legacy_round(
                 else Path(prepared["background_original_path"])
             ),
             restore_background_path=effective_text_clean_path,
-            component_ids=set(rebuild_actions[0]["object_ids"]),
+            repair_requests=repair_requests,
             graph=next_graph,
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
-            margin_ratio=rebuild_actions[0]["parameters"]["margin_ratio"],
             output_path=output_dir / "background-rebuilt.png",
         )
     refs = _quality_assets(

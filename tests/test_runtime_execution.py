@@ -2451,6 +2451,190 @@ def test_item_text_region_does_not_expand_a_partial_icon_owner() -> None:
     assert np.array_equal(assigned[0], icon)
 
 
+def _background_box_mask(
+    shape: tuple[int, int], box: tuple[int, int, int, int]
+) -> np.ndarray:
+    mask = np.zeros(shape, dtype=bool)
+    left, top, right, bottom = box
+    mask[top:bottom, left:right] = True
+    return mask
+
+
+def _write_background_action_graph(
+    graph_dir: Path, masks: dict[str, np.ndarray]
+) -> dict:
+    nodes = []
+    for z_index, (component_id, mask) in enumerate(masks.items()):
+        path = graph_dir / "masks" / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(path)
+        ys, xs = np.where(mask)
+        nodes.append({
+            "id": component_id,
+            "kind": "text" if component_id.startswith("text_") else "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": [
+                int(xs.min()), int(ys.min()),
+                int(xs.max()) + 1, int(ys.max()) + 1,
+            ],
+            "z_index": z_index,
+            "text_ids": [],
+        })
+    return {"nodes": nodes}
+
+
+def test_rebuild_canvas_background_consumes_every_repair_request(
+    tmp_path: Path,
+) -> None:
+    shape = (80, 120)
+    source_pixels = np.full((*shape, 3), 240, dtype=np.uint8)
+    source_pixels[8:24, 8:36] = 20
+    source_pixels[40:64, 80:112] = 40
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    Image.fromarray(source_pixels).save(source)
+    Image.fromarray(source_pixels).save(current)
+    graph_dir = tmp_path / "graph"
+    (graph_dir / "masks").mkdir(parents=True)
+    left = _background_box_mask(shape, (8, 8, 36, 24))
+    right = _background_box_mask(shape, (80, 40, 112, 64))
+    graph = _write_background_action_graph(
+        graph_dir,
+        {"text_left": left, "component_right": right},
+    )
+    text_mask = tmp_path / "text-mask.png"
+    Image.fromarray(left.astype(np.uint8) * 255, mode="L").save(text_mask)
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source,
+        current_background_path=current,
+        repair_requests=[
+            ({"text_left"}, 0.01),
+            ({"component_right"}, 0.02),
+        ],
+        graph=graph,
+        graph_dir=graph_dir,
+        text_mask_path=text_mask,
+        output_path=output,
+    )
+
+    actual = np.asarray(Image.open(output).convert("RGB"))
+    assert not np.array_equal(actual[8:24, 8:36], source_pixels[8:24, 8:36])
+    assert not np.array_equal(actual[40:64, 80:112], source_pixels[40:64, 80:112])
+    assert np.array_equal(actual[:4, :4], source_pixels[:4, :4])
+
+
+def test_execute_legacy_round_aggregates_background_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    round_dir = reconstruction / "round-01"
+    round_dir.mkdir(parents=True)
+    store = RunStore(run_dir)
+
+    source = round_dir / "source.png"
+    background = reconstruction / "background.png"
+    text_mask = reconstruction / "text-mask.png"
+    for path in (source, background):
+        Image.new("RGB", (12, 8), "white").save(path)
+    Image.new("L", (12, 8), 0).save(text_mask)
+    quality = round_dir / "quality-report.json"
+    quality.write_text("{}", encoding="utf-8")
+    presentation_manifest = round_dir / "presentation-manifest.json"
+    presentation_manifest.write_text("{}", encoding="utf-8")
+    graph_path = round_dir / "component-graph.json"
+    graph_path.write_text(json.dumps({"nodes": []}), encoding="utf-8")
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    request = round_dir / "request.json"
+    request.write_text(json.dumps({
+        "evidence": {
+            "source.png": {"path": "source.png"},
+            "quality-report.json": {"path": "quality-report.json"},
+            "presentation-manifest.json": {"path": "presentation-manifest.json"},
+        },
+    }), encoding="utf-8")
+    plan = round_dir / "plan.json"
+    plan.write_text(json.dumps({"actions": [
+        {
+            "action": "rebuild_background",
+            "object_ids": ["text_left"],
+            "parameters": {"margin_ratio": 0.01},
+        },
+        {
+            "action": "rebuild_background",
+            "object_ids": ["component_right"],
+            "parameters": {"margin_ratio": 0.02},
+        },
+    ]}), encoding="utf-8")
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "repair_round": 1,
+        "provider": "host",
+        "graph_ref": reference(graph_path),
+        "current_round": {
+            "request_ref": reference(request),
+            "plan_ref": reference(plan),
+        },
+        "frozen": {},
+    })
+
+    def execute_round(pixels, graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True)
+        (output_dir / "component-graph.json").write_text(
+            json.dumps(graph), encoding="utf-8"
+        )
+        return graph
+
+    captured: dict[str, Any] = {}
+
+    def rebuild_background(**kwargs):
+        captured["repair_requests"] = (
+            kwargs["repair_requests"]
+            if "repair_requests" in kwargs
+            else [(kwargs["component_ids"], kwargs["margin_ratio"])]
+        )
+        return kwargs["current_background_path"]
+
+    fake_image_module = types.SimpleNamespace(
+        load_component_layers=lambda path: {
+            "_text_clean_path": str(source),
+            "_text_cleanup_mask_path": str(text_mask),
+            "_text_mask_path": str(text_mask),
+            "background_original_path": str(background),
+            "text_items": [],
+        }
+    )
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
+    monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *a, **k: None)
+    monkeypatch.setattr(legacy, "_effective_text_context", lambda **kwargs: (
+        [], np.zeros((8, 12), dtype=bool), np.full((8, 12, 3), 255, dtype=np.uint8)
+    ))
+    monkeypatch.setattr(legacy, "_rebuild_canvas_background", rebuild_background)
+    monkeypatch.setattr(legacy, "_quality_assets", lambda *a, **k: {})
+    monkeypatch.setattr(legacy, "record_component_execution", lambda *a, **k: None)
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: fake_image_module
+    )
+
+    legacy._execute_legacy_round(store, "page_001", object())
+
+    assert captured["repair_requests"] == [
+        ({"text_left"}, 0.01),
+        ({"component_right"}, 0.02),
+    ]
+
+
 def test_agent_can_rebuild_uniform_canvas_under_active_components(
     tmp_path: Path,
 ) -> None:
@@ -2483,8 +2667,9 @@ def test_agent_can_rebuild_uniform_canvas_under_active_components(
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
+        repair_requests=[({"component"}, 0.1)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.1, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
@@ -2520,8 +2705,9 @@ def test_background_rebuild_cleans_discarded_component_residual(
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
+        repair_requests=[({"discarded"}, 0.01)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.01, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
@@ -2560,9 +2746,10 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
-        restore_background_path=restored, component_ids={"selected"},
+        restore_background_path=restored,
+        repair_requests=[({"selected"}, 0.01)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.01, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
@@ -2600,9 +2787,10 @@ def test_background_rebuild_preserves_local_tinted_surface(tmp_path: Path) -> No
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
-        restore_background_path=restored, component_ids={"component"},
+        restore_background_path=restored,
+        repair_requests=[({"component"}, 0.025)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.025, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
@@ -2629,8 +2817,9 @@ def test_background_rebuild_does_not_expand_text_box_into_neighbor_content(
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
+        repair_requests=[],
         graph={"nodes": []}, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.1, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
@@ -2665,8 +2854,9 @@ def test_background_rebuild_supports_nonuniform_canvas_border(tmp_path: Path) ->
     output = tmp_path / "rebuilt.png"
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
+        repair_requests=[({"component"}, 0.01)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        margin_ratio=0.01, output_path=output,
+        output_path=output,
     )
 
     with Image.open(output) as rebuilt:
