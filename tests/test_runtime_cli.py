@@ -15,6 +15,7 @@ import pytest
 from image2editable import cli
 from image2editable import doctor
 from image2editable.inputs import prepare_image_job
+from image2editable.store import RunStore
 
 
 def test_pyproject_exposes_complete_package_metadata() -> None:
@@ -480,6 +481,43 @@ def test_module_help_starts() -> None:
     assert "prepare" in result.stdout
     assert "run" in result.stdout
     assert "doctor" in result.stdout
+
+
+def test_cli_warning_image_exits_nonzero_without_pptx(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir()
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {"status": "preserved_with_warning"},
+    )
+    page_jobs = store.read_json("page_jobs.json")
+    page_jobs["pages"]["page_001"]["status"] = "preserved_with_warning"
+    store.write_json("page_jobs.json", page_jobs)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "image2editable",
+            "run",
+            "execute",
+            str(run_dir),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "editable reconstruction incomplete" in result.stderr
+    assert store.read_json("run_summary.json")["status"] == "failed"
+    assert not (run_dir / "final/output_original.pptx").exists()
+    assert not (run_dir / "final/output_16x9.pptx").exists()
 
 
 def test_public_api_is_importable() -> None:

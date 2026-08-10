@@ -126,6 +126,10 @@ def advance_component_repair(
         if state["phase"] == "freeze_committed":
             page_violations = _repairable_page_quality_violations(store, state)
             if state["failed_ids"] or page_violations:
+                if not _page_quality_progressed(store, state):
+                    return _commit_fallback_required(
+                        store, state, page_id, "no_quality_improvement"
+                    )
                 if state["repair_round"] >= MAX_REPAIR_ROUNDS:
                     return _commit_fallback_required(
                         store, state, page_id, "round_limit"
@@ -638,6 +642,8 @@ def record_next_component_request(
             raise RuntimeError("component repair is not ready for a next round")
         if state["repair_round"] >= MAX_REPAIR_ROUNDS:
             raise RuntimeError("component repair cannot publish round 6 after five rounds")
+        if not _page_quality_progressed(store, state):
+            raise RuntimeError("component quality did not improve")
         request_path = Path(request_path)
         request = load_component_agent_request(request_path)
         graph = load_component_agent_graph(request_path)
@@ -1783,6 +1789,54 @@ def _repairable_page_quality_violations(store, state: dict) -> list[str]:
         _blocking_page_quality_violations(store, state)
         & _REPAIRABLE_PAGE_VIOLATIONS
     )
+
+
+def _page_progress_key(quality: dict) -> tuple[float, ...]:
+    visual = quality.get("visual_metrics")
+    violation_items = quality.get("violations")
+    if not isinstance(visual, dict) or not isinstance(violation_items, list):
+        raise ValueError("component quality report is invalid for progress check")
+    violations = set(violation_items)
+    return (
+        float(visual.get("largest_unexplained_region_pixels", 0)),
+        float(visual.get("unexplained_visual_pixels", 0)),
+        float("background_text_residual" in violations),
+        float("component_text_residual" in violations),
+        float("duplicate_pixels" in violations),
+        float("over_merged_component" in violations),
+        float(visual["mae"]),
+        float(visual["p95"]),
+    )
+
+
+def _page_quality_progressed(store, state: dict) -> bool:
+    if state["repair_round"] == 1:
+        return True
+    request_path = store.root / Path(
+        *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
+    )
+    request = load_component_agent_request(request_path)
+    reference = request["evidence"]["quality-report.json"]
+    previous_path = request_path.parent / Path(
+        *PurePosixPath(reference["path"]).parts
+    )
+    previous_payload = _read_bound_file(
+        previous_path,
+        store.root,
+        max_bytes=REQUEST_JSON_LIMIT,
+        label="previous component quality",
+    )
+    if hashlib.sha256(previous_payload).hexdigest() != reference["sha256"]:
+        raise ValueError("previous component quality sha256 mismatch")
+    current = json.loads(_load_state_artifact(
+        store.root, state["current_round"]["quality_ref"]
+    ).decode("utf-8"))
+    previous = json.loads(previous_payload.decode("utf-8"))
+    previous_report = previous.get("report")
+    current_report = current.get("report")
+    if not isinstance(previous_report, dict) or not isinstance(current_report, dict):
+        raise ValueError("component quality report is invalid for progress check")
+    return _page_progress_key(current_report) < _page_progress_key(previous_report)
 
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:

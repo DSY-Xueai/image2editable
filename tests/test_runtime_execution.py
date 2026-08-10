@@ -862,7 +862,7 @@ def test_local_provider_runs_complete_without_host_receipt(
     assert state["plan_count"] == 1
 
 
-def test_local_provider_runs_multiple_rounds_serially_without_pausing(
+def test_local_provider_warning_fails_without_fake_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -898,16 +898,17 @@ def test_local_provider_runs_multiple_rounds_serially_without_pausing(
 
     monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
 
-    completed = runtime.run_job(run_dir)
+    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
+        runtime.run_job(run_dir)
 
-    assert completed["status"] == "completed"
     assert rounds == [1, 2]
-    assert RunStore.open(run_dir).read_json("run_state.json")["status"] == "completed"
+    assert RunStore.open(run_dir).read_json("run_state.json")["status"] == "failed"
     state = RunStore.open(run_dir).read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
     assert state["plan_count"] == 2
     assert state["status"] == "preserved_with_warning"
+    assert not (run_dir / "final/output.pptx").exists()
     assert not (run_dir / "host_capabilities.json").exists()
     round_two = run_dir / "pages/page_001/reconstruction/agent/round-02"
     assert (round_two / "numbered-masks.png").read_bytes() != (
@@ -1018,7 +1019,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
     assert not (reconstruction / "evidence-round-02").exists()
 
 
-def test_local_provider_stops_at_five_page_batches_and_falls_back(
+def test_local_provider_stops_when_page_quality_does_not_improve(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1062,19 +1063,18 @@ def test_local_provider_stops_at_five_page_batches_and_falls_back(
 
     monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
 
-    completed = runtime.run_job(run_dir)
+    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
+        runtime.run_job(run_dir)
 
-    assert completed["status"] == "completed"
-    assert rounds == [1, 2, 3, 4, 5]
+    assert rounds == [1, 2]
     state = RunStore.open(run_dir).read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
-    assert state["plan_count"] == 5
-    assert state["stop_reason"] == "round_limit"
+    assert state["plan_count"] == 2
+    assert state["stop_reason"] == "no_quality_improvement"
     assert state["status"] == "preserved_with_warning"
-    assert not (
-        run_dir / "pages/page_001/reconstruction/agent/round-06"
-    ).exists()
+    assert not (run_dir / "pages/page_001/reconstruction/agent/round-03").exists()
+    assert not (run_dir / "final/output.pptx").exists()
 
 
 def test_local_missing_service_configuration_stops_before_heavy_page_initialization(
@@ -1173,27 +1173,24 @@ def test_pdf_component_plan_e2e_is_serial_and_falls_back_before_one_assembly(
     _record_current_component_plan(
         run_dir, tmp_path / "page-2-round-2.json", []
     )
-    completed = runtime.run_job(run_dir)
+    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
+        runtime.run_job(run_dir)
 
-    assert completed["status"] == "completed"
-    assert completed["quality_gate_version"] == runtime.COMPONENT_QUALITY_GATE_VERSION
     assert initial_calls == ["page_001", "page_002"]
-    assert assembly_calls == ["multi"]
+    assert assembly_calls == []
     store = RunStore.open(run_dir)
     page_1_state = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
     page_2_state = store.read_json("pages/page_002/reconstruction/component_state.json")
-    page_2_delivery = store.read_json(
-        "pages/page_002/reconstruction/component_delivery.json"
-    )
     assert (
         page_1_state["quality_gate_version"]
         == page_2_state["quality_gate_version"]
     )
     assert page_2_state["status"] == "preserved_with_warning"
     assert page_2_state["fallback"]["status"] == "warning"
-    assert "full source image" in page_2_delivery["warning"]
+    assert store.read_json("run_state.json")["status"] == "failed"
+    assert not (run_dir / "final/output.pptx").exists()
 
 
 def test_image_host_pauses_without_assembly_or_completed_summary(
@@ -3131,11 +3128,13 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
     background = accepted / "background.png"
     reconstructed = accepted / "reconstructed.png"
     text_mask = accepted / "text-mask.png"
+    foreground_evidence = accepted / "foreground-evidence-mask.png"
     native = accepted / "native.json"
     for path, color in ((source, "white"), (background, "black"),
                         (reconstructed, "red")):
         Image.new("RGB", (4, 4), color).save(path)
     Image.new("L", (4, 4), 0).save(text_mask)
+    Image.new("L", (4, 4), 255).save(foreground_evidence)
     native.write_text("{}", encoding="utf-8")
     mask = masks / "component_0001.png"
     Image.new("L", (4, 4), 255).save(mask)
@@ -3170,6 +3169,7 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
             name: ref(path) for name, path in {
                 "source": source, "background": background,
                 "reconstructed": reconstructed, "text_mask": text_mask,
+                "foreground_evidence": foreground_evidence,
                 "native_check": native,
             }.items()
         },
@@ -3205,11 +3205,13 @@ def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
     prepared_source = initial / "source.png"
     prepared_background = initial / "background.png"
     prepared_text_mask = initial / "text-mask.png"
+    prepared_foreground = initial / "foreground-evidence-mask.png"
     prepared_removal_mask = initial / "removal-mask.png"
     prepared_difference = initial / "difference.png"
     Image.new("RGB", (16, 9), "white").save(prepared_source)
     Image.new("RGB", (16, 9), "white").save(prepared_background)
     Image.new("L", (16, 9), 0).save(prepared_text_mask)
+    Image.new("L", (16, 9), 0).save(prepared_foreground)
     Image.new("L", (16, 9), 0).save(prepared_removal_mask)
     Image.new("RGB", (16, 9), "black").save(prepared_difference)
     image_to_ppt._write_prepared_page({
@@ -3226,6 +3228,7 @@ def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
         "background_removal_mask_path": str(prepared_removal_mask),
         "background_difference_path": str(prepared_difference),
         "_text_mask_path": str(prepared_text_mask),
+        "_foreground_evidence_mask_path": str(prepared_foreground),
         "_element_mask_paths": [],
         "_semantic_mask_paths": [],
         "_resource_isolation": False,
@@ -3704,7 +3707,7 @@ def test_accepted_presentation_component_id_cannot_escape_asset_directory(
     assert component_path.is_relative_to(reconstruction.resolve())
 
 
-def test_warning_page_assembly_preserves_full_source_and_records_warning(
+def test_warning_image_page_assembly_refuses_fake_editable_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.png"
@@ -3719,8 +3722,6 @@ def test_warning_page_assembly_preserves_full_source_and_records_warning(
         "pages/page_001/reconstruction/component_state.json",
         {"status": "preserved_with_warning"},
     )
-    captured = {}
-
     class FakeImageModule:
         @staticmethod
         def load_component_layers(path):
@@ -3732,29 +3733,16 @@ def test_warning_page_assembly_preserves_full_source_and_records_warning(
 
         @staticmethod
         def _assemble_prepared_slide(slide_data, output_path, *args):
-            captured.update(slide_data)
-            presentation = Presentation()
-            presentation.slides.add_slide(presentation.slide_layouts[6])
-            presentation.save(output_path)
-            return str(output_path)
+            raise AssertionError("warning image must not enter the assembler")
 
     monkeypatch.setattr(
         legacy.importlib, "import_module", lambda name: FakeImageModule
     )
 
-    outputs = legacy.assemble_legacy_results(store)
+    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
+        legacy.assemble_legacy_results(store)
 
-    assert captured["components"] == []
-    assert captured["text_items"] == []
-    assert hashlib.sha256(
-        Path(captured["background_path"]).read_bytes()
-    ).hexdigest() == hashlib.sha256(source.read_bytes()).hexdigest()
-    assert Path(outputs["16:9"]).is_file()
-    delivery = store.read_json(
-        "pages/page_001/reconstruction/component_delivery.json"
-    )
-    assert delivery["status"] == "preserved_with_warning"
-    assert "full source image" in delivery["warning"]
+    assert not (run_dir / "final/output.pptx").exists()
 
 
 def test_legacy_assembly_refuses_existing_output_before_assembler_call(
@@ -3795,7 +3783,7 @@ def test_legacy_assembly_refuses_existing_output_before_assembler_call(
     assert not list(reconstruction.glob("assembly-assets-*"))
 
 
-def test_legacy_variant_assembly_does_not_publish_partial_outputs(
+def test_warning_image_with_multiple_variants_publishes_no_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.png"
@@ -3829,8 +3817,9 @@ def test_legacy_variant_assembly_does_not_publish_partial_outputs(
         legacy.importlib, "import_module", lambda name: FakeImageModule
     )
 
-    with pytest.raises(RuntimeError, match="second variant failed"):
+    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
         legacy.assemble_legacy_results(store)
+    assert calls == 0
     assert not (run_dir / "final/output_original.pptx").exists()
     assert not (run_dir / "final/output_16x9.pptx").exists()
 
@@ -4592,6 +4581,80 @@ def test_run_job_executes_agent_approved_shadow_plan(
         == "awaiting_agent"
     )
     assert not (run_dir / "final" / "output.pptx").exists()
+
+
+def test_mixed_pptx_warning_output_is_recovery_not_reconstruction_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "slide.png"
+    _image(image)
+    source = tmp_path / "source.pptx"
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_picture(
+        str(image), 0, 0, presentation.slide_width, presentation.slide_height
+    )
+    presentation.save(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    manifest = store.read_json("job_manifest.json")
+    monkeypatch.setattr(
+        runtime,
+        "shadow_replacement_plans",
+        lambda store, manifest: [{"page_id": "page_001"}],
+    )
+
+    def warning_recovery(store: RunStore, plans: list[dict]) -> dict[str, Any]:
+        output = store.root / "final/output.pptx"
+        output.parent.mkdir(parents=True)
+        source_copy = store.root / manifest["input"]["source"]
+        output.write_bytes(source_copy.read_bytes())
+        digest = runtime.sha256_file(output)
+        status = output.lstat()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "status": "completed",
+            "pages": 1,
+            "preserved_objects": manifest["input"]["object_count"],
+            "pending_candidates": manifest["input"]["candidate_count"],
+            "replaced_pages": 0,
+            "preserved_with_warning_pages": 1,
+            "page_results": [{
+                "schema_version": SCHEMA_VERSION,
+                "page_id": "page_001",
+                "status": "preserved_with_warning",
+                "warning": "editable reconstruction incomplete",
+                "error_type": "RuntimeError",
+            }],
+            "warnings": ["editable reconstruction incomplete"],
+            "outputs": {"pptx": str(output)},
+            "input_sha256": manifest["input"]["sha256"],
+            "output_sha256": digest,
+            "_output_identity": {
+                "version": 1,
+                "path": str(output),
+                "dev": status.st_dev,
+                "ino": status.st_ino,
+                "mode": status.st_mode,
+                "size": status.st_size,
+                "mtime_ns": status.st_mtime_ns,
+                "sha256": digest,
+            },
+        }
+
+    monkeypatch.setattr(runtime, "execute_pptx_shadow", warning_recovery)
+
+    summary = runtime.run_job(run_dir)
+
+    assert summary["replaced_pages"] == 0
+    assert summary["preserved_with_warning_pages"] == 1
+    assert Path(summary["outputs"]["pptx"]).is_file()
+    assert summary["page_results"][0]["status"] == "preserved_with_warning"
+    assert (
+        store.read_json("page_jobs.json")["pages"]["page_001"]["status"]
+        == "preserved_with_warning"
+    )
 
 
 def test_completed_pptx_run_is_idempotent_without_recopy(

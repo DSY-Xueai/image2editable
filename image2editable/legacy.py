@@ -2281,6 +2281,21 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             if path.exists() or path.is_symlink()
         )
         raise RuntimeError(f"Refusing to overwrite existing output: {existing}")
+    warning_pages = [
+        page_id for page_id in page_ids
+        if store.read_json(
+            f"pages/{page_id}/reconstruction/component_state.json"
+        )["status"] == "preserved_with_warning"
+    ]
+    if (
+        warning_pages
+        and output_format == "pptx"
+        and manifest["input"]["type"] in {"images", "pdf"}
+    ):
+        raise RuntimeError(
+            "editable reconstruction incomplete; no PPTX was created for "
+            + ", ".join(warning_pages)
+        )
     module = importlib.import_module("image_to_ppt")
     slides = []
     page_records = []

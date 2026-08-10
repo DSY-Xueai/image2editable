@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import hmac
@@ -35,6 +36,48 @@ from scripts.visual_segment import VisualSegmentationError, _publish_action_dire
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
 from PIL import Image
 import numpy as np
+
+
+def _page_quality_key_case(**metrics: float) -> dict:
+    return {
+        "violations": ["background_text_residual"],
+        "visual_metrics": {
+            "largest_unexplained_region_pixels": 120,
+            "unexplained_visual_pixels": 120,
+            "mae": 1.0,
+            "p95": 2.0,
+            **metrics,
+        },
+    }
+
+
+def test_page_progress_key_orders_improved_equal_and_worse_quality() -> None:
+    quality = _page_quality_key_case()
+    improved = _page_quality_key_case(largest_unexplained_region_pixels=119)
+    worse = _page_quality_key_case(largest_unexplained_region_pixels=121)
+
+    key = component_repair._page_progress_key(quality)
+    assert component_repair._page_progress_key(improved) < key
+    assert component_repair._page_progress_key(copy.deepcopy(quality)) == key
+    assert component_repair._page_progress_key(worse) > key
+
+
+def test_page_progress_key_compares_legacy_quality_deterministically() -> None:
+    quality = {
+        "violations": ["background_text_residual"],
+        "visual_metrics": {
+            "mae": 1.0,
+            "p95": 2.0,
+        },
+    }
+
+    assert component_repair._page_progress_key(quality)[:2] == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("quality", [{}, {"violations": [], "visual_metrics": []}])
+def test_page_progress_key_rejects_invalid_quality(quality: dict) -> None:
+    with pytest.raises(ValueError, match="progress check"):
+        component_repair._page_progress_key(quality)
 
 
 def test_unowned_raster_text_check_accepts_diagnostic_owned_by_editable_text() -> None:
@@ -1121,7 +1164,9 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     }
 
 
-def test_page_only_violation_stops_at_round_limit(page_session: dict) -> None:
+def test_page_only_violation_stops_when_quality_does_not_improve(
+    page_session: dict,
+) -> None:
     from image2editable.store import RunStore
 
     first = build_component_agent_request(page_session, repair_round=1)
@@ -1223,31 +1268,30 @@ def test_page_only_violation_stops_at_round_limit(page_session: dict) -> None:
     state["current_round"]["execution_ref"] = state["current_round"]["request_ref"]
     state["current_round"]["quality_ref"] = bind_synthetic_quality(state)
     store.write_json("pages/page_001/reconstruction/component_state.json", state)
-    updated = state
-    request_path = first
-    for expected_round in range(2, 6):
-        request_path = build_component_agent_request(
-            page_session, repair_round=expected_round
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    updated = record_next_component_request(
+        store, "page_001", request_path=request_path
+    )
+    assert updated["repair_round"] == 2
+    assert updated["candidate_ids"] == []
+    updated["phase"] = "freeze_committed"
+    updated["current_round"]["plan_ref"] = updated["current_round"]["request_ref"]
+    updated["current_round"]["execution_ref"] = updated["current_round"]["request_ref"]
+    updated["current_round"]["quality_ref"] = bind_synthetic_quality(updated)
+    store.write_json("pages/page_001/reconstruction/component_state.json", updated)
+
+    third_request = build_component_agent_request(page_session, repair_round=3)
+    with pytest.raises(RuntimeError, match="quality did not improve"):
+        record_next_component_request(
+            store, "page_001", request_path=third_request
         )
-        updated = record_next_component_request(
-            store, "page_001", request_path=request_path
-        )
-        assert updated["repair_round"] == expected_round
-        assert updated["candidate_ids"] == []
-        assert updated["plan_count"] == 0
-        assert updated["phase"] == "request_published"
-        updated["phase"] = "freeze_committed"
-        updated["current_round"]["plan_ref"] = updated["current_round"]["request_ref"]
-        updated["current_round"]["execution_ref"] = updated["current_round"]["request_ref"]
-        updated["current_round"]["quality_ref"] = bind_synthetic_quality(updated)
-        store.write_json("pages/page_001/reconstruction/component_state.json", updated)
     assert advance_component_repair(store, "page_001") == {
         "status": "fallback_required",
         "page_id": "page_001",
-        "repair_round": 5,
-        "stop_reason": "round_limit",
+        "repair_round": 2,
+        "stop_reason": "no_quality_improvement",
     }
-    assert not (first.parent.parent / "round-06").exists()
+    assert not (first.parent.parent / "round-04").exists()
 
 
 @pytest.mark.parametrize(
@@ -2857,6 +2901,25 @@ def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
     assert "over_merged_component" in parent["violations"]
     assert second_freeze["failed_ids"] == ["parent"]
     assert "parent" not in second_freeze["frozen_ids"]
+    state_before = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    third_session = _real_next_round_session(
+        session,
+        store,
+        store.root / state_before["current_round"]["quality_ref"]["path"],
+    )
+    third_request = build_component_agent_request(third_session, repair_round=3)
+    with pytest.raises(RuntimeError, match="quality did not improve"):
+        record_next_component_request(
+            store, "page_001", request_path=third_request
+        )
+    assert store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    ) == state_before
+    outcome = advance_component_repair(store, "page_001")
+    assert outcome["status"] == "fallback_required"
+    assert outcome["stop_reason"] == "no_quality_improvement"
 
 
 def test_execution_rejects_rewritten_retained_inactive_source_mask(
