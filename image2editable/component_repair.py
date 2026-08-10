@@ -17,6 +17,7 @@ from scripts.initial_diagnostics import validate_initial_diagnostics
 
 from image2editable.component_contracts import (
     COMPONENT_EVIDENCE_NAMES,
+    MAX_REPAIR_ROUNDS,
     validate_agent_provider,
     validate_component_agent_request,
     validate_component_graph,
@@ -39,6 +40,10 @@ REQUEST_JSON_LIMIT = 4 * 1024 * 1024
 MARKER_JSON_LIMIT = 64 * 1024
 PRESENTATION_ASSET_LIMIT = 256 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
+_REPAIRABLE_PAGE_VIOLATIONS = frozenset({
+    "background_text_residual",
+    "unexplained_visual_residual",
+})
 
 
 def advance_component_repair(
@@ -112,14 +117,16 @@ def advance_component_repair(
         if state["phase"] == "quality_recorded":
             return _commit_component_freeze(store, state, page_id)
         if state["phase"] == "freeze_committed":
-            if state["failed_ids"]:
-                if state["repair_round"] >= 5:
+            page_violations = _repairable_page_quality_violations(store, state)
+            if state["failed_ids"] or page_violations:
+                if state["repair_round"] >= MAX_REPAIR_ROUNDS:
                     return _commit_fallback_required(
                         store, state, page_id, "round_limit"
                     )
                 return {"status": "needs_next_round", "page_id": page_id,
                         "repair_round": state["repair_round"] + 1,
-                        "candidate_ids": list(state["failed_ids"])}
+                        "candidate_ids": list(state["failed_ids"]),
+                        "page_violations": page_violations}
             blocking_violations = _blocking_page_quality_violations(store, state)
             if blocking_violations:
                 updated = dict(state)
@@ -598,9 +605,15 @@ def record_next_component_request(
         relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
         state = validate_component_repair_state(store.read_json(relative))
         _validate_repair_state_identity(store, state, page_id)
-        if state["phase"] != "freeze_committed" or not state["failed_ids"]:
+        if (
+            state["phase"] != "freeze_committed"
+            or not (
+                state["failed_ids"]
+                or _repairable_page_quality_violations(store, state)
+            )
+        ):
             raise RuntimeError("component repair is not ready for a next round")
-        if state["repair_round"] >= 5:
+        if state["repair_round"] >= MAX_REPAIR_ROUNDS:
             raise RuntimeError("component repair cannot publish round 6 after five rounds")
         request_path = Path(request_path)
         request = load_component_agent_request(request_path)
@@ -1720,6 +1733,13 @@ def _blocking_page_quality_violations(store, state: dict) -> set[str]:
     return set(quality.get("report", {}).get("violations", [])) - {
         "pptx_reopen_unknown"
     }
+
+
+def _repairable_page_quality_violations(store, state: dict) -> list[str]:
+    return sorted(
+        _blocking_page_quality_violations(store, state)
+        & _REPAIRABLE_PAGE_VIOLATIONS
+    )
 
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:

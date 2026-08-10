@@ -732,8 +732,9 @@ def test_execution_refreshes_candidates_after_discard(
     assert state["failed_ids"] == ["candidate_d"]
 
 
-def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
+def test_page_only_background_residual_enters_next_round(
     page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from image2editable.store import RunStore
 
@@ -803,6 +804,21 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
         store, "page_001", execution_path=execution_path,
         output_graph_path=graph_path,
     )
+    monkeypatch.setattr(
+        component_repair, "evaluate_component_quality_round",
+        lambda *args, **kwargs: component_quality.evaluate_page_quality(
+            [],
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={
+                "pptx_reopen": "unknown",
+                "editable_text_once": "pass",
+                "background_text_clean": "fail",
+                "unowned_raster_text": "pass",
+            },
+            expected_component_ids=[], initial_component_count=2,
+            active_visual_count=1,
+        ),
+    )
 
     assert state["phase"] == "actions_executed"
     assert state["candidate_ids"] == []
@@ -820,8 +836,14 @@ def test_last_pending_discard_records_page_quality_without_rechecking_frozen(
         "pages/page_001/reconstruction/component_state.json"
     )["frozen"]
     assert frozen_after == {"frozen_a": frozen_before["mask_sha256"]}
-    preserved = advance_component_repair(store, "page_001")
-    assert preserved["status"] == "preserved_with_warning"
+    next_round = advance_component_repair(store, "page_001")
+    assert next_round == {
+        "status": "needs_next_round",
+        "page_id": "page_001",
+        "repair_round": 2,
+        "candidate_ids": [],
+        "page_violations": ["background_text_residual"],
+    }
 
 
 def test_record_suppress_text_preserves_linked_frozen_visual_assets(
@@ -1063,7 +1085,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     }
 
 
-def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: dict) -> None:
+def test_page_only_violation_stops_at_round_limit(page_session: dict) -> None:
     from image2editable.store import RunStore
 
     first = build_component_agent_request(page_session, repair_round=1)
@@ -1090,6 +1112,8 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
         quality_path = Path(page_session["reconstruction_dir"]) / (
             f"synthetic-quality-{current['repair_round']:02d}.json"
         )
+        strict_report = _strict_quality_report("candidate_b", False)
+        strict_report["checks"]["background_text_clean"] = "fail"
         quality_path.write_text(json.dumps({
             "schema_version": 1,
             "page_id": "page_001",
@@ -1122,7 +1146,14 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
                     "sha256": current["source_sha256"],
                 },
             },
-            "report": _strict_quality_report("candidate_b", False),
+            "report": component_quality.evaluate_page_quality(
+                strict_report["component_reports"],
+                visual_metrics=strict_report["visual_metrics"],
+                page_checks=strict_report["checks"],
+                expected_component_ids=["candidate_b"],
+                initial_component_count=2,
+                active_visual_count=2,
+            ),
         }), encoding="utf-8")
         page_session["evidence"]["quality-report.json"] = quality_path
         return {
@@ -1130,8 +1161,28 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
             "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
         }
 
+    graph = json.loads(
+        page_session["evidence"]["component-graph.json"].read_text(
+            encoding="utf-8"
+        )
+    )
+    candidate = next(
+        node for node in graph["nodes"] if node["id"] == "candidate_b"
+    )
+    candidate["state"] = "frozen"
+    page_session["evidence"]["component-graph.json"].write_text(
+        json.dumps(graph), encoding="utf-8"
+    )
+    _refresh_test_presentation_manifest(page_session)
     state["phase"] = "freeze_committed"
-    state["candidate_ids"] = state["failed_ids"] = ["candidate_b"]
+    state["candidate_ids"] = state["failed_ids"] = []
+    state["frozen"] = {
+        "candidate_b": state["parent_assets"]["candidate_b"]["sha256"],
+        "frozen_a": next(
+            node["mask_sha256"] for node in graph["nodes"]
+            if node["id"] == "frozen_a"
+        ),
+    }
     state["current_round"]["plan_ref"] = state["current_round"]["request_ref"]
     state["current_round"]["execution_ref"] = state["current_round"]["request_ref"]
     state["current_round"]["quality_ref"] = bind_synthetic_quality(state)
@@ -1146,7 +1197,7 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
             store, "page_001", request_path=request_path
         )
         assert updated["repair_round"] == expected_round
-        assert updated["candidate_ids"] == ["candidate_b"]
+        assert updated["candidate_ids"] == []
         assert updated["plan_count"] == 0
         assert updated["phase"] == "request_published"
         updated["phase"] = "freeze_committed"
@@ -1154,9 +1205,13 @@ def test_next_request_is_page_batch_and_round_six_is_impossible(page_session: di
         updated["current_round"]["execution_ref"] = updated["current_round"]["request_ref"]
         updated["current_round"]["quality_ref"] = bind_synthetic_quality(updated)
         store.write_json("pages/page_001/reconstruction/component_state.json", updated)
+    assert advance_component_repair(store, "page_001") == {
+        "status": "fallback_required",
+        "page_id": "page_001",
+        "repair_round": 5,
+        "stop_reason": "round_limit",
+    }
     assert not (first.parent.parent / "round-06").exists()
-    with pytest.raises(RuntimeError, match="round 6|five"):
-        record_next_component_request(store, "page_001", request_path=request_path)
 
 
 @pytest.mark.parametrize(
