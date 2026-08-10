@@ -67,6 +67,7 @@ def _install_component_e2e_boundaries(
             Image.new("L", (width, height), 0).save(text_mask)
             component_masks = []
             components = []
+            foreground_evidence = np.zeros((height, width), dtype=np.uint8)
             for index in range(component_count):
                 if component_count == 1:
                     left, top = width // 4, height // 4
@@ -80,6 +81,7 @@ def _install_component_e2e_boundaries(
                     (left, top, right - 1, bottom - 1), fill=255
                 )
                 mask.save(component_mask)
+                foreground_evidence[top:bottom, left:right] = 255
                 component_masks.append(str(component_mask))
                 component = work / f"component-{index:04d}.png"
                 source_rgb.crop((left, top, right, bottom)).convert("RGBA").save(component)
@@ -89,7 +91,12 @@ def _install_component_e2e_boundaries(
                 })
             state_path = work / "prepared-page.json"
             state_path.write_text("{}", encoding="utf-8")
+            foreground_evidence_path = work / "foreground-evidence-mask.png"
+            Image.fromarray(foreground_evidence, mode="L").save(
+                foreground_evidence_path
+            )
             prepared = {
+                "_prepared_schema_version": 5,
                 "state_path": str(state_path),
                 "initial_component_count": component_count,
                 "original_image_path": str(Path(source).resolve()),
@@ -97,6 +104,7 @@ def _install_component_e2e_boundaries(
                 "background_difference_path": str(difference),
                 "_text_mask_path": str(text_mask),
                 "_element_mask_paths": component_masks,
+                "_foreground_evidence_mask_path": str(foreground_evidence_path),
                 "components": components,
                 "img_width": width, "img_height": height,
                 "canvas_width": width, "canvas_height": height,
@@ -908,6 +916,16 @@ def test_local_provider_runs_multiple_rounds_serially_without_pausing(
     assert (round_two / "ownership.png").read_bytes() != (
         round_two / "source.png"
     ).read_bytes()
+    request = json.loads(
+        (round_two / "component_agent_request.json").read_text(encoding="utf-8")
+    )
+    unexplained = round_two / "unexplained-mask.png"
+    assert unexplained.read_bytes() == (
+        run_dir / "pages/page_001/reconstruction/execution-01/unexplained-mask.png"
+    ).read_bytes()
+    assert request["evidence"]["unexplained-mask.png"]["sha256"] == (
+        hashlib.sha256(unexplained.read_bytes()).hexdigest()
+    )
 
 
 def test_host_component_rounds_publish_hash_bound_presentation_manifests(
@@ -1331,8 +1349,10 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     assert calls == {"prepare": 1, "request": 1, "state": 1}
 
 
-def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
-    tmp_path: Path
+@pytest.mark.parametrize("prepared_schema_version", [1, 5])
+def test_initial_page_session_uses_versioned_foreground_evidence(
+    tmp_path: Path,
+    prepared_schema_version: int,
 ) -> None:
     source = tmp_path / "source.png"
     _image(source)
@@ -1359,6 +1379,7 @@ def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
     mask.putpixel((2, 1), 255)
     mask.save(component_mask)
     prepared = {
+        "_prepared_schema_version": prepared_schema_version,
         "state_path": str(prepared_root / "prepared-page.json"),
         "initial_component_count": 1,
         "original_image_path": str(source),
@@ -1372,13 +1393,23 @@ def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
         }],
         "text_items": [{"text": "T", "box": [10, 4, 3, 2]}],
     }
+    if prepared_schema_version == 5:
+        foreground = prepared_root / "foreground-evidence-mask.png"
+        Image.new("L", (20, 10), 0).save(foreground)
+        with Image.open(foreground) as image:
+            image.putpixel((2, 1), 255)
+            image.save(foreground)
+        prepared["_foreground_evidence_mask_path"] = str(foreground)
 
     session = legacy._build_initial_page_session(
         store, "page_001", prepared, reconstruction
     )
 
     assert session["provider"] == "host"
-    assert set(session["evidence"]) == set(legacy.EVIDENCE_NAMES)
+    expected_evidence = set(legacy.EVIDENCE_NAMES)
+    if prepared_schema_version < 5:
+        expected_evidence.remove("unexplained-mask.png")
+    assert set(session["evidence"]) == expected_evidence
     graph = json.loads(Path(session["evidence"]["component-graph.json"]).read_text())
     visual, text = graph["nodes"]
     assert visual["kind"] == "parent"
@@ -1396,6 +1427,13 @@ def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
     request = json.loads(request_path.read_text(encoding="utf-8"))
     assert request["candidate_ids"] == ["component_0001"]
     assert request["frozen_ids"] == ["text_0001"]
+    if prepared_schema_version == 5:
+        record = request["evidence"]["unexplained-mask.png"]
+        unexplained = request_path.parent / record["path"]
+        assert unexplained.read_bytes() == foreground.read_bytes()
+        assert record["sha256"] == hashlib.sha256(unexplained.read_bytes()).hexdigest()
+    else:
+        assert "unexplained-mask.png" not in request["evidence"]
     evidence = session["evidence"]
     for name in ("numbered-masks.png", "ocr-overlay.png", "ownership.png"):
         assert Path(evidence[name]).read_bytes() != Path(evidence["source.png"]).read_bytes()

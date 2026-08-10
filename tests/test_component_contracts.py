@@ -16,6 +16,7 @@ def test_component_agent_provider_contract_is_frozen() -> None:
     assert "pending_gate" in component_contracts.COMPONENT_STATES
     assert "component-isolation.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
     assert "presentation-manifest.json" in component_contracts.COMPONENT_EVIDENCE_NAMES
+    assert "unexplained-mask.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
 
 
 def test_quality_input_contract_requires_presentation_manifest_ref() -> None:
@@ -296,6 +297,21 @@ def _plan(request: dict, action: str, object_ids: list[str]) -> dict:
                          "evidence": ["visible"]}]}
 
 
+def test_component_plan_accepts_multiple_background_rebuilds() -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, "rebuild_background", ["visual"])
+    plan["actions"][0]["parameters"] = {"margin_ratio": 0.01}
+    plan["actions"].append({
+        **plan["actions"][0],
+        "object_ids": ["visual2"],
+        "parameters": {"margin_ratio": 0.02},
+    })
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
 def _node(
     component_id: str,
     *,
@@ -453,6 +469,33 @@ def test_frozen_text_suppression_requires_explicit_transition_authorization() ->
         after=suppressed,
         allowed_suppressed_text_ids={"text_0001"},
     ) is suppressed
+
+
+def test_inactive_visual_reactivation_requires_exact_authorization() -> None:
+    visual = _node(
+        "visual_0001", kind="parent", parent_id=None, state="inactive",
+    )
+    before = {"nodes": [visual]}
+    reactivated = {"nodes": [{**visual, "state": "pending"}]}
+
+    with pytest.raises(ValueError, match="inactive"):
+        component_contracts.validate_graph_transition(
+            before=before,
+            after=reactivated,
+        )
+
+    assert component_contracts.validate_graph_transition(
+        before=before,
+        after=reactivated,
+        allowed_reactivated_ids={"visual_0001"},
+    ) is reactivated
+
+    with pytest.raises(ValueError, match="reactivation"):
+        component_contracts.validate_graph_transition(
+            before=before,
+            after=reactivated,
+            allowed_reactivated_ids={"other"},
+        )
 
 
 def test_authorized_text_suppression_cannot_change_any_other_frozen_field() -> None:

@@ -17,6 +17,7 @@ from scripts.initial_diagnostics import validate_initial_diagnostics
 
 from image2editable.component_contracts import (
     COMPONENT_EVIDENCE_NAMES,
+    LEGACY_COMPONENT_EVIDENCE_NAMES,
     MAX_REPAIR_ROUNDS,
     validate_agent_provider,
     validate_component_agent_request,
@@ -29,6 +30,7 @@ from image2editable.execution import ExecutionLease
 
 
 EVIDENCE_NAMES = tuple(sorted(COMPONENT_EVIDENCE_NAMES))
+LEGACY_EVIDENCE_NAMES = tuple(sorted(LEGACY_COMPONENT_EVIDENCE_NAMES))
 REQUEST_NAME = "component_agent_request.json"
 MARKER_NAME = "publication-marker.json"
 INTEGRITY_DIRECTORY = ".component-agent-integrity"
@@ -326,7 +328,10 @@ def _initialize_component_repair_state_locked(
         "schema_version": 1, "page_id": page_id, "provider": provider,
         "source_sha256": request["source_sha256"],
         "initial_component_count": initial_component_count,
-        "quality_gate_version": 1, "revision": 1,
+        "quality_gate_version": (
+            2 if "unexplained-mask.png" in request["evidence"] else 1
+        ),
+        "revision": 1,
         "phase": "request_published", "status": "active",
         "repair_round": request["repair_round"], "plan_count": 0,
         "stop_reason": None,
@@ -426,6 +431,18 @@ def record_component_execution(
             action["object_ids"][0] for action in plan["actions"]
             if action["action"] == "suppress_text"
         }
+        before_by_id = {node["id"]: node for node in before["nodes"]}
+        after_by_id = {node["id"]: node for node in after["nodes"]}
+        reactivated_ids = {
+            action["object_ids"][0]
+            for action in plan["actions"]
+            if action["action"] in {
+                "retry_with_box", "retry_with_points",
+                "collapse_to_parent", "absorb_into_parent",
+            }
+            and before_by_id[action["object_ids"][0]]["state"] == "inactive"
+            and after_by_id.get(action["object_ids"][0], {}).get("state") == "pending"
+        }
         _, _, presentation_manifest, _ = _verify_quality_input_refs(
             store, state, execution["quality_input_refs"],
             request=request,
@@ -468,6 +485,7 @@ def record_component_execution(
             before=before,
             after=after,
             allowed_suppressed_text_ids=suppressed_text_ids,
+            allowed_reactivated_ids=reactivated_ids,
         )
         for node in after["nodes"]:
             mask_path = Path(output_graph_path).parent / Path(
@@ -1351,10 +1369,15 @@ def _verify_quality_input_refs(
     expected_component_ids: list[str] | None = None,
     return_bound_inputs: bool = False,
 ):
-    if not isinstance(refs, dict) or frozenset(refs) not in {
-        _LEGACY_QUALITY_INPUT_NAMES,
-        _QUALITY_INPUT_NAMES,
-    }:
+    expected_names = (
+        _QUALITY_INPUT_NAMES
+        if state.get("quality_gate_version", 1) >= 2
+        else _LEGACY_QUALITY_INPUT_NAMES
+    )
+    if not isinstance(refs, dict) or frozenset(refs) != expected_names:
+        missing = expected_names - frozenset(refs) if isinstance(refs, dict) else set()
+        if "foreground_evidence" in missing:
+            raise ValueError("component quality input refs require foreground_evidence")
         raise ValueError("component quality input refs are invalid")
     bound_payloads = {}
     for name, reference in refs.items():
@@ -2342,7 +2365,7 @@ def _build_component_agent_request_locked(
     try:
         records: dict[str, dict[str, str]] = {}
         graph_payload = b""
-        for name in EVIDENCE_NAMES:
+        for name in sorted(sources):
             _require_single_directory_identity(staging, staging_identity)
             source = _contained_path(Path(sources[name]), reconstruction)
             digest, captured = _copy_bound_file(
@@ -2618,7 +2641,10 @@ def _validate_page_session(session: object) -> tuple[str, str, Path, dict]:
         )
     _validate_directory_chain(reconstruction, reconstruction)
     evidence = session["evidence"]
-    if not isinstance(evidence, dict) or set(evidence) != COMPONENT_EVIDENCE_NAMES:
+    if not isinstance(evidence, dict) or frozenset(evidence) not in {
+        LEGACY_COMPONENT_EVIDENCE_NAMES,
+        COMPONENT_EVIDENCE_NAMES,
+    }:
         raise ValueError("page_session evidence fields are invalid")
     return page_id, provider, reconstruction, evidence
 

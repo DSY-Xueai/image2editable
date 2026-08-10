@@ -150,6 +150,7 @@ def execute_component_actions(
     mask_payloads = {component_id: loaded[1] for component_id, loaded in loaded_masks.items()}
     touched = set()
     suppressed_text_ids = set()
+    reactivated_ids = set()
     for action in actions:
         validate_component_action(action, graph=validated)
         object_ids = action["object_ids"]
@@ -186,6 +187,10 @@ def execute_component_actions(
                 nodes[value]["state"] in {"pending", "frozen"}
                 for value in object_ids
             )
+        elif name in {"retry_with_box", "retry_with_points"}:
+            valid_states = nodes[object_ids[0]]["state"] in {
+                "pending", "inactive"
+            }
         else:
             allowed_states = {"pending"}
             valid_states = all(
@@ -227,6 +232,8 @@ def execute_component_actions(
                 ]
         elif name == "collapse_to_parent":
             parent = object_ids[0]
+            if nodes[parent]["state"] == "inactive":
+                reactivated_ids.add(parent)
             nodes[parent]["state"] = "pending"
             _deactivate_descendants(nodes, parent)
         elif name == "absorb_into_parent":
@@ -234,6 +241,8 @@ def execute_component_actions(
             masks[parent] = np.logical_or.reduce(
                 [masks[value] for value in object_ids]
             )
+            if nodes[parent]["state"] == "inactive":
+                reactivated_ids.add(parent)
             nodes[parent]["state"] = "pending"
             for component_id in absorbed:
                 nodes[component_id]["state"] = "inactive"
@@ -310,6 +319,9 @@ def execute_component_actions(
             if proposed.shape != image.shape[:2] or not proposed.any():
                 raise VisualSegmentationError("SAM component retry returned an invalid mask")
             masks[component_id] = proposed
+            if nodes[component_id]["state"] == "inactive":
+                reactivated_ids.add(component_id)
+                nodes[component_id]["state"] = "pending"
             parent_id = nodes[component_id]["parent_id"]
             if parent_id is not None and (
                 parameters.get("independent") is True
@@ -344,6 +356,7 @@ def execute_component_actions(
             before=validated,
             after=result,
             allowed_suppressed_text_ids=suppressed_text_ids,
+            allowed_reactivated_ids=reactivated_ids,
         )
         (staging / "component-graph.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -1266,7 +1279,8 @@ def filter_prompt_free_candidates(
     for candidate in candidates:
         visible = _drop_small_mask_islands(candidate.mask) & (text_mask == 0)
         area = int(np.count_nonzero(visible))
-        if area < min_area or candidate.score < min_score:
+        required_score = 0.70 if candidate.source == "geometry" else min_score
+        if area < min_area or candidate.score < required_score:
             continue
         duplicate = None
         max_containment = 0.0

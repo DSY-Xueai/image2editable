@@ -763,6 +763,10 @@ def test_page_only_background_residual_enters_next_round(
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
     )
+    initialized = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert initialized["quality_gate_version"] == 2
     advance_component_repair(store, "page_001")
     graph = load_component_agent_graph(request_path)
     frozen_before = dict(next(
@@ -978,6 +982,27 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     graph_path = execution_dir / "component-graph.json"
     graph_path.write_text(json.dumps(next_graph), encoding="utf-8")
     quality_input_refs = _quality_input_refs(execution_dir, store, graph_path)
+    missing_evidence_refs = dict(quality_input_refs)
+    missing_evidence_refs.pop("foreground_evidence")
+    missing_evidence_execution = {
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
+        "repair_round": 1, "request_sha256": plan["request_sha256"],
+        "input_graph_sha256": request["graph_sha256"],
+        "output_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+        "executable_action_count": 1,
+        "quality_input_refs": missing_evidence_refs,
+    }
+    missing_evidence_path = execution_dir / "missing-evidence-execution.json"
+    missing_evidence_path.write_text(
+        json.dumps(missing_evidence_execution), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="foreground_evidence"):
+        record_component_execution(
+            store,
+            "page_001",
+            execution_path=missing_evidence_path,
+            output_graph_path=graph_path,
+        )
     foreground_evidence = execution_dir / "foreground-evidence-mask.png"
     Image.new("L", (2, 2), 255).save(foreground_evidence)
     quality_input_refs["foreground_evidence"] = {
@@ -1909,6 +1934,10 @@ def _quality_input_refs(directory: Path, store, graph_path: Path) -> dict:
         Image.fromarray(np.zeros((2, 2), dtype=np.uint8)).save(path)
         paths[name] = path
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    if state["quality_gate_version"] >= 2:
+        foreground = directory / "foreground-evidence.png"
+        Image.fromarray(np.zeros((2, 2), dtype=np.uint8)).save(foreground)
+        paths["foreground-evidence"] = foreground
     native = directory / "native-check.json"
     native.write_text(json.dumps({
         "schema_version": 1, "page_id": "page_001",
@@ -2227,6 +2256,10 @@ def _execute_composite_quality_round(
         Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
         quality_paths[name.replace("-", "_")] = path
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    if state["quality_gate_version"] >= 2:
+        foreground = execution_dir / "foreground-evidence.png"
+        Image.fromarray(np.zeros(shape, dtype=np.uint8)).save(foreground)
+        quality_paths["foreground_evidence"] = foreground
     native = execution_dir / "native-check.json"
     native.write_text(json.dumps({
         "schema_version": 1, "page_id": "page_001",
@@ -3207,14 +3240,32 @@ def test_invalid_later_action_is_rejected_before_sam_side_effect(tmp_path: Path)
     assert calls == []
 
 
-def test_retry_rejects_inactive_non_candidate(tmp_path: Path) -> None:
+def test_retry_with_box_can_reconsider_inactive_visual(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    left["state"] = "inactive"
+    proposed = np.asarray(Image.open(input_dir / left["mask"])) > 0
+
+    result = execute_component_actions(
+        image, graph,
+        [_action("retry_with_box", ["left"], {"box": [0.1, 0.1, 0.9, 0.9]})],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir, output_dir=tmp_path / "round-inactive",
+    )
+
+    reconsidered = next(node for node in result["nodes"] if node["id"] == "left")
+    assert reconsidered["state"] == "pending"
+
+
+def test_non_retry_action_cannot_reactivate_inactive_visual(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    left["state"] = "inactive"
+
     with pytest.raises(ValueError, match="pending component"):
         execute_component_actions(
-            image, graph,
-            [_action("retry_with_box", ["parent"], {"box": [0.1, 0.1, 0.9, 0.9]})],
-            sam_runner=lambda **_: np.ones(image.shape[:2], dtype=bool),
-            input_dir=input_dir, output_dir=tmp_path / "round-inactive",
+            image, graph, [_action("accept", ["left"])], sam_runner=None,
+            input_dir=input_dir, output_dir=tmp_path / "round-inactive-accept",
         )
 
 
@@ -3940,6 +3991,17 @@ def test_validate_request_rejects_changed_overlay(page_session: dict) -> None:
     request_path = build_component_agent_request(page_session, repair_round=1)
     overlay = request_path.parent / "ocr-overlay.png"
     overlay.write_bytes(overlay.read_bytes() + b"changed")
+
+    with pytest.raises(RuntimeError, match="evidence hash"):
+        load_component_agent_request(request_path)
+
+
+def test_validate_request_rejects_changed_unexplained_mask(
+    page_session: dict,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    unexplained = request_path.parent / "unexplained-mask.png"
+    unexplained.write_bytes(unexplained.read_bytes() + b"changed")
 
     with pytest.raises(RuntimeError, match="evidence hash"):
         load_component_agent_request(request_path)

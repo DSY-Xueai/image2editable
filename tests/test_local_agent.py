@@ -52,6 +52,14 @@ def test_host_skill_limits_absorb_to_one_physical_entity() -> None:
     assert "语义父级只用于分组，不参与最终像素渲染" in text
 
 
+def test_host_skill_requires_residual_driven_repairs() -> None:
+    text = (ROOT / "skills/image-to-ppt/SKILL.md").read_text(encoding="utf-8")
+
+    assert "unexplained_visual_residual" in text
+    assert "unexplained-mask.png" in text
+    assert "background_text_residual" in text
+
+
 def _request_path(tmp_path: Path) -> Path:
     reconstruction = tmp_path / "pages" / "page_001" / "reconstruction"
     evidence_root = reconstruction / "evidence-source"
@@ -459,6 +467,10 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         "suppress_text only when visual evidence clearly proves",
         '"negative"',
         "normalized to 0..1",
+        "unexplained_visual_residual",
+        "unexplained-mask.png",
+        "Do not accept, discard, or classify the region as background",
+        "background_text_residual",
     ):
         assert required_rule in local_agent_worker.SYSTEM_PROMPT
     prompt_messages = next(value for kind, value, _ in calls if kind == "prompt")

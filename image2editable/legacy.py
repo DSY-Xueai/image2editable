@@ -543,6 +543,10 @@ def _build_initial_page_session(
     source_target = evidence_root / "source.png"
     shutil.copyfile(prepared["original_image_path"], source_target)
     evidence = {"source.png": source_target}
+    if prepared.get("_prepared_schema_version", 1) >= 5:
+        unexplained = evidence_root / "unexplained-mask.png"
+        shutil.copyfile(prepared["_foreground_evidence_mask_path"], unexplained)
+        evidence["unexplained-mask.png"] = unexplained
 
     nodes = []
     for index, (mask_source, component) in enumerate(
@@ -645,7 +649,12 @@ def _build_initial_page_session(
             text_items=text_items,
         )
     )
-    if set(evidence) != set(EVIDENCE_NAMES):
+    expected_evidence = (
+        set(EVIDENCE_NAMES)
+        if prepared.get("_prepared_schema_version", 1) >= 5
+        else set(EVIDENCE_NAMES) - {"unexplained-mask.png"}
+    )
+    if set(evidence) != expected_evidence:
         raise RuntimeError("legacy component evidence set is incomplete")
     return {
         "page_id": page_id,
@@ -2100,6 +2109,8 @@ def _publish_next_legacy_request(
         "component-graph.json": graph_path,
         "quality-report.json": quality_path,
     }
+    if "foreground_evidence" in refs:
+        copies["unexplained-mask.png"] = quality_path.parent / "unexplained-mask.png"
     for name, source_path in copies.items():
         target = evidence_root / name
         shutil.copyfile(source_path, target)
@@ -2541,7 +2552,10 @@ def _accepted_slide_data(
         "source", "background", "reconstructed", "text_mask",
         "native_check", "presentation_manifest",
     }
-    if not isinstance(refs, dict) or set(refs) != expected_refs:
+    if not isinstance(refs, dict) or frozenset(refs) not in {
+        frozenset(expected_refs),
+        frozenset({*expected_refs, "foreground_evidence"}),
+    }:
         raise ValueError("accepted presentation references are invalid")
     for reference in refs.values():
         _legacy_ref_path(store, reference)

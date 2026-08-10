@@ -50,7 +50,7 @@ from image2editable.store import RunStore
 _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
     "_PPTX_EXECUTION_MANIFEST", default=None
 )
-COMPONENT_QUALITY_GATE_VERSION = "component-quality-v1"
+COMPONENT_QUALITY_GATE_VERSION = "component-quality-v2"
 _LOCAL_MODEL_PROVENANCE = "local-agent-model.json"
 _LOCAL_MODEL_PROVENANCE_LIMIT = 16 * 1024 * 1024
 

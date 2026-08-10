@@ -10,7 +10,7 @@ COMPONENT_STATES = frozenset(
     {"pending", "pending_gate", "failed", "frozen", "inactive"}
 )
 COMPONENT_KINDS = frozenset({"parent", "child", "text"})
-COMPONENT_EVIDENCE_NAMES = frozenset(
+LEGACY_COMPONENT_EVIDENCE_NAMES = frozenset(
     {
         "source.png",
         "numbered-masks.png",
@@ -24,6 +24,9 @@ COMPONENT_EVIDENCE_NAMES = frozenset(
         "presentation-manifest.json",
     }
 )
+COMPONENT_EVIDENCE_NAMES = LEGACY_COMPONENT_EVIDENCE_NAMES | {
+    "unexplained-mask.png"
+}
 
 _COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
     {
@@ -429,17 +432,12 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             if node.get("kind") == "parent" and node.get("state") == "inactive"
         }
     touched = set()
-    background_rebuilds = 0
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
             raise ValueError("component action fields are invalid")
         name = action["action"]
         if type(name) is not str or name not in _ACTION_PARAMETERS:
             raise ValueError("component action is invalid")
-        if name == "rebuild_background":
-            background_rebuilds += 1
-            if background_rebuilds > 1:
-                raise ValueError("component plan has multiple background rebuilds")
         object_ids = action["object_ids"]
         if (
             not isinstance(object_ids, list) or not object_ids
@@ -607,7 +605,10 @@ def validate_component_agent_request(request: object) -> dict:
     if set(request["candidate_ids"]) & set(request["frozen_ids"]):
         raise ValueError("candidate_ids and frozen_ids must be disjoint")
     evidence = request["evidence"]
-    if not isinstance(evidence, dict) or set(evidence) != COMPONENT_EVIDENCE_NAMES:
+    if not isinstance(evidence, dict) or frozenset(evidence) not in {
+        LEGACY_COMPONENT_EVIDENCE_NAMES,
+        COMPONENT_EVIDENCE_NAMES,
+    }:
         raise ValueError("component agent request evidence fields are invalid")
     for name, record in evidence.items():
         if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
@@ -750,6 +751,7 @@ def validate_graph_transition(
     before: object,
     after: object,
     allowed_suppressed_text_ids: set[str] | frozenset[str] | None = None,
+    allowed_reactivated_ids: set[str] | frozenset[str] | None = None,
 ) -> dict:
     before_graph = validate_component_graph(before)
     allowed = (
@@ -757,11 +759,21 @@ def validate_graph_transition(
         if allowed_suppressed_text_ids is None
         else frozenset(allowed_suppressed_text_ids)
     )
+    reactivated = (
+        frozenset()
+        if allowed_reactivated_ids is None
+        else frozenset(allowed_reactivated_ids)
+    )
     if (
         allowed_suppressed_text_ids is not None
         and not isinstance(allowed_suppressed_text_ids, (set, frozenset))
     ) or any(type(value) is not str or not value for value in allowed):
         raise ValueError("suppressed text authorization is invalid")
+    if (
+        allowed_reactivated_ids is not None
+        and not isinstance(allowed_reactivated_ids, (set, frozenset))
+    ) or any(type(value) is not str or not value for value in reactivated):
+        raise ValueError("component reactivation authorization is invalid")
     before_nodes = {node["id"]: node for node in before_graph["nodes"]}
     if any(
         component_id not in before_nodes
@@ -770,6 +782,13 @@ def validate_graph_transition(
         for component_id in allowed
     ):
         raise ValueError("suppressed text authorization is invalid")
+    if any(
+        component_id not in before_nodes
+        or before_nodes[component_id]["kind"] == "text"
+        or before_nodes[component_id]["state"] != "inactive"
+        for component_id in reactivated
+    ):
+        raise ValueError("component reactivation authorization is invalid")
     if not isinstance(after, dict) or set(after) != {"nodes"}:
         raise ValueError("component graph fields are invalid")
     if not isinstance(after["nodes"], list):
@@ -779,6 +798,17 @@ def validate_graph_transition(
         for node in after["nodes"]
         if isinstance(node, dict) and type(node.get("id")) is str
     }
+    actual_reactivated = {
+        component_id
+        for component_id, node in before_nodes.items()
+        if node["state"] == "inactive"
+        and after_nodes.get(component_id, {}).get("state") != "inactive"
+    }
+    if actual_reactivated != set(reactivated) or any(
+        after_nodes[component_id].get("state") != "pending"
+        for component_id in actual_reactivated
+    ):
+        raise ValueError("inactive component reactivation is not authorized")
     for node in before_graph["nodes"]:
         if node["state"] != "frozen":
             continue

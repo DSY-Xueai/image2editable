@@ -101,6 +101,8 @@ prepare 会在全页 OCR 和首轮视觉候选完成后，对小型候选做两�
 
 组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。`accept`、`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认对象是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
 
+当 `quality-report.json` 包含 `unexplained_visual_residual` 时，必须查看 `unexplained-mask.png`。每个显著区域都必须由 active visual owner 覆盖，或对最接近的 inactive visual candidate 执行 `retry_with_box` / `retry_with_points`；不得用 accept、discard 或将其归为背景来消除违规。当 `background_text_residual` 是唯一阻断项时，对诊断命中的冻结文字或视觉 ID 执行 `rebuild_background`。
+
 PPTX 的整页截图候选先使用决策路由：
 
 ```bash

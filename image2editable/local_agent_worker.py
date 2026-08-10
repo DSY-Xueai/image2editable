@@ -38,6 +38,7 @@ Never target a frozen object except a frozen text node with attach_text or suppr
 Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
 Inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels.
 Treat glyph-shaped transparent holes or missing expected fills and lines as incomplete segmentation, not successful text removal. When the inactive parent restores the same complete visual unit, use collapse_to_parent while keeping independently movable higher-z components separate; never restore source glyph pixels.
+When quality-report.json contains unexplained_visual_residual, inspect unexplained-mask.png. Every material region must be covered by an active visual owner or repaired with retry_with_box/retry_with_points on the closest inactive visual candidate. Do not accept, discard, or classify the region as background merely to reduce violations. When background_text_residual is the only blocking violation, issue rebuild_background for the affected frozen text or visual IDs using the residual diagnostics.
 When quality reports contained_parent_review for contained parent candidates, use the exact contained_parent_pairs IDs from quality evidence and inspect both isolation cells. Choose one rendering owner when one is a duplicate subset. If both are genuinely independent, explicitly accept each at confidence >= 0.92 and include both exact pair IDs as separate strings in each action evidence; otherwise the review remains a hard failure.
 Use the counterfactual test: after one unit is moved alone, both that unit and the remaining visual units should still be complete.
 Every action must contain exactly action, object_ids, parameters, confidence, evidence.
@@ -60,6 +61,7 @@ _IMAGE_EVIDENCE = (
     "ownership.png",
     "reconstructed.png",
     "difference.png",
+    "unexplained-mask.png",
 )
 _EVIDENCE_DESCRIPTIONS = {
     "source.png": "original page pixels",
@@ -69,6 +71,7 @@ _EVIDENCE_DESCRIPTIONS = {
     "ownership.png": "exclusive component pixel ownership colors and IDs",
     "reconstructed.png": "current deterministic reconstruction",
     "difference.png": "contrast-expanded source versus reconstruction difference",
+    "unexplained-mask.png": "material foreground pixels without an active visual owner",
 }
 _JSON_LIMIT = 16 * 1024 * 1024
 
@@ -176,6 +179,8 @@ def _messages(
         }
     ]
     for name in _IMAGE_EVIDENCE:
+        if name not in evidence:
+            continue
         content.append(
             {
                 "type": "text",

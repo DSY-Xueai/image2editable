@@ -872,6 +872,29 @@ def test_combine_residual_candidates_keeps_prompt_free_object() -> None:
     assert np.array_equal(residual[0].mask, right)
 
 
+def test_combine_residual_candidates_keeps_geometry_when_sam_is_empty() -> None:
+    import numpy as np
+
+    source = np.full((80, 120, 3), 240, dtype=np.uint8)
+    shape = np.zeros((80, 120), dtype=bool)
+    shape[20:60, 30:90] = True
+    source[shape] = 20
+    geometry = visual_segment.MaskCandidate(shape, 0.70, "geometry")
+
+    residual, attached = visual_segment.combine_residual_candidates(
+        source=source,
+        clean_background=source.copy(),
+        prompted=[],
+        prompt_free=[geometry],
+        existing=[],
+        text_mask=np.zeros(shape.shape, dtype=np.uint8),
+    )
+
+    assert attached == 0
+    assert len(residual) == 1
+    assert residual[0] is geometry
+
+
 def test_resolve_visual_elements_reuses_candidate_as_semantic_support() -> None:
     import numpy as np
 
