@@ -636,6 +636,7 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         component_path = component_dir / "component.png"
         element_mask_path = mask_dir / "0000.png"
         semantic_mask_path = semantic_mask_dir / "0000.png"
+        foreground_evidence_path = target / "foreground-evidence-mask.png"
         background_path = target / "background-original.png"
         Image.new("RGBA", (3, 3), "red").save(component_path)
         element_mask = np.zeros((10, 20), dtype=np.uint8)
@@ -644,6 +645,7 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         semantic_mask[1:6, 1:6] = 255
         Image.fromarray(element_mask, mode="L").save(element_mask_path)
         Image.fromarray(semantic_mask, mode="L").save(semantic_mask_path)
+        Image.fromarray(semantic_mask, mode="L").save(foreground_evidence_path)
         Image.new("RGB", (20, 10), "white").save(background_path)
         Image.new("L", (20, 10), 0).save(target / "background-removal-mask.png")
         Image.new("RGB", (20, 10), "black").save(
@@ -675,6 +677,7 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
             "_text_mask_path": text_analysis["mask_path"],
             "_element_mask_paths": [str(element_mask_path)],
             "_semantic_mask_paths": [str(semantic_mask_path)],
+            "_foreground_evidence_mask_path": str(foreground_evidence_path),
         }
 
     monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
@@ -712,6 +715,7 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         manifest["assets"]["ocr_mask"],
         manifest["assets"]["element_masks"][0],
         manifest["assets"]["semantic_masks"][0],
+        manifest["assets"]["foreground_evidence_mask"],
         manifest["assets"]["background_original"],
         manifest["components"][0]["asset"],
     ]:

@@ -6520,6 +6520,7 @@ def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(
     assert len(open_calls) == (
         len(prepared["_element_mask_paths"])
         + len(prepared["_semantic_mask_paths"])
+        + 1
     )
     assert staged_paths
     staging_dirs = {path.parent for path in staged_paths}

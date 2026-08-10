@@ -837,6 +837,14 @@ def _prepare_rerun_fixture(
             ])
             child_paths.append(str(stale_child))
             parent_paths.append(str(stale_parent))
+        foreground_evidence = np.zeros((70, 120), dtype=np.uint8)
+        for parent_mask_path in parent_paths:
+            with Image.open(parent_mask_path) as parent_mask:
+                foreground_evidence |= np.asarray(
+                    parent_mask.convert("L"), dtype=np.uint8
+                )
+        foreground_evidence_path = target / "foreground-evidence-mask.png"
+        Image.fromarray(foreground_evidence).save(foreground_evidence_path)
         background = target / "background-original.png"
         Image.new("RGB", (120, 70), "white").save(background)
         Image.new("L", (120, 70), 0).save(target / "background-removal-mask.png")
@@ -861,6 +869,7 @@ def _prepare_rerun_fixture(
             "_text_mask_path": text_analysis["mask_path"],
             "_element_mask_paths": child_paths,
             "_semantic_mask_paths": parent_paths,
+            "_foreground_evidence_mask_path": str(foreground_evidence_path),
         }
 
     monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)
@@ -1150,6 +1159,7 @@ def test_prepared_page_v2_loads_with_empty_initial_diagnostics(
     manifest["schema_version"] = 2
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("text_cleanup_mask")
+    manifest["assets"].pop("foreground_evidence_mask")
     _rewrite_prepared_manifest(state_path, manifest)
 
     loaded = image_to_ppt.load_component_layers(state_path)
