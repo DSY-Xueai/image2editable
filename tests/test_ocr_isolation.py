@@ -1158,13 +1158,8 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     )
     monkeypatch.setattr(
         image_to_ppt,
-        "filter_unchanged_residual_candidates",
-        lambda *args: [],
-    )
-    monkeypatch.setattr(
-        image_to_ppt,
-        "reconcile_residual_candidates",
-        lambda *args: ([], 1),
+        "combine_residual_candidates",
+        lambda **kwargs: ([], 1),
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -1250,7 +1245,7 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         _resource_isolation=True,
     )
 
-    assert sam_calls == ["prompted", "automatic", "prompted"]
+    assert sam_calls == ["prompted", "automatic", "prompted", "automatic"]
     assert background_calls == ["clean", "clean", "clean", "widescreen"]
     assert len(isolated_calls) == 4
     assert all(

@@ -1316,6 +1316,29 @@ def filter_unchanged_residual_candidates(
     return retained
 
 
+def combine_residual_candidates(
+    *,
+    source: np.ndarray,
+    clean_background: np.ndarray,
+    prompted: list[MaskCandidate],
+    prompt_free: list[MaskCandidate],
+    existing: list[MaskCandidate],
+    text_mask: np.ndarray,
+) -> tuple[list[MaskCandidate], int]:
+    automatic = filter_prompt_free_candidates(
+        prompt_free,
+        prompted,
+        text_mask,
+    )
+    residual = filter_unchanged_residual_candidates(
+        source,
+        clean_background,
+        [*prompted, *automatic],
+        text_mask,
+    )
+    return reconcile_residual_candidates(residual, existing, source.shape[:2])
+
+
 def reconcile_residual_candidates(
     residual_candidates: list[MaskCandidate],
     existing_candidates: list[MaskCandidate],

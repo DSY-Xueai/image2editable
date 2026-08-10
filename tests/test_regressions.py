@@ -847,6 +847,31 @@ def test_prompt_free_filter_reuses_candidate_storage() -> None:
     assert retained[0] is candidate
 
 
+def test_combine_residual_candidates_keeps_prompt_free_object() -> None:
+    import numpy as np
+
+    source = np.full((80, 120, 3), 240, dtype=np.uint8)
+    right = np.zeros((80, 120), dtype=bool)
+    right[24:56, 72:104] = True
+    source[right] = 20
+    clean_background = np.full_like(source, 240)
+    clean_background[right] = source[right]
+    automatic = [visual_segment.MaskCandidate(right, 0.96, "sam")]
+
+    residual, attached = visual_segment.combine_residual_candidates(
+        source=source,
+        clean_background=clean_background,
+        prompted=[],
+        prompt_free=automatic,
+        existing=[],
+        text_mask=np.zeros(right.shape, dtype=np.uint8),
+    )
+
+    assert attached == 0
+    assert len(residual) == 1
+    assert np.array_equal(residual[0].mask, right)
+
+
 def test_resolve_visual_elements_reuses_candidate_as_semantic_support() -> None:
     import numpy as np
 
@@ -1988,6 +2013,7 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
     expected_component = component.copy()
     empty_mask = np.zeros(source.shape[:2], dtype=np.uint8)
     export_kwargs = {}
+    sam_generation_calls = []
 
     monkeypatch.setattr(
         image_to_ppt,
@@ -2000,7 +2026,11 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
         "generate_prompted_mask_candidates",
         lambda *args: [],
     )
-    monkeypatch.setattr(image_to_ppt, "generate_mask_candidates", lambda *args, **kwargs: [])
+    def generate_masks(*args, **kwargs):
+        sam_generation_calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(image_to_ppt, "generate_mask_candidates", generate_masks)
     monkeypatch.setattr(
         image_to_ppt,
         "filter_prompt_free_candidates",
@@ -2008,13 +2038,8 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
     )
     monkeypatch.setattr(
         image_to_ppt,
-        "filter_unchanged_residual_candidates",
-        lambda *args: [],
-    )
-    monkeypatch.setattr(
-        image_to_ppt,
-        "reconcile_residual_candidates",
-        lambda *args: ([], 0),
+        "combine_residual_candidates",
+        lambda **kwargs: ([], 0),
     )
     monkeypatch.setattr(image_to_ppt, "recheck_visual_element_holes", lambda *args: None)
     monkeypatch.setattr(
@@ -2081,6 +2106,10 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
         == identity_data["background_original_path"]
     )
     assert not (tmp_path / "identity-work" / "background-16x9.png").exists()
+    assert [call["include_geometry"] for call in sam_generation_calls] == [
+        False, True, False, True,
+    ]
+    assert all(call["min_score"] == 0.90 for call in sam_generation_calls)
 
 
 def test_text_only_background_removes_detected_box_without_changing_outside() -> None:
@@ -2473,13 +2502,8 @@ def test_process_image_restores_raw_text_mask_after_each_component_inpaint(
     monkeypatch.setattr(image_to_ppt, "filter_prompt_free_candidates", lambda *args: [])
     monkeypatch.setattr(
         image_to_ppt,
-        "filter_unchanged_residual_candidates",
-        lambda *args: [],
-    )
-    monkeypatch.setattr(
-        image_to_ppt,
-        "reconcile_residual_candidates",
-        lambda *args: ([], 1),
+        "combine_residual_candidates",
+        lambda **kwargs: ([], 1),
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -4049,13 +4073,8 @@ def test_deferred_mask_paths_are_lossless_and_hold_no_arrays(
     )
     monkeypatch.setattr(
         image_to_ppt,
-        "filter_unchanged_residual_candidates",
-        lambda *args: [],
-    )
-    monkeypatch.setattr(
-        image_to_ppt,
-        "reconcile_residual_candidates",
-        lambda *args: ([], 0),
+        "combine_residual_candidates",
+        lambda **kwargs: ([], 0),
     )
     monkeypatch.setattr(
         image_to_ppt,

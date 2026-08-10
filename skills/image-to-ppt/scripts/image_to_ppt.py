@@ -72,12 +72,12 @@ from scripts.visual_segment import (
     MaskCandidate,
     VisualSegmentationError,
     background_residual_metrics,
+    combine_residual_candidates,
     create_sam_generator,
     filter_prompt_free_candidates,
-    filter_unchanged_residual_candidates,
+    generate_geometry_candidates,
     generate_mask_candidates,
     generate_prompted_mask_candidates,
-    reconcile_residual_candidates,
     recheck_visual_element_holes,
     has_background_residual,
     needs_text_only_fallback,
@@ -1813,30 +1813,44 @@ def _process_image(
                 _restore_mask_references(packed_masks)
                 element_masks = [element.mask for element in elements]
         if _resource_isolation:
-            residual_candidates = _generate_sam_candidates_isolated(
+            prompted_residual_candidates = _generate_sam_candidates_isolated(
                 clean_background,
                 text_ink_mask,
                 residual_proposals,
                 work_dir,
                 mode="prompted",
             )
+            prompt_free_residual_candidates = _generate_sam_candidates_isolated(
+                clean_background,
+                None,
+                None,
+                work_dir,
+                mode="automatic",
+            )
+            prompt_free_residual_candidates.extend(
+                generate_geometry_candidates(clean_background)
+            )
         else:
-            residual_candidates = generate_prompted_mask_candidates(
+            prompted_residual_candidates = generate_prompted_mask_candidates(
                 clean_background,
                 residual_proposals,
                 mask_generator,
                 text_ink_mask,
             )
-        residual_candidates = filter_unchanged_residual_candidates(
-            img,
-            clean_background,
-            residual_candidates,
-            text_ink_mask,
-        )
-        residual_candidates, attached_count = reconcile_residual_candidates(
-            residual_candidates,
-            candidates,
-            img.shape[:2],
+            prompt_free_residual_candidates = generate_mask_candidates(
+                clean_background,
+                mask_generator,
+                crop_size=max(clean_background.shape[:2]),
+                include_geometry=True,
+                min_score=0.90,
+            )
+        residual_candidates, attached_count = combine_residual_candidates(
+            source=img,
+            clean_background=clean_background,
+            prompted=prompted_residual_candidates,
+            prompt_free=prompt_free_residual_candidates,
+            existing=candidates,
+            text_mask=text_ink_mask,
         )
         if not residual_candidates:
             if attached_count:
