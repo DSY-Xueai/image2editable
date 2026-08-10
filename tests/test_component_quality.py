@@ -1335,6 +1335,39 @@ def test_page_background_residual_ignores_text_pixels_owned_by_a_component() -> 
     assert context.background_text_residual_ratio == 0
 
 
+def test_material_foreground_without_owner_fails_page_gate() -> None:
+    shape = (96, 160)
+    evidence = np.zeros(shape, dtype=bool)
+    evidence[24:56, 72:104] = True
+    owned = np.zeros(shape, dtype=bool)
+    calibration = component_quality.PageCalibration(1.0, 20.0, 2, 3, 20)
+
+    metrics, unexplained = component_quality.material_ownership_metrics(
+        evidence,
+        [owned],
+        np.zeros(shape, dtype=bool),
+        calibration,
+    )
+
+    assert metrics["largest_unexplained_region_pixels"] == 32 * 32
+    assert metrics["visual_ownership_coverage"] == 0.0
+    assert np.array_equal(unexplained, evidence)
+
+
+def test_visual_ownership_failure_is_a_page_hard_gate() -> None:
+    report = evaluate_page_quality(
+        [],
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"visual_ownership": "fail"},
+        expected_component_ids=[],
+        initial_component_count=0,
+        active_visual_count=0,
+    )
+
+    assert "unexplained_visual_residual" in report["violations"]
+    assert not report["accepted"]
+
+
 def test_reliable_ocr_requires_exactly_one_editable_text_contribution() -> None:
     report = evaluate_page_quality(
         [],
@@ -1682,6 +1715,8 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
         page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
         initial_component_count=1,
         expected_component_ids=["component_0001"],
+        material_foreground=case["component_mask"],
+        unexplained_output_path=graph_dir / "unexplained-mask.png",
     )
     unknown = evaluate_component_quality_round(
         case["source"], case["background"], case["reconstructed"],
@@ -1693,6 +1728,10 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
         expected_component_ids=["component_0001"],
     )
     assert accepted["accepted"] is True
+    assert accepted["checks"]["visual_ownership"] == "pass"
+    assert accepted["visual_metrics"]["unexplained_visual_pixels"] == 0
+    with Image.open(graph_dir / "unexplained-mask.png") as unexplained:
+        assert not np.any(np.asarray(unexplained))
     assert unknown["accepted"] is False
     assert {"protected_native_overlap_unknown", "pptx_reopen_unknown"} <= set(unknown["violations"])
 

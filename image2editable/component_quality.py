@@ -1049,6 +1049,10 @@ def evaluate_page_quality(
         unowned_state = _check_state(page_checks, "unowned_raster_text")
         if unowned_state != "pass":
             violations.append("unowned_raster_text")
+    if page_checks is not None and "visual_ownership" in page_checks:
+        ownership_state = _check_state(page_checks, "visual_ownership")
+        if ownership_state != "pass":
+            violations.append("unexplained_visual_residual")
     if (
         float(visual_metrics["mae"]) > 8.0
         or float(visual_metrics["p95"]) > 32.0
@@ -1077,8 +1081,54 @@ def evaluate_page_quality(
                 if page_checks is not None and "unowned_raster_text" in page_checks
                 else {}
             ),
+            **(
+                {"visual_ownership": _check_state(page_checks, "visual_ownership")}
+                if page_checks is not None and "visual_ownership" in page_checks
+                else {}
+            ),
         },
     }
+
+
+def material_ownership_metrics(
+    material_foreground: np.ndarray,
+    component_masks: Iterable[np.ndarray],
+    text_mask: np.ndarray,
+    calibration: PageCalibration,
+) -> tuple[dict, np.ndarray]:
+    material = np.asarray(material_foreground, dtype=bool).copy()
+    text = np.asarray(text_mask, dtype=bool)
+    if material.ndim != 2 or text.shape != material.shape:
+        raise ValueError("material foreground and text mask dimensions differ")
+    material &= ~text
+    owned = np.zeros(material.shape, dtype=bool)
+    for mask in component_masks:
+        projected, _ = _project_component_mask(mask, material.shape)
+        owned |= projected
+    unexplained = material & ~owned
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        unexplained.astype(np.uint8), 8
+    )
+    keep = np.zeros(material.shape, dtype=bool)
+    largest = 0
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < calibration.min_component_pixels:
+            continue
+        keep |= labels == label
+        largest = max(largest, area)
+    material_pixels = int(np.count_nonzero(material))
+    unexplained_pixels = int(np.count_nonzero(keep))
+    owned_pixels = int(np.count_nonzero(material & owned))
+    return {
+        "material_foreground_pixels": material_pixels,
+        "owned_visual_pixels": owned_pixels,
+        "unexplained_visual_pixels": unexplained_pixels,
+        "largest_unexplained_region_pixels": largest,
+        "visual_ownership_coverage": (
+            owned_pixels / material_pixels if material_pixels else 1.0
+        ),
+    }, keep
 
 
 def _page_shape(shape: object) -> tuple[int, int]:

@@ -5374,6 +5374,18 @@ def _prepare_component_layers_fixture(
             Image.fromarray(semantic_mask, mode="L").save(semantic_mask_path)
             mask_paths.append(mask_path)
             semantic_mask_paths.append(semantic_mask_path)
+        foreground_evidence_path = target / "foreground-evidence-mask.png"
+        foreground_evidence = image_to_ppt.np.zeros(
+            (10, 16), dtype=image_to_ppt.np.uint8
+        )
+        for path in semantic_mask_paths:
+            with Image.open(path) as stored_mask:
+                foreground_evidence |= image_to_ppt.np.asarray(
+                    stored_mask.convert("L")
+                )
+        Image.fromarray(foreground_evidence, mode="L").save(
+            foreground_evidence_path
+        )
         background_path = target / "background-original.png"
         Image.new("RGB", (16, 10), "white").save(background_path)
         Image.new("L", (16, 10), 0).save(target / "background-removal-mask.png")
@@ -5412,6 +5424,7 @@ def _prepare_component_layers_fixture(
             "_text_clean_path": str(text_clean_path),
             "_element_mask_paths": [str(mask) for mask in mask_paths],
             "_semantic_mask_paths": [str(mask) for mask in semantic_mask_paths],
+            "_foreground_evidence_mask_path": str(foreground_evidence_path),
         }
 
     def fake_process(
@@ -5575,13 +5588,17 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     cleanup_path = Path(prepared["_text_cleanup_mask_path"])
     assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
     assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
     assert manifest["initial_diagnostics"] == []
     assert manifest["phase"] == "initial_layers"
     assert len(manifest["assets"]["semantic_masks"]) == 2
+    assert Path(prepared["_foreground_evidence_mask_path"]).is_file()
+    assert manifest["assets"]["foreground_evidence_mask"]["path"] == (
+        "foreground-evidence-mask.png"
+    )
     sidecar_path = work_dir / "prepared_page.sha256"
     assert sidecar_path.read_text(encoding="ascii") == (
         hashlib.sha256(Path(prepared["state_path"]).read_bytes()).hexdigest()
@@ -5606,6 +5623,27 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
             assert_asset(value)
     for component in manifest["components"]:
             assert_asset(component["asset"])
+
+
+def test_load_component_layers_rejects_foreground_evidence_not_matching_semantics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    state_path = Path(prepared["state_path"])
+    manifest = json.loads(state_path.read_text(encoding="utf-8"))
+    evidence_path = work_dir / manifest["assets"]["foreground_evidence_mask"]["path"]
+    Image.new("L", (16, 10), 0).save(evidence_path)
+    manifest["assets"]["foreground_evidence_mask"]["sha256"] = hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+    _write_prepared_manifest(state_path, manifest)
+
+    with pytest.raises(
+        ValueError,
+        match="foreground evidence does not match semantic masks",
+    ):
+        image_to_ppt.load_component_layers(state_path)
 
 
 def test_prepare_component_layers_authenticates_text_cleanup_mask(
@@ -6023,11 +6061,12 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 4
+    assert manifest["schema_version"] == 5
     manifest["schema_version"] = 1
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("semantic_masks")
     manifest["assets"].pop("text_cleanup_mask")
+    manifest["assets"].pop("foreground_evidence_mask")
     _write_prepared_manifest(state_path, manifest)
 
     restored = image_to_ppt.load_component_layers(state_path)
@@ -6185,6 +6224,7 @@ def test_load_component_layers_rejects_hardlinked_owned_file(
         ("ocr_mask", None),
         ("element_masks", 0),
         ("semantic_masks", 0),
+        ("foreground_evidence_mask", None),
         ("background_original", None),
         ("background_removal_mask", None),
         ("background_difference", None),

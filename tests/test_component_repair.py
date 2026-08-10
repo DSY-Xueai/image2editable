@@ -978,6 +978,12 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     graph_path = execution_dir / "component-graph.json"
     graph_path.write_text(json.dumps(next_graph), encoding="utf-8")
     quality_input_refs = _quality_input_refs(execution_dir, store, graph_path)
+    foreground_evidence = execution_dir / "foreground-evidence-mask.png"
+    Image.new("L", (2, 2), 255).save(foreground_evidence)
+    quality_input_refs["foreground_evidence"] = {
+        "path": foreground_evidence.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
+    }
     manifest_path = store.root / quality_input_refs["presentation_manifest"]["path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     first = manifest["components"][0]
@@ -1021,6 +1027,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
 
     observed_visual = {}
     observed_layers = []
+    observed_foreground = {}
     import scripts.visual_segment as visual_segment
     real_visual_difference = visual_segment.visual_difference
 
@@ -1037,6 +1044,8 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     def quality_evaluator(*args, **kwargs):
         observed_visual.update(kwargs["visual_metrics"])
         observed_layers.extend(kwargs["presentation_layers"])
+        observed_foreground["mask"] = kwargs["material_foreground"]
+        observed_foreground["output"] = kwargs["unexplained_output_path"]
         return _strict_quality_report("candidate_b", True)
 
     monkeypatch.setattr(
@@ -1059,6 +1068,8 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         exact_masks["generated_underlay_mask"] > 0,
     )
     assert observed_layers[0]["metrics"] == first["metrics"]
+    assert np.all(observed_foreground["mask"] == 255)
+    assert observed_foreground["output"] == execution_dir / "unexplained-mask.png"
     quality_state = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
@@ -1068,7 +1079,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     )
     assert set(quality_artifact["input_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check",
-        "presentation_manifest",
+        "presentation_manifest", "foreground_evidence",
     }
     assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
@@ -1081,7 +1092,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     result = store.read_json("pages/page_001/reconstruction/component_result.json")
     assert set(result["accepted_asset_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check",
-        "presentation_manifest",
+        "presentation_manifest", "foreground_evidence",
     }
 
 

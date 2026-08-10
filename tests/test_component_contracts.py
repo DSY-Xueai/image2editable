@@ -28,6 +28,12 @@ def test_quality_input_contract_requires_presentation_manifest_ref() -> None:
     }
 
     assert component_contracts._validate_quality_input_refs(refs) is refs
+    refs["foreground_evidence"] = {
+        "path": "quality/foreground_evidence",
+        "sha256": "b" * 64,
+    }
+    assert component_contracts._validate_quality_input_refs(refs) is refs
+    refs.pop("foreground_evidence")
     refs.pop("presentation_manifest")
     with pytest.raises(ValueError, match="quality input refs"):
         component_contracts._validate_quality_input_refs(refs)

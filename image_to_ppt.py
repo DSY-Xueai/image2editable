@@ -1126,7 +1126,9 @@ def _finalize_slide_quality(
     _resource_isolation: bool = False,
 ) -> dict:
     slide_data = slide_data.copy()
+    slide_data.pop("_prepared_schema_version", None)
     slide_data.pop("_semantic_mask_paths", None)
+    slide_data.pop("_foreground_evidence_mask_path", None)
     work_dir = Path(slide_data.pop("_work_dir"))
     text_mask_path = Path(slide_data.pop("_text_mask_path"))
     text_clean_path_value = slide_data.pop("_text_clean_path", None)
@@ -1946,6 +1948,15 @@ def _process_image(
         "semantic-masks",
         semantic_masks,
     )
+    material_foreground = (
+        np.logical_or.reduce(semantic_masks)
+        if semantic_masks
+        else np.zeros(img.shape[:2], dtype=bool)
+    )
+    foreground_evidence_path = work_dir / "foreground-evidence-mask.png"
+    Image.fromarray(
+        material_foreground.astype(np.uint8) * 255, mode="L"
+    ).save(foreground_evidence_path)
     slide_data = {
         "background_path": str(background_widescreen_path),
         "background_original_path": str(background_original_path),
@@ -1964,6 +1975,7 @@ def _process_image(
         "_text_mask_path": str(text_mask_path),
         "_element_mask_paths": element_mask_paths,
         "_semantic_mask_paths": semantic_mask_paths,
+        "_foreground_evidence_mask_path": str(foreground_evidence_path),
     }
     if text_clean_path is not None:
         slide_data["_text_clean_path"] = str(text_clean_path)
@@ -1972,7 +1984,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 4
+_PREPARED_PAGE_SCHEMA_VERSION = 5
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -2007,6 +2019,9 @@ _PREPARED_ASSET_FIELDS_V1 = {
 }
 _PREPARED_ASSET_FIELDS_V2 = _PREPARED_ASSET_FIELDS_V1 | {"semantic_masks"}
 _PREPARED_ASSET_FIELDS_V4 = _PREPARED_ASSET_FIELDS_V2 | {"text_cleanup_mask"}
+_PREPARED_ASSET_FIELDS_V5 = _PREPARED_ASSET_FIELDS_V4 | {
+    "foreground_evidence_mask"
+}
 _PREPARED_COMPONENT_FIELDS = {"x", "y", "w", "h", "area", "z_index"}
 _PREPARED_TEXT_FIELDS = {
     "box",
@@ -2375,6 +2390,11 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
             _prepared_asset_record(work_dir, path, "semantic mask")
             for path in slide_data["_semantic_mask_paths"]
         ],
+        "foreground_evidence_mask": _prepared_asset_record(
+            work_dir,
+            slide_data["_foreground_evidence_mask_path"],
+            "foreground evidence mask",
+        ),
         "background_original": _prepared_asset_record(
             work_dir,
             slide_data["background_original_path"],
@@ -2479,7 +2499,7 @@ def _load_component_layer_state(
     if not isinstance(manifest, dict):
         raise ValueError("prepared page state fields are invalid")
     schema_version = manifest.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5}:
         raise ValueError("prepared page schema_version is invalid")
     legacy_fields = _PREPARED_PAGE_FIELDS - {"initial_diagnostics"}
     expected_fields = (
@@ -2504,7 +2524,8 @@ def _load_component_layer_state(
     dimensions = manifest["dimensions"]
     assets = manifest["assets"]
     expected_asset_fields = (
-        _PREPARED_ASSET_FIELDS_V4 if schema_version >= 4
+        _PREPARED_ASSET_FIELDS_V5 if schema_version >= 5
+        else _PREPARED_ASSET_FIELDS_V4 if schema_version >= 4
         else _PREPARED_ASSET_FIELDS_V2 if schema_version >= 2
         else _PREPARED_ASSET_FIELDS_V1
     )
@@ -2533,6 +2554,29 @@ def _load_component_layer_state(
             "background_difference",
         )
     }
+    foreground_evidence_mask = None
+    if schema_version >= 5:
+        evidence_path, evidence_content = _read_prepared_asset_bytes(
+            work_dir,
+            assets["foreground_evidence_mask"],
+            "foreground_evidence_mask",
+        )
+        try:
+            with Image.open(io.BytesIO(evidence_content)) as evidence_image:
+                if evidence_image.size != (
+                    dimensions["img_width"], dimensions["img_height"]
+                ):
+                    raise ValueError(
+                        "prepared page foreground evidence dimensions are invalid"
+                    )
+                foreground_evidence_mask = np.asarray(
+                    evidence_image.convert("L")
+                ).copy() > 0
+        except OSError as exc:
+            raise ValueError(
+                "prepared page foreground evidence is invalid"
+            ) from exc
+        loaded_assets["foreground_evidence_mask"] = str(evidence_path)
     text_clean = assets["text_clean"]
     if text_clean is not None:
         loaded_assets["text_clean"] = _load_prepared_asset(
@@ -2562,6 +2606,9 @@ def _load_component_layer_state(
     if schema_version >= 2:
         semantic_mask_paths = []
         expected_size = (dimensions["img_width"], dimensions["img_height"])
+        semantic_union = np.zeros(
+            (dimensions["img_height"], dimensions["img_width"]), dtype=bool
+        )
         for index, (child_record, parent_record) in enumerate(
             zip(assets["element_masks"], assets["semantic_masks"])
         ):
@@ -2603,10 +2650,19 @@ def _load_component_layer_state(
                 raise ValueError(
                     f"prepared page child mask {index} must be inside its parent"
                 )
+            semantic_union |= parent_mask > 0
+        if (
+            schema_version >= 5
+            and not np.array_equal(foreground_evidence_mask, semantic_union)
+        ):
+            raise ValueError(
+                "prepared page foreground evidence does not match semantic masks"
+            )
 
     loaded = {
         "phase": "initial_layers",
         "initial_component_count": initial_count,
+        "_prepared_schema_version": schema_version,
         "state_path": str(state_file),
         "_resource_isolation": manifest["resource_isolation"],
         **dimensions,
@@ -2629,6 +2685,15 @@ def _load_component_layer_state(
             else {}
         ),
         "_element_mask_paths": element_mask_paths,
+        **(
+            {
+                "_foreground_evidence_mask_path": loaded_assets[
+                    "foreground_evidence_mask"
+                ]
+            }
+            if "foreground_evidence_mask" in loaded_assets
+            else {}
+        ),
         **(
             {"_semantic_mask_paths": semantic_mask_paths}
             if semantic_mask_paths is not None

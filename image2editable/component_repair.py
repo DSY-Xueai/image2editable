@@ -44,6 +44,11 @@ _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
     "unexplained_visual_residual",
 })
+_LEGACY_QUALITY_INPUT_NAMES = frozenset({
+    "background", "reconstructed", "text_mask", "native_check",
+    "presentation_manifest",
+})
+_QUALITY_INPUT_NAMES = _LEGACY_QUALITY_INPUT_NAMES | {"foreground_evidence"}
 
 
 def advance_component_repair(
@@ -1306,9 +1311,9 @@ def _previous_component_reports(
             quality_evidence["approved_contained_parent_pairs"]
         )
         or not isinstance(quality_evidence["input_refs"], dict)
-        or set(quality_evidence["input_refs"]) != {
-            "source", "background", "reconstructed", "text_mask",
-            "native_check", "presentation_manifest",
+        or frozenset(quality_evidence["input_refs"]) not in {
+            _LEGACY_QUALITY_INPUT_NAMES | {"source"},
+            _QUALITY_INPUT_NAMES | {"source"},
         }
         or any(
             not _is_artifact_reference(reference)
@@ -1346,9 +1351,9 @@ def _verify_quality_input_refs(
     expected_component_ids: list[str] | None = None,
     return_bound_inputs: bool = False,
 ):
-    if not isinstance(refs, dict) or set(refs) != {
-        "background", "reconstructed", "text_mask", "native_check",
-        "presentation_manifest",
+    if not isinstance(refs, dict) or frozenset(refs) not in {
+        _LEGACY_QUALITY_INPUT_NAMES,
+        _QUALITY_INPUT_NAMES,
     }:
         raise ValueError("component quality input refs are invalid")
     bound_payloads = {}
@@ -1504,6 +1509,10 @@ def _recompute_quality_artifact(
     payloads = {"source": source_payload}
     for name in ("background", "reconstructed", "text_mask"):
         payloads[name] = bound_quality_payloads[name]
+    if "foreground_evidence" in bound_quality_payloads:
+        payloads["foreground_evidence"] = bound_quality_payloads[
+            "foreground_evidence"
+        ]
 
     def decode(name: str, flags: int):
         image = cv2.imdecode(np.frombuffer(payloads[name], dtype=np.uint8), flags)
@@ -1519,6 +1528,11 @@ def _recompute_quality_artifact(
         decode("reconstructed", cv2.IMREAD_COLOR), cv2.COLOR_BGR2RGB
     )
     text_mask = decode("text_mask", cv2.IMREAD_GRAYSCALE)
+    material_foreground = (
+        decode("foreground_evidence", cv2.IMREAD_GRAYSCALE)
+        if "foreground_evidence" in payloads
+        else None
+    )
     plan = None
     if filename == "component-quality.json":
         input_graph = load_component_agent_graph(request_path)
@@ -1575,6 +1589,12 @@ def _recompute_quality_artifact(
         text_items=native.get("text_items", []),
         contained_parent_pairs=contained_parent_pairs,
         approved_contained_parent_pairs=approved_contained_parent_pairs,
+        material_foreground=material_foreground,
+        unexplained_output_path=(
+            graph_path.parent / "unexplained-mask.png"
+            if material_foreground is not None
+            else None
+        ),
     )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
@@ -1934,7 +1954,10 @@ def evaluate_component_quality_round(
     approved_contained_parent_pairs: set[tuple[str, str]] | None = None,
     presentation_layers=None,
     text_items: list[dict] | None = None,
+    material_foreground=None,
+    unexplained_output_path: str | Path | None = None,
 ) -> dict:
+    import cv2
     import numpy as np
 
     from image2editable.component_quality import (
@@ -1943,6 +1966,7 @@ def evaluate_component_quality_round(
         contained_active_parent_pairs,
         evaluate_component,
         evaluate_page_quality,
+        material_ownership_metrics,
         resolve_visual_mask_ownership,
         _strict_binary_mask,
         _validate_presentation_mask_union,
@@ -2151,6 +2175,28 @@ def evaluate_component_quality_round(
             )
             else "fail"
         )
+    if material_foreground is not None:
+        ownership_metrics, unexplained = material_ownership_metrics(
+            material_foreground,
+            (
+                component_ownership(node["id"])
+                for node in active_visual
+            ),
+            text_mask,
+            calibration,
+        )
+        visual_metrics = {**visual_metrics, **ownership_metrics}
+        page_checks["visual_ownership"] = (
+            "pass"
+            if ownership_metrics["unexplained_visual_pixels"] == 0
+            else "fail"
+        )
+        if unexplained_output_path is not None:
+            if not cv2.imwrite(
+                str(unexplained_output_path),
+                unexplained.astype(np.uint8) * 255,
+            ):
+                raise RuntimeError("could not write unexplained visual mask")
     for node in candidates:
         component_id = node["id"]
         component_mask = component_ownership(component_id)

@@ -2153,10 +2153,14 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     mask.close()
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     store = RunStore.open(run_dir)
+    foreground_evidence = run_dir / "input/foreground-evidence-mask.png"
+    Image.new("L", (4, 4), 255).save(foreground_evidence)
     prepared = {
+        "_prepared_schema_version": 5,
         "original_image_path": str(source),
         "background_original_path": str(background),
         "_text_mask_path": str(text_mask),
+        "_foreground_evidence_mask_path": str(foreground_evidence),
         "text_items": [{"text": "editable"}],
     }
 
@@ -2194,6 +2198,10 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
         store, "page_001", graph, mask_dir.parent, output_dir,
     )
 
+    assert refs["foreground_evidence"] == {
+        "path": "input/foreground-evidence-mask.png",
+        "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
+    }
     with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
         assert reconstructed.getpixel((1, 1)) == (255, 0, 0)

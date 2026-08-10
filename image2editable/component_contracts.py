@@ -247,9 +247,13 @@ def validate_component_repair_state(state: object) -> dict:
 
 
 def _validate_quality_input_refs(value: object) -> dict:
-    if not isinstance(value, dict) or set(value) != {
+    legacy_fields = {
         "background", "reconstructed", "text_mask", "native_check",
         "presentation_manifest",
+    }
+    if not isinstance(value, dict) or frozenset(value) not in {
+        frozenset(legacy_fields),
+        frozenset({*legacy_fields, "foreground_evidence"}),
     }:
         raise ValueError("component quality input refs are invalid")
     for reference in value.values():

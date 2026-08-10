@@ -1893,6 +1893,10 @@ def _quality_assets(
         "native_check": output_dir / "native-check.json",
         "presentation_manifest": presentation_manifest,
     }
+    if prepared.get("_prepared_schema_version", 1) >= 5:
+        assets["foreground_evidence"] = Path(
+            prepared["_foreground_evidence_mask_path"]
+        )
     shutil.copyfile(background_path, assets["background"])
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
