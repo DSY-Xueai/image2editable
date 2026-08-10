@@ -1283,10 +1283,9 @@ def _render_component_evidence(
             ocr_draw.rectangle(
                 (left, top, right, bottom), outline=(255, 225, 0), width=2
             )
-            label = f'{item["id"]}: {item["text"].replace(chr(10), " ")[:40]}'
             ocr_draw.text(
                 (left, max(0, top - 12)),
-                label,
+                item["id"],
                 fill="white",
                 stroke_width=2,
                 stroke_fill="black",

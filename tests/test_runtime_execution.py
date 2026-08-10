@@ -1404,6 +1404,40 @@ def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
         assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
 
 
+def test_initial_page_session_renders_cjk_ocr_evidence(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    background = tmp_path / "background.png"
+    difference = tmp_path / "difference.png"
+    text_mask = tmp_path / "text-mask.png"
+    for path in (source, background, difference):
+        Image.new("RGB", (20, 10), "white").save(path)
+    Image.new("L", (20, 10), 0).save(text_mask)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+
+    session = legacy._build_initial_page_session(
+        RunStore.open(run_dir),
+        "page_001",
+        {
+            "original_image_path": str(source),
+            "background_original_path": str(background),
+            "background_difference_path": str(difference),
+            "_text_mask_path": str(text_mask),
+            "_element_mask_paths": [],
+            "components": [],
+            "text_items": [{"text": "虚拟机", "box": [1, 1, 5, 3]}],
+        },
+        reconstruction,
+    )
+
+    assert Path(session["evidence"]["ocr-overlay.png"]).is_file()
+    report = json.loads(
+        Path(session["evidence"]["quality-report.json"]).read_text(encoding="utf-8")
+    )
+    assert report["text_items"][0]["text"] == "虚拟机"
+
+
 def test_initial_page_session_v2_builds_parent_child_graph_and_excludes_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
