@@ -8,8 +8,8 @@ GitHub 当前对外目标是把图片、PDF、图片版 PPTX 和混合 PPTX 中�
 
 已确认的通用根因是闭环缺少有效反馈动作：
 
-- `rebuild_background` 已存在于动作契约，但执行器当前不修改背景。
-- 质量门能检测 `background_text_residual`，却不能把诊断区域转成可执行修复。
+- `rebuild_background` 在 mask 动作执行器中按职责保持图状态不变，Legacy 执行阶段会另行重建背景；但当前接线只消费第一条背景动作，质量违反也不会确定性地产生修复请求。
+- 质量门能检测 `background_text_residual`，却不能把诊断区域自动转成有界、可验证的背景修复。
 - 初始候选筛选可能丢弃低分、小面积、重叠或未被首轮模型覆盖的视觉区域。
 - 系统没有页面级“显著视觉区域必须有 ownership”的约束；对象留在背景中时，最终合成图仍可能获得很低的视觉误差。
 - 相同组件计划可以被重复提交，最终以 `repeated_plan`、`empty_plan` 或轮次上限进入整页回退。
@@ -140,7 +140,7 @@ ownership ledger 由现有 OCR mask、组件图 mask、presentation alpha、候�
 
 现有 `rebuild_background` 继续引用组件图中的文字或视觉对象 ID，并使用现有 `margin_ratio` 形成有界 removal mask。动作不改变组件 ownership，只请求在指定区域重新生成背景。
 
-执行器不再忽略该动作。它输出与本轮 graph hash、source hash 和 action hash 绑定的 repair mask，并在当前背景上执行局部修复。后续质量检查和 evidence 必须消费修复后的背景，避免 Agent 看到的证据与最终 PPTX 不一致。
+mask 动作执行器继续保持图状态不变，不承担背景模型职责。Legacy 执行阶段聚合本轮全部 `rebuild_background` 动作，输出与本轮 graph hash、source hash 和 action hash 绑定的 repair mask，并在当前背景上执行局部修复。后续质量检查和 evidence 必须消费修复后的背景，避免 Agent 看到的证据与最终 PPTX 不一致。
 
 ### 修复策略
 
