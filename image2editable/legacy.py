@@ -695,6 +695,7 @@ def _component_text_records(items: object, page_size: tuple[int, int]) -> list[d
         if (
             type(component_id) is not str
             or not component_id.startswith("text_")
+            or not component_id[5:].isascii()
             or not component_id[5:].isdigit()
             or component_id in used_ids
         ):

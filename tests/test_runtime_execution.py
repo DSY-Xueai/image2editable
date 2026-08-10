@@ -1404,7 +1404,9 @@ def test_initial_page_session_v1_falls_back_to_authenticated_parent_graph(
         assert reconstructed.getpixel((2, 1)) == (1, 2, 3)
 
 
-def test_initial_page_session_renders_cjk_ocr_evidence(tmp_path: Path) -> None:
+def test_initial_page_session_renders_cjk_ocr_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = tmp_path / "source.png"
     background = tmp_path / "background.png"
     difference = tmp_path / "difference.png"
@@ -1415,6 +1417,15 @@ def test_initial_page_session_renders_cjk_ocr_evidence(tmp_path: Path) -> None:
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     reconstruction = run_dir / "pages/page_001/reconstruction"
     reconstruction.mkdir(parents=True)
+    labels = []
+    original_text = ImageDraw.ImageDraw.text
+
+    def draw_ascii_label(draw, xy, text, *args, **kwargs):
+        text.encode("ascii")
+        labels.append(text)
+        return original_text(draw, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", draw_ascii_label)
 
     session = legacy._build_initial_page_session(
         RunStore.open(run_dir),
@@ -1432,6 +1443,8 @@ def test_initial_page_session_renders_cjk_ocr_evidence(tmp_path: Path) -> None:
     )
 
     assert Path(session["evidence"]["ocr-overlay.png"]).is_file()
+    assert labels[-1] == "text_0001"
+    assert all(label.isascii() for label in labels)
     report = json.loads(
         Path(session["evidence"]["quality-report.json"]).read_text(encoding="utf-8")
     )
@@ -2280,12 +2293,19 @@ def test_filtered_text_items_keep_their_original_component_ids() -> None:
         "text": "keep",
         "box": [2, 1, 3, 2],
     }]
-
     assert legacy._component_text_items(items, (8, 6)) == [{
         "id": "text_0002",
         "text": "keep",
         "box": [2, 1, 5, 3],
     }]
+
+
+def test_component_text_items_reject_non_ascii_numeric_id() -> None:
+    with pytest.raises(ValueError, match="component text id is invalid"):
+        legacy._component_text_items(
+            [{"_component_id": "text_１２３", "text": "x", "box": [0, 0, 1, 1]}],
+            (2, 2),
+        )
 
 
 def test_frozen_presentation_records_are_reused_without_changing_graph_binding() -> None:
