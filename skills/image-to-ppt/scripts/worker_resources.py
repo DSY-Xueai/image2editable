@@ -39,4 +39,6 @@ def run_isolated_worker(command: list[str], **kwargs):
     kwargs["env"] = env
     if kwargs.get("text") and "encoding" not in kwargs:
         kwargs["encoding"] = "utf-8"
+    if kwargs.get("text") and "errors" not in kwargs:
+        kwargs["errors"] = "replace"
     return subprocess.run(command, **kwargs)

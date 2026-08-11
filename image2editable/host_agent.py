@@ -20,7 +20,7 @@ from image2editable.component_repair import (
     load_or_create_run_integrity_key,
     load_run_integrity_key,
 )
-from image2editable.contracts import RunStatus, SCHEMA_VERSION
+from image2editable.contracts import PageStatus, RunStatus, SCHEMA_VERSION
 from image2editable.execution import ExecutionLease
 from image2editable.store import RunStore
 
@@ -198,8 +198,15 @@ def _request_item(path: Path, request: dict) -> dict:
 
 def _current_request(store: RunStore, *, include_recorded: bool = False) -> tuple[Path, dict]:
     manifest = store.read_json("job_manifest.json")
+    page_jobs = store.read_json("page_jobs.json").get("pages", {})
+    public_awaiting = {
+        page_id for page_id, page in page_jobs.items()
+        if page.get("status") == PageStatus.AWAITING_AGENT.value
+    }
     candidates = []
     for page_id in manifest.get("pages", []):
+        if public_awaiting and page_id not in public_awaiting:
+            continue
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         state_path = reconstruction / "component_state.json"
         if not state_path.is_file():

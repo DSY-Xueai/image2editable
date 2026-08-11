@@ -1378,7 +1378,23 @@ def _rebuild_canvas_background(
 
     graph_root = graph_dir.resolve()
     by_id = {node["id"]: node for node in graph["nodes"]}
-    repair = np.zeros(text_repair.shape, dtype=bool)
+    masks_by_id = {}
+    claimed_visual = np.zeros(text_repair.shape, dtype=bool)
+    for object_id, node in by_id.items():
+        mask_path = (graph_dir / Path(node["mask"])).resolve()
+        if not mask_path.is_relative_to(graph_root):
+            raise ValueError("background rebuild mask is outside graph directory")
+        if sha256_file(mask_path) != node["mask_sha256"]:
+            raise ValueError("background rebuild mask sha256 mismatch")
+        with Image.open(mask_path) as image:
+            mask = np.asarray(image.convert("L")) > 0
+        if mask.shape != text_repair.shape:
+            raise ValueError("background rebuild mask dimensions differ")
+        masks_by_id[object_id] = mask
+        claimed_visual |= mask
+    repair = cv2.dilate(
+        claimed_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
     for object_ids, margin_ratio in repair_requests:
         if not 0 < margin_ratio <= 0.1:
             raise ValueError("background rebuild margin_ratio is invalid")
@@ -1388,21 +1404,13 @@ def _rebuild_canvas_background(
         )
         request_mask = np.zeros(text_repair.shape, dtype=bool)
         for object_id in object_ids:
-            node = by_id[object_id]
-            mask_path = (graph_dir / Path(node["mask"])).resolve()
-            if not mask_path.is_relative_to(graph_root):
-                raise ValueError("background rebuild mask is outside graph directory")
-            if sha256_file(mask_path) != node["mask_sha256"]:
-                raise ValueError("background rebuild mask sha256 mismatch")
-            with Image.open(mask_path) as image:
-                mask = np.asarray(image.convert("L")) > 0
-            if mask.shape != text_repair.shape:
-                raise ValueError("background rebuild mask dimensions differ")
-            request_mask |= mask
+            request_mask |= masks_by_id[object_id]
         repair |= cv2.dilate(request_mask.astype(np.uint8), kernel) > 0
     if restored is None:
         repair |= text_repair
-    rebuilt = current.copy() if restored is None else restored.copy()
+    rebuilt = current.copy()
+    if restored is not None:
+        rebuilt[~claimed_visual] = restored[~claimed_visual]
     if np.any(repair):
         from scripts.component_underlay import _choose_visual_fill
 
@@ -1413,6 +1421,7 @@ def _rebuild_canvas_background(
             donor_mask=~repair,
             visual_hole=repair,
             allow_smooth_surface=True,
+            allow_original=False,
         )
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
     return output_path
@@ -1530,6 +1539,29 @@ def _assign_text_regions_to_component_masks(
     return assigned
 
 
+def _quality_text_repair_mask(text_mask, text_items: list[dict]):
+    import cv2
+    import numpy as np
+
+    text = np.asarray(text_mask) > 0
+    repair_mask = np.zeros(text.shape, dtype=bool)
+    for item in text_items:
+        box = item.get("box") if isinstance(item, dict) else None
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x, y, box_width, box_height = (int(value) for value in box)
+        radius = max(2, min(6, int(round(max(box_height, 1) * 0.15))))
+        x1, y1 = max(0, x - radius), max(0, y - radius)
+        x2 = min(text.shape[1], x + box_width + radius)
+        y2 = min(text.shape[0], y + box_height + radius)
+        local = text[y1:y2, x1:x2].astype(np.uint8)
+        repair_mask[y1:y2, x1:x2] |= cv2.dilate(
+            local,
+            np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8),
+        ).astype(bool)
+    return repair_mask
+
+
 def _refine_quality_text_clean(
     source,
     text_clean,
@@ -1548,53 +1580,14 @@ def _refine_quality_text_clean(
     import cv2
 
     module = importlib.import_module("image_to_ppt")
-    repair_mask = cv2.dilate(
-        text.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
-    ).astype(bool)
+    repair_mask = _quality_text_repair_mask(text, text_items)
+    candidate = module._repair_text_with_local_planes(
+        source,
+        repair_mask.astype(np.uint8) * 255,
+        text_items,
+    )
     refined = cleaned.copy()
-    for item in text_items:
-        box = item.get("box") if isinstance(item, dict) else None
-        if not isinstance(box, (list, tuple)) or len(box) != 4:
-            continue
-        x, y, box_width, box_height = (int(value) for value in box)
-        padding = _text_item_repair_padding_px(box_height)
-        x1, y1 = max(1, x - padding), max(1, y - padding)
-        x2 = min(source.shape[1] - 1, x + box_width + padding)
-        y2 = min(source.shape[0] - 1, y + box_height + padding)
-        if x1 >= x2 or y1 >= y2:
-            continue
-        outside_text = ~repair_mask[y1:y2, x1:x2]
-        refined[y1:y2, x1:x2][outside_text] = source[
-            y1:y2, x1:x2
-        ][outside_text]
-        candidate = module._interpolate_text_item_boxes(
-            refined, [item], padding=padding
-        )
-        horizontal_boundary = np.concatenate((
-            refined[y1:y2, x1 - 1], refined[y1:y2, x2]
-        ))
-        vertical_boundary = np.concatenate((
-            refined[y1 - 1, x1:x2], refined[y2, x1:x2]
-        ))
-        horizontal_chroma = float(np.median(np.ptp(
-            horizontal_boundary.astype(np.int16), axis=1
-        )))
-        vertical_chroma = float(np.median(np.ptp(
-            vertical_boundary.astype(np.int16), axis=1
-        )))
-        if horizontal_chroma > vertical_chroma + 8.0:
-            weight = np.linspace(
-                0.0, 1.0, x2 - x1, dtype=np.float32
-            )[None, :, None]
-            horizontal = (
-                refined[y1:y2, x1 - 1][:, None] * (1.0 - weight)
-                + refined[y1:y2, x2][:, None] * weight
-            )
-            candidate[y1:y2, x1:x2] = np.clip(
-                horizontal, 0, 255
-            ).astype(np.uint8)
-        region = repair_mask[y1:y2, x1:x2]
-        refined[y1:y2, x1:x2][region] = candidate[y1:y2, x1:x2][region]
+    refined[repair_mask] = candidate[repair_mask]
 
     short_side = min(source.shape[:2])
     line_length = max(9, min(31, round(short_side * 0.03)))
@@ -1622,8 +1615,8 @@ def _refine_quality_text_clean(
     )
     for line_label in range(1, line_count):
         component = line_labels == line_label
-        inside = component & text
-        outside = component & ~text
+        inside = component & repair_mask
+        outside = component & ~repair_mask
         if not np.any(inside) or not np.any(outside):
             continue
         refined[inside] = np.median(source[outside], axis=0).astype(np.uint8)
@@ -1754,9 +1747,12 @@ def _effective_text_context(
                     donor[ring], axis=0
                 ).astype(np.uint8)
                 effective_mask |= repair
-    if refine_text_clean:
+    if refine_text_clean and effective_items and np.any(effective_mask):
         effective_clean = _refine_quality_text_clean(
             source, effective_clean, effective_mask, effective_items
+        )
+        effective_mask = _quality_text_repair_mask(
+            effective_mask, effective_items
         )
     return effective_items, effective_mask, effective_clean
 
@@ -1805,7 +1801,7 @@ def _quality_assets(
         text_items=prepared.get("text_items", []),
         graph=graph,
         graph_dir=graph_dir,
-        refine_text_clean="_text_cleanup_mask_path" not in prepared,
+        refine_text_clean=True,
         refine_cleanup_mask="_text_cleanup_mask_path" in prepared,
     )
     text_clean_output = output_dir / "text-clean.png"
@@ -2018,7 +2014,7 @@ def _execute_legacy_round(
             text_items=prepared.get("text_items", []),
             graph=next_graph,
             graph_dir=output_dir,
-            refine_text_clean="_text_cleanup_mask_path" not in prepared,
+            refine_text_clean=True,
             refine_cleanup_mask="_text_cleanup_mask_path" in prepared,
         )
         effective_text_mask_path = output_dir / "background-text-mask.png"

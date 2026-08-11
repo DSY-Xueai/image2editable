@@ -11,6 +11,7 @@ import queue
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 import cv2
@@ -72,6 +73,16 @@ def test_page_progress_key_compares_legacy_quality_deterministically() -> None:
     }
 
     assert component_repair._page_progress_key(quality)[:2] == (0.0, 0.0)
+
+
+def test_page_progress_key_counts_resolved_blocking_violation_as_progress() -> None:
+    previous = _page_quality_key_case()
+    previous["violations"].append("contained_parent_review")
+    current = _page_quality_key_case()
+
+    assert component_repair._page_progress_key(current) < (
+        component_repair._page_progress_key(previous)
+    )
 
 
 @pytest.mark.parametrize("quality", [{}, {"violations": [], "visual_metrics": []}])
@@ -155,9 +166,7 @@ def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
         >= (semantic & ~ownership & (child | text))
     )
     assert np.all(layer["presentation_alpha_mask"][layer["generated_underlay_mask"]])
-    assert np.abs(
-        layer["rgb"][text].astype(np.int16) - source[text].astype(np.int16)
-    ).mean() <= 4.0
+    assert not np.array_equal(layer["rgb"][text], text_clean[text])
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
     assert layer["metrics"]["gradient_jump_p95"] <= 6.0
     assert all(np.isfinite(value) for value in layer["metrics"].values())
@@ -209,7 +218,7 @@ def test_presentation_layer_removes_active_text_from_visual_ownership() -> None:
     assert np.array_equal(layer["rgb"][text], text_clean[text])
 
 
-def test_presentation_layer_repairs_bad_text_clean_fill_from_visual_neighbors() -> None:
+def test_presentation_layer_preserves_verified_text_clean_underlay() -> None:
     from scripts.component_underlay import build_presentation_layer
 
     green = np.array((30, 150, 70), dtype=np.uint8)
@@ -217,8 +226,7 @@ def test_presentation_layer_repairs_bad_text_clean_fill_from_visual_neighbors() 
     text = np.zeros((15, 21), dtype=bool)
     text[6:9, 8:13] = True
     source[text] = 255
-    text_clean = source.copy()
-    text_clean[4:11, 5:16] = 255
+    text_clean = np.full_like(source, green)
     semantic = np.ones(text.shape, dtype=bool)
 
     layer = build_presentation_layer(
@@ -230,9 +238,89 @@ def test_presentation_layer_repairs_bad_text_clean_fill_from_visual_neighbors() 
         text_mask=text,
     )
 
-    assert np.max(np.abs(
-        layer["rgb"][text].astype(np.int16) - green.astype(np.int16)
-    )) <= 3
+    assert np.array_equal(layer["rgb"][text], text_clean[text])
+
+
+def test_presentation_layer_repairs_discontinuous_text_clean_on_gradient() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 64, 96
+    y, x = np.mgrid[:height, :width]
+    gradient = np.dstack((2 * x, 2 * y, x + y)).astype(np.uint8)
+    semantic = _rounded_rectangle_mask(height, width)
+    text = np.zeros((height, width), dtype=bool)
+    text[22:42, 32:64] = True
+    source = gradient.copy()
+    source[text] = 0
+    text_clean = gradient.copy()
+    text_clean[text] = (240, 20, 20)
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=np.zeros_like(semantic),
+        text_mask=text,
+    )
+
+    assert not np.array_equal(layer["rgb"][text], text_clean[text])
+    assert layer["metrics"]["boundary_color_mae"] <= 6.0
+    assert layer["metrics"]["gradient_jump_p95"] <= 12.0
+
+
+def test_presentation_layer_handles_saturated_gradient_beside_text_hole() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.full((64, 96, 3), (90, 168, 112), dtype=np.uint8)
+    semantic = np.zeros(source.shape[:2], dtype=bool)
+    semantic[5:59, 5:91] = True
+    source[5:40, 5:91] = (12, 129, 44)
+    text = np.zeros_like(semantic)
+    text[15:39, 25:71] = True
+    text_clean = source.copy()
+    text_clean[text] = (40, 180, 60)
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=text_clean,
+        ownership_mask=semantic & ~text,
+        semantic_mask=semantic,
+        higher_layer_mask=np.zeros_like(semantic),
+        text_mask=text,
+    )
+
+    assert layer["metrics"]["boundary_color_mae"] <= 6.0
+    assert layer["metrics"]["gradient_jump_p95"] <= 12.0
+
+
+def test_presentation_layer_offers_smooth_repair_for_visual_holes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.full((20, 30, 3), 180, dtype=np.uint8)
+    semantic = np.ones(source.shape[:2], dtype=bool)
+    higher = np.zeros_like(semantic)
+    higher[7:13, 11:19] = True
+    calls: list[bool] = []
+    real_choose = component_underlay._choose_visual_fill
+
+    def observe(**kwargs):
+        calls.append(kwargs["allow_smooth_surface"])
+        return real_choose(**kwargs)
+
+    monkeypatch.setattr(component_underlay, "_choose_visual_fill", observe)
+    component_underlay.build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~higher,
+        semantic_mask=semantic,
+        higher_layer_mask=higher,
+        text_mask=np.zeros_like(semantic),
+    )
+
+    assert calls == [True]
 
 
 def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
@@ -492,6 +580,55 @@ def test_visual_fill_rebuilds_smooth_canvas_hole_from_outside_ring(
     assert float(np.abs(rebuilt[hole].astype(int) - source[hole]).mean()) <= 2.0
 
 
+def test_gradient_continuation_keeps_text_hole_boundary_smooth() -> None:
+    from scripts import component_underlay
+
+    height, width = 48, 80
+    y, x = np.mgrid[:height, :width]
+    source = np.dstack((80 + 2 * x, 60 + y, 40 + x + y)).astype(np.uint8)
+    hole = np.zeros((height, width), dtype=bool)
+    hole[14:34, 24:56] = True
+    damaged = source.copy()
+    damaged[hole] = (240, 20, 20)
+
+    repaired = component_underlay._continue_boundary_gradient(damaged, ~hole, hole)
+    metrics = component_underlay._visual_metrics(repaired, source, ~hole, hole)
+
+    assert metrics["boundary_color_mae"] <= 6.0
+    assert metrics["gradient_jump_p95"] <= 12.0
+    assert metrics["added_high_frequency_pixels"] == 0.0
+
+
+def test_gradient_continuation_smooths_noisy_hole_interior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.full((48, 80, 3), 120, dtype=np.uint8)
+    hole = np.zeros(source.shape[:2], dtype=bool)
+    hole[10:38, 20:60] = True
+
+    def noisy_inpaint(image, mask, radius, method):
+        output = image.copy()
+        y, x = np.indices(mask.shape)
+        selected = mask.astype(bool)
+        output[selected] = np.where(
+            ((x + y) % 2)[selected, None], 255, 0,
+        )
+        return output
+
+    monkeypatch.setattr(component_underlay.cv2, "inpaint", noisy_inpaint)
+    repaired = component_underlay._continue_boundary_gradient(
+        source, ~hole, hole,
+    )
+    metrics = component_underlay._visual_metrics(
+        repaired, source, ~hole, hole,
+    )
+
+    assert metrics["gradient_jump_p95"] <= 12.0
+    assert metrics["added_high_frequency_pixels"] == 0.0
+
+
 def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
     from scripts.component_underlay import build_presentation_layer
 
@@ -527,6 +664,28 @@ def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
         - truth[contaminated].astype(np.int16)
     )
     assert repaired_error.mean() <= 8.0
+
+
+def test_presentation_layer_ignores_adjacent_higher_layer_at_semantic_edge() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    source = np.full((64, 112, 3), 220, dtype=np.uint8)
+    semantic = np.zeros(source.shape[:2], dtype=bool)
+    semantic[12:52, 12:100] = True
+    higher = np.zeros_like(semantic)
+    higher[10:14, 20:92] = True
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=higher,
+        text_mask=np.zeros_like(semantic),
+    )
+
+    assert np.array_equal(layer["ownership_mask"], semantic & ~higher)
+    assert not np.any(layer["generated_underlay_mask"])
 
 
 def test_presentation_layer_skips_visual_hole_without_ownership_donor() -> None:
@@ -758,7 +917,7 @@ def test_execution_refreshes_candidates_after_discard(
     failed = _strict_quality_report("candidate_d", False)["component_reports"][0]
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
-        lambda *args, **kwargs: {
+        lambda *args, **kwargs: _quality_report_with_unexplained({
             "accepted": False,
             "violations": [
                 "missing_edge", "pptx_reopen_unknown", "visual_difference",
@@ -766,7 +925,7 @@ def test_execution_refreshes_candidates_after_discard(
             "component_reports": [passed, failed],
             "visual_metrics": {"mae": 30.0, "p95": 60.0, "changed_ratio": 0.2},
             "checks": {"pptx_reopen": "unknown"},
-        },
+        }, **kwargs),
     )
     record_component_quality(store, "page_001")
     advance_component_repair(store, "page_001")
@@ -869,6 +1028,10 @@ def test_page_only_background_residual_enters_next_round(
 
     assert state["phase"] == "actions_executed"
     assert state["candidate_ids"] == []
+    unexplained_path = execution_dir / "unexplained-mask.png"
+    unexplained = np.zeros((2, 2), dtype=np.uint8)
+    unexplained[0, 1] = 255
+    Image.fromarray(unexplained, mode="L").save(unexplained_path)
     state = record_component_quality(store, "page_001")
     quality = json.loads(
         (store.root / state["current_round"]["quality_ref"]["path"])
@@ -876,21 +1039,235 @@ def test_page_only_background_residual_enters_next_round(
     )
     assert quality["report"]["component_reports"] == []
     assert quality["report"]["accepted"] is False
+    assert quality["unexplained_mask_ref"]["sha256"] == hashlib.sha256(
+        unexplained_path.read_bytes()
+    ).hexdigest()
     after = json.loads(graph_path.read_text(encoding="utf-8"))
     assert next(node for node in after["nodes"] if node["id"] == "frozen_a") == frozen_before
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
-    frozen_after = store.read_json(
+    state_after = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
-    )["frozen"]
-    assert frozen_after == {"frozen_a": frozen_before["mask_sha256"]}
+    )
+    assert state_after["frozen"] == {}
+    assert state_after["failed_ids"] == ["frozen_a"]
     next_round = advance_component_repair(store, "page_001")
     assert next_round == {
         "status": "needs_next_round",
         "page_id": "page_001",
         "repair_round": 2,
-        "candidate_ids": [],
+        "candidate_ids": ["frozen_a"],
         "page_violations": ["background_text_residual"],
     }
+
+
+def test_page_residual_owner_selects_adjacent_pending_component(
+    tmp_path: Path,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    graph_root = store.root / "evidence"
+    masks_root = graph_root / "masks"
+    masks_root.mkdir(parents=True)
+    residual = np.zeros((40, 40), dtype=np.uint8)
+    residual[10:13, 10:13] = 255
+    residual_path = graph_root / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    nodes = []
+    for component_id, box in (
+        ("adjacent", (5, 10, 7, 13)),
+        ("separate", (25, 25, 30, 30)),
+    ):
+        mask = np.zeros_like(residual)
+        x1, y1, x2, y2 = box
+        mask[y1:y2, x1:x2] = 255
+        mask_path = masks_root / f"{component_id}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": list(box), "z_index": len(nodes), "text_ids": [],
+        })
+    quality = {"unexplained_mask_ref": {
+        "path": residual_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}
+
+    owners = component_repair._page_residual_owner_ids(
+        store, quality=quality, graph={"nodes": nodes}, graph_root=graph_root,
+    )
+
+    assert owners == {"adjacent"}
+
+
+def test_page_residual_owner_selects_smallest_containing_visual_component(
+    tmp_path: Path,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    graph_root = store.root / "evidence"
+    masks_root = graph_root / "masks"
+    masks_root.mkdir(parents=True)
+    residual = np.zeros((50, 50), dtype=np.uint8)
+    residual[20:24, 20:22] = 255
+    residual_path = graph_root / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    nodes = []
+    for component_id, box in (
+        ("small_container", (10, 10, 40, 40)),
+        ("large_container", (2, 2, 48, 48)),
+    ):
+        mask = np.zeros_like(residual)
+        x1, y1, x2, y2 = box
+        mask[y1, x1:x2] = 255
+        mask[y2 - 1, x1:x2] = 255
+        mask[y1:y2, x1] = 255
+        mask[y1:y2, x2 - 1] = 255
+        mask_path = masks_root / f"{component_id}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "frozen", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": list(box), "z_index": len(nodes), "text_ids": [],
+        })
+    quality = {"unexplained_mask_ref": {
+        "path": residual_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}
+
+    owners = component_repair._page_residual_owner_ids(
+        store, quality=quality, graph={"nodes": nodes}, graph_root=graph_root,
+    )
+
+    assert owners == {"small_container"}
+
+
+def test_small_page_residual_selects_adjacent_large_frozen_component(
+    tmp_path: Path,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    graph_root = store.root / "evidence"
+    masks_root = graph_root / "masks"
+    masks_root.mkdir(parents=True)
+    residual = np.zeros((600, 600), dtype=np.uint8)
+    residual[200:206, 96:99] = 255
+    residual_path = graph_root / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    nodes = []
+    for component_id, state, box in (
+        ("large_panel", "frozen", (100, 100, 500, 500)),
+        ("unrelated", "pending", (520, 520, 540, 540)),
+    ):
+        mask = np.zeros_like(residual)
+        x1, y1, x2, y2 = box
+        mask[y1:y2, x1:x2] = 255
+        mask_path = masks_root / f"{component_id}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": state, "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": list(box), "z_index": len(nodes), "text_ids": [],
+        })
+    quality = {"unexplained_mask_ref": {
+        "path": residual_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}
+
+    owners = component_repair._page_residual_owner_ids(
+        store, quality=quality, graph={"nodes": nodes}, graph_root=graph_root,
+    )
+
+    assert owners == {"large_panel"}
+
+
+@pytest.mark.parametrize(
+    ("component_accepted", "residual_owner", "expected_failed"),
+    [
+        (True, "candidate_b", ["candidate_b"]),
+        (False, "frozen_a", ["candidate_b", "frozen_a"]),
+    ],
+)
+def test_page_residual_owner_is_reopened_with_component_failures(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    component_accepted: bool,
+    residual_owner: str,
+    expected_failed: list[str],
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    quality = _strict_quality_report("candidate_b", component_accepted)
+    quality["violations"] = [
+        "pptx_reopen_unknown", "unexplained_visual_residual",
+    ]
+    quality_path = store.root / "quality.json"
+    quality_path.write_text(
+        json.dumps({
+            "report": quality,
+            "contained_parent_pairs": [],
+            "approved_contained_parent_pairs": [],
+        }),
+        encoding="utf-8",
+    )
+    quality_ref = {
+        "path": quality_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(quality_path.read_bytes()).hexdigest(),
+    }
+    state["current_round"].update({
+        "plan_ref": quality_ref,
+        "execution_ref": quality_ref,
+        "quality_ref": quality_ref,
+    })
+    state["phase"] = "quality_recorded"
+    state["plan_count"] = 1
+    state["round_history"] = [{
+        "round": 1,
+        "plan_sha256": quality_ref["sha256"],
+        "normalized_plan_sha256": quality_ref["sha256"],
+        "execution_sha256": quality_ref["sha256"],
+        "quality_sha256": None,
+        "frozen_ids": [],
+        "failed_ids": [],
+    }]
+    monkeypatch.setattr(
+        component_repair, "_page_residual_owner_ids",
+        lambda *args, **kwargs: {residual_owner},
+    )
+
+    result = component_repair._commit_component_freeze(
+        store, state, "page_001"
+    )
+
+    assert result["failed_ids"] == expected_failed
+    updated = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert "candidate_b" not in updated["frozen"]
+    graph = json.loads(
+        (store.root / updated["graph_ref"]["path"]).read_text(encoding="utf-8")
+    )
+    assert next(
+        node for node in graph["nodes"] if node["id"] == "candidate_b"
+    )["state"] == "pending"
 
 
 def test_record_suppress_text_preserves_linked_frozen_visual_assets(
@@ -1114,7 +1491,9 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         observed_layers.extend(kwargs["presentation_layers"])
         observed_foreground["mask"] = kwargs["material_foreground"]
         observed_foreground["output"] = kwargs["unexplained_output_path"]
-        return _strict_quality_report("candidate_b", True)
+        return _quality_report_with_unexplained(
+            _strict_quality_report("candidate_b", True), **kwargs
+        )
 
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round", quality_evaluator,
@@ -1422,7 +1801,7 @@ def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
     failed["checks"]["unowned_raster_text"] = "fail"
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
-        lambda *args, **kwargs: failed,
+        lambda *args, **kwargs: _quality_report_with_unexplained(failed, **kwargs),
     )
     graph = load_component_agent_graph(request_path)
     _, freeze = _execute_composite_quality_round(
@@ -1569,7 +1948,7 @@ def test_next_request_must_reference_the_state_quality_artifact(
 
 
 @pytest.mark.parametrize(
-    "mutation", ["identity", "report", "input_ref", "pairs"],
+    "mutation", ["identity", "report", "input_ref", "unexplained_ref", "pairs"],
 )
 def test_previous_quality_artifact_identity_is_strict(
     page_session: dict,
@@ -1587,6 +1966,8 @@ def test_previous_quality_artifact_identity_is_strict(
         quality["report"] = {}
     elif mutation == "input_ref":
         quality["input_refs"]["background"]["path"] = 1
+    elif mutation == "unexplained_ref":
+        quality["unexplained_mask_ref"]["path"] = 1
     else:
         quality["contained_parent_pairs"] = [["candidate_b"]]
 
@@ -1600,6 +1981,50 @@ def test_previous_quality_artifact_identity_is_strict(
             request=request,
             active_component_ids=["candidate_b", "frozen_a"],
         )
+
+
+def test_previous_quality_allows_failed_candidate_to_be_replaced(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["frozen_a"],
+    )
+
+    assert "candidate_b" in reports
+
+
+def test_previous_quality_identity_allows_unapproved_pair_reactivation(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["contained_parent_pairs"] = [["candidate_b", "frozen_a"]]
+    quality["approved_contained_parent_pairs"] = []
+    request["candidate_ids"] = ["candidate_b", "frozen_a"]
+    request["frozen_ids"] = []
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["candidate_b", "frozen_a"],
+    )
+
+    assert "candidate_b" in reports
 
 
 def test_initial_diagnostics_continue_through_real_round_two(
@@ -1813,7 +2238,9 @@ def test_intact_parent_gate_controls_fallback_result(
     state = store.read_json("pages/page_001/reconstruction/component_state.json")
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
-        lambda *args, **kwargs: _strict_quality_report("candidate_b", accepted),
+        lambda *args, **kwargs: _quality_report_with_unexplained(
+            _strict_quality_report("candidate_b", accepted), **kwargs
+        ),
     )
     record_parent_fallback_quality(store, "page_001")
 
@@ -1969,6 +2396,14 @@ def _strict_quality_report(component_id: str, accepted: bool) -> dict:
         "visual_metrics": {"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
         "checks": {"pptx_reopen": "unknown"},
     }
+
+
+def _quality_report_with_unexplained(report: dict, **kwargs) -> dict:
+    output = kwargs.get("unexplained_output_path")
+    material = kwargs.get("material_foreground")
+    if output is not None and material is not None:
+        Image.fromarray(np.zeros(np.asarray(material).shape, dtype=np.uint8)).save(output)
+    return report
 
 
 def _quality_input_refs(directory: Path, store, graph_path: Path) -> dict:
@@ -2153,6 +2588,37 @@ def test_execute_accept_can_detach_confirmed_independent_visual(tmp_path: Path) 
     assert accepted["state"] == "pending_gate"
     assert accepted["kind"] == "parent"
     assert accepted["parent_id"] is None
+
+
+def test_independent_accept_restores_parent_backing_only_under_editable_text(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    by_id = {node["id"]: node for node in graph["nodes"]}
+    text = np.zeros(image.shape[:2], dtype=np.uint8)
+    text[2:4, 2:4] = 255
+    text_path = input_dir / by_id["text"]["mask"]
+    Image.fromarray(text, mode="L").save(text_path)
+    by_id["text"]["mask_sha256"] = hashlib.sha256(text_path.read_bytes()).hexdigest()
+    by_id["text"]["bbox"] = [2, 2, 4, 4]
+    left_path = input_dir / by_id["left"]["mask"]
+    left_before = np.asarray(Image.open(left_path)) > 0
+    left_before[2:4, 2:4] = False
+    Image.fromarray(left_before.astype(np.uint8) * 255, mode="L").save(left_path)
+    by_id["left"]["mask_sha256"] = hashlib.sha256(left_path.read_bytes()).hexdigest()
+
+    output = tmp_path / "round-independent-text-backing"
+    result = execute_component_actions(
+        image, graph,
+        [_action("accept", ["left"], {"independent": True})],
+        sam_runner=None, input_dir=input_dir, output_dir=output,
+    )
+
+    accepted = next(node for node in result["nodes"] if node["id"] == "left")
+    actual = np.asarray(Image.open(output / accepted["mask"])) > 0
+    expected = left_before.copy()
+    expected[2:4, 2:4] = True
+    assert np.array_equal(actual, expected)
 
 
 def test_execute_suppress_text_only_deactivates_selected_frozen_text(
@@ -2748,6 +3214,66 @@ def test_contained_pair_approval_requires_explicit_cross_evidence() -> None:
     ) == set()
 
 
+def test_contained_pair_approval_does_not_survive_without_mask_binding() -> None:
+    previous = {
+        "approved_contained_parent_pairs": [
+            ["inner", "outer"], ["old_inner", "old_outer"],
+        ],
+    }
+
+    assert component_repair._carried_contained_parent_pairs(
+        previous, {("inner", "outer"), ("new_inner", "new_outer")}
+    ) == set()
+
+
+def test_explicit_retry_authorizes_one_next_round_without_prior_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        component_repair, "_page_quality_progressed", lambda *_: False,
+    )
+
+    assert component_repair._next_round_progress_allowed(
+        None, {"stop_reason": "no_quality_improvement"}
+    ) is True
+    assert component_repair._next_round_progress_allowed(
+        None, {"stop_reason": None}
+    ) is False
+
+
+def test_unapproved_contained_pair_reopens_both_visual_owners() -> None:
+    quality = {
+        "contained_parent_pairs": [
+            ["frozen_inner", "pending_outer"],
+            ["approved_inner", "approved_outer"],
+        ],
+        "approved_contained_parent_pairs": [
+            ["approved_inner", "approved_outer"],
+        ],
+    }
+
+    assert component_repair._unapproved_contained_parent_ids(quality) == {
+        "frozen_inner", "pending_outer",
+    }
+
+
+def test_component_overlap_reopens_only_affected_frozen_owner() -> None:
+    graph = {"nodes": [
+        {"id": "pending", "kind": "parent", "state": "pending"},
+        {"id": "affected", "kind": "parent", "state": "frozen"},
+        {"id": "unrelated", "kind": "parent", "state": "frozen"},
+    ]}
+    report = {"component_reports": [{
+        "component_id": "pending",
+        "violations": ["component_overlap"],
+        "overlap_component_ids": ["affected"],
+    }]}
+
+    assert component_repair._failed_overlap_dependency_ids(report, graph) == {
+        "affected"
+    }
+
+
 def test_pair_approval_changes_normalized_plan_without_accepting_rewording() -> None:
     actions = [_action("accept", ["inner"]), _action("accept", ["outer"])]
     first = {"actions": json.loads(json.dumps(actions))}
@@ -2922,6 +3448,43 @@ def test_over_merge_violation_survives_next_round_accept_of_unchanged_parent(
     assert outcome["stop_reason"] == "no_quality_improvement"
 
 
+def test_page_quality_progresses_when_round_freezes_new_components() -> None:
+    state = {
+        "repair_round": 2,
+        "round_history": [
+            {"round": 1, "frozen_ids": []},
+            {"round": 2, "frozen_ids": ["isolated_panel"]},
+        ],
+    }
+
+    assert component_repair._page_quality_progressed(None, state) is True
+
+
+def test_page_quality_progresses_when_candidate_topology_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {
+        "repair_round": 2,
+        "failed_ids": ["row_1", "row_2"],
+        "round_history": [
+            {"round": 1, "frozen_ids": []},
+            {"round": 2, "frozen_ids": []},
+        ],
+        "current_round": {
+            "request_ref": {"path": "current-request.json"},
+        },
+    }
+    monkeypatch.setattr(
+        component_repair,
+        "load_component_agent_request",
+        lambda _: {"candidate_ids": ["composite"]},
+    )
+    store = type("Store", (), {"root": tmp_path})()
+
+    assert component_repair._page_quality_progressed(store, state) is True
+
+
 def test_execution_rejects_rewritten_retained_inactive_source_mask(
     page_session: dict,
 ) -> None:
@@ -3067,6 +3630,164 @@ def test_execute_merge_unions_masks_and_inactivates_sources(tmp_path: Path) -> N
     assert int(merged.sum()) == 32
     assert by_id["merge_0001"]["kind"] == "child"
     assert by_id["merge_0001"]["parent_id"] == "parent"
+
+
+def test_absorb_residual_unions_only_bound_unexplained_pixels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[6:8, 2:4] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+        "path": "unexplained-mask.png",
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}}
+    (input_dir / "component_agent_request.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+    left_before = np.asarray(Image.open(
+        input_dir / next(node for node in graph["nodes"] if node["id"] == "left")["mask"]
+    )) > 0
+
+    result = execute_component_actions(
+        image, graph, [_action("absorb_residual", ["left"])], sam_runner=None,
+        input_dir=input_dir, output_dir=tmp_path / "round-residual",
+    )
+
+    left = next(node for node in result["nodes"] if node["id"] == "left")
+    actual = np.asarray(Image.open(tmp_path / "round-residual" / left["mask"])) > 0
+    assert np.array_equal(actual, left_before | (residual > 0))
+
+
+def test_absorb_residual_partitions_disconnected_regions_by_nearest_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[3:5, 0:2] = 255
+    residual[3:5, 14:16] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+        "path": "unexplained-mask.png",
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}}
+    (input_dir / "component_agent_request.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+    before = {
+        node["id"]: np.asarray(Image.open(input_dir / node["mask"])) > 0
+        for node in graph["nodes"]
+        if node["id"] in {"left", "right"}
+    }
+
+    result = execute_component_actions(
+        image, graph,
+        [
+            _action("absorb_residual", ["left"]),
+            _action("absorb_residual", ["right"]),
+        ],
+        sam_runner=None, input_dir=input_dir,
+        output_dir=tmp_path / "round-partitioned-residual",
+    )
+
+    by_id = {node["id"]: node for node in result["nodes"]}
+    left = np.asarray(Image.open(
+        tmp_path / "round-partitioned-residual" / by_id["left"]["mask"]
+    )) > 0
+    right = np.asarray(Image.open(
+        tmp_path / "round-partitioned-residual" / by_id["right"]["mask"]
+    )) > 0
+    expected_left = before["left"].copy()
+    expected_left[3:5, 0:2] = True
+    expected_right = before["right"].copy()
+    expected_right[3:5, 14:16] = True
+    assert np.array_equal(left, expected_left)
+    assert np.array_equal(right, expected_right)
+
+
+def test_absorb_residual_rejects_region_unrelated_to_every_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[10:12, 14:16] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+            "path": "unexplained-mask.png",
+            "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+        }}}
+    (input_dir / "component_agent_request.json").write_text(
+        json.dumps(request),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+
+    with pytest.raises(VisualSegmentationError, match="unrelated residual"):
+        execute_component_actions(
+            image,
+            graph,
+            [_action("absorb_residual", ["left"])],
+            sam_runner=None,
+            input_dir=input_dir,
+            output_dir=tmp_path / "round-unrelated-residual",
+        )
+
+
+def test_skill_absorb_residual_validates_bound_request_without_product_import(
+    page_session: dict,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    skill_root = Path(__file__).parents[1] / "skills" / "image-to-ppt"
+    script = """
+import builtins
+from pathlib import Path
+from scripts import visual_segment
+original_import = builtins.__import__
+def blocked_import(name, *args, **kwargs):
+    if name.startswith('image2editable'):
+        raise ModuleNotFoundError(name)
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = blocked_import
+mask = visual_segment._read_bound_residual_mask(Path(__import__('sys').argv[1]).parent, (2, 2))
+assert mask.shape == (2, 2)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(request_path)],
+        cwd=skill_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    marker_path = request_path.parent / "publication-marker.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["hmac_sha256"] = "0" * 64
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    rejected = subprocess.run(
+        [sys.executable, "-c", script, str(request_path)],
+        cwd=skill_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert rejected.returncode != 0
+    assert "publication signature mismatch" in rejected.stderr
 
 
 def test_split_without_connected_proposals_fails_without_output(tmp_path: Path) -> None:
@@ -3318,6 +4039,85 @@ def test_retry_with_box_can_reconsider_inactive_visual(tmp_path: Path) -> None:
 
     reconsidered = next(node for node in result["nodes"] if node["id"] == "left")
     assert reconsidered["state"] == "pending"
+
+
+def test_retry_with_box_completes_subtle_antialias_edges(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    image[1:11, 2:12] = 20
+    image[2:10, 3:11] = 80
+    proposed = np.zeros(image.shape[:2], dtype=bool)
+    proposed[2:10, 3:11] = True
+    output = tmp_path / "round-retry-antialias"
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("retry_with_box", ["left"], {"box": [0.1, 0.1, 0.9, 0.9]})],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir,
+        output_dir=output,
+    )
+
+    left = next(node for node in result["nodes"] if node["id"] == "left")
+    stored = np.asarray(Image.open(output / left["mask"])) > 0
+    assert np.all(stored[1:11, 2:12])
+
+
+def test_absorb_into_parent_completes_subtle_antialias_edges(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    image[1:11, 2:14] = 20
+    image[2:10, 3:13] = 80
+    for component_id, x0, x1 in (("parent", 3, 7), ("left", 7, 10), ("right", 10, 13)):
+        node = next(node for node in graph["nodes"] if node["id"] == component_id)
+        mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        mask[2:10, x0:x1] = 255
+        path = input_dir / node["mask"]
+        Image.fromarray(mask).save(path)
+        node["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        node["bbox"] = [x0, 2, x1, 10]
+    output = tmp_path / "round-absorb-antialias"
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("absorb_into_parent", ["parent", "left", "right"])],
+        sam_runner=None,
+        input_dir=input_dir,
+        output_dir=output,
+    )
+
+    updated = next(node for node in result["nodes"] if node["id"] == "parent")
+    stored = np.asarray(Image.open(output / updated["mask"])) > 0
+    assert np.all(stored[1:11, 2:14])
+
+
+def test_retried_inactive_visual_can_rebuild_background_in_same_round(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    left["state"] = "inactive"
+    proposed = np.asarray(Image.open(input_dir / left["mask"])) > 0
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [
+            _action(
+                "retry_with_box", ["left"], {"box": [0.1, 0.1, 0.9, 0.9]},
+            ),
+            _action(
+                "rebuild_background", ["left"], {"margin_ratio": 0.01},
+            ),
+        ],
+        sam_runner=lambda **_: proposed,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-retry-background",
+    )
+
+    assert next(node for node in result["nodes"] if node["id"] == "left")[
+        "state"
+    ] == "pending"
 
 
 def test_non_retry_action_cannot_reactivate_inactive_visual(tmp_path: Path) -> None:
@@ -3586,6 +4386,21 @@ def test_opaque_mask_completion_restores_colored_node_on_smooth_canvas() -> None
 
     assert completed[40, 60]
     assert not completed[20, 60]
+
+
+def test_opaque_mask_completion_restores_subtle_antialias_edge() -> None:
+    from scripts.visual_segment import _complete_opaque_mask_regions
+
+    image = np.full((60, 100, 3), 248, dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=np.uint8)
+    image[28:33, 20:81] = (242, 244, 246)
+    image[29:32, 20:81] = (20, 70, 140)
+    mask[29:32, 20:81] = 1
+
+    completed = _complete_opaque_mask_regions(mask > 0, image)
+
+    assert np.all(completed[28, 20:81])
+    assert np.all(completed[32, 20:81])
 
 
 def test_opaque_mask_completion_preserves_legitimate_transparent_hole() -> None:

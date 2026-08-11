@@ -56,7 +56,7 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 ## 统一 Runtime Agent 模式
 
-在完整仓库环境中，先按运行环境选择 Provider。Provider 写入 Run 后不可切换，两种模式共享同一套严格组件动作、最多五轮修复和质量门禁。
+在完整仓库环境中，先按运行环境选择 Provider。Provider 写入 Run 后不可切换，两种模式共享同一套严格组件动作、最多五轮修复和质量门禁；质量没有改善时会提前停止，不会为了耗尽轮数重复执行。
 
 优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
 
@@ -99,9 +99,9 @@ prepare 会在全页 OCR 和首轮视觉候选完成后，对小型候选做两�
 }
 ```
 
-组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十三类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_into_parent`，不添加未知字段。`accept`、`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认对象是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
+组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十四类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_residual/absorb_into_parent`，不添加未知字段。`accept`、`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认对象是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
 
-当 `quality-report.json` 包含 `unexplained_visual_residual` 时，必须查看 `unexplained-mask.png`。每个显著区域都必须由 active visual owner 覆盖，或对最接近的 inactive visual candidate 执行 `retry_with_box` / `retry_with_points`；不得用 accept、discard 或将其归为背景来消除违规。当 `background_text_residual` 是唯一阻断项时，对诊断命中的冻结文字或视觉 ID 执行 `rebuild_background`。
+当 `quality-report.json` 包含 `unexplained_visual_residual` 时，必须查看 `unexplained-mask.png`。每个显著区域都必须由 active visual owner 覆盖；若区域是候选边界框内经验证的结构碎片，使用 `absorb_residual` 将绑定残差精确并入最小包含候选；否则对最接近的 inactive visual candidate 执行 `retry_with_box` / `retry_with_points`。不得用 accept、discard 或将其归为背景来消除违规。当 `background_text_residual` 是唯一阻断项时，对诊断命中的冻结文字或视觉 ID 执行 `rebuild_background`。
 
 PPTX 的整页截图候选先使用决策路由：
 

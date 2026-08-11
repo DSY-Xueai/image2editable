@@ -19,7 +19,8 @@ from PIL import Image, ImageDraw
 from pypdf import PdfWriter
 from pptx import Presentation
 
-from image2editable import host_agent, legacy, runtime
+from image2editable import component_repair, host_agent, legacy, runtime
+from image2editable.component_contracts import MAX_REPAIR_ROUNDS
 from image2editable.contracts import PageStatus, RunStatus, SCHEMA_VERSION
 from image2editable.execution import ExecutionLease
 from image2editable.pptx_input import prepare_pptx_job
@@ -2307,11 +2308,15 @@ def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
     monkeypatch.setattr(
         legacy.importlib, "import_module", lambda name: FakeImageModule,
     )
+    original_effective_text_context = legacy._effective_text_context
+    refine_text_clean_flags = []
+
+    def record_refinement_policy(**kwargs):
+        refine_text_clean_flags.append(kwargs["refine_text_clean"])
+        return original_effective_text_context(**kwargs)
+
     monkeypatch.setattr(
-        legacy, "_refine_quality_text_clean",
-        lambda *args, **kwargs: pytest.fail(
-            "authenticated clean image must not be repainted during quality assembly"
-        ),
+        legacy, "_effective_text_context", record_refinement_policy,
     )
     output_dir = run_dir / "pages/page_001/reconstruction/quality"
     output_dir.mkdir(parents=True)
@@ -2320,6 +2325,7 @@ def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
         store, "page_001", graph, graph_dir, output_dir,
     )
 
+    assert refine_text_clean_flags == [True]
     native = json.loads(
         (run_dir / refs["native_check"]["path"]).read_text(encoding="utf-8")
     )
@@ -2758,7 +2764,7 @@ def test_background_rebuild_cleans_discarded_component_residual(
 
 
 def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source.png"
     current = tmp_path / "current.png"
@@ -2768,24 +2774,50 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
     masks = graph_dir / "masks"
     masks.mkdir(parents=True)
     Image.new("RGB", (40, 30), "white").save(source)
-    Image.new("RGB", (40, 30), (210, 210, 210)).save(current)
+    current_image = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(current_image).rectangle(
+        (28, 8, 34, 14), fill=(210, 210, 210)
+    )
+    current_image.save(current)
     clean = Image.new("RGB", (40, 30), "white")
     draw = ImageDraw.Draw(clean)
     draw.line((4, 20, 35, 20), fill="blue", width=1)
     draw.rectangle((12, 8, 18, 14), fill="red")
+    draw.rectangle((28, 8, 34, 14), fill="green")
     clean.save(restored)
     Image.new("L", (40, 30), 0).save(text_mask)
     selected_mask = masks / "selected.png"
     mask = Image.new("L", (40, 30), 0)
     ImageDraw.Draw(mask).rectangle((12, 8, 18, 14), fill=255)
     mask.save(selected_mask)
+    other_mask = masks / "other.png"
+    mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(mask).rectangle((28, 8, 34, 14), fill=255)
+    mask.save(other_mask)
     graph = {"nodes": [{
         "id": "selected", "kind": "child", "parent_id": "parent",
         "state": "frozen", "mask": "masks/selected.png",
         "mask_sha256": hashlib.sha256(selected_mask.read_bytes()).hexdigest(),
         "bbox": [12, 8, 19, 15], "z_index": 0, "text_ids": [],
+    }, {
+        "id": "other", "kind": "child", "parent_id": "parent",
+        "state": "frozen", "mask": "masks/other.png",
+        "mask_sha256": hashlib.sha256(other_mask.read_bytes()).hexdigest(),
+        "bbox": [28, 8, 35, 15], "z_index": 1, "text_ids": [],
     }]}
     output = tmp_path / "rebuilt.png"
+    from scripts import component_underlay
+
+    choose_visual_fill = component_underlay._choose_visual_fill
+    allow_original_values = []
+
+    def record_fill_policy(**kwargs):
+        allow_original_values.append(kwargs.get("allow_original"))
+        return choose_visual_fill(**kwargs)
+
+    monkeypatch.setattr(
+        component_underlay, "_choose_visual_fill", record_fill_policy
+    )
 
     legacy._rebuild_canvas_background(
         source_path=source, current_background_path=current,
@@ -2797,7 +2829,9 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
 
     with Image.open(output) as rebuilt:
         assert rebuilt.getpixel((15, 11)) == (255, 255, 255)
+        assert rebuilt.getpixel((31, 11)) == (255, 255, 255)
         assert rebuilt.getpixel((20, 20)) == (0, 0, 255)
+    assert allow_original_values == [False]
 
 
 def test_background_rebuild_preserves_local_tinted_surface(tmp_path: Path) -> None:
@@ -6216,6 +6250,356 @@ def test_retry_page_resets_the_entire_failed_batch(
     assert {
         page["status"] for page in status["pages"]["pages"].values()
     } == {"pending"}
+
+
+@pytest.mark.parametrize(
+    ("analyzed", "expected"),
+    [(False, "pending"), (True, "analyzed")],
+)
+def test_reset_page_jobs_allows_reconstruction_warning_retry(
+    analyzed: bool, expected: str,
+) -> None:
+    page_jobs = {
+        "schema_version": 1,
+        "pages": {
+            "page_001": {
+                "schema_version": 1,
+                "status": "preserved_with_warning",
+                "updated_at": "2026-01-01T00:00:00Z",
+            },
+        },
+    }
+
+    assert runtime._reset_page_jobs(page_jobs, analyzed=analyzed) is True
+    assert page_jobs["pages"]["page_001"]["status"] == expected
+
+
+def test_retry_warning_removes_stale_page_reconstruction(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job([source], run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    store.transition_run(RunStatus.RUNNING)
+    store.transition_page("page_001", PageStatus.PROCESSING)
+    store.transition_page("page_001", PageStatus.PRESERVED_WITH_WARNING)
+    store.transition_run(RunStatus.FAILED)
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    (reconstruction / "component_state.json").write_text(
+        "stale", encoding="utf-8"
+    )
+
+    status = runtime.retry_page(run_dir, "page_001")
+
+    assert not reconstruction.exists()
+    assert status["run"]["status"] == "prepared"
+    assert status["pages"]["pages"]["page_001"]["status"] == "pending"
+
+
+def test_retry_warning_during_agent_wait_preserves_other_page(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    _image(first)
+    _image(second)
+    run_dir = runtime.prepare_job([first, second], run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    store.transition_run(RunStatus.RUNNING)
+    store.transition_page("page_001", PageStatus.PROCESSING)
+    store.transition_page("page_001", PageStatus.PRESERVED_WITH_WARNING)
+    store.transition_page("page_002", PageStatus.PROCESSING)
+    store.transition_page("page_002", PageStatus.AWAITING_AGENT)
+    store.transition_run(RunStatus.AWAITING_AGENT)
+    first_reconstruction = run_dir / "pages/page_001/reconstruction"
+    second_reconstruction = run_dir / "pages/page_002/reconstruction"
+    first_reconstruction.mkdir(parents=True)
+    second_reconstruction.mkdir(parents=True)
+    (first_reconstruction / "stale.txt").write_text("stale", encoding="utf-8")
+    (second_reconstruction / "keep.txt").write_text("keep", encoding="utf-8")
+
+    status = runtime.retry_page(run_dir, "page_001")
+
+    assert status["run"]["status"] == "prepared"
+    assert status["pages"]["pages"]["page_001"]["status"] == "pending"
+    assert status["pages"]["pages"]["page_002"]["status"] == "awaiting_agent"
+    assert not first_reconstruction.exists()
+    assert (second_reconstruction / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.parametrize(
+    ("first_status", "ready_after_assembly_warning", "fail_after_cleanup"),
+    [
+        ("replaced", False, False),
+        ("preserved_with_warning", True, False),
+        ("replaced", False, True),
+    ],
+)
+def test_retry_completed_pptx_warning_preserves_validated_other_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_status: str,
+    ready_after_assembly_warning: bool,
+    fail_after_cleanup: bool,
+) -> None:
+    source = tmp_path / "source.pptx"
+    _pptx(source, slide_count=2)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    manifest = store.read_json("job_manifest.json")
+    output = run_dir / "final/output.pptx"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"owned output")
+    output_hash = runtime.sha256_file(output)
+    store.write_json("run_state.json", {
+        "schema_version": SCHEMA_VERSION,
+        "status": "completed",
+        "updated_at": runtime.utc_now(),
+    })
+    page_jobs = store.read_json("page_jobs.json")
+    page_jobs["pages"]["page_001"].update({
+        "status": first_status, "updated_at": runtime.utc_now(),
+    })
+    page_jobs["pages"]["page_002"].update({
+        "status": "preserved_with_warning", "updated_at": runtime.utc_now(),
+    })
+    store.write_json("page_jobs.json", page_jobs)
+    store.write_json("run_summary.json", {
+        "schema_version": SCHEMA_VERSION,
+        "status": "completed",
+        "outputs": {"pptx": str(output)},
+        "output_sha256": output_hash,
+        "page_results": [
+            {"page_id": "page_001", "status": first_status},
+            {"page_id": "page_002", "status": "preserved_with_warning"},
+        ],
+        "input_sha256": manifest["input"]["sha256"],
+    })
+    first_reconstruction = run_dir / "pages/page_001/reconstruction"
+    second_reconstruction = run_dir / "pages/page_002/reconstruction"
+    first_reconstruction.mkdir(parents=True)
+    second_reconstruction.mkdir(parents=True)
+    if ready_after_assembly_warning:
+        _write_mock_component_state(store, "page_001")
+        component_state = store.read_json(
+            "pages/page_001/reconstruction/component_state.json"
+        )
+        component_state.update({
+            "phase": "ready_for_assembly",
+            "status": "ready_for_assembly",
+            "result_ref": {
+                "path": "mock-artifact.json",
+                "sha256": "0" * 64,
+            },
+        })
+        store.write_json(
+            "pages/page_001/reconstruction/component_state.json",
+            component_state,
+        )
+    (first_reconstruction / "keep.txt").write_text("keep", encoding="utf-8")
+    (first_reconstruction / "donor.pptx").write_bytes(b"stale donor")
+    (second_reconstruction / "stale.txt").write_text("stale", encoding="utf-8")
+    first_plan = run_dir / "host-component-plan-page_001-01-first.json"
+    second_plan = run_dir / "host-component-plan-page_002-05-stale.json"
+    first_plan.write_text("keep", encoding="utf-8")
+    second_plan.write_text("stale", encoding="utf-8")
+
+    if fail_after_cleanup:
+        original_unlink = Path.unlink
+        failed = False
+
+        def fail_isolated_unlink(path: Path, *args, **kwargs) -> None:
+            nonlocal failed
+            if path.name.startswith(".output.pptx.recovery-") and not failed:
+                failed = True
+                raise OSError("isolated output cleanup failed")
+            original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_isolated_unlink)
+        with pytest.raises(OSError, match="isolated output cleanup failed"):
+            runtime.retry_page(run_dir, "page_002")
+        assert output.read_bytes() == b"owned output"
+        assert (second_reconstruction / "stale.txt").read_text(
+            encoding="utf-8"
+        ) == "stale"
+        assert store.read_json("run_state.json")["status"] == "completed"
+        return
+
+    status = runtime.retry_page(run_dir, "page_002")
+
+    assert status["run"]["status"] == "prepared"
+    assert status["pages"]["pages"]["page_001"]["status"] == "validated"
+    assert status["pages"]["pages"]["page_002"]["status"] == "analyzed"
+    assert not output.exists()
+    assert (first_reconstruction / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert (first_reconstruction / "donor.pptx").read_bytes() == b"stale donor"
+    assert not second_reconstruction.exists()
+    assert first_plan.read_text(encoding="utf-8") == "keep"
+    assert not second_plan.exists()
+
+
+def test_retry_failed_page_preserves_other_ready_reconstruction(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pptx"
+    _pptx(source, slide_count=2)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    store.write_json("run_state.json", {
+        "schema_version": SCHEMA_VERSION,
+        "status": "failed",
+        "updated_at": runtime.utc_now(),
+    })
+    page_jobs = store.read_json("page_jobs.json")
+    for page in page_jobs["pages"].values():
+        page.update({"status": "failed", "updated_at": runtime.utc_now()})
+    store.write_json("page_jobs.json", page_jobs)
+    store.write_json("run_summary.json", {
+        "schema_version": SCHEMA_VERSION,
+        "status": "failed",
+    })
+    first_reconstruction = run_dir / "pages/page_001/reconstruction"
+    second_reconstruction = run_dir / "pages/page_002/reconstruction"
+    first_reconstruction.mkdir(parents=True)
+    second_reconstruction.mkdir(parents=True)
+    (first_reconstruction / "stale.txt").write_text("stale", encoding="utf-8")
+    _write_mock_component_state(store, "page_002")
+    second_state = store.read_json(
+        "pages/page_002/reconstruction/component_state.json"
+    )
+    second_state.update({
+        "phase": "ready_for_assembly",
+        "status": "ready_for_assembly",
+        "result_ref": {
+            "path": "mock-artifact.json",
+            "sha256": "0" * 64,
+        },
+    })
+    store.write_json(
+        "pages/page_002/reconstruction/component_state.json", second_state
+    )
+    (second_reconstruction / "donor.pptx").write_bytes(b"validated donor")
+
+    status = runtime.retry_page(run_dir, "page_001")
+
+    assert status["run"]["status"] == "prepared"
+    assert status["pages"]["pages"]["page_001"]["status"] == "analyzed"
+    assert status["pages"]["pages"]["page_002"]["status"] == "validated"
+    assert not first_reconstruction.exists()
+    assert (second_reconstruction / "donor.pptx").read_bytes() == b"validated donor"
+
+
+@pytest.mark.parametrize("stop_reason", ["round_limit", "no_quality_improvement"])
+def test_retry_completed_component_warning_resumes_component_state(
+    tmp_path: Path,
+    stop_reason: str,
+) -> None:
+    source = tmp_path / "source.pptx"
+    _pptx(source, slide_count=1)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    manifest = store.read_json("job_manifest.json")
+    output = run_dir / "final/output.pptx"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"owned output")
+    output_hash = runtime.sha256_file(output)
+    store.write_json("run_state.json", {
+        "schema_version": SCHEMA_VERSION, "status": "completed",
+        "updated_at": runtime.utc_now(),
+    })
+    page_jobs = store.read_json("page_jobs.json")
+    page_jobs["pages"]["page_001"].update({
+        "status": "preserved_with_warning", "updated_at": runtime.utc_now(),
+    })
+    store.write_json("page_jobs.json", page_jobs)
+    store.write_json("run_summary.json", {
+        "schema_version": SCHEMA_VERSION, "status": "completed",
+        "outputs": {"pptx": str(output)}, "output_sha256": output_hash,
+        "page_results": [{
+            "page_id": "page_001", "status": "preserved_with_warning",
+        }],
+        "input_sha256": manifest["input"]["sha256"],
+    })
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    _write_mock_component_state(store, "page_001")
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    reference = state["graph_ref"]
+    graph_path = store.root / reference["path"]
+    graph_path.write_text(json.dumps({
+        "nodes": [{
+            "id": "candidate", "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": "masks/candidate.png",
+            "mask_sha256": "2" * 64, "bbox": [0, 0, 1, 1],
+            "z_index": 0, "text_ids": [],
+        }],
+    }), encoding="utf-8")
+    reference["sha256"] = runtime.sha256_file(graph_path)
+    state.update({
+        "phase": "preserved_with_warning",
+        "status": "preserved_with_warning",
+        "stop_reason": stop_reason,
+        "plan_count": 1,
+        "candidate_ids": ["candidate"],
+        "failed_ids": ["candidate"],
+        "fallback": {"status": "warning", "parent_ids": []},
+        "current_round": {
+            "round": 1, "request_ref": reference, "plan_ref": reference,
+            "execution_ref": reference, "quality_ref": reference,
+        },
+        "round_history": [{
+            "round": 1, "plan_sha256": "0" * 64,
+            "normalized_plan_sha256": "0" * 64,
+            "execution_sha256": "0" * 64, "quality_sha256": "0" * 64,
+            "frozen_ids": [], "failed_ids": ["candidate"],
+        }],
+    })
+    if stop_reason == "round_limit":
+        state["repair_round"] = MAX_REPAIR_ROUNDS
+        state["plan_count"] = MAX_REPAIR_ROUNDS
+        state["current_round"]["round"] = MAX_REPAIR_ROUNDS
+        state["round_history"] = [
+            {
+                **state["round_history"][0],
+                "round": repair_round,
+            }
+            for repair_round in range(1, MAX_REPAIR_ROUNDS + 1)
+        ]
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json", state
+    )
+
+    if stop_reason == "round_limit":
+        with pytest.raises(RuntimeError, match="non-resumable repair boundary"):
+            runtime.retry_page(run_dir, "page_001")
+        assert output.read_bytes() == b"owned output"
+        assert reconstruction.exists()
+        assert store.read_json("run_state.json")["status"] == "completed"
+        assert store.read_json(
+            "pages/page_001/reconstruction/component_state.json"
+        ) == state
+        return
+
+    status = runtime.retry_page(run_dir, "page_001")
+
+    resumed = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert status["run"]["status"] == "prepared"
+    assert status["pages"]["pages"]["page_001"]["status"] == "analyzed"
+    assert resumed["phase"] == "freeze_committed"
+    assert resumed["status"] == "active"
+    assert reconstruction.exists()
+    assert not output.exists()
+    assert component_repair.advance_component_repair(store, "page_001") == {
+        "status": "needs_next_round",
+        "page_id": "page_001",
+        "repair_round": 2,
+        "candidate_ids": ["candidate"],
+        "page_violations": [],
+    }
 
 
 def test_retry_page_removes_work_before_resetting_state(

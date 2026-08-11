@@ -784,15 +784,58 @@ def test_legacy_empty_component_does_not_gain_exact_only_violation() -> None:
 
 def test_generated_underlay_outside_parent_semantic_mask_fails() -> None:
     case, semantic, generated = _clean_underlay_case()
+    generated[3:6, 4:6] = True
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated,
+    )
+
+    assert report["metrics"]["generated_underlay_pixels"] == 70
+    assert report["metrics"]["underlay_out_of_bounds_pixels"] == 6
+    assert "underlay_out_of_bounds" in report["violations"]
+
+
+def test_four_isolated_underlay_boundary_pixels_do_not_fail_the_page() -> None:
+    case, semantic, generated = _clean_underlay_case()
     generated[4:6, 4:6] = True
 
     report = _evaluate_underlay(
         case, parent_mask=semantic, generated=generated,
     )
 
-    assert report["metrics"]["generated_underlay_pixels"] == 68
     assert report["metrics"]["underlay_out_of_bounds_pixels"] == 4
-    assert "underlay_out_of_bounds" in report["violations"]
+    assert "underlay_out_of_bounds" not in report["violations"]
+
+
+def test_generated_text_underlay_may_extend_into_ocr_text_mask() -> None:
+    case = _synthetic_quality_case()
+    semantic = case["component_mask"].copy()
+    generated = case["text_mask"].copy()
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated,
+    )
+
+    assert report["metrics"]["generated_underlay_pixels"] > 0
+    assert report["metrics"]["underlay_out_of_bounds_pixels"] == 0
+    assert "underlay_out_of_bounds" not in report["violations"]
+
+
+def test_generated_text_underlay_may_extend_into_calibrated_text_halo() -> None:
+    case = _synthetic_quality_case()
+    semantic = case["component_mask"].copy()
+    case["text_mask"] = np.zeros_like(semantic)
+    case["text_mask"][12:16, 24:40] = True
+    generated = np.zeros_like(semantic)
+    generated[11:12, 24:40] = True
+
+    report = _evaluate_underlay(
+        case, parent_mask=semantic, generated=generated,
+    )
+
+    assert report["metrics"]["generated_underlay_pixels"] == 16
+    assert report["metrics"]["underlay_out_of_bounds_pixels"] == 0
+    assert "underlay_out_of_bounds" not in report["violations"]
 
 
 @pytest.mark.parametrize(
@@ -1016,10 +1059,42 @@ def test_nonhierarchical_component_overlap_fails_quality_gate() -> None:
         case["node"], case["graph"], calibration,
         component_mask=case["component_mask"], text_mask=case["text_mask"],
         page_checks={"protected_native_overlap": "pass"},
+        overlap_component_ids=["component_0002"],
         _page_context=context,
     )
 
     assert "component_overlap" in report["violations"]
+    assert report["overlap_component_ids"] == ["component_0002"]
+
+
+def test_sub_noise_component_overlap_does_not_fail_quality_gate() -> None:
+    case = _synthetic_quality_case(scale=20)
+    other = np.zeros_like(case["component_mask"])
+    other[300, 400:450] = True
+    case["graph"]["nodes"].append({
+        "id": "component_0002", "kind": "parent", "parent_id": None,
+        "state": "frozen", "mask": "masks/component_0002.png",
+        "mask_sha256": "b" * 64, "bbox": [400, 300, 450, 301],
+        "z_index": 1, "text_ids": [],
+    })
+    module = importlib.import_module("image2editable.component_quality")
+    calibration = calibrate_page(case["source"], case["text_mask"])
+    context = module._prepare_page_quality_context(
+        case["source"], case["background"], case["reconstructed"],
+        case["text_mask"], calibration=calibration,
+        component_masks=[case["component_mask"], other],
+    )
+
+    report = evaluate_component(
+        case["source"], case["background"], case["reconstructed"],
+        case["node"], case["graph"], calibration,
+        component_mask=case["component_mask"], text_mask=case["text_mask"],
+        page_checks={"protected_native_overlap": "pass"},
+        _page_context=context,
+    )
+
+    assert report["metrics"]["component_overlap_pixels"] == 50
+    assert "component_overlap" not in report["violations"]
 
 
 def test_canvas_colored_component_fill_is_not_a_visible_duplicate() -> None:
@@ -1029,6 +1104,21 @@ def test_canvas_colored_component_fill_is_not_a_visible_duplicate() -> None:
     case["source"][fill] = 97
     case["background"][fill] = 97
     case["reconstructed"][fill] = 97
+
+    assert "duplicate_pixels" not in _evaluate_synthetic(case)["violations"]
+
+
+def test_clean_background_baseline_ignores_source_contamination_around_component() -> None:
+    case = _synthetic_quality_case()
+    outside = ~case["component_mask"]
+    case["source"][outside] = 80
+    case["background"][outside] = 96
+    case["reconstructed"][outside] = 96
+    canvas_fill = np.zeros(case["component_mask"].shape, dtype=bool)
+    canvas_fill[26:34, 24:32] = True
+    case["source"][canvas_fill] = 96
+    case["background"][canvas_fill] = 96
+    case["reconstructed"][canvas_fill] = 96
 
     assert "duplicate_pixels" not in _evaluate_synthetic(case)["violations"]
 
@@ -1141,6 +1231,26 @@ def test_quality_text_refinement_rebuilds_the_confirmed_text_box_and_halo() -> N
     assert "component_text_residual" not in _evaluate_synthetic(case)["violations"]
 
 
+def test_quality_text_refinement_clears_antialias_halo_beyond_raw_mask() -> None:
+    from image2editable import legacy
+
+    source = np.full((80, 160, 3), (70, 125, 190), dtype=np.uint8)
+    source[27:53, 57:103] = (18, 24, 32)
+    dirty = source.copy()
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[31:49, 61:99] = True
+    dirty[27:53, 57:103] = (218, 228, 239)
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        dirty,
+        text_mask,
+        [{"box": [55, 24, 50, 32]}],
+    )
+
+    assert np.all(refined[27:53, 57:103] == (70, 125, 190))
+
+
 def test_quality_text_refinement_preserves_structure_crossing_text_box() -> None:
     import cv2
 
@@ -1226,6 +1336,55 @@ def test_effective_text_context_reuses_authenticated_clean_image(
 
     assert np.array_equal(effective_mask, cleanup_mask > 0)
     assert np.array_equal(effective_clean, cleaned)
+
+
+def test_effective_text_context_excludes_the_full_repaired_text_halo(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    from image2editable import legacy
+
+    source = np.full((80, 160, 3), (70, 125, 190), dtype=np.uint8)
+    cleaned = source.copy()
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[31:49, 61:99] = 255
+    mask_path = tmp_path / "text.png"
+    Image.fromarray(text_mask, mode="L").save(mask_path)
+    graph = {"nodes": [{
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [55, 24, 105, 56], "z_index": 1, "text_ids": [],
+    }]}
+
+    _, effective_mask, _ = legacy._effective_text_context(
+        source=source,
+        text_clean=cleaned,
+        text_mask=text_mask,
+        text_items=[{"box": [55, 24, 50, 32], "text": "A"}],
+        graph=graph,
+        graph_dir=tmp_path,
+        refine_text_clean=True,
+    )
+
+    assert effective_mask[28, 58]
+
+
+def test_quality_text_repair_mask_excludes_visual_outside_text_boxes() -> None:
+    from image2editable import legacy
+
+    contaminated = np.zeros((60, 100), dtype=np.uint8)
+    contaminated[10:20, 10:20] = 255
+    contaminated[30:36, 50:65] = 255
+
+    repaired = legacy._quality_text_repair_mask(
+        contaminated,
+        [{"box": [45, 25, 25, 18], "text": "editable text"}],
+    )
+
+    assert not np.any(repaired[10:20, 10:20])
+    assert np.all(repaired[30:36, 50:65])
 
 
 def test_effective_text_context_refines_mask_without_reintroducing_text(
@@ -1352,6 +1511,40 @@ def test_material_foreground_without_owner_fails_page_gate() -> None:
     assert metrics["largest_unexplained_region_pixels"] == 32 * 32
     assert metrics["visual_ownership_coverage"] == 0.0
     assert np.array_equal(unexplained, evidence)
+
+
+def test_material_evidence_ignores_flat_region_matching_background() -> None:
+    shape = (96, 160)
+    source = np.full((*shape, 3), 240, dtype=np.uint8)
+    evidence = np.ones(shape, dtype=bool)
+    calibration = component_quality.PageCalibration(1.0, 20.0, 2, 3, 20)
+
+    refined = component_quality.refine_material_foreground(
+        evidence, source, source.copy(), calibration
+    )
+
+    assert not np.any(refined)
+
+
+def test_material_evidence_keeps_structure_retained_in_background() -> None:
+    shape = (96, 160)
+    source = np.full((*shape, 3), 240, dtype=np.uint8)
+    source[24:56, 72:104] = 20
+    evidence = np.zeros(shape, dtype=bool)
+    evidence[24:56, 72:104] = True
+    calibration = component_quality.PageCalibration(1.0, 20.0, 2, 3, 20)
+
+    refined = component_quality.refine_material_foreground(
+        evidence, source, source.copy(), calibration
+    )
+    metrics, _ = component_quality.material_ownership_metrics(
+        refined,
+        [np.zeros(shape, dtype=bool)],
+        np.zeros(shape, dtype=bool),
+        calibration,
+    )
+
+    assert metrics["unexplained_visual_pixels"] > 0
 
 
 def test_visual_ownership_failure_is_a_page_hard_gate() -> None:
@@ -1734,6 +1927,49 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
         assert not np.any(np.asarray(unexplained))
     assert unknown["accepted"] is False
     assert {"protected_native_overlap_unknown", "pptx_reopen_unknown"} <= set(unknown["violations"])
+
+
+def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    semantic = case["component_mask"].copy()
+    Image.fromarray(semantic.astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    ownership = semantic.copy()
+    ownership[26:34, 24:32] = False
+    generated = semantic & ~ownership
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=semantic,
+        presentation_layers=[{
+            "component_id": "component_0001",
+            "ownership_mask": ownership,
+            "presentation_alpha_mask": semantic,
+            "generated_underlay_mask": generated,
+            "metrics": _underlay_metrics(),
+        }],
+    )
+
+    assert report["checks"]["visual_ownership"] == "pass"
+    assert report["visual_metrics"]["owned_visual_pixels"] == int(
+        np.count_nonzero(ownership)
+    )
+    assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
+        np.count_nonzero(generated)
+    )
+    assert report["visual_metrics"]["visual_ownership_coverage"] < 1.0
+    assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
 
 
 def test_repair_quality_round_rejects_reliable_text_without_editable_object(tmp_path) -> None:

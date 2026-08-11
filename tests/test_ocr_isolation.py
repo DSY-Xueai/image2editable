@@ -1114,9 +1114,11 @@ def test_visual_masks_pack_and_restore_exactly() -> None:
     assert element.semantic_mask is candidates[0].mask
 
 
+@pytest.mark.parametrize("persistent_residual", [False, True])
 def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     tmp_path: Path,
     monkeypatch,
+    persistent_residual: bool,
 ) -> None:
     source = np.full((20, 30, 3), 40, dtype=np.uint8)
     image_path = tmp_path / "source.png"
@@ -1139,6 +1141,7 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     sam_calls = []
     background_calls = []
     isolated_calls = []
+    resolved_candidate_counts = []
 
     monkeypatch.setattr(
         image_to_ppt,
@@ -1163,12 +1166,19 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     monkeypatch.setattr(
         image_to_ppt,
         "combine_residual_candidates",
-        lambda **kwargs: ([], 1),
+        lambda **kwargs: (
+            [MaskCandidate(mask.copy(), 0.95, "sam")], 0
+        ) if persistent_residual else ([], 1),
     )
+
+    def resolve_candidates(candidates):
+        resolved_candidate_counts.append(len(candidates))
+        return [element]
+
     monkeypatch.setattr(
         image_to_ppt,
         "resolve_visual_elements",
-        lambda *args: [element],
+        resolve_candidates,
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -1249,9 +1259,15 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         _resource_isolation=True,
     )
 
-    assert sam_calls == ["prompted", "automatic", "prompted", "automatic"]
-    assert background_calls == ["clean", "clean", "clean", "widescreen"]
-    assert len(isolated_calls) == 4
+    if persistent_residual:
+        assert sam_calls == ["prompted", "automatic"] * 4
+        assert resolved_candidate_counts[-1] == 4
+        assert background_calls == ["clean"] * 4 + ["widescreen"]
+        assert len(isolated_calls) == 5
+    else:
+        assert sam_calls == ["prompted", "automatic", "prompted", "automatic"]
+        assert background_calls == ["clean", "clean", "clean", "widescreen"]
+        assert len(isolated_calls) == 4
     assert all(
         input_path.parent == mask_path.parent == output_path.parent
         for input_path, mask_path, output_path in isolated_calls

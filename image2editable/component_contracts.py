@@ -225,7 +225,16 @@ def validate_component_repair_state(state: object) -> dict:
         "fallback_required", "fallback_executed", "fallback_quality_recorded",
         "preserved_with_warning",
     } or fallback_status == "parent_preserved"
-    if fallback_phase != (state["stop_reason"] is not None):
+    resumed_progress_override = (
+        phase == "freeze_committed"
+        and fallback_status == "none"
+        and state["stop_reason"] in {
+            "round_limit", "no_quality_improvement",
+        }
+    )
+    if (fallback_phase or resumed_progress_override) != (
+        state["stop_reason"] is not None
+    ):
         raise ValueError("component repair fallback stop reason is inconsistent")
     if phase == "fallback_required" and any(
         state[name] is not None for name in (
@@ -323,6 +332,7 @@ _ACTION_PARAMETERS = {
     "suppress_text": frozenset(),
     "collapse_to_parent": frozenset(),
     "rebuild_background": frozenset({"margin_ratio"}),
+    "absorb_residual": frozenset(),
     "absorb_into_parent": frozenset(),
 }
 _OPTIONAL_ACTION_PARAMETERS = {
@@ -331,7 +341,7 @@ _OPTIONAL_ACTION_PARAMETERS = {
     "retry_with_points": frozenset({"independent"}),
 }
 _SINGLE_OBJECT_ACTIONS = frozenset(
-    {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "suppress_text", "collapse_to_parent"}
+    {"accept", "discard", "split", "expand", "shrink", "retry_with_box", "retry_with_points", "suppress_text", "collapse_to_parent", "absorb_residual"}
 )
 
 
@@ -421,6 +431,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
     known_ids = set(request["candidate_ids"]) | set(request["frozen_ids"])
     collapsible_parent_ids = set()
     recoverable_parent_ids = set()
+    recoverable_retry_ids = set()
     if graph is not None:
         candidate_ids = set(request["candidate_ids"])
         collapsible_parent_ids = {
@@ -432,7 +443,12 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             node["id"] for node in graph["nodes"]
             if node.get("kind") == "parent" and node.get("state") == "inactive"
         }
+        recoverable_retry_ids = {
+            node["id"] for node in graph["nodes"]
+            if node.get("kind") != "text" and node.get("state") == "inactive"
+        }
     touched = set()
+    retried_ids = set()
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
             raise ValueError("component action fields are invalid")
@@ -454,6 +470,14 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     name == "absorb_into_parent"
                     and value == object_ids[0]
                     and value in recoverable_parent_ids
+                )
+                and not (
+                    name in {"retry_with_box", "retry_with_points"}
+                    and value in recoverable_retry_ids
+                )
+                and not (
+                    name == "rebuild_background"
+                    and value in retried_ids
                 )
                 for value in object_ids
             )
@@ -534,6 +558,8 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     _validate_normalized_point(point, field)
             if not parameters["positive"]:
                 raise ValueError("component action positive coordinates are invalid")
+        if name in {"retry_with_box", "retry_with_points"}:
+            retried_ids.update(object_ids)
     return plan
 
 
@@ -786,7 +812,7 @@ def validate_graph_transition(
     if any(
         component_id not in before_nodes
         or before_nodes[component_id]["kind"] == "text"
-        or before_nodes[component_id]["state"] != "inactive"
+        or before_nodes[component_id]["state"] not in {"inactive", "frozen"}
         for component_id in reactivated
     ):
         raise ValueError("component reactivation authorization is invalid")
@@ -802,10 +828,17 @@ def validate_graph_transition(
     actual_reactivated = {
         component_id
         for component_id, node in before_nodes.items()
-        if node["state"] == "inactive"
-        and after_nodes.get(component_id, {}).get("state") != "inactive"
+        if node["state"] in {"inactive", "frozen"}
+        and after_nodes.get(component_id, {}).get("state") == "pending"
     }
-    if actual_reactivated != set(reactivated) or any(
+    if actual_reactivated != set(reactivated):
+        if any(
+            before_nodes[component_id]["state"] == "frozen"
+            for component_id in actual_reactivated - set(reactivated)
+        ):
+            raise ValueError("frozen component reactivation is not authorized")
+        raise ValueError("inactive component reactivation is not authorized")
+    if any(
         after_nodes[component_id].get("state") != "pending"
         for component_id in actual_reactivated
     ):
@@ -815,7 +848,10 @@ def validate_graph_transition(
             continue
         replacement = after_nodes.get(node["id"])
         fields = _FROZEN_FIELDS
-        if node["id"] in allowed:
+        if node["id"] in reactivated:
+            fields = tuple(field for field in fields if field != "state")
+            valid = replacement is not None and replacement.get("state") == "pending"
+        elif node["id"] in allowed:
             fields = tuple(field for field in fields if field != "state")
             valid = replacement is not None and replacement.get("state") == "inactive"
         elif node["kind"] != "text" and set(node["text_ids"]) & allowed:

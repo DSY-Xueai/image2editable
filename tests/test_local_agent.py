@@ -451,8 +451,9 @@ def test_worker_loads_only_the_confirmed_local_snapshot(
         "attach_text",
         "suppress_text",
         "collapse_to_parent",
-        "rebuild_background",
-        "absorb_into_parent",
+            "rebuild_background",
+            "absorb_residual",
+            "absorb_into_parent",
     }
     assert "untrusted" in local_agent_worker.SYSTEM_PROMPT.casefold()
     assert "JSON" in local_agent_worker.SYSTEM_PROMPT

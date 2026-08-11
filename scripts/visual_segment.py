@@ -8,6 +8,7 @@ import copy
 import ctypes
 import errno
 import hashlib
+import hmac
 import stat
 import uuid
 from contextlib import contextmanager
@@ -72,6 +73,10 @@ def _complete_opaque_mask_regions(
     if np.count_nonzero(quiet) < np.count_nonzero(ring) * 0.6:
         return completed
     foreground = distance > 18.0
+    foreground |= (
+        (distance > 3.0)
+        & (cv2.dilate(local.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+    )
     foreground &= ~local
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         foreground.astype(np.uint8), 8
@@ -102,11 +107,27 @@ def _complete_opaque_mask_regions(
             ][neighbor_mask].astype(np.float32)
             contact_color = crop[contact_y, contact_x].astype(np.float32)
             color_distance = np.linalg.norm(neighbor_colors - contact_color, axis=1)
-            if np.count_nonzero(color_distance <= 30.0) >= 3:
+            neighbor_vectors = neighbor_colors - background
+            contact_vector = contact_color - background
+            neighbor_norms = np.linalg.norm(neighbor_vectors, axis=1)
+            contact_norm = float(np.linalg.norm(contact_vector))
+            alignment = (
+                neighbor_vectors @ contact_vector
+                / np.maximum(neighbor_norms * contact_norm, 1e-6)
+            )
+            subtle_aligned_edge = (
+                contact_norm > 3.0
+                and contact_norm <= float(np.max(neighbor_norms)) * 0.45
+                and np.count_nonzero(alignment >= 0.9) >= 3
+            )
+            if (
+                np.count_nonzero(color_distance <= 30.0) >= 3
+                or subtle_aligned_edge
+            ):
                 compatible += 1
         if compatible >= max(3, round(contact_count * 0.6)):
             recovered |= candidate
-    if np.count_nonzero(recovered) <= np.count_nonzero(local) * 1.5:
+    if np.count_nonzero(recovered) <= np.count_nonzero(local) * 2.0:
         completed[y0:y1, x0:x1] = recovered
     return completed
 
@@ -148,9 +169,19 @@ def execute_component_actions(
     }
     masks = {component_id: loaded[0] for component_id, loaded in loaded_masks.items()}
     mask_payloads = {component_id: loaded[1] for component_id, loaded in loaded_masks.items()}
+    residual_targets = [
+        action["object_ids"][0]
+        for action in actions
+        if action["action"] == "absorb_residual"
+    ]
+    bound_residuals = _partition_bound_residual_mask(
+        source, image.shape[:2], residual_targets, masks
+    ) if residual_targets else {}
     touched = set()
     suppressed_text_ids = set()
+    text_backing = None
     reactivated_ids = set()
+    planned_retry_ids = set()
     for action in actions:
         validate_component_action(action, graph=validated)
         object_ids = action["object_ids"]
@@ -171,6 +202,7 @@ def execute_component_actions(
             if not valid_states:
                 raise ValueError("suppress_text requires a frozen text object")
             suppressed_text_ids.add(object_ids[0])
+            text_backing = None
         elif name == "collapse_to_parent":
             allowed_states = {"inactive", "pending"}
             valid_states = all(
@@ -185,6 +217,7 @@ def execute_component_actions(
         elif name == "rebuild_background":
             valid_states = all(
                 nodes[value]["state"] in {"pending", "frozen"}
+                or value in planned_retry_ids
                 for value in object_ids
             )
         elif name in {"retry_with_box", "retry_with_points"}:
@@ -202,6 +235,8 @@ def execute_component_actions(
             if touched & set(object_ids):
                 raise ValueError("component plan has conflicting object actions")
             touched.update(object_ids)
+        if name in {"retry_with_box", "retry_with_points"}:
+            planned_retry_ids.update(object_ids)
     for action in actions:
         object_ids = action["object_ids"]
         name = action["action"]
@@ -209,11 +244,29 @@ def execute_component_actions(
             if nodes[object_ids[0]]["state"] != "pending":
                 raise ValueError("accept requires a pending component")
             accepted = nodes[object_ids[0]]
+            accepted_mask = masks[object_ids[0]]
             if action["parameters"].get("independent") is True:
+                parent_id = accepted["parent_id"]
+                if parent_id is not None:
+                    if text_backing is None:
+                        text_backing = np.zeros(image.shape[:2], dtype=bool)
+                        for node in nodes.values():
+                            if (
+                                node["kind"] == "text"
+                                and node["state"] == "frozen"
+                                and node["id"] not in suppressed_text_ids
+                            ):
+                                text_backing |= masks[node["id"]]
+                    left, top, right, bottom = accepted["bbox"]
+                    within_bounds = np.zeros(image.shape[:2], dtype=bool)
+                    within_bounds[top:bottom, left:right] = True
+                    accepted_mask |= (
+                        masks[parent_id] & text_backing & within_bounds
+                    )
                 accepted["kind"] = "parent"
                 accepted["parent_id"] = None
             masks[object_ids[0]] = _complete_opaque_mask_regions(
-                masks[object_ids[0]], image
+                accepted_mask, image
             )
             accepted["state"] = "pending_gate"
         elif name == "discard":
@@ -238,8 +291,9 @@ def execute_component_actions(
             _deactivate_descendants(nodes, parent)
         elif name == "absorb_into_parent":
             parent, *absorbed = object_ids
-            masks[parent] = np.logical_or.reduce(
-                [masks[value] for value in object_ids]
+            masks[parent] = _complete_opaque_mask_regions(
+                np.logical_or.reduce([masks[value] for value in object_ids]),
+                image,
             )
             if nodes[parent]["state"] == "inactive":
                 reactivated_ids.add(parent)
@@ -291,6 +345,9 @@ def execute_component_actions(
                 support = masks[parent_id] if parent_id is not None else cv2.dilate(current, kernel)
                 changed = np.asarray(changed, dtype=bool) & np.asarray(support, dtype=bool)
             masks[component_id] = np.asarray(changed, dtype=bool)
+        elif name == "absorb_residual":
+            component_id = object_ids[0]
+            masks[component_id] |= bound_residuals[component_id]
         elif name in {"retry_with_box", "retry_with_points"}:
             component_id = object_ids[0]
             parameters = action["parameters"]
@@ -318,6 +375,7 @@ def execute_component_actions(
             proposed = np.asarray(proposed, dtype=bool)
             if proposed.shape != image.shape[:2] or not proposed.any():
                 raise VisualSegmentationError("SAM component retry returned an invalid mask")
+            proposed = _complete_opaque_mask_regions(proposed, image)
             masks[component_id] = proposed
             if nodes[component_id]["state"] == "inactive":
                 reactivated_ids.add(component_id)
@@ -437,6 +495,265 @@ def _read_action_mask(path: Path, shape: tuple[int, int], digest: str) -> tuple[
     if mask.shape != shape:
         raise VisualSegmentationError(f"Component action mask shape mismatch: {path}")
     return mask, payload
+
+
+def _read_bound_residual_mask(source: Path, shape: tuple[int, int]) -> np.ndarray:
+    try:
+        from image2editable.component_repair import load_component_agent_request
+    except ModuleNotFoundError:
+        request = _load_bound_residual_request(source)
+    else:
+        request = load_component_agent_request(
+            source / "component_agent_request.json"
+        )
+    reference = request.get("evidence", {}).get("unexplained-mask.png")
+    if (
+        not isinstance(reference, dict)
+        or reference.get("path") != "unexplained-mask.png"
+        or not isinstance(reference.get("sha256"), str)
+    ):
+        raise VisualSegmentationError(
+            "absorb_residual requires bound unexplained-mask evidence"
+        )
+    mask, _ = _read_action_mask(
+        source / reference["path"], shape, reference["sha256"]
+    )
+    return mask
+
+
+def _load_bound_residual_request(source: Path) -> dict:
+    source = source if source.is_absolute() else Path.cwd() / source
+    reconstruction = source.parent.parent
+    if (
+        source.parent.name != "agent"
+        or reconstruction.name != "reconstruction"
+        or reconstruction.parent.parent.name != "pages"
+        or not source.name.startswith("round-")
+        or len(source.name) != 8
+        or not source.name[6:].isdigit()
+    ):
+        raise VisualSegmentationError(
+            "absorb_residual requires a published component Agent round"
+        )
+    run_root = reconstruction.parent.parent.parent
+    _validate_safe_directory_chain(source, run_root)
+    marker = _read_bound_json(
+        source / "publication-marker.json", 64 * 1024, "publication marker"
+    )
+    marker_fields = {
+        "schema_version", "page_id", "provider", "repair_round",
+        "request_path", "request_sha256", "hmac_sha256",
+    }
+    if not isinstance(marker, dict) or set(marker) != marker_fields:
+        raise VisualSegmentationError("Component Agent publication marker is invalid")
+    round_number = int(source.name[6:])
+    if (
+        type(marker.get("schema_version")) is not int
+        or marker["schema_version"] != 1
+        or type(marker.get("repair_round")) is not int
+        or marker["repair_round"] != round_number
+        or marker.get("page_id") != reconstruction.parent.name
+        or marker.get("provider") not in {"host", "local"}
+        or marker.get("request_path")
+        != f"{source.name}/component_agent_request.json"
+    ):
+        raise VisualSegmentationError("Component Agent publication marker is invalid")
+    for field in ("request_sha256", "hmac_sha256"):
+        digest = marker.get(field)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise VisualSegmentationError("Component Agent publication digest is invalid")
+    integrity_directory = run_root / ".component-agent-integrity"
+    _validate_safe_directory_chain(integrity_directory, run_root)
+    key_path = integrity_directory / "key.bin"
+    key = _read_bound_bytes(
+        key_path,
+        32,
+        "integrity key",
+    )
+    if len(key) != 32:
+        raise VisualSegmentationError("Component Agent integrity key is damaged")
+    if os.name != "nt" and stat.S_IMODE(key_path.lstat().st_mode) & 0o077:
+        raise VisualSegmentationError("Component Agent integrity key permissions are unsafe")
+    signed_fields = {key: value for key, value in marker.items() if key != "hmac_sha256"}
+    expected_signature = hmac.new(
+        key,
+        json.dumps(
+            signed_fields,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(marker["hmac_sha256"], expected_signature):
+        raise VisualSegmentationError("Component Agent publication signature mismatch")
+    request_bytes = _read_bound_bytes(
+        source / "component_agent_request.json",
+        4 * 1024 * 1024,
+        "component request",
+    )
+    if hashlib.sha256(request_bytes).hexdigest() != marker["request_sha256"]:
+        raise VisualSegmentationError("Component Agent request hash mismatch")
+    try:
+        request = json.loads(request_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VisualSegmentationError("Component Agent request is invalid") from error
+    if (
+        not isinstance(request, dict)
+        or request.get("page_id") != marker["page_id"]
+        or request.get("provider") != marker["provider"]
+        or request.get("repair_round") != marker["repair_round"]
+    ):
+        raise VisualSegmentationError("Component Agent request binding is invalid")
+    return request
+
+
+def _validate_safe_directory_chain(directory: Path, root: Path) -> None:
+    try:
+        relative = directory.relative_to(root)
+    except ValueError as error:
+        raise VisualSegmentationError("Component Agent round is outside its run") from error
+    current = root
+    for part in (Path(), *relative.parts):
+        if part != Path():
+            current /= part
+        status = current.lstat()
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (
+            stat.S_ISLNK(status.st_mode)
+            or getattr(status, "st_file_attributes", 0) & reparse
+            or not stat.S_ISDIR(status.st_mode)
+        ):
+            raise VisualSegmentationError(
+                f"Component Agent directory is unsafe: {current}"
+            )
+
+
+def _read_bound_json(path: Path, limit: int, label: str) -> object:
+    payload = _read_bound_bytes(path, limit, label)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VisualSegmentationError(f"{label} is invalid") from error
+
+
+def _read_bound_bytes(path: Path, limit: int, label: str) -> bytes:
+    status = path.lstat()
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or getattr(status, "st_file_attributes", 0) & reparse
+        or not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+        or status.st_size > limit
+    ):
+        raise VisualSegmentationError(f"{label} is unsafe")
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino)
+        ):
+            raise VisualSegmentationError(f"{label} identity changed")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise VisualSegmentationError(f"{label} size limit exceeded")
+        payload = b"".join(chunks)
+        stable = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size)
+            != (stable.st_dev, stable.st_ino, stable.st_size)
+        ):
+            raise VisualSegmentationError(f"{label} changed while reading")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _partition_bound_residual_mask(
+    source: Path,
+    shape: tuple[int, int],
+    target_ids: list[str],
+    masks: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    residual = _read_bound_residual_mask(source, shape)
+    assignments = {
+        component_id: np.zeros(shape, dtype=bool)
+        for component_id in target_ids
+    }
+    nearby_masks = {
+        component_id: cv2.dilate(
+            masks[component_id].astype(np.uint8),
+            np.ones((7, 7), dtype=np.uint8),
+        ).astype(bool)
+        for component_id in target_ids
+    }
+    bounds = {}
+    for component_id in target_ids:
+        ys, xs = np.nonzero(masks[component_id])
+        bounds[component_id] = (
+            int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1,
+        )
+    distances = {
+        component_id: cv2.distanceTransform(
+            (~masks[component_id]).astype(np.uint8), cv2.DIST_L2, 3
+        )
+        for component_id in target_ids
+    }
+    areas = {
+        component_id: int(np.count_nonzero(masks[component_id]))
+        for component_id in target_ids
+    }
+    action_order = {
+        component_id: index for index, component_id in enumerate(target_ids)
+    }
+    count, labels = cv2.connectedComponents(residual.astype(np.uint8), 8)
+    for label in range(1, count):
+        region = labels == label
+        ys, xs = np.nonzero(region)
+        region_bounds = (
+            int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1,
+        )
+        eligible = []
+        for component_id in target_ids:
+            left, top, right, bottom = bounds[component_id]
+            region_left, region_top, region_right, region_bottom = region_bounds
+            contained = (
+                left <= region_left and top <= region_top
+                and right >= region_right and bottom >= region_bottom
+            )
+            if contained or np.any(nearby_masks[component_id] & region):
+                eligible.append(component_id)
+        if not eligible:
+            raise VisualSegmentationError(
+                "absorb_residual found an unrelated residual region"
+            )
+        owner = min(
+            eligible,
+            key=lambda component_id: (
+                float(np.min(distances[component_id][region])),
+                areas[component_id],
+                action_order[component_id],
+            ),
+        )
+        assignments[owner] |= region
+    return assignments
 
 
 def _new_action_id(nodes: dict[str, dict], prefix: str) -> str:
@@ -1561,10 +1878,11 @@ def create_sam_generator(
         stability_score_thresh=0.92,
         crop_n_layers=0,
         crop_n_points_downscale_factor=2,
-        min_mask_region_area=20,
+        min_mask_region_area=0,
         output_mode=(
             "uncompressed_rle" if resource_safe else "binary_mask"
         ),
     )
+    generator.min_mask_region_area = 20
     generator._image2editable_device = selected_device
     return generator

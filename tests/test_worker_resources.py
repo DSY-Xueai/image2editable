@@ -122,6 +122,7 @@ def test_runner_spawns_after_best_effort_windows_oserror(monkeypatch) -> None:
     assert kwargs["text"] is True
     assert kwargs["check"] is False
     assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
     assert kwargs["env"]["PYTHONUTF8"] == "1"
 
 

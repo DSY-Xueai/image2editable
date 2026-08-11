@@ -13,12 +13,14 @@ import tempfile
 from typing import Any, Iterable, Sequence
 
 from image2editable.component_contracts import (
+    MAX_REPAIR_ROUNDS,
     validate_agent_provider,
     validate_component_repair_state,
 )
 from image2editable.component_repair import (
     _read_bound_file,
     record_local_component_plan,
+    resume_round_limited_component_repair,
 )
 from image2editable.contracts import (
     PageStatus,
@@ -330,7 +332,7 @@ def _advance_legacy_pages(
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         if not (reconstruction / "component_state.json").is_file():
             initialize_legacy_page(store, page_id, _lease=lease)
-        for _ in range(32):
+        for _ in range(MAX_REPAIR_ROUNDS * 6 + 4):
             outcome = advance_legacy_page(store, page_id, _lease=lease)
             if outcome["status"] == "awaiting_agent" and provider == "local":
                 request_path = _local_component_request_path(store, page_id)
@@ -788,6 +790,24 @@ def _path_entry_exists(path: Path) -> bool:
     return True
 
 
+def _clear_host_plan_records(store: RunStore, page_id: str) -> None:
+    prefix = f"host-component-plan-{page_id}-"
+    records = []
+    for entry in store.root.iterdir():
+        if not (entry.name.startswith(prefix) and entry.name.endswith(".json")):
+            continue
+        status = entry.lstat()
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+        ):
+            raise RuntimeError(f"Run host plan is not a regular file: {entry}")
+        records.append(entry)
+    for record in records:
+        record.unlink()
+
+
 def _is_link_or_reparse(status: os.stat_result) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return stat.S_ISLNK(status.st_mode) or bool(
@@ -830,6 +850,54 @@ def _run_owned_directory(
             f"Run {name} directory is outside run directory: {current}"
         )
     return resolved, (status.st_dev, status.st_ino)
+
+
+def _quarantine_run_owned_directory(
+    directory: tuple[Path, tuple[int, int]],
+) -> tuple[Path, Path, tuple[int, int]]:
+    path, expected_identity = directory
+    status = path.lstat()
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or (status.st_dev, status.st_ino) != expected_identity
+    ):
+        raise RuntimeError(f"Run directory identity changed before quarantine: {path}")
+    quarantine = path.with_name(
+        f".{path.name}.retry-quarantine-{secrets.token_hex(8)}"
+    )
+    os.replace(path, quarantine)
+    moved = quarantine.lstat()
+    if (moved.st_dev, moved.st_ino) != expected_identity:
+        raise RuntimeError(f"Run directory identity changed during quarantine: {path}")
+    return quarantine, path, expected_identity
+
+
+def _restore_quarantined_run_directory(
+    quarantine: tuple[Path, Path, tuple[int, int]],
+) -> None:
+    quarantined, original, expected_identity = quarantine
+    status = quarantined.lstat()
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or (status.st_dev, status.st_ino) != expected_identity
+        or _path_entry_exists(original)
+    ):
+        raise RuntimeError(
+            f"Quarantined run directory cannot be safely restored: {original}"
+        )
+    os.replace(quarantined, original)
+
+
+def _discard_quarantined_run_directory(
+    quarantine: tuple[Path, Path, tuple[int, int]],
+) -> None:
+    quarantined, _, expected_identity = quarantine
+    try:
+        _safe_rmtree(quarantined, expected_identity)
+    except OSError:
+        pass
 
 
 def _pptx_reconstruction_directories(
@@ -1292,7 +1360,9 @@ def _restore_isolated_pptx_output(
 
 def _isolate_recorded_pptx_output(
     record: tuple[Path, tuple[int, int, int, int, int], str],
-) -> None:
+    *,
+    keep_isolated: bool = False,
+) -> Path | None:
     output, expected_identity, expected_hash = record
     descriptor, isolated_value = tempfile.mkstemp(
         dir=output.parent,
@@ -1305,7 +1375,7 @@ def _isolate_recorded_pptx_output(
         os.replace(output, isolated)
     except FileNotFoundError:
         isolated.unlink(missing_ok=True)
-        return
+        return None
     except Exception:
         isolated.unlink(missing_ok=True)
         raise
@@ -1328,7 +1398,10 @@ def _isolate_recorded_pptx_output(
         raise RuntimeError(
             "PPTX output changed and cannot be safely removed"
         )
+    if keep_isolated:
+        return isolated
     isolated.unlink()
+    return None
 
 
 def run_job(run_dir: str | Path) -> dict[str, Any]:
@@ -1752,8 +1825,13 @@ def _reset_pages_for_retry(
     page_jobs: dict[str, Any],
     *,
     analyzed: bool = False,
+    preserve_page_ids: frozenset[str] = frozenset(),
 ) -> None:
-    if _reset_page_jobs(page_jobs, analyzed=analyzed):
+    if _reset_page_jobs(
+        page_jobs,
+        analyzed=analyzed,
+        preserve_page_ids=preserve_page_ids,
+    ):
         store.write_json("page_jobs.json", page_jobs)
 
 
@@ -1761,10 +1839,13 @@ def _reset_page_jobs(
     page_jobs: dict[str, Any],
     *,
     analyzed: bool,
+    preserve_page_ids: frozenset[str] = frozenset(),
 ) -> bool:
     pages = page_jobs["pages"]
     updates = {}
     for page_id, page in pages.items():
+        if page_id in preserve_page_ids:
+            continue
         status = PageStatus(page["status"])
         if status is PageStatus.PENDING:
             if analyzed:
@@ -1773,6 +1854,16 @@ def _reset_page_jobs(
                 )
             continue
         if status is PageStatus.ANALYZED and analyzed:
+            continue
+        if status is PageStatus.PRESERVED_WITH_WARNING:
+            page = {
+                **page,
+                "status": PageStatus.PENDING.value,
+                "updated_at": utc_now(),
+            }
+            if analyzed:
+                page = transition_page_document(page, PageStatus.ANALYZED)
+            updates[page_id] = page
             continue
         if status is PageStatus.PRESERVED and analyzed:
             raise RuntimeError(
@@ -1961,9 +2052,86 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
     continuing_retry = (
         run_status == RunStatus.PREPARED.value and has_failed_summary
     )
-    if not retrying_failed_run and not continuing_retry:
+    retrying_warning_wait = (
+        run_status == RunStatus.AWAITING_AGENT.value
+        and page_jobs["pages"][page_id]["status"]
+        == PageStatus.PRESERVED_WITH_WARNING.value
+    )
+    retrying_completed_warning = (
+        run_status == RunStatus.COMPLETED.value
+        and page_jobs["pages"][page_id]["status"]
+        == PageStatus.PRESERVED_WITH_WARNING.value
+    )
+    if not (
+        retrying_failed_run
+        or continuing_retry
+        or retrying_warning_wait
+        or retrying_completed_warning
+    ):
         raise RuntimeError(f"Run is not failed or continuing a retry: {page_id}")
-    if input_type == "pptx" and (
+    try:
+        component_state = validate_component_repair_state(store.read_json(
+            f"pages/{page_id}/reconstruction/component_state.json"
+        ))
+    except (FileNotFoundError, ValueError):
+        component_state = None
+    if (
+        component_state is not None
+        and component_state["phase"] == "preserved_with_warning"
+        and (
+            component_state["stop_reason"] not in {
+                "round_limit", "no_quality_improvement",
+            }
+            or component_state["repair_round"] >= MAX_REPAIR_ROUNDS
+        )
+    ):
+        raise RuntimeError(
+            "Component warning reached a non-resumable repair boundary; "
+            "the existing output and reconstruction were preserved"
+        )
+    if retrying_failed_run:
+        resumed_warning = resume_round_limited_component_repair(
+            store, page_id
+        ) if component_state is not None else False
+        if (
+            component_state is not None
+            and (
+                resumed_warning
+                or (
+                    component_state["status"] == "active"
+                    and component_state["phase"] in {
+                        "request_published", "awaiting_plan", "plan_recorded",
+                        "actions_executed", "quality_recorded", "freeze_committed",
+                        "fallback_required", "fallback_executed",
+                        "fallback_quality_recorded",
+                    }
+                )
+            )
+        ):
+            for retry_page_id, page in page_jobs["pages"].items():
+                if retry_page_id == page_id:
+                    page["status"] = PageStatus.ANALYZED.value
+                else:
+                    try:
+                        other_state = validate_component_repair_state(
+                            store.read_json(
+                                f"pages/{retry_page_id}/reconstruction/"
+                                "component_state.json"
+                            )
+                        )
+                    except (FileNotFoundError, ValueError):
+                        continue
+                    if other_state["phase"] == "ready_for_assembly":
+                        page["status"] = PageStatus.VALIDATED.value
+                page["updated_at"] = utc_now()
+            store.write_json("page_jobs.json", page_jobs)
+            store.write_json("run_state.json", {
+                **store.read_json("run_state.json"),
+                "status": RunStatus.PREPARED.value,
+                "updated_at": utc_now(),
+            })
+            return get_status(store.root)
+    if input_type == "pptx" and not retrying_completed_warning and (
         (
             failed_summary is not None
             and failed_summary.get("retry_blocked") is True
@@ -1974,19 +2142,200 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
             f"PPTX retry is blocked while an output entry may be owned "
             f"by another process: {page_id}"
         )
+    if retrying_completed_warning:
+        if input_type != "pptx":
+            raise RuntimeError(
+                "Completed warning retry is only supported for PPTX inputs"
+            )
+        summary = store.read_json("run_summary.json")
+        validate_schema_version(summary)
+        output = _pptx_output_path(store, manifest)
+        page_results = summary.get("page_results")
+        if (
+            summary.get("status") != RunStatus.COMPLETED.value
+            or summary.get("outputs") != {"pptx": str(output)}
+            or summary.get("input_sha256") != manifest["input"]["sha256"]
+            or not _is_sha256(summary.get("output_sha256"))
+            or not isinstance(page_results, list)
+            or not any(
+                result.get("page_id") == page_id
+                and result.get("status")
+                == PageStatus.PRESERVED_WITH_WARNING.value
+                for result in page_results
+                if isinstance(result, dict)
+            )
+        ):
+            raise RuntimeError(
+                "Completed PPTX warning retry summary is invalid"
+            )
+        expected_hash = summary["output_sha256"]
+        identity = _pptx_output_identity(output)
+        digest = sha256_file(output)
+        if (
+            digest != expected_hash
+            or _pptx_output_identity(output) != identity
+        ):
+            raise RuntimeError(
+                "Completed PPTX output changed and cannot be safely retried"
+            )
+        isolated = _isolate_recorded_pptx_output(
+            (output, identity, expected_hash), keep_isolated=True
+        )
+        if isolated is None:
+            raise RuntimeError("Completed PPTX output disappeared during retry")
+        previous_pages = store.read_json("page_jobs.json")
+        previous_run = store.read_json("run_state.json")
+        previous_component_state = None
+        resumed_component_state = False
+        quarantined_reconstruction = None
+        try:
+            for other_id, other_page in page_jobs["pages"].items():
+                if other_id == page_id:
+                    other_page["status"] = PageStatus.ANALYZED.value
+                    other_page["updated_at"] = utc_now()
+                elif other_page["status"] == PageStatus.REPLACED.value:
+                    other_page["status"] = PageStatus.VALIDATED.value
+                    other_page["updated_at"] = utc_now()
+                elif (
+                    other_page["status"]
+                    == PageStatus.PRESERVED_WITH_WARNING.value
+                ):
+                    try:
+                        component_state = validate_component_repair_state(
+                            store.read_json(
+                                f"pages/{other_id}/reconstruction/"
+                                "component_state.json"
+                            )
+                        )
+                    except (FileNotFoundError, ValueError):
+                        continue
+                    if (
+                        component_state["page_id"] == other_id
+                        and component_state["phase"] == "ready_for_assembly"
+                        and component_state["status"] == "ready_for_assembly"
+                    ):
+                        other_page["status"] = PageStatus.VALIDATED.value
+                        other_page["updated_at"] = utc_now()
+            store.write_json("page_jobs.json", page_jobs)
+            store.write_json("run_state.json", {
+                **previous_run,
+                "status": RunStatus.PREPARED.value,
+                "updated_at": utc_now(),
+            })
+            component_state_path = (
+                f"pages/{page_id}/reconstruction/component_state.json"
+            )
+            try:
+                previous_component_state = store.read_json(component_state_path)
+            except FileNotFoundError:
+                previous_component_state = None
+            resumed_component_state = resume_round_limited_component_repair(
+                store, page_id
+            )
+            reconstruction = _run_owned_directory(
+                store, Path("pages") / page_id / "reconstruction"
+            )
+            if not resumed_component_state:
+                _clear_host_plan_records(store, page_id)
+            if reconstruction is not None and not resumed_component_state:
+                quarantined_reconstruction = _quarantine_run_owned_directory(
+                    reconstruction
+                )
+            isolated.unlink()
+        except Exception:
+            if quarantined_reconstruction is not None:
+                _restore_quarantined_run_directory(quarantined_reconstruction)
+            store.write_json("page_jobs.json", previous_pages)
+            store.write_json("run_state.json", previous_run)
+            if previous_component_state is not None:
+                store.write_json(
+                    f"pages/{page_id}/reconstruction/component_state.json",
+                    previous_component_state,
+                )
+            _restore_isolated_pptx_output(isolated, output)
+            raise
+        if quarantined_reconstruction is not None:
+            _discard_quarantined_run_directory(quarantined_reconstruction)
+        return get_status(store.root)
+    if retrying_warning_wait:
+        if resume_round_limited_component_repair(store, page_id):
+            page = {
+                **page_jobs["pages"][page_id],
+                "status": PageStatus.ANALYZED.value,
+                "updated_at": utc_now(),
+            }
+            page_jobs["pages"][page_id] = page
+            store.write_json("page_jobs.json", page_jobs)
+            store.write_json("run_state.json", {
+                **store.read_json("run_state.json"),
+                "status": RunStatus.PREPARED.value,
+                "updated_at": utc_now(),
+            })
+            return get_status(store.root)
+        reconstruction = _run_owned_directory(
+            store, Path("pages") / page_id / "reconstruction"
+        )
+        _clear_host_plan_records(store, page_id)
+        if reconstruction is not None:
+            _safe_rmtree(*reconstruction)
+        page = {
+            **page_jobs["pages"][page_id],
+            "status": PageStatus.PENDING.value,
+            "updated_at": utc_now(),
+        }
+        if input_type == "pptx":
+            page = transition_page_document(page, PageStatus.ANALYZED)
+        page_jobs["pages"][page_id] = page
+        store.write_json("page_jobs.json", page_jobs)
+        store.transition_run(RunStatus.PREPARED)
+        return get_status(store.root)
+    reusable_page_ids = set()
+    for retry_page_id, page in page_jobs["pages"].items():
+        if retry_page_id == page_id:
+            continue
+        try:
+            other_state = validate_component_repair_state(store.read_json(
+                f"pages/{retry_page_id}/reconstruction/component_state.json"
+            ))
+        except (FileNotFoundError, ValueError):
+            continue
+        if (
+            other_state["page_id"] == retry_page_id
+            and other_state["phase"] == "ready_for_assembly"
+            and other_state["status"] == "ready_for_assembly"
+        ):
+            reusable_page_ids.add(retry_page_id)
+            page["status"] = PageStatus.VALIDATED.value
+            page["updated_at"] = utc_now()
     cleanup = []
     work = _run_work_directory(store)
     if work is not None:
         cleanup.append(work)
-    if input_type == "pptx":
-        cleanup.extend(_pptx_reconstruction_directories(store, page_jobs))
+    cleanup.extend(
+        directory
+        for retry_page_id, page in page_jobs["pages"].items()
+        if retry_page_id not in reusable_page_ids
+        for directory in [
+            _run_owned_directory(
+                store, Path("pages") / retry_page_id / "reconstruction"
+            )
+        ]
+        if directory is not None
+    )
     for directory in cleanup:
         _safe_rmtree(*directory)
+    for retry_page_id in page_jobs["pages"]:
+        if retry_page_id in reusable_page_ids:
+            continue
+        _clear_host_plan_records(store, retry_page_id)
     if orphaned_failed_batch:
         store.transition_run(RunStatus.FAILED)
         run_status = RunStatus.FAILED.value
     _reset_pages_for_retry(
-        store, page_jobs, analyzed=input_type == "pptx"
+        store,
+        page_jobs,
+        analyzed=input_type == "pptx",
+        preserve_page_ids=frozenset(reusable_page_ids),
     )
     if run_status == RunStatus.FAILED.value:
         store.transition_run(RunStatus.PREPARED)

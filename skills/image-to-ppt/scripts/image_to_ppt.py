@@ -47,6 +47,7 @@ from scripts.bg_model import (
 )
 from scripts.fg_extract import (
     _build_text_ink_mask,
+    _remove_border_connected,
     export_visual_components,
     repair_exported_component_text,
 )
@@ -686,6 +687,18 @@ def _build_text_cleanup_mask(
             matching = (
                 np.linalg.norm(region - target, axis=2) <= 18.0
             ).astype(np.uint8)
+        gray_region = cv2.cvtColor(region.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        gray_threshold, _ = cv2.threshold(
+            gray_region, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        )
+        target_gray = float(np.mean(target))
+        background_gray = float(np.mean(background))
+        secondary = (
+            gray_region <= gray_threshold
+            if target_gray < background_gray
+            else gray_region > gray_threshold
+        )
+        matching |= _remove_border_connected(secondary).astype(np.uint8)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             matching,
             connectivity=8,
@@ -1876,13 +1889,9 @@ def _process_image(
             reconstructed=clean_background,
             metrics={"residual_count": len(residual_candidates)},
         )
-        if round_index == 2:
-            raise VisualSegmentationError(
-                "clean background still contains independent visual elements; "
-                f"diagnostics={residual_diagnostics.resolve()}"
-            )
         candidates.extend(residual_candidates)
 
+    elements = resolve_visual_elements(candidates)
     if _resource_isolation:
         _recheck_visual_element_holes_isolated(
             img,

@@ -126,7 +126,7 @@ def advance_component_repair(
         if state["phase"] == "freeze_committed":
             page_violations = _repairable_page_quality_violations(store, state)
             if state["failed_ids"] or page_violations:
-                if not _page_quality_progressed(store, state):
+                if not _next_round_progress_allowed(store, state):
                     return _commit_fallback_required(
                         store, state, page_id, "no_quality_improvement"
                     )
@@ -160,6 +160,87 @@ def advance_component_repair(
             return _commit_parent_fallback_result(store, state, page_id)
         return {"status": state["phase"], "page_id": page_id,
                 "repair_round": state["repair_round"]}
+
+
+def resume_round_limited_component_repair(store, page_id: str) -> bool:
+    state_path = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+    try:
+        state = validate_component_repair_state(store.read_json(state_path))
+    except (FileNotFoundError, ValueError):
+        return False
+    resumable_warning = (
+        state["phase"] == "preserved_with_warning"
+        and state["stop_reason"] in {"round_limit", "no_quality_improvement"}
+    )
+    interrupted_resume = (
+        state["phase"] == "freeze_committed"
+        and state["status"] == "active"
+        and state["stop_reason"] is None
+    )
+    if not (
+        (resumable_warning or interrupted_resume)
+        and state["repair_round"] < MAX_REPAIR_ROUNDS
+        and state["failed_ids"]
+    ):
+        return False
+    graph_ref = state["graph_ref"]
+    try:
+        graph = validate_component_graph(json.loads(
+            _load_state_artifact(
+                store.root, graph_ref, max_bytes=GRAPH_JSON_LIMIT
+            ).decode("utf-8")
+        ))
+    except (FileNotFoundError, ValueError, RuntimeError):
+        graph = {"nodes": []}
+    pending_ids = {
+        node["id"] for node in graph["nodes"]
+        if node["kind"] != "text" and node["state"] in {
+            "pending", "pending_gate",
+        }
+    }
+    if not set(state["failed_ids"]) <= pending_ids:
+        execution_path = store.root / Path(
+            *PurePosixPath(state["current_round"]["execution_ref"]["path"]).parts
+        )
+        frozen_graph_path = execution_path.parent / "component-graph-frozen.json"
+        try:
+            graph_ref, graph_payload = _artifact_reference(
+                store.root, frozen_graph_path, "round-limit frozen graph"
+            )
+            graph = validate_component_graph(json.loads(
+                graph_payload.decode("utf-8")
+            ))
+        except (FileNotFoundError, ValueError, RuntimeError):
+            return False
+        pending_ids = {
+            node["id"] for node in graph["nodes"]
+            if node["kind"] != "text" and node["state"] in {
+                "pending", "pending_gate",
+            }
+        }
+        if not set(state["failed_ids"]) <= pending_ids:
+            return False
+    frozen = {
+        node["id"]: node["mask_sha256"]
+        for node in graph["nodes"]
+        if node["kind"] != "text" and node["state"] == "frozen"
+    }
+    updated = dict(state)
+    updated.update({
+        "phase": "freeze_committed",
+        "status": "active",
+        "graph_ref": graph_ref,
+        "frozen": frozen,
+        "fallback": {"status": "none", "parent_ids": []},
+        "fallback_graph_ref": None,
+        "fallback_quality_ref": None,
+        "fallback_input_refs": None,
+        "revision": state["revision"] + 1,
+        "updated_at": _utc_now(),
+    })
+    validate_component_repair_state(updated)
+    store.write_json(state_path, updated)
+    return True
 
 
 def initialize_component_repair_state(
@@ -641,8 +722,11 @@ def record_next_component_request(
         ):
             raise RuntimeError("component repair is not ready for a next round")
         if state["repair_round"] >= MAX_REPAIR_ROUNDS:
-            raise RuntimeError("component repair cannot publish round 6 after five rounds")
-        if not _page_quality_progressed(store, state):
+            raise RuntimeError(
+                f"component repair cannot publish round {MAX_REPAIR_ROUNDS + 1} "
+                f"after {MAX_REPAIR_ROUNDS} rounds"
+            )
+        if not _next_round_progress_allowed(store, state):
             raise RuntimeError("component quality did not improve")
         request_path = Path(request_path)
         request = load_component_agent_request(request_path)
@@ -725,6 +809,7 @@ def record_next_component_request(
         updated = dict(state)
         updated["repair_round"] = request["repair_round"]
         updated["phase"] = "request_published"
+        updated["stop_reason"] = None
         updated["graph_ref"] = graph_ref
         updated["candidate_ids"] = list(request["candidate_ids"])
         updated["current_round"] = {
@@ -1309,11 +1394,27 @@ def _previous_component_reports(
     if (
         not isinstance(quality_evidence, dict)
         or not required_fields <= set(quality_evidence)
-        or not set(quality_evidence) <= required_fields | {"text_items"}
+        or not set(quality_evidence) <= required_fields | {
+            "text_items", "unexplained_mask_ref",
+        }
     ):
         raise ValueError("previous component quality artifact fields are invalid")
     expected_component_ids = quality_evidence.get("expected_component_ids")
     initial_component_count = quality_evidence.get("initial_component_count")
+    state_failed_ids = state.get("failed_ids", [])
+    valid_state_failed_ids = (
+        isinstance(state_failed_ids, list)
+        and all(type(value) is str for value in state_failed_ids)
+    )
+    state_failed_id_set = set(state_failed_ids) if valid_state_failed_ids else set()
+    reopened_pair_ids = (
+        _unapproved_contained_parent_ids(quality_evidence)
+        if _is_component_pair_list(quality_evidence["contained_parent_pairs"])
+        and _is_component_pair_list(
+            quality_evidence["approved_contained_parent_pairs"]
+        )
+        else set()
+    )
     if (
         type(quality_evidence["schema_version"]) is not int
         or quality_evidence["schema_version"] != 1
@@ -1323,8 +1424,15 @@ def _previous_component_reports(
         or quality_evidence["quality_gate_version"] != state["quality_gate_version"]
         or type(expected_component_ids) is not list
         or len(expected_component_ids) != len(set(expected_component_ids))
-        or not set(expected_component_ids) <= set(active_component_ids)
-        or not set(request["candidate_ids"]) <= set(expected_component_ids)
+        or not (
+            set(expected_component_ids) - set(request["candidate_ids"])
+        ) <= set(active_component_ids)
+        or not set(request["candidate_ids"]) <= (
+            set(expected_component_ids)
+            | reopened_pair_ids
+            | state_failed_id_set
+        )
+        or not valid_state_failed_ids
         or initial_component_count != state["initial_component_count"]
         or not _is_sha256(quality_evidence["request_sha256"])
         or not _is_sha256(quality_evidence["input_graph_sha256"])
@@ -1342,6 +1450,12 @@ def _previous_component_reports(
         or any(
             not _is_artifact_reference(reference)
             for reference in quality_evidence["input_refs"].values()
+        )
+        or (
+            "unexplained_mask_ref" in quality_evidence
+            and not _is_artifact_reference(
+                quality_evidence["unexplained_mask_ref"]
+            )
         )
         or quality_evidence["input_refs"]["source"]["sha256"]
         != request["source_sha256"]
@@ -1361,7 +1475,7 @@ def _previous_component_reports(
         quality_evidence["report"],
         expected_component_ids=expected_component_ids,
         initial_component_count=initial_component_count,
-        active_visual_count=active_visual_count,
+        active_visual_count=max(active_visual_count, len(expected_component_ids)),
     )
     return {
         component["component_id"]: component
@@ -1481,6 +1595,41 @@ def _approved_contained_parent_pairs(
     return approved
 
 
+def _carried_contained_parent_pairs(
+    previous_quality: dict, contained_parent_pairs: set[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    return set()
+
+
+def _unapproved_contained_parent_ids(quality: dict) -> set[str]:
+    contained = {
+        tuple(pair) for pair in quality.get("contained_parent_pairs", [])
+    }
+    approved = {
+        tuple(pair)
+        for pair in quality.get("approved_contained_parent_pairs", [])
+    }
+    return {
+        component_id
+        for pair in contained - approved
+        for component_id in pair
+    }
+
+
+def _failed_overlap_dependency_ids(report: dict, graph: dict) -> set[str]:
+    frozen_ids = {
+        node["id"] for node in graph["nodes"]
+        if node.get("kind") != "text" and node.get("state") == "frozen"
+    }
+    return {
+        component_id
+        for item in report["component_reports"]
+        if "component_overlap" in item.get("violations", [])
+        for component_id in item.get("overlap_component_ids", [])
+        if component_id in frozen_ids
+    }
+
+
 def _unowned_raster_text_check(
     diagnostics: list[dict], text_items: list[dict]
 ) -> str:
@@ -1592,11 +1741,13 @@ def _recompute_quality_artifact(
     contained_parent_pairs = {
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
     }
-    approved_contained_parent_pairs = set()
+    approved_contained_parent_pairs = _carried_contained_parent_pairs(
+        quality_evidence, contained_parent_pairs
+    )
     if plan is not None:
-        approved_contained_parent_pairs = _approved_contained_parent_pairs(
+        approved_contained_parent_pairs.update(_approved_contained_parent_pairs(
             plan, contained_parent_pairs
-        )
+        ))
     checks = {
         "protected_native_overlap": native["protected_native_overlap"],
         "pptx_reopen": "unknown",
@@ -1625,6 +1776,12 @@ def _recompute_quality_artifact(
             else None
         ),
     )
+    unexplained_mask_ref = None
+    if material_foreground is not None:
+        unexplained_mask_path = graph_path.parent / "unexplained-mask.png"
+        unexplained_mask_ref, _ = _artifact_reference(
+            store.root, unexplained_mask_path, "unexplained visual mask"
+        )
     quality = {
         "schema_version": 1, "page_id": state["page_id"],
         "provider": state["provider"], "repair_round": state["repair_round"],
@@ -1642,6 +1799,8 @@ def _recompute_quality_artifact(
         ],
         "input_refs": input_refs, "report": report,
     }
+    if unexplained_mask_ref is not None:
+        quality["unexplained_mask_ref"] = unexplained_mask_ref
     if native.get("text_items"):
         quality["text_items"] = native["text_items"]
     payload = json.dumps(
@@ -1711,22 +1870,56 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
         item["component_id"] for item in report["component_reports"]
         if item.get("accepted") is True and not item.get("violations")
     }
-    failed = sorted(set(state["candidate_ids"]) - accepted)
-    fixable_page_violations = page_violations - {"unowned_raster_text"}
-    if fixable_page_violations and not failed:
-        accepted.clear()
-    failed = sorted(set(state["candidate_ids"]) - accepted)
+    contained_review_ids = _unapproved_contained_parent_ids(quality)
+    accepted.difference_update(contained_review_ids)
     graph_payload = _load_state_artifact(
         store.root, state["graph_ref"], max_bytes=GRAPH_JSON_LIMIT
     )
     graph = json.loads(graph_payload.decode("utf-8"))
+    failed = sorted(
+        (set(state["candidate_ids"]) - accepted) | contained_review_ids
+    )
+    failed = sorted(
+        set(failed) | _failed_overlap_dependency_ids(report, graph)
+    )
+    fixable_page_violations = page_violations - {"unowned_raster_text"}
+    if fixable_page_violations:
+        residual_owner_ids = _page_residual_owner_ids(
+            store,
+            quality=quality,
+            graph=graph,
+            graph_root=(
+                store.root
+                / Path(*PurePosixPath(state["graph_ref"]["path"]).parts)
+            ).parent,
+        )
+        if residual_owner_ids:
+            failed = sorted(set(failed) | residual_owner_ids)
+        elif not failed:
+            accepted.clear()
+    failed = sorted(
+        set(failed)
+        | (set(state["candidate_ids"]) - accepted)
+        | contained_review_ids
+    )
+    accepted.difference_update(failed)
+    reopened_frozen_ids = {
+        node["id"] for node in graph["nodes"]
+        if node["id"] in failed and node["state"] == "frozen"
+    }
     for node in graph["nodes"]:
         if node["id"] in accepted:
             node["state"] = "frozen"
-        elif node["id"] in failed and node["state"] in {"pending", "pending_gate"}:
+        elif node["id"] in failed and node["state"] in {
+            "pending", "pending_gate", "frozen",
+        }:
             node["state"] = "pending"
     from image2editable.component_contracts import validate_graph_transition
-    validate_graph_transition(before=json.loads(graph_payload.decode("utf-8")), after=graph)
+    validate_graph_transition(
+        before=json.loads(graph_payload.decode("utf-8")),
+        after=graph,
+        allowed_reactivated_ids=reopened_frozen_ids,
+    )
     frozen_payload = json.dumps(
         graph, ensure_ascii=False, indent=2, sort_keys=True
     ).encode("utf-8") + b"\n"
@@ -1746,6 +1939,8 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
         "sha256": hashlib.sha256(frozen_payload).hexdigest(),
     }
     frozen = dict(state["frozen"])
+    for component_id in reopened_frozen_ids:
+        frozen.pop(component_id, None)
     for node in graph["nodes"]:
         if node["state"] == "frozen" and node["kind"] != "text":
             frozen[node["id"]] = node["mask_sha256"]
@@ -1770,6 +1965,83 @@ def _commit_component_freeze(store, state: dict, page_id: str) -> dict:
     return {"status": "freeze_committed", "page_id": page_id,
             "repair_round": state["repair_round"], "frozen_ids": sorted(accepted),
             "failed_ids": failed}
+
+
+def _page_residual_owner_ids(
+    store, *, quality: dict, graph: dict, graph_root: Path
+) -> set[str]:
+    reference = quality.get("unexplained_mask_ref")
+    if reference is None:
+        return set()
+    import cv2
+    import numpy as np
+
+    payload = _load_state_artifact(
+        store.root, reference, max_bytes=PRESENTATION_ASSET_LIMIT
+    )
+    residual = cv2.imdecode(
+        np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE
+    )
+    if residual is None or residual.dtype != np.uint8 or residual.ndim != 2:
+        raise ValueError("unexplained visual mask is invalid")
+    residual = residual > 0
+    if not np.any(residual):
+        return set()
+    trusted_chain = _snapshot_quality_directory_chain(graph_root, store.root)
+    owners = set()
+    active_nodes = []
+    for node in graph["nodes"]:
+        if node["kind"] == "text" or node["state"] not in {
+            "pending", "pending_gate", "frozen",
+        }:
+            continue
+        mask = _load_quality_graph_mask(
+            node,
+            graph_root=graph_root,
+            trusted_chain=trusted_chain,
+            shape=residual.shape,
+        )
+        active_nodes.append((node, mask))
+    region_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        residual.astype(np.uint8), 8
+    )
+    for label in range(1, region_count):
+        region = labels == label
+        nearby = cv2.dilate(
+            region.astype(np.uint8), np.ones((9, 9), dtype=np.uint8)
+        ) > 0
+        adjacent = []
+        for node, mask in active_nodes:
+            overlap = int(np.count_nonzero(mask & nearby))
+            minimum_overlap = max(1, round(np.count_nonzero(mask) * 0.0002))
+            if overlap >= minimum_overlap:
+                adjacent.append(node["id"])
+        if adjacent:
+            owners.update(adjacent)
+            continue
+        x = int(stats[label, cv2.CC_STAT_LEFT])
+        y = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        containing = [
+            node for node, _ in active_nodes
+            if node["bbox"][0] <= x
+            and node["bbox"][1] <= y
+            and node["bbox"][2] >= x + width
+            and node["bbox"][3] >= y + height
+        ]
+        if containing:
+            owner = min(
+                containing,
+                key=lambda node: (
+                    (node["bbox"][2] - node["bbox"][0])
+                    * (node["bbox"][3] - node["bbox"][1]),
+                    -node["z_index"],
+                    node["id"],
+                ),
+            )
+            owners.add(owner["id"])
+    return owners
 
 
 def _blocking_page_quality_violations(store, state: dict) -> set[str]:
@@ -1800,6 +2072,7 @@ def _page_progress_key(quality: dict) -> tuple[float, ...]:
     return (
         float(visual.get("largest_unexplained_region_pixels", 0)),
         float(visual.get("unexplained_visual_pixels", 0)),
+        float(len(violations - {"pptx_reopen_unknown"})),
         float("background_text_residual" in violations),
         float("component_text_residual" in violations),
         float("duplicate_pixels" in violations),
@@ -1812,10 +2085,18 @@ def _page_progress_key(quality: dict) -> tuple[float, ...]:
 def _page_quality_progressed(store, state: dict) -> bool:
     if state["repair_round"] == 1:
         return True
+    if (
+        state["round_history"]
+        and state["round_history"][-1]["round"] == state["repair_round"]
+        and state["round_history"][-1]["frozen_ids"]
+    ):
+        return True
     request_path = store.root / Path(
         *PurePosixPath(state["current_round"]["request_ref"]["path"]).parts
     )
     request = load_component_agent_request(request_path)
+    if set(state["failed_ids"]) != set(request["candidate_ids"]):
+        return True
     reference = request["evidence"]["quality-report.json"]
     previous_path = request_path.parent / Path(
         *PurePosixPath(reference["path"]).parts
@@ -1837,6 +2118,12 @@ def _page_quality_progressed(store, state: dict) -> bool:
     if not isinstance(previous_report, dict) or not isinstance(current_report, dict):
         raise ValueError("component quality report is invalid for progress check")
     return _page_progress_key(current_report) < _page_progress_key(previous_report)
+
+
+def _next_round_progress_allowed(store, state: dict) -> bool:
+    return state.get("stop_reason") in {
+        "round_limit", "no_quality_improvement",
+    } or _page_quality_progressed(store, state)
 
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:
@@ -2044,6 +2331,7 @@ def evaluate_component_quality_round(
         evaluate_component,
         evaluate_page_quality,
         material_ownership_metrics,
+        refine_material_foreground,
         resolve_visual_mask_ownership,
         _strict_binary_mask,
         _validate_presentation_mask_union,
@@ -2163,10 +2451,19 @@ def evaluate_component_quality_round(
             left_mask = unpack(left["id"], "ownership_mask")
             left_area = packed_layers[left["id"]]["ownership_pixels"]
             for right in parents[left_index + 1:]:
+                ix1 = max(left["bbox"][0], right["bbox"][0])
+                iy1 = max(left["bbox"][1], right["bbox"][1])
+                ix2 = min(left["bbox"][2], right["bbox"][2])
+                iy2 = min(left["bbox"][3], right["bbox"][3])
+                if ix1 >= ix2 or iy1 >= iy2:
+                    continue
                 right_area = packed_layers[right["id"]]["ownership_pixels"]
+                right_mask = unpack(right["id"], "ownership_mask")
                 overlap = int(np.count_nonzero(
-                    left_mask & unpack(right["id"], "ownership_mask")
+                    left_mask[iy1:iy2, ix1:ix2]
+                    & right_mask[iy1:iy2, ix1:ix2]
                 ))
+                del right_mask
                 if overlap / min(left_area, right_area) >= 0.95:
                     contained_parent_pairs.add(tuple(sorted((
                         left["id"], right["id"]
@@ -2253,6 +2550,9 @@ def evaluate_component_quality_round(
             else "fail"
         )
     if material_foreground is not None:
+        material_foreground = refine_material_foreground(
+            material_foreground, source, background, calibration
+        )
         ownership_metrics, unexplained = material_ownership_metrics(
             material_foreground,
             (
@@ -2261,6 +2561,10 @@ def evaluate_component_quality_round(
             ),
             text_mask,
             calibration,
+            generated_underlay_masks=(
+                unpack(node["id"], "generated_underlay_mask")
+                for node in active_visual
+            ) if packed_layers is not None else (),
         )
         visual_metrics = {**visual_metrics, **ownership_metrics}
         page_checks["visual_ownership"] = (
@@ -2277,6 +2581,24 @@ def evaluate_component_quality_round(
     for node in candidates:
         component_id = node["id"]
         component_mask = component_ownership(component_id)
+        overlap_component_ids = []
+        for other in active_visual:
+            if other["id"] == component_id:
+                continue
+            ix1 = max(node["bbox"][0], other["bbox"][0])
+            iy1 = max(node["bbox"][1], other["bbox"][1])
+            ix2 = min(node["bbox"][2], other["bbox"][2])
+            iy2 = min(node["bbox"][3], other["bbox"][3])
+            if ix1 >= ix2 or iy1 >= iy2:
+                continue
+            other_mask = component_ownership(other["id"])
+            if np.any(
+                component_mask[iy1:iy2, ix1:ix2]
+                & other_mask[iy1:iy2, ix1:ix2]
+            ):
+                overlap_component_ids.append(other["id"])
+            if packed_layers is not None:
+                del other_mask
         previous = previous_reports.get(component_id, {})
         presentation_kwargs = {}
         if packed_layers is None:
@@ -2314,6 +2636,7 @@ def evaluate_component_quality_round(
             previous_metrics=previous.get("metrics"),
             over_merged_component=component_id in over_merged_component_ids,
             contained_parent_review=component_id in contained_parent_review_ids,
+            overlap_component_ids=overlap_component_ids,
             _page_context=page_context,
         ))
     return evaluate_page_quality(

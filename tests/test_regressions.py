@@ -556,6 +556,8 @@ def _create_fake_sam_generator(
     class FakeGenerator:
         def __init__(self, model, **kwargs):
             captured.update(kwargs)
+            captured["generator"] = self
+            self.min_mask_region_area = kwargs["min_mask_region_area"]
 
     fake_modules = {
         "torch": fake_torch,
@@ -594,6 +596,15 @@ def test_sam_generator_uses_four_points_per_batch_on_cpu(monkeypatch) -> None:
 
     assert captured["points_per_side"] == 16
     assert captured["points_per_batch"] == 4
+
+
+def test_sam_generator_uses_opencv_region_cleanup_without_cuda_extension(
+    monkeypatch,
+) -> None:
+    captured = _create_fake_sam_generator(monkeypatch, cuda_available=False)
+
+    assert captured["min_mask_region_area"] == 0
+    assert captured["generator"].min_mask_region_area == 20
 
 
 def test_sam_resource_safe_generator_uses_single_point_and_rle(
@@ -4611,6 +4622,40 @@ def test_text_cleanup_mask_covers_multiple_text_colors_in_one_ocr_box() -> None:
     black_ink = np.mean(source, axis=2) < 160
     assert np.all(cleanup[red_ink] == 255)
     assert np.all(cleanup[black_ink] == 255)
+
+
+def test_text_cleanup_mask_covers_secondary_color_touching_ocr_box_edge() -> None:
+    import cv2
+    import numpy as np
+
+    source = np.full((70, 320, 3), 255, dtype=np.uint8)
+    cv2.putText(
+        source, "RED", (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+        (230, 45, 20), 2, cv2.LINE_AA,
+    )
+    cv2.putText(
+        source, "black", (100, 45), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+        (30, 30, 30), 2, cv2.LINE_AA,
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[5:46, 5:280] = 255
+
+    cleanup = image_to_ppt._build_text_cleanup_mask(
+        source,
+        text_mask,
+        [{
+            "box": [5, 5, 275, 41],
+            "text": "RED black",
+            "color": "#e62d14",
+            "font_size": 18.0,
+        }],
+    )
+
+    black_ink = (
+        np.all(source < 80, axis=2)
+        & (np.indices(source.shape[:2])[1] >= 100)
+    )
+    assert np.mean(cleanup[black_ink] > 0) >= 0.98
 
 
 def test_text_cleanup_mask_preserves_long_graphic_line_near_text() -> None:

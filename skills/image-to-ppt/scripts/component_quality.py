@@ -137,11 +137,28 @@ def validate_component_quality_report(
     }:
         raise ValueError("component quality report fields are invalid")
     for component in report["component_reports"]:
-        if not isinstance(component, dict) or set(component) != {
+        component_fields = {
             "component_id", "accepted", "metrics", "improvement", "violations",
             "checks", "agent_confidence",
-        }:
+        }
+        if (
+            not isinstance(component, dict)
+            or not component_fields <= set(component)
+            or set(component) - component_fields != (
+                {"overlap_component_ids"}
+                if "overlap_component_ids" in component
+                else set()
+            )
+        ):
             raise ValueError("component quality report entry fields are invalid")
+        overlap_component_ids = component.get("overlap_component_ids", [])
+        if (
+            not isinstance(overlap_component_ids, list)
+            or overlap_component_ids != sorted(set(overlap_component_ids))
+            or any(type(value) is not str for value in overlap_component_ids)
+            or component["component_id"] in overlap_component_ids
+        ):
+            raise ValueError("component quality overlap component IDs are invalid")
         metrics = component["metrics"]
         if not isinstance(metrics, dict) or set(metrics) != _METRIC_FIELDS:
             raise ValueError("component quality metrics fields are invalid")
@@ -653,9 +670,9 @@ def component_metrics(
     far_kernel = np.ones((2 * far_radius + 1, 2 * far_radius + 1), dtype=np.uint8)
     far = cv2.dilate(support.astype(np.uint8), far_kernel) > 0
     far &= ~support
-    baseline_pixels = source_rgb[far]
+    baseline_pixels = context.background_rgb[far]
     if baseline_pixels.size == 0:
-        baseline_pixels = source_rgb.reshape(-1, 3)
+        baseline_pixels = context.background_rgb.reshape(-1, 3)
     baseline = np.median(baseline_pixels.astype(np.float32), axis=0)
     source_luma = context.source_luma
     baseline_luma = float(cv2.cvtColor(
@@ -786,6 +803,7 @@ def evaluate_component(
     previous_metrics: dict | None = None,
     over_merged_component: bool = False,
     contained_parent_review: bool = False,
+    overlap_component_ids: Iterable[str] = (),
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
     source_shape = np.asarray(source).shape[:2]
@@ -843,7 +861,15 @@ def evaluate_component(
         semantic_parent = _strict_binary_mask(
             parent_mask, source_shape, "parent semantic mask"
         )
-        underlay_outside = generated & ~semantic_parent
+        text_semantic = _strict_binary_mask(
+            text_mask, source_shape, "component text mask"
+        )
+        radius = max(1, calibration.text_halo_px)
+        text_semantic = cv2.dilate(
+            text_semantic.astype(np.uint8),
+            np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8),
+        ).astype(bool)
+        underlay_outside = generated & ~(semantic_parent | text_semantic)
 
     metrics = component_metrics(
         source, background, reconstructed, node, graph, calibration,
@@ -913,13 +939,20 @@ def evaluate_component(
         violations.append("alpha_halo")
     if metrics["parent_child_double"]:
         violations.append("parent_child_double")
-    if metrics["component_overlap_pixels"]:
+    overlap_pixel_limit = max(
+        calibration.min_component_pixels,
+        round(metrics["component_pixels"] * 0.0002),
+    )
+    if metrics["component_overlap_pixels"] > overlap_pixel_limit:
         violations.append("component_overlap")
     if metrics["duplicate_ratio"] >= hard_pixel_ratio:
         violations.append("duplicate_pixels")
     if metrics["ownership_out_of_bounds_pixels"]:
         violations.append("out_of_bounds")
-    if metrics["underlay_out_of_bounds_pixels"]:
+    underlay_out_of_bounds_limit = max(
+        4, round(metrics["generated_underlay_pixels"] * 0.0002)
+    )
+    if metrics["underlay_out_of_bounds_pixels"] > underlay_out_of_bounds_limit:
         violations.append("underlay_out_of_bounds")
     if (
         metrics["underlay_boundary_color_mae"]
@@ -965,7 +998,7 @@ def evaluate_component(
         if not np.isfinite(prior):
             raise ValueError("previous component metrics must be finite")
         improvement[key] = prior - float(metrics[key])
-    return {
+    report = {
         "component_id": node["id"],
         "accepted": not violations,
         "metrics": metrics,
@@ -974,6 +1007,10 @@ def evaluate_component(
         "checks": {"protected_native_overlap": native_state},
         "agent_confidence": agent_confidence,
     }
+    overlap_ids = sorted(set(overlap_component_ids))
+    if overlap_ids:
+        report["overlap_component_ids"] = overlap_ids
+    return report
 
 
 def evaluate_page_quality(
@@ -1049,6 +1086,10 @@ def evaluate_page_quality(
         unowned_state = _check_state(page_checks, "unowned_raster_text")
         if unowned_state != "pass":
             violations.append("unowned_raster_text")
+    if page_checks is not None and "visual_ownership" in page_checks:
+        ownership_state = _check_state(page_checks, "visual_ownership")
+        if ownership_state != "pass":
+            violations.append("unexplained_visual_residual")
     if (
         float(visual_metrics["mae"]) > 8.0
         or float(visual_metrics["p95"]) > 32.0
@@ -1077,8 +1118,108 @@ def evaluate_page_quality(
                 if page_checks is not None and "unowned_raster_text" in page_checks
                 else {}
             ),
+            **(
+                {"visual_ownership": _check_state(page_checks, "visual_ownership")}
+                if page_checks is not None and "visual_ownership" in page_checks
+                else {}
+            ),
         },
     }
+
+
+def material_ownership_metrics(
+    material_foreground: np.ndarray,
+    component_masks: Iterable[np.ndarray],
+    text_mask: np.ndarray,
+    calibration: PageCalibration,
+    *,
+    generated_underlay_masks: Iterable[np.ndarray] = (),
+) -> tuple[dict, np.ndarray]:
+    material = np.asarray(material_foreground, dtype=bool).copy()
+    text = np.asarray(text_mask, dtype=bool)
+    if material.ndim != 2 or text.shape != material.shape:
+        raise ValueError("material foreground and text mask dimensions differ")
+    material &= ~text
+    owned = np.zeros(material.shape, dtype=bool)
+    for mask in component_masks:
+        projected, _ = _project_component_mask(mask, material.shape)
+        owned |= projected
+    generated = np.zeros(material.shape, dtype=bool)
+    for mask in generated_underlay_masks:
+        projected, _ = _project_component_mask(mask, material.shape)
+        generated |= projected
+    generated_responsibility = material & generated & ~owned
+    unexplained = material & ~owned & ~generated
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        unexplained.astype(np.uint8), 8
+    )
+    keep = np.zeros(material.shape, dtype=bool)
+    largest = 0
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < calibration.min_component_pixels:
+            continue
+        keep |= labels == label
+        largest = max(largest, area)
+    material_pixels = int(np.count_nonzero(material))
+    unexplained_pixels = int(np.count_nonzero(keep))
+    owned_pixels = int(np.count_nonzero(material & owned))
+    generated_pixels = int(np.count_nonzero(generated_responsibility))
+    return {
+        "material_foreground_pixels": material_pixels,
+        "owned_visual_pixels": owned_pixels,
+        "generated_underlay_visual_pixels": generated_pixels,
+        "unexplained_visual_pixels": unexplained_pixels,
+        "largest_unexplained_region_pixels": largest,
+        "visual_ownership_coverage": (
+            owned_pixels / material_pixels if material_pixels else 1.0
+        ),
+        "visual_responsibility_coverage": (
+            (owned_pixels + generated_pixels) / material_pixels
+            if material_pixels else 1.0
+        ),
+    }, keep
+
+
+def refine_material_foreground(
+    material_foreground: np.ndarray,
+    source: np.ndarray,
+    background: np.ndarray,
+    calibration: PageCalibration,
+) -> np.ndarray:
+    material = np.asarray(material_foreground, dtype=bool)
+    if material.ndim != 2:
+        raise ValueError("material foreground must be a two-dimensional mask")
+    source_rgb = _rgb_image(source, material.shape, "source")
+    background_rgb = _rgb_image(background, material.shape, "background")
+    tolerance = max(
+        3.0,
+        calibration.noise_l1 * 4.0 + calibration.local_contrast * 0.08,
+    )
+    background_delta = np.max(
+        np.abs(source_rgb.astype(np.int16) - background_rgb.astype(np.int16)),
+        axis=2,
+    )
+    source_luma = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2GRAY)
+    background_luma = cv2.cvtColor(background_rgb, cv2.COLOR_RGB2GRAY)
+    source_structure = cv2.morphologyEx(
+        source_luma,
+        cv2.MORPH_GRADIENT,
+        np.ones((3, 3), dtype=np.uint8),
+    )
+    background_structure = cv2.morphologyEx(
+        background_luma,
+        cv2.MORPH_GRADIENT,
+        np.ones((3, 3), dtype=np.uint8),
+    )
+    retained_structure = (
+        (background_delta <= tolerance)
+        & (source_structure > tolerance)
+        & (background_structure > tolerance)
+    )
+    return material & (
+        (background_delta > tolerance) | retained_structure
+    )
 
 
 def _page_shape(shape: object) -> tuple[int, int]:

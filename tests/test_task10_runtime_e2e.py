@@ -179,6 +179,11 @@ def test_test1_two_page_component_state_to_shadow_output(
 
     def deterministic_quality(*args, expected_component_ids, initial_component_count, **kwargs):
         from image2editable.component_quality import evaluate_page_quality
+        unexplained_output_path = kwargs.get("unexplained_output_path")
+        if unexplained_output_path is not None:
+            Image.new(
+                "L", (args[0].shape[1], args[0].shape[0]), 0
+            ).save(unexplained_output_path)
         fields = {
             "component_pixels": 0, "missing_pixels": 0, "missing_ratio": 0.0,
             "duplicate_pixels": 0, "duplicate_ratio": 0.0,

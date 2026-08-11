@@ -46,6 +46,7 @@ def test_quality_input_contract_requires_presentation_manifest_ref() -> None:
         ("accept", ["component_0001"], {}),
         ("discard", ["component_0001"], {}),
         ("rebuild_background", ["component_0001"], {"margin_ratio": 0.01}),
+        ("absorb_residual", ["component_0001"], {}),
         ("absorb_into_parent", ["parent_0001", "component_0001"], {}),
         ("merge", ["component_0001", "component_0002"], {}),
         ("split", ["component_0001"], {"parts": 2}),
@@ -242,6 +243,48 @@ def test_component_plan_allows_absorb_into_authenticated_inactive_parent() -> No
     request["candidate_ids"].remove("child_b")
     next(node for node in graph["nodes"] if node["id"] == "parent_b")["state"] = "inactive"
     plan = _plan(request, "absorb_into_parent", ["parent_b", "visual"])
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
+def test_component_plan_allows_retrying_authenticated_inactive_visual() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].remove("visual")
+    next(node for node in graph["nodes"] if node["id"] == "visual")[
+        "state"
+    ] = "inactive"
+    plan = _plan(request, "retry_with_box", ["visual"])
+    plan["actions"][0]["parameters"] = {"box": [0.1, 0.1, 0.5, 0.5]}
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+    plan["actions"][0]["action"] = "accept"
+    plan["actions"][0]["parameters"] = {}
+    with pytest.raises(ValueError, match="object_ids"):
+        component_contracts.validate_component_plan(
+            plan, request=request, graph=graph,
+        )
+
+
+def test_component_plan_rebuilds_background_with_retried_inactive_visual() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].remove("visual")
+    next(node for node in graph["nodes"] if node["id"] == "visual")[
+        "state"
+    ] = "inactive"
+    plan = _plan(request, "retry_with_box", ["visual"])
+    plan["actions"][0]["parameters"] = {"box": [0.1, 0.1, 0.5, 0.5]}
+    plan["actions"].append({
+        "action": "rebuild_background",
+        "object_ids": ["visual"],
+        "parameters": {"margin_ratio": 0.01},
+        "confidence": 0.9,
+        "evidence": ["remove the retried visual from the rebuilt background"],
+    })
 
     assert component_contracts.validate_component_plan(
         plan, request=request, graph=graph,
@@ -496,6 +539,25 @@ def test_inactive_visual_reactivation_requires_exact_authorization() -> None:
             after=reactivated,
             allowed_reactivated_ids={"other"},
         )
+
+
+def test_frozen_visual_repair_reactivation_requires_exact_authorization() -> None:
+    visual = _node(
+        "visual_0001", kind="parent", parent_id=None, state="frozen",
+    )
+    before = {"nodes": [visual]}
+    reactivated = {"nodes": [{**visual, "state": "pending"}]}
+
+    with pytest.raises(ValueError, match="frozen"):
+        component_contracts.validate_graph_transition(
+            before=before, after=reactivated,
+        )
+
+    assert component_contracts.validate_graph_transition(
+        before=before,
+        after=reactivated,
+        allowed_reactivated_ids={"visual_0001"},
+    ) is reactivated
 
 
 def test_authorized_text_suppression_cannot_change_any_other_frozen_field() -> None:

@@ -101,6 +101,57 @@ def _publish_request(run_dir: Path) -> Path:
     return request_path
 
 
+def test_current_request_prefers_public_awaiting_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStore:
+        root = tmp_path
+
+        def read_json(self, name: str) -> dict:
+            if name == "job_manifest.json":
+                return {"pages": ["page_001", "page_002"]}
+            if name == "page_jobs.json":
+                return {"pages": {
+                    "page_001": {"status": "awaiting_agent"},
+                    "page_002": {"status": "processing"},
+                }}
+            page_id = Path(name).parts[1]
+            request = requests[page_id]
+            return {
+                "provider": "host", "phase": "awaiting_plan",
+                "current_round": {"request_ref": {
+                    "path": (
+                        f"pages/{page_id}/reconstruction/agent/"
+                        f"round-{request['repair_round']:02d}/component_agent_request.json"
+                    ),
+                    "sha256": host_agent._request_sha256(request),
+                }},
+            }
+
+    requests = {
+        "page_001": {"page_id": "page_001", "provider": "host", "repair_round": 2},
+        "page_002": {"page_id": "page_002", "provider": "host", "repair_round": 1},
+    }
+    for page_id in requests:
+        state_path = tmp_path / f"pages/{page_id}/reconstruction/component_state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        "image2editable.component_contracts.validate_component_repair_state",
+        lambda state: state,
+    )
+    monkeypatch.setattr(
+        host_agent,
+        "load_component_agent_request",
+        lambda path: requests[path.parents[3].name],
+    )
+
+    _, request = host_agent._current_request(FakeStore())
+
+    assert request["page_id"] == "page_001"
+
+
 def test_host_ignores_unreferenced_complete_round(host_run: Path, tmp_path: Path) -> None:
     request_path = _publish_request(host_run)
     reconstruction = host_run / "pages/page_001/reconstruction"
