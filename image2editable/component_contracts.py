@@ -6,6 +6,7 @@ import math
 
 AGENT_PROVIDERS = frozenset({"host", "local"})
 MAX_REPAIR_ROUNDS = 5
+MAX_COMPONENT_PROMPT_POINTS = 256
 COMPONENT_STATES = frozenset(
     {"pending", "pending_gate", "failed", "frozen", "inactive"}
 )
@@ -556,6 +557,11 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     raise ValueError(f"component action {field} coordinates are invalid")
                 for point in points:
                     _validate_normalized_point(point, field)
+            if (
+                len(parameters["positive"]) + len(parameters["negative"])
+                > MAX_COMPONENT_PROMPT_POINTS
+            ):
+                raise ValueError("component action has too many prompt points")
             if not parameters["positive"]:
                 raise ValueError("component action positive coordinates are invalid")
         if name in {"retry_with_box", "retry_with_points"}:

@@ -288,11 +288,14 @@ def execute_component_actions(
             proposed_results = [
                 {
                     "component_id": prompt["component_id"],
-                    "mask": runner(
-                        image=image,
-                        box=prompt["box"],
-                        positive=prompt["positive"],
-                        negative=prompt["negative"],
+                    "mask": np.asarray(
+                        runner(
+                            image=image,
+                            box=prompt["box"],
+                            positive=prompt["positive"],
+                            negative=prompt["negative"],
+                        ),
+                        dtype=bool,
                     ),
                 }
                 for prompt in retry_prompts

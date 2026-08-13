@@ -2682,6 +2682,43 @@ def test_retry_batch_rejects_reordered_results_before_graph_mutation(
     assert not output_dir.exists()
 
 
+def test_single_retry_runner_preserves_uint8_mask_compatibility(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    uint8_mask = np.asarray(Image.open(input_dir / "masks/left.png"), dtype=np.uint8)
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("retry_with_box", ["left"], {"box": [0.25, 0.25, 0.75, 0.75]})],
+        sam_runner=lambda **_: uint8_mask,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-single-uint8",
+    )
+
+    assert next(node for node in result["nodes"] if node["id"] == "left")["state"] == "pending"
+
+
+def test_component_plan_rejects_excessive_prompt_points() -> None:
+    from image2editable.component_contracts import (
+        MAX_COMPONENT_PROMPT_POINTS,
+        validate_component_action,
+    )
+
+    with pytest.raises(ValueError, match="too many"):
+        validate_component_action(_action(
+            "retry_with_points",
+            ["component"],
+            {
+                "positive": [[0.5, 0.5]] * (MAX_COMPONENT_PROMPT_POINTS + 1),
+                "negative": [],
+            },
+        ))
+
+    from scripts import sam_worker
+
+    assert MAX_COMPONENT_PROMPT_POINTS == sam_worker._COMPONENT_MAX_POINTS_PER_PROMPT
+
+
 def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     output = tmp_path / "round-02"
@@ -4622,6 +4659,56 @@ def test_component_prompt_batch_sets_source_image_once_and_preserves_order() -> 
     assert [int(np.where(mask)[1].min()) for mask in masks] == [1, 3]
 
 
+def test_component_prompt_batch_worker_entry_loads_generator_once_and_publishes_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    image_path = tmp_path / "image.png"
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result.json"
+    Image.fromarray(np.zeros((4, 5, 3), dtype=np.uint8)).save(image_path)
+    prompts = [
+        {"component_id": "left", "box": [1, 1, 2, 3], "positive": [], "negative": []},
+        {"component_id": "right", "box": [3, 1, 4, 3], "positive": [], "negative": []},
+    ]
+    request_path.write_text(json.dumps({
+        "schema_version": sam_worker._BATCH_SCHEMA_VERSION,
+        "image": image_path.name,
+        "prompts": prompts,
+    }), encoding="utf-8")
+    loads = []
+
+    class Predictor:
+        def set_image(self, image: np.ndarray) -> None:
+            self.image = image
+
+        def predict(self, **kwargs: object) -> tuple[np.ndarray, np.ndarray, None]:
+            mask = np.zeros((1, 4, 5), dtype=bool)
+            column = int(np.asarray(kwargs["box"])[0])
+            mask[0, 1:3, column] = True
+            return mask, np.asarray([0.9]), None
+
+    generator = type("Generator", (), {"predictor": Predictor()})()
+    monkeypatch.setattr(
+        sam_worker,
+        "_load_tools",
+        lambda: (None, lambda *args, **kwargs: loads.append(1) or generator, None, None,
+                 lambda: tmp_path / "sam.pt", None, None),
+    )
+    published = []
+    monkeypatch.setattr(
+        sam_worker,
+        "_write_bound_json_result",
+        lambda binding, payload, limit: published.append(payload),
+    )
+
+    assert sam_worker._run_component_prompt_batch(request_path, result_path) == 0
+    assert loads == [1]
+    assert [record["component_id"] for record in published[0]] == ["left", "right"]
+
+
 def test_component_sam_batch_subprocess_runner_uses_one_worker_and_cleans_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4663,6 +4750,121 @@ def test_component_sam_batch_subprocess_runner_uses_one_worker_and_cleans_worksp
     assert calls[0][1]["timeout"] == 600
     assert [int(np.where(mask)[1].min()) for mask in masks] == [1, 3]
     assert not list(tmp_path.glob("component-sam-batch-*"))
+
+
+def test_component_sam_batch_rejects_mask_shape_before_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    monkeypatch.setattr(sam_worker, "sam_candidate_batch_output_supported", lambda _: True)
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps([{
+            "component_id": "left",
+            "mask": "AA==",
+            "mask_shape": [1_000_000_000, 1_000_000_000],
+        }]), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(sam_worker, "run_isolated_worker", fake_run)
+    monkeypatch.setattr(
+        np,
+        "unpackbits",
+        lambda *args, **kwargs: pytest.fail("invalid shape must be rejected before decode"),
+    )
+
+    with pytest.raises(RuntimeError, match="shape"):
+        sam_worker.run_component_prompt_batch_worker(
+            np.zeros((4, 5, 3), dtype=np.uint8),
+            [{
+                "component_id": "left",
+                "box": [1, 1, 2, 3],
+                "positive": [],
+                "negative": [],
+            }],
+            work_dir=tmp_path,
+        )
+
+
+def test_component_sam_batch_over_capacity_uses_single_workers_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    monkeypatch.setattr(sam_worker, "sam_candidate_batch_output_supported", lambda _: True)
+    monkeypatch.setattr(
+        sam_worker,
+        "run_isolated_worker",
+        lambda *args, **kwargs: pytest.fail("over-capacity batch must not spawn"),
+    )
+    calls = []
+
+    def single(image: np.ndarray, **kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        mask = np.zeros(image.shape[:2], dtype=bool)
+        mask[0, 0] = True
+        return mask
+
+    monkeypatch.setattr(sam_worker, "run_component_prompt_worker", single)
+    prompts = [
+        {
+            "component_id": f"component_{index:04d}",
+            "box": [0, 0, 1, 1],
+            "positive": [],
+            "negative": [],
+        }
+        for index in range(sam_worker._COMPONENT_BATCH_MAX_PROMPTS + 1)
+    ]
+
+    masks = sam_worker.run_component_prompt_batch_worker(
+        np.zeros((2, 2, 3), dtype=np.uint8), prompts, work_dir=tmp_path
+    )
+
+    assert len(calls) == len(prompts)
+    assert len(masks) == len(prompts)
+
+
+def test_component_sam_batch_oversize_request_uses_single_workers_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    monkeypatch.setattr(sam_worker, "sam_candidate_batch_output_supported", lambda _: True)
+    monkeypatch.setattr(
+        sam_worker,
+        "run_isolated_worker",
+        lambda *args, **kwargs: pytest.fail("oversize batch must not spawn"),
+    )
+    calls = []
+
+    def single(image: np.ndarray, **kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        mask = np.zeros(image.shape[:2], dtype=bool)
+        mask[0, 0] = True
+        return mask
+
+    monkeypatch.setattr(sam_worker, "run_component_prompt_worker", single)
+    prompts = [
+        {
+            "component_id": f"component_{index:04d}_" + "x" * 220,
+            "box": [0, 0, 1, 1],
+            "positive": [],
+            "negative": [],
+        }
+        for index in range(220)
+    ]
+
+    masks = sam_worker.run_component_prompt_batch_worker(
+        np.zeros((2, 2, 3), dtype=np.uint8), prompts, work_dir=tmp_path
+    )
+
+    assert len(calls) == len(prompts)
+    assert len(masks) == len(prompts)
 
 
 def test_component_sam_batch_unsupported_uses_equal_quality_single_workers(

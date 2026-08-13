@@ -74,6 +74,32 @@ def _decode_mask(record: dict, name: str = "mask") -> np.ndarray:
     )
 
 
+def _decode_expected_mask(record: dict, expected_shape: tuple[int, int]) -> np.ndarray:
+    shape = record.get("mask_shape")
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 2
+        or any(type(value) is not int for value in shape)
+        or tuple(shape) != expected_shape
+    ):
+        raise RuntimeError("SAM component worker returned the wrong mask shape")
+    expected_bytes = (expected_shape[0] * expected_shape[1] + 7) // 8
+    expected_base64_length = ((expected_bytes + 2) // 3) * 4
+    encoded = record.get("mask")
+    if not isinstance(encoded, str) or len(encoded) != expected_base64_length:
+        raise RuntimeError("SAM component worker returned an invalid mask length")
+    try:
+        packed = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("SAM component worker returned an invalid mask") from exc
+    if len(packed) != expected_bytes:
+        raise RuntimeError("SAM component worker returned an invalid mask length")
+    return np.unpackbits(
+        np.frombuffer(packed, dtype=np.uint8),
+        count=expected_shape[0] * expected_shape[1],
+    ).reshape(expected_shape).astype(bool, copy=False)
+
+
 def _candidate_record(candidate) -> dict:
     return {
         **_mask_record(candidate.mask),
@@ -109,6 +135,8 @@ _BATCH_JSON_RECORD_OVERHEAD_BYTES = 512
 # Python's default JSON integer conversion limit is 4300 decimal digits.
 _BATCH_JSON_NUMBER_BYTES = 4300
 _COMPONENT_BATCH_FIELDS = {"component_id", "box", "positive", "negative"}
+_COMPONENT_BATCH_MAX_PROMPTS = 256
+_COMPONENT_MAX_POINTS_PER_PROMPT = 256
 _BATCH_CANDIDATE_FIELDS = {
     "mask",
     "mask_shape",
@@ -1680,9 +1708,16 @@ def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndar
     return component_prompt_masks(generator, image, [prompt])[0]
 
 
-def _validate_component_prompt_batch(prompts, image_shape: tuple[int, int]) -> list[dict]:
+def _validate_component_prompt_batch(
+    prompts,
+    image_shape: tuple[int, int],
+    *,
+    max_prompts: int | None = None,
+) -> list[dict]:
     if not isinstance(prompts, list) or not prompts:
         raise ValueError("SAM component prompt batch must be a non-empty list")
+    if max_prompts is not None and len(prompts) > max_prompts:
+        raise ValueError("SAM component prompt batch has too many prompts")
     height, width = image_shape
     validated = []
     component_ids = set()
@@ -1722,6 +1757,11 @@ def _validate_component_prompt_batch(prompts, image_shape: tuple[int, int]) -> l
                     raise ValueError(f"SAM component {name} point is outside the image")
                 mapped.append([x, y])
             points[name] = mapped
+        if (
+            len(points["positive"]) + len(points["negative"])
+            > _COMPONENT_MAX_POINTS_PER_PROMPT
+        ):
+            raise ValueError("SAM component prompt has too many points")
         if box is None and not points["positive"]:
             raise ValueError("SAM component prompt requires a box or positive point")
         validated.append({
@@ -1792,7 +1832,9 @@ def _validate_component_batch_request(
     with Image.open(io.BytesIO(_read_batch_bound_bytes(image_binding))) as stored_image:
         image = np.asarray(stored_image.convert("RGB")).copy()
     prompts = _validate_component_prompt_batch(
-        request["prompts"], tuple(image.shape[:2])
+        request["prompts"],
+        tuple(image.shape[:2]),
+        max_prompts=_COMPONENT_BATCH_MAX_PROMPTS,
     )
     result_binding = {
         "path": resolved_root / result_path.name,
@@ -1883,7 +1925,20 @@ def run_component_prompt_batch_worker(
     validated_prompts = _validate_component_prompt_batch(
         prompts, tuple(image.shape[:2])
     )
-    if not sam_candidate_batch_output_supported(work_dir):
+    request_bytes = json.dumps(
+        {
+            "schema_version": _BATCH_SCHEMA_VERSION,
+            "image": "image.png",
+            "prompts": validated_prompts,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if (
+        len(validated_prompts) > _COMPONENT_BATCH_MAX_PROMPTS
+        or len(request_bytes) > _BATCH_MAX_REQUEST_BYTES
+        or not sam_candidate_batch_output_supported(work_dir)
+    ):
         return [
             run_component_prompt_worker(
                 image,
@@ -1900,14 +1955,7 @@ def run_component_prompt_batch_worker(
         request_path = root / "request.json"
         result_path = root / "result.json"
         Image.fromarray(np.asarray(image, dtype=np.uint8)).save(image_path)
-        request_path.write_text(
-            json.dumps({
-                "schema_version": _BATCH_SCHEMA_VERSION,
-                "image": image_path.name,
-                "prompts": validated_prompts,
-            }),
-            encoding="utf-8",
-        )
+        request_path.write_bytes(request_bytes)
         run_isolated_worker(
             [
                 sys.executable,
@@ -1936,7 +1984,7 @@ def run_component_prompt_batch_worker(
                 or record["component_id"] != prompt["component_id"]
             ):
                 raise RuntimeError("SAM component worker returned results out of order")
-            mask = _decode_mask(record).copy()
+            mask = _decode_expected_mask(record, tuple(image.shape[:2])).copy()
             if mask.shape != image.shape[:2] or not mask.any():
                 raise RuntimeError("SAM component worker returned an invalid mask")
             masks.append(mask)
