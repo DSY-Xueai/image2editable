@@ -1504,6 +1504,13 @@ def _generate_sam_candidates_isolated(
 
 
 _SAM_CANDIDATE_BATCH_SCHEMA_VERSION = 1
+_SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES = 512 * 1024 * 1024
+_SAM_CANDIDATE_BATCH_MAX_PROPOSALS = 16_384
+_SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES = (
+    2 * _SAM_CANDIDATE_BATCH_MAX_PROPOSALS
+)
+_SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES = 16 * 16 * 3
+_SAM_CANDIDATE_BATCH_MAX_STRING_LENGTH = 256
 _SAM_CANDIDATE_BATCH_FIELDS = {
     "mask",
     "mask_shape",
@@ -1517,13 +1524,72 @@ _SAM_CANDIDATE_BATCH_FIELDS = {
 }
 
 
-def _decode_sam_candidate_batch_records(
+def _validate_sam_candidate_batch_string(
+    value,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or (not allow_empty and not value)
+        or len(value) > _SAM_CANDIDATE_BATCH_MAX_STRING_LENGTH
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    return value
+
+
+def _validate_sam_candidate_batch_score(value) -> float:
+    if (
+        type(value) not in {int, float}
+        or not math.isfinite(value)
+        or not 0.0 <= value <= 1.0
+    ):
+        raise RuntimeError("SAM candidate batch returned an invalid score")
+    return value
+
+
+def _validate_sam_candidate_batch_box(
+    value,
+    label: str,
+    image_shape: tuple[int, int],
+) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(
+            type(coordinate) not in {int, float} or not math.isfinite(coordinate)
+            for coordinate in value
+        )
+    ):
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    x1, y1, x2, y2 = value
+    height, width = image_shape
+    if not (0.0 <= x1 < x2 <= width and 0.0 <= y1 < y2 <= height):
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    return tuple(value)
+
+
+def _validate_sam_candidate_batch_records(
     records,
     image_shape: tuple[int, int],
-) -> list[MaskCandidate]:
+    kind: str,
+) -> list[tuple[bytes, dict]]:
     if not isinstance(records, list):
         raise RuntimeError("SAM candidate batch records must be a list")
-    candidates = []
+    limit = (
+        _SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES
+        if kind == "prompted"
+        else _SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES
+    )
+    if len(records) > limit:
+        raise RuntimeError("SAM candidate batch returned too many candidates")
+    validated = []
+    expected_bytes = (int(np.prod(image_shape)) + 7) // 8
+    expected_base64_length = ((expected_bytes + 2) // 3) * 4
     for record in records:
         if not isinstance(record, dict) or set(record) != _SAM_CANDIDATE_BATCH_FIELDS:
             raise RuntimeError("SAM candidate batch returned an invalid candidate")
@@ -1535,28 +1601,130 @@ def _decode_sam_candidate_batch_records(
             or tuple(mask_shape) != image_shape
         ):
             raise RuntimeError("SAM candidate batch returned the wrong mask shape")
+        if (
+            not isinstance(record["mask"], str)
+            or len(record["mask"]) != expected_base64_length
+        ):
+            raise RuntimeError("SAM candidate batch returned an invalid mask length")
         try:
             packed_bytes = base64.b64decode(record["mask"], validate=True)
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             raise RuntimeError("SAM candidate batch returned an invalid mask") from exc
-        expected_bytes = (int(np.prod(image_shape)) + 7) // 8
         if len(packed_bytes) != expected_bytes:
             raise RuntimeError("SAM candidate batch returned an invalid mask length")
+        if type(record["touches_crop_edge"]) is not bool:
+            raise RuntimeError(
+                "SAM candidate batch returned an invalid crop-edge flag"
+            )
+        candidate_fields = {
+            "score": _validate_sam_candidate_batch_score(record["score"]),
+            "source": _validate_sam_candidate_batch_string(
+                record["source"],
+                "source",
+            ),
+            "crop_box": _validate_sam_candidate_batch_box(
+                record["crop_box"],
+                "crop box",
+                image_shape,
+            ),
+            "touches_crop_edge": record["touches_crop_edge"],
+            "label": _validate_sam_candidate_batch_string(
+                record["label"],
+                "label",
+                allow_empty=True,
+            ),
+            "role": _validate_sam_candidate_batch_string(
+                record["role"],
+                "role",
+                allow_empty=True,
+            ),
+            "object_box": _validate_sam_candidate_batch_box(
+                record["object_box"],
+                "object box",
+                image_shape,
+            ),
+        }
+        validated.append((packed_bytes, candidate_fields))
+    return validated
+
+
+def _decode_sam_candidate_batch_records(
+    records: list[tuple[bytes, dict]],
+    image_shape: tuple[int, int],
+) -> list[MaskCandidate]:
+    candidates = []
+    for packed_bytes, candidate_fields in records:
         mask = np.unpackbits(
             np.frombuffer(packed_bytes, dtype=np.uint8),
             count=int(np.prod(image_shape)),
         ).reshape(image_shape).astype(bool, copy=False)
-        candidate_fields = {
-            key: value
-            for key, value in record.items()
-            if key not in {"mask", "mask_shape"}
-        }
-        if candidate_fields["crop_box"] is not None:
-            candidate_fields["crop_box"] = tuple(candidate_fields["crop_box"])
-        if candidate_fields["object_box"] is not None:
-            candidate_fields["object_box"] = tuple(candidate_fields["object_box"])
         candidates.append(MaskCandidate(mask=mask, **candidate_fields))
     return candidates
+
+
+def _read_sam_candidate_batch_result(path: Path) -> bytes:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            "Isolated SAM candidate batch did not create its result"
+        ) from exc
+    if (
+        _is_link_or_reparse(before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+        or before.st_size > _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES
+    ):
+        raise RuntimeError("SAM candidate batch result is unsafe or too large")
+    flags = os.O_RDONLY
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != before.st_size
+        ):
+            raise RuntimeError("SAM candidate batch result identity changed")
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(
+                    1024 * 1024,
+                    _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES + 1 - total,
+                ),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES:
+                raise RuntimeError("SAM candidate batch result is too large")
+        stable = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    identities = {
+        (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+        for status in (before, opened, stable, after)
+    }
+    if (
+        len(identities) != 1
+        or _is_link_or_reparse(after)
+        or not stat.S_ISREG(after.st_mode)
+        or after.st_nlink != 1
+    ):
+        raise RuntimeError("SAM candidate batch result changed while reading")
+    return b"".join(chunks)
+
+
+def _reject_sam_candidate_batch_json_constant(value: str):
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 
 def _generate_sam_candidate_batch_isolated(
@@ -1565,6 +1733,8 @@ def _generate_sam_candidate_batch_isolated(
     proposals: list[ObjectProposal],
     work_dir: Path,
 ) -> tuple[list[MaskCandidate], list[MaskCandidate]]:
+    if len(proposals) > _SAM_CANDIDATE_BATCH_MAX_PROPOSALS:
+        raise RuntimeError("SAM candidate batch has too many proposals")
     with tempfile.TemporaryDirectory(
         prefix="sam-batch-",
         dir=work_dir,
@@ -1614,7 +1784,6 @@ def _generate_sam_candidate_batch_isolated(
         worker_path = module_dir / "scripts" / "sam_worker.py"
         if not worker_path.is_file():
             worker_path = module_dir / "sam_worker.py"
-        result_path.unlink(missing_ok=True)
         completed = run_isolated_worker(
             [
                 sys.executable,
@@ -1633,12 +1802,11 @@ def _generate_sam_candidate_batch_isolated(
             result_path.unlink(missing_ok=True)
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise RuntimeError(f"Isolated SAM candidate batch failed: {detail}")
-        if not result_path.is_file():
-            raise RuntimeError(
-                "Isolated SAM candidate batch did not create its result"
-            )
         try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            payload = json.loads(
+                _read_sam_candidate_batch_result(result_path).decode("utf-8"),
+                parse_constant=_reject_sam_candidate_batch_json_constant,
+            )
             if not isinstance(payload, dict) or set(payload) != {
                 "schema_version",
                 "operations",
@@ -1662,7 +1830,7 @@ def _generate_sam_candidate_batch_isolated(
                 raise RuntimeError(
                     "SAM candidate batch returned the wrong operation count"
                 )
-            decoded = []
+            candidate_groups = []
             for output, expected in zip(output_operations, expected_operations):
                 if not isinstance(output, dict) or set(output) != {
                     "id",
@@ -1676,12 +1844,32 @@ def _generate_sam_candidate_batch_isolated(
                     raise RuntimeError(
                         "SAM candidate batch returned operations out of order"
                     )
-                decoded.append(
-                    _decode_sam_candidate_batch_records(
-                        output["candidates"],
-                        tuple(image.shape[:2]),
-                    )
+                records = output["candidates"]
+                candidate_limit = (
+                    _SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES
+                    if expected[1] == "prompted"
+                    else _SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES
                 )
+                if not isinstance(records, list) or len(records) > candidate_limit:
+                    raise RuntimeError(
+                        "SAM candidate batch returned an invalid candidate count"
+                    )
+                candidate_groups.append((records, expected[1]))
+            validated = [
+                _validate_sam_candidate_batch_records(
+                    records,
+                    tuple(image.shape[:2]),
+                    kind,
+                )
+                for records, kind in candidate_groups
+            ]
+            decoded = [
+                _decode_sam_candidate_batch_records(
+                    records,
+                    tuple(image.shape[:2]),
+                )
+                for records in validated
+            ]
         except RuntimeError:
             result_path.unlink(missing_ok=True)
             raise

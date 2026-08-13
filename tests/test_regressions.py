@@ -814,6 +814,94 @@ def _candidate_batch_record(shape=(6, 8)) -> dict:
     }
 
 
+def _candidate_batch_payload(
+    prompted: list[dict] | None = None,
+    automatic: list[dict] | None = None,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "operations": [
+            {
+                "id": "prompted",
+                "kind": "prompted",
+                "candidates": prompted or [],
+            },
+            {
+                "id": "automatic",
+                "kind": "automatic",
+                "candidates": automatic or [],
+            },
+        ],
+    }
+
+
+def _candidate_batch_worker_fixture(root: Path) -> dict:
+    root.mkdir(parents=True, exist_ok=True)
+    image_path = root / "image.png"
+    text_mask_path = root / "text-mask.png"
+    proposals_path = root / "proposals.json"
+    request_path = root / "request.json"
+    Image.new("RGB", (8, 6), "white").save(image_path)
+    Image.new("L", (8, 6), 0).save(text_mask_path)
+    proposals = [{
+        "box_xyxy": [1.0, 1.0, 7.0, 5.0],
+        "score": 0.91,
+        "label": "badge",
+        "role": "object",
+        "source": "full",
+        "crop_box": [0, 0, 8, 6],
+        "touches_crop_edge": False,
+    }]
+    proposals_path.write_text(json.dumps(proposals), encoding="utf-8")
+    request = {
+        "schema_version": 1,
+        "operations": [
+            {
+                "id": "prompted",
+                "kind": "prompted",
+                "image": image_path.name,
+                "text_mask": text_mask_path.name,
+                "proposals": proposals_path.name,
+            },
+            {
+                "id": "automatic",
+                "kind": "automatic",
+                "image": image_path.name,
+            },
+        ],
+    }
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    return {
+        "root": root,
+        "request": request_path,
+        "image": image_path,
+        "text_mask": text_mask_path,
+        "proposals": proposals_path,
+        "proposal_records": proposals,
+    }
+
+
+def _run_candidate_batch_worker_main(
+    monkeypatch,
+    request_path: Path,
+    result_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sam_worker.py",
+            "--mode",
+            "batch",
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+        ],
+    )
+    sam_worker.main()
+
+
 def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics(
     tmp_path: Path,
     monkeypatch,
@@ -956,6 +1044,116 @@ def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics
     ]
 
 
+def test_candidate_batch_main_matches_legacy_candidate_records(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    prompted_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
+    prompted_mask[1:5, 1:7] = True
+    automatic_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
+    automatic_mask[2:4, 2:6] = True
+
+    def generate_prompted(*args):
+        return [
+            image_to_ppt.MaskCandidate(
+                prompted_mask.copy(),
+                0.89,
+                "grounded:full:object",
+                (0, 0, 8, 6),
+                True,
+                "badge",
+                "object",
+                (1.0, 1.0, 7.0, 5.0),
+            )
+        ]
+
+    def generate_automatic(*args, **kwargs):
+        return [
+            image_to_ppt.MaskCandidate(
+                automatic_mask.copy(),
+                0.97,
+                "sam",
+                (0, 0, 8, 6),
+            )
+        ]
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_load_tools",
+        lambda: (
+            image_to_ppt.ObjectProposal,
+            lambda *args, **kwargs: object(),
+            generate_automatic,
+            generate_prompted,
+            lambda: Path("sam2.1-large.pt"),
+            visual_segment.VisualElement,
+            lambda *args: None,
+        ),
+    )
+
+    def run_main(arguments):
+        monkeypatch.setattr(sys, "argv", ["sam_worker.py", *arguments])
+        assert sam_worker.main() == 0
+
+    legacy_prompted = fixture["root"] / "legacy-prompted.json"
+    run_main(
+        [
+            "--mode", "prompted",
+            "--image", str(fixture["image"]),
+            "--text-mask", str(fixture["text_mask"]),
+            "--proposals", str(fixture["proposals"]),
+            "--result", str(legacy_prompted),
+        ]
+    )
+    legacy_automatic = fixture["root"] / "legacy-automatic.json"
+    run_main(
+        [
+            "--mode", "automatic",
+            "--image", str(fixture["image"]),
+            "--result", str(legacy_automatic),
+        ]
+    )
+    batch_result = fixture["root"] / "batch-result.json"
+    run_main(
+        [
+            "--mode", "batch",
+            "--request", str(fixture["request"]),
+            "--result", str(batch_result),
+        ]
+    )
+
+    batch_payload = json.loads(batch_result.read_text(encoding="utf-8"))
+    assert batch_payload["operations"][0]["candidates"] == json.loads(
+        legacy_prompted.read_text(encoding="utf-8")
+    )
+    assert batch_payload["operations"][1]["candidates"] == json.loads(
+        legacy_automatic.read_text(encoding="utf-8")
+    )
+
+
+def test_candidate_batch_legacy_main_still_requires_image(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sam_worker.py",
+            "--mode", "automatic",
+            "--result", str(tmp_path / "result.json"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="automatic mode requires image"):
+        sam_worker.main()
+
+    assert loads == []
+
+
 @pytest.mark.parametrize(
     "malformation",
     [
@@ -1029,6 +1227,394 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("score", float("nan")),
+        ("source", 7),
+        ("crop_box", "0,0,8,6"),
+        ("touches_crop_edge", 1),
+        ("label", "bad\nlabel"),
+        ("source", "bad\u202esource"),
+    ],
+)
+def test_candidate_batch_caller_rejects_invalid_candidate_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    field: str,
+    value,
+) -> None:
+    record = _candidate_batch_record()
+    record[field] = value
+    payload = _candidate_batch_payload(prompted=[record])
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        image_to_ppt._generate_sam_candidate_batch_isolated(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+
+def test_candidate_batch_caller_validates_all_records_before_constructing_any(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    good = _candidate_batch_record()
+    bad = _candidate_batch_record()
+    bad["crop_box"] = 7
+    payload = _candidate_batch_payload(prompted=[good, bad])
+    constructions = []
+    original_candidate = image_to_ppt.MaskCandidate
+
+    def tracking_candidate(*args, **kwargs):
+        constructions.append((args, kwargs))
+        return original_candidate(*args, **kwargs)
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "MaskCandidate", tracking_candidate)
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        image_to_ppt._generate_sam_candidate_batch_isolated(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+    assert constructions == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("score", float("nan")),
+        ("source", 7),
+        ("crop_box", "0,0,8,6"),
+        ("touches_crop_edge", 1),
+        ("source", "bad\u202esource"),
+    ],
+)
+def test_candidate_batch_worker_rejects_invalid_proposal_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+    field: str,
+    value,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    proposal = fixture["proposal_records"][0].copy()
+    proposal[field] = value
+    fixture["proposals"].write_text(json.dumps([proposal]), encoding="utf-8")
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+@pytest.mark.parametrize(
+    "operation_change",
+    ["missing", "extra", "reordered"],
+)
+def test_candidate_batch_worker_requires_exact_candidate_operations(
+    tmp_path: Path,
+    monkeypatch,
+    operation_change: str,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    request = json.loads(fixture["request"].read_text(encoding="utf-8"))
+    if operation_change == "missing":
+        request["operations"].pop()
+    elif operation_change == "extra":
+        request["operations"].append(request["operations"][1].copy())
+        request["operations"][2]["id"] = "extra"
+    else:
+        request["operations"].reverse()
+    fixture["request"].write_text(json.dumps(request), encoding="utf-8")
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+def test_candidate_batch_worker_bounds_request_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    request_bytes = fixture["request"].read_bytes()
+    monkeypatch.setattr(
+        sam_worker,
+        "_BATCH_MAX_REQUEST_BYTES",
+        len(request_bytes) - 1,
+        raising=False,
+    )
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="request"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+def test_candidate_batch_worker_bounds_proposals_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    fixture["proposals"].write_text(
+        json.dumps(fixture["proposal_records"] * 2),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_BATCH_MAX_PROPOSALS",
+        1,
+        raising=False,
+    )
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="proposal"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+@pytest.mark.parametrize(
+    ("fixture_name", "limit_name"),
+    [
+        ("image", "_BATCH_MAX_INPUT_BYTES"),
+        ("proposals", "_BATCH_MAX_PROPOSALS_BYTES"),
+    ],
+)
+def test_candidate_batch_worker_bounds_input_files_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+    fixture_name: str,
+    limit_name: str,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    monkeypatch.setattr(
+        sam_worker,
+        limit_name,
+        fixture[fixture_name].stat().st_size - 1,
+    )
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="size limit"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+def test_candidate_batch_worker_bounds_candidates_before_decoding_masks(
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload(
+        automatic=[_candidate_batch_record(), _candidate_batch_record()]
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_BATCH_MAX_AUTOMATIC_CANDIDATES",
+        1,
+        raising=False,
+    )
+    decode_calls = []
+    monkeypatch.setattr(
+        sam_worker.base64,
+        "b64decode",
+        lambda *args, **kwargs: decode_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="candidate"):
+        sam_worker._validate_batch_output(payload, operations)
+
+    assert decode_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("score", float("nan")),
+        ("source", 7),
+        ("crop_box", "0,0,8,6"),
+        ("touches_crop_edge", 1),
+        ("source", "bad\u202esource"),
+    ],
+)
+def test_candidate_batch_worker_rejects_invalid_candidate_metadata(
+    field: str,
+    value,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    record = _candidate_batch_record()
+    record[field] = value
+
+    with pytest.raises(RuntimeError, match="candidate"):
+        sam_worker._validate_batch_output(
+            _candidate_batch_payload(automatic=[record]),
+            operations,
+        )
+
+
+def test_candidate_batch_caller_bounds_candidates_before_decoding_masks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload = _candidate_batch_payload(
+        prompted=[_candidate_batch_record()],
+        automatic=[_candidate_batch_record(), _candidate_batch_record()]
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES",
+        1,
+    )
+    decode_calls = []
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+    monkeypatch.setattr(
+        image_to_ppt.base64,
+        "b64decode",
+        lambda *args, **kwargs: decode_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        image_to_ppt._generate_sam_candidate_batch_isolated(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+    assert decode_calls == []
+
+
+def test_candidate_batch_caller_bounds_result_before_parsing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    payload_bytes = json.dumps(_candidate_batch_payload()).encode("utf-8")
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES",
+        len(payload_bytes) - 1,
+        raising=False,
+    )
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_bytes(payload_bytes)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        image_to_ppt._generate_sam_candidate_batch_isolated(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+
+def test_candidate_batch_caller_rejects_oversized_mask_before_decoding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    record = _candidate_batch_record()
+    record["mask"] += "AAAA"
+    payload = _candidate_batch_payload(automatic=[record])
+    decode_calls = []
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+    monkeypatch.setattr(
+        image_to_ppt.base64,
+        "b64decode",
+        lambda *args, **kwargs: decode_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        image_to_ppt._generate_sam_candidate_batch_isolated(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+    assert decode_calls == []
+
+
+def test_candidate_batch_limits_cover_current_sam_generation_bounds() -> None:
+    assert sam_worker._BATCH_MAX_OPERATIONS == 2
+    assert sam_worker._BATCH_MAX_AUTOMATIC_CANDIDATES >= 16 * 16 * 3
+    assert sam_worker._BATCH_MAX_PROPOSALS >= 16_384
+    assert (
+        sam_worker._BATCH_MAX_PROMPTED_CANDIDATES
+        >= 2 * sam_worker._BATCH_MAX_PROPOSALS
+    )
+
+
+@pytest.mark.parametrize(
     "invalid_request",
     ["unknown-kind", "duplicate-id", "escape"],
 )
@@ -1062,7 +1648,6 @@ def test_candidate_batch_worker_rejects_invalid_schema_before_loading_sam(
         encoding="utf-8",
     )
     result_path = tmp_path / "result.json"
-    result_path.write_text("stale", encoding="utf-8")
     load_events = []
     monkeypatch.setattr(sam_worker, "_load_tools", lambda: load_events.append("load"))
     monkeypatch.setattr(
@@ -1085,6 +1670,150 @@ def test_candidate_batch_worker_rejects_invalid_schema_before_loading_sam(
     assert load_events == []
     assert not result_path.exists()
     assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "result_name",
+    ["request", "image", "text_mask", "proposals"],
+)
+def test_candidate_batch_worker_rejects_result_alias_without_deleting_input(
+    tmp_path: Path,
+    monkeypatch,
+    result_name: str,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    before = {
+        name: fixture[name].read_bytes()
+        for name in ("request", "image", "text_mask", "proposals")
+    }
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture[result_name],
+        )
+
+    assert loads == []
+    assert {
+        name: fixture[name].read_bytes()
+        for name in ("request", "image", "text_mask", "proposals")
+    } == before
+
+
+def test_candidate_batch_worker_rejects_existing_result_without_deleting_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    result_path = fixture["root"] / "result.json"
+    result_path.write_bytes(b"existing result")
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="already exists"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            result_path,
+        )
+
+    assert loads == []
+    assert result_path.read_bytes() == b"existing result"
+
+
+def test_candidate_batch_worker_rejects_result_hardlink_to_input(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    result_path = fixture["root"] / "result.json"
+    os.link(fixture["image"], result_path)
+    before = fixture["image"].read_bytes()
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="already exists"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            result_path,
+        )
+
+    assert loads == []
+    assert fixture["image"].read_bytes() == before
+    assert result_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("target_name", ["image", "external"])
+def test_candidate_batch_worker_rejects_result_symlink_without_touching_target(
+    tmp_path: Path,
+    monkeypatch,
+    target_name: str,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    if target_name == "image":
+        target = fixture["image"]
+    else:
+        target = tmp_path / "external.txt"
+        target.write_bytes(b"external content")
+    before = target.read_bytes()
+    result_path = fixture["root"] / "result.json"
+    try:
+        result_path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            result_path,
+        )
+
+    assert loads == []
+    assert target.read_bytes() == before
+    assert result_path.is_symlink()
+
+
+def test_candidate_batch_worker_rejects_linked_parent_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "actual")
+    linked_root = tmp_path / "linked"
+    try:
+        linked_root.symlink_to(fixture["root"], target_is_directory=True)
+    except OSError as exc:
+        if os.name != "nt":
+            pytest.skip(f"directory symlink creation is unavailable: {exc}")
+        junction = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(linked_root), str(fixture["root"])],
+            capture_output=True,
+            text=True,
+        )
+        if junction.returncode != 0:
+            pytest.skip(
+                "directory symlink and junction creation are unavailable: "
+                f"{junction.stderr.strip()}"
+            )
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="directory"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            linked_root / "request.json",
+            linked_root / "result.json",
+        )
+
+    assert loads == []
+    assert fixture["request"].is_file()
+    assert not (fixture["root"] / "result.json").exists()
 
 
 def test_candidate_batch_worker_rejects_resolved_path_escape(
@@ -1139,7 +1868,6 @@ def test_candidate_batch_worker_validates_output_before_replacing_result(
         encoding="utf-8",
     )
     result_path = tmp_path / "result.json"
-    result_path.write_text("stale", encoding="utf-8")
     wrong_mask = image_to_ppt.np.ones((2, 2), dtype=bool)
     monkeypatch.setattr(
         sam_worker,
@@ -1182,18 +1910,18 @@ def test_candidate_batch_worker_uses_exclusive_random_result_temp(
     monkeypatch,
 ) -> None:
     image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
-    operations = [{"id": "automatic", "kind": "automatic", "image": image}]
-    payload = {
-        "schema_version": 1,
-        "operations": [
-            {
-                "id": "automatic",
-                "kind": "automatic",
-                "candidates": [_candidate_batch_record()],
-            }
-        ],
-    }
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload(automatic=[_candidate_batch_record()])
     result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
     mkstemp_calls = []
     actual_mkstemp = sam_worker.tempfile.mkstemp
 
@@ -1203,10 +1931,43 @@ def test_candidate_batch_worker_uses_exclusive_random_result_temp(
 
     monkeypatch.setattr(sam_worker.tempfile, "mkstemp", fake_mkstemp)
 
-    sam_worker._write_batch_result(result_path, payload, operations)
+    sam_worker._write_batch_result(result_binding, payload, operations)
 
     assert mkstemp_calls == [(".result.json.", ".tmp", tmp_path)]
     assert json.loads(result_path.read_text(encoding="utf-8")) == payload
+
+
+def test_candidate_batch_worker_does_not_replace_result_created_during_publish(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    intruder = b"created during publish"
+    actual_link = sam_worker.os.link
+
+    def racing_link(source, destination):
+        Path(destination).write_bytes(intruder)
+        return actual_link(source, destination)
+
+    monkeypatch.setattr(sam_worker.os, "link", racing_link)
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert result_path.read_bytes() == intruder
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
 
 
 def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
