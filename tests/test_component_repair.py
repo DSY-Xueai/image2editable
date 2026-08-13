@@ -5057,7 +5057,7 @@ def _prepare_round_two_review_session(page_session: dict) -> None:
     masks = Path(evidence["component-graph.json"]).parent / "masks"
     nodes = []
     definitions = [
-        ("failed", "child", "parent", "pending", [2, 2, 6, 6], (2, 2, 6, 6)),
+        ("failed,one", "child", "parent", "pending", [2, 2, 3, 6], (2, 2, 3, 6)),
         ("parent", "parent", None, "inactive", [1, 1, 7, 7], (1, 1, 7, 7)),
         ("contained", "parent", None, "frozen", [2, 2, 5, 5], (2, 2, 5, 5)),
         ("overlap", "parent", None, "frozen", [5, 5, 9, 9], (5, 5, 9, 9)),
@@ -5094,7 +5094,7 @@ def _prepare_round_two_review_session(page_session: dict) -> None:
                 "unexplained_visual_residual", "contained_parent_review"
             ],
         },
-        "contained_parent_pairs": [["contained", "failed"]],
+        "contained_parent_pairs": [["contained", "failed,one"]],
     }), encoding="utf-8")
     _refresh_test_presentation_manifest(page_session)
 
@@ -5119,13 +5119,17 @@ def test_round_two_review_contains_failed_node_and_every_dependency_neighbor(
     request = load_component_agent_request(request_path)
     atlas_path = request_path.parent / request["evidence"]["round-review.png"]["path"]
     with Image.open(atlas_path) as atlas:
-        assert atlas.info["component_ids"].split(",") == [
-            "contained", "failed", "overlap", "parent", "residual_neighbor"
+        assert json.loads(atlas.info["component_ids"]) == [
+            "contained", "failed,one", "overlap", "parent", "residual_neighbor"
         ]
-        assert atlas.info["panel_names"].split(",") == [
+        assert json.loads(atlas.info["panel_names"]) == [
             "source", "isolation", "ownership", "reconstructed", "difference",
             "residual",
         ]
+        rows = json.loads(atlas.info["rows"])
+        failed_row = next(row for row in rows if row["id"] == "failed,one")
+        assert failed_row["crop"] == [2, 2, 3, 6]
+        assert atlas.width >= failed_row["label_width"]
         assert np.all(np.asarray(atlas.convert("RGB"))[40:43, 0:3] == 220)
     assert request["review_evidence"] == [
         "source.png", "reconstructed.png", "difference.png",
@@ -5157,17 +5161,34 @@ def test_partial_round_review_write_is_removed_before_full_fallback(
 ) -> None:
     _prepare_round_two_review_session(page_session)
 
+    partial_target = Path(page_session["reconstruction_dir"]) / "partial-target.bin"
+    partial_target.write_bytes(b"partial")
+
     def fail_after_partial_write(*, staging: Path, **kwargs):
-        (staging / "round-review.png").write_bytes(b"partial")
+        (staging / "round-review.png").hardlink_to(partial_target)
         raise OSError("write interrupted")
 
     monkeypatch.setattr(component_repair, "_write_round_review", fail_after_partial_write)
 
     request_path = build_component_agent_request(page_session, repair_round=2)
 
-    assert not (request_path.parent / "round-review.png").exists()
     assert "round-review.png" not in load_component_agent_request(request_path)[
         "evidence"
+    ]
+
+
+def test_round_review_mask_work_budget_falls_back_before_unbounded_decode(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+    monkeypatch.setattr(component_repair, "ROUND_REVIEW_MAX_MASK_PIXELS", 100)
+
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    request = load_component_agent_request(request_path)
+
+    assert "round-review.png" not in request["evidence"]
+    assert request["review_evidence"] == [
+        *component_repair.FULL_COMPONENT_REVIEW_EVIDENCE
     ]
 
 

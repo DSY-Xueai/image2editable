@@ -48,6 +48,7 @@ PRESENTATION_ASSET_LIMIT = 256 * 1024 * 1024
 ROUND_REVIEW_MAX_COMPONENTS = 64
 ROUND_REVIEW_MAX_DIMENSION = 8192
 ROUND_REVIEW_MAX_PIXELS = 64 * 1024 * 1024
+ROUND_REVIEW_MAX_MASK_PIXELS = 256 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
@@ -58,6 +59,10 @@ _LEGACY_QUALITY_INPUT_NAMES = frozenset({
     "presentation_manifest",
 })
 _QUALITY_INPUT_NAMES = _LEGACY_QUALITY_INPUT_NAMES | {"foreground_evidence"}
+
+
+class _RoundReviewFallback(Exception):
+    pass
 
 
 def advance_component_repair(
@@ -2813,6 +2818,8 @@ def _write_round_review(
     }
     if not seeds:
         raise ValueError("Round review has no failed or reopened components")
+    if len(graph["nodes"]) * page_size[0] * page_size[1] > ROUND_REVIEW_MAX_MASK_PIXELS:
+        raise ValueError("Round review mask work exceeds limit")
     component_ids = set(seeds)
     for node in graph["nodes"]:
         if node["id"] in seeds or node.get("parent_id") in seeds:
@@ -2898,15 +2905,17 @@ def _write_round_review(
     atlas_width = 0
     atlas_height = 0
     header_height = 40
+    font = ImageDraw.Draw(Image.new("L", (1, 1))).getfont()
     for component_id in ordered_ids:
         left, top, right, bottom = nodes[component_id]["bbox"]
         crop = (left, top, right, bottom)
         width, height = right - left, bottom - top
-        row_width = width * len(panel_names)
+        label_width = math.ceil(font.getlength(component_id)) + 8
+        row_width = max(width * len(panel_names), label_width)
         row_height = height + header_height
         atlas_width = max(atlas_width, row_width)
         atlas_height += row_height
-        rows.append((component_id, crop, width, height, row_height))
+        rows.append((component_id, crop, width, height, row_height, label_width))
     if (
         atlas_width <= 0
         or atlas_height <= 0
@@ -2920,7 +2929,8 @@ def _write_round_review(
     atlas = Image.new("RGBA", (atlas_width, atlas_height), (24, 24, 24, 255))
     draw = ImageDraw.Draw(atlas)
     y = 0
-    for component_id, crop, width, height, row_height in rows:
+    row_metadata = []
+    for component_id, crop, width, height, row_height, label_width in rows:
         draw.text((4, y + 4), component_id, fill="white")
         panels = (
             images["source.png"], isolation[component_id], images["ownership.png"],
@@ -2932,10 +2942,17 @@ def _write_round_review(
             draw.text(
                 (x + 2, y + 20), panel_name, fill="white",
             )
+        row_metadata.append({
+            "id": component_id,
+            "crop": list(crop),
+            "y": y,
+            "label_width": label_width,
+        })
         y += row_height
     metadata = PngImagePlugin.PngInfo()
-    metadata.add_text("component_ids", ",".join(ordered_ids))
-    metadata.add_text("panel_names", ",".join(panel_names))
+    metadata.add_text("component_ids", json.dumps(ordered_ids, ensure_ascii=False))
+    metadata.add_text("panel_names", json.dumps(panel_names))
+    metadata.add_text("rows", json.dumps(row_metadata, ensure_ascii=False))
     output = io.BytesIO()
     atlas.save(output, format="PNG", pnginfo=metadata, optimize=False)
     payload = output.getvalue()
@@ -2953,12 +2970,21 @@ def build_component_agent_request(
     validated = _validate_page_session(page_session)
     reconstruction = validated[2]
     with _run_publication_lease(reconstruction):
-        return _build_component_agent_request_locked(validated, repair_round)
+        try:
+            return _build_component_agent_request_locked(
+                validated, repair_round, build_review=True,
+            )
+        except _RoundReviewFallback:
+            return _build_component_agent_request_locked(
+                validated, repair_round, build_review=False,
+            )
 
 
 def _build_component_agent_request_locked(
     validated: tuple[str, str, Path, dict],
     repair_round: int,
+    *,
+    build_review: bool,
 ) -> Path:
     page_id, provider, reconstruction, sources = validated
     integrity_key = _load_or_create_integrity_key(reconstruction)
@@ -3006,7 +3032,7 @@ def _build_component_agent_request_locked(
         review_evidence = [
             name for name in FULL_COMPONENT_REVIEW_EVIDENCE if name in records
         ]
-        if repair_round > 1:
+        if repair_round > 1 and build_review:
             try:
                 atlas_payload, include_unexplained = _write_round_review(
                     staging=staging,
@@ -3021,24 +3047,8 @@ def _build_component_agent_request_locked(
                     atlas_payload,
                     reconstruction,
                 )
-            except Exception:
-                atlas_path = staging / ROUND_REVIEW_EVIDENCE_NAME
-                try:
-                    atlas_status = atlas_path.lstat()
-                except FileNotFoundError:
-                    pass
-                else:
-                    _require_single_directory_identity(staging, staging_identity)
-                    if (
-                        _is_link_or_reparse(atlas_status)
-                        or not stat.S_ISREG(atlas_status.st_mode)
-                        or atlas_status.st_nlink != 1
-                    ):
-                        raise RuntimeError(
-                            "Failed round review output cannot be removed safely"
-                        )
-                    atlas_path.unlink()
-                    _require_single_directory_identity(staging, staging_identity)
+            except Exception as error:
+                raise _RoundReviewFallback() from error
             else:
                 records[ROUND_REVIEW_EVIDENCE_NAME] = {
                     "path": ROUND_REVIEW_EVIDENCE_NAME,
