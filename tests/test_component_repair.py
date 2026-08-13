@@ -5192,6 +5192,31 @@ def test_round_review_mask_work_budget_falls_back_before_unbounded_decode(
     ]
 
 
+def test_round_review_working_budget_falls_back_before_full_image_decode(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+    monkeypatch.setattr(component_repair, "ROUND_REVIEW_MAX_WORKING_BYTES", 1)
+    monkeypatch.setattr(
+        component_repair,
+        "_round_review_image",
+        lambda *args, **kwargs: pytest.fail("full image decoded before budget check"),
+    )
+    monkeypatch.setattr(
+        component_repair,
+        "_round_review_mask",
+        lambda *args, **kwargs: pytest.fail("full mask decoded before budget check"),
+    )
+
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    request = load_component_agent_request(request_path)
+
+    assert "round-review.png" not in request["evidence"]
+    assert request["review_evidence"] == [
+        *component_repair.FULL_COMPONENT_REVIEW_EVIDENCE
+    ]
+
+
 def test_round_review_tamper_is_rejected_with_full_request_hash_checks(
     page_session: dict,
 ) -> None:

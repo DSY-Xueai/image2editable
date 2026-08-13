@@ -49,6 +49,8 @@ ROUND_REVIEW_MAX_COMPONENTS = 64
 ROUND_REVIEW_MAX_DIMENSION = 8192
 ROUND_REVIEW_MAX_PIXELS = 64 * 1024 * 1024
 ROUND_REVIEW_MAX_MASK_PIXELS = 256 * 1024 * 1024
+ROUND_REVIEW_MAX_WORKING_BYTES = 256 * 1024 * 1024
+ROUND_REVIEW_MAX_ENCODED_BYTES = 64 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
@@ -2748,11 +2750,41 @@ def _verified_staged_evidence(
 def _round_review_image(payload: bytes, name: str):
     from PIL import Image
 
-    with Image.open(io.BytesIO(payload)) as image:
+    stream = io.BytesIO(payload)
+    try:
+        image = Image.open(stream)
         if image.format != "PNG":
             raise ValueError(f"Round review evidence is not PNG: {name}")
         image.load()
-        return image.convert("RGBA")
+        if image.mode == "RGBA":
+            return image
+        converted = image.convert("RGBA")
+        image.close()
+        return converted
+    finally:
+        stream.close()
+
+
+def _round_review_size(payload: bytes, name: str) -> tuple[int, int]:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG":
+            raise ValueError(f"Round review evidence is not PNG: {name}")
+        return image.size
+
+
+def _round_review_mask(payload: bytes, name: str, page_size: tuple[int, int]):
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG":
+            raise ValueError(f"Round review evidence is not PNG: {name}")
+        if image.size != page_size:
+            raise ValueError("Round review component mask dimensions differ")
+        image.load()
+        return np.asarray(image.convert("L")) > 0
 
 
 def _write_round_review(
@@ -2770,21 +2802,24 @@ def _write_round_review(
     visual_names = (
         "source.png", "ownership.png", "reconstructed.png", "difference.png",
     )
-    images = {
-        name: _round_review_image(_verified_staged_evidence(
+    page_size = None
+    for name in visual_names:
+        size = _round_review_size(_verified_staged_evidence(
             staging, reconstruction, records, name,
-            max_bytes=PRESENTATION_ASSET_LIMIT,
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
         ), name)
-        for name in visual_names
-    }
-    page_size = images["source.png"].size
+        if page_size is None:
+            page_size = size
+        elif size != page_size:
+            raise ValueError("Round review evidence dimensions differ")
+    assert page_size is not None
+    page_pixels = page_size[0] * page_size[1]
     if (
         page_size[0] <= 0
         or page_size[1] <= 0
         or page_size[0] > ROUND_REVIEW_MAX_DIMENSION
         or page_size[1] > ROUND_REVIEW_MAX_DIMENSION
-        or page_size[0] * page_size[1] > ROUND_REVIEW_MAX_PIXELS
-        or any(image.size != page_size for image in images.values())
+        or page_pixels > ROUND_REVIEW_MAX_PIXELS
     ):
         raise ValueError("Round review page dimensions exceed limits")
     quality = json.loads(_verified_staged_evidence(
@@ -2799,17 +2834,15 @@ def _write_round_review(
     ):
         raise ValueError("Round review quality evidence is invalid")
     include_unexplained = "unexplained_visual_residual" in violations
-    residual = Image.new("L", page_size, 0)
     if include_unexplained:
         if "unexplained-mask.png" not in records:
             raise ValueError("Round review unexplained mask is missing")
-        residual_rgba = _round_review_image(_verified_staged_evidence(
+        residual_size = _round_review_size(_verified_staged_evidence(
             staging, reconstruction, records, "unexplained-mask.png",
-            max_bytes=PRESENTATION_ASSET_LIMIT,
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
         ), "unexplained-mask.png")
-        if residual_rgba.size != page_size:
+        if residual_size != page_size:
             raise ValueError("Round review residual dimensions differ")
-        residual = residual_rgba.convert("L")
 
     nodes = {node["id"]: node for node in graph["nodes"]}
     seeds = {
@@ -2818,8 +2851,15 @@ def _write_round_review(
     }
     if not seeds:
         raise ValueError("Round review has no failed or reopened components")
-    if len(graph["nodes"]) * page_size[0] * page_size[1] > ROUND_REVIEW_MAX_MASK_PIXELS:
+    if len(seeds) > ROUND_REVIEW_MAX_COMPONENTS:
+        raise ValueError("Round review seed count exceeds limit")
+    if len(graph["nodes"]) * page_pixels > ROUND_REVIEW_MAX_MASK_PIXELS:
         raise ValueError("Round review mask work exceeds limit")
+    mask_working_bytes = ROUND_REVIEW_MAX_ENCODED_BYTES + page_pixels * (
+        len(seeds) + (9 if include_unexplained else 7)
+    )
+    if mask_working_bytes > ROUND_REVIEW_MAX_WORKING_BYTES:
+        raise ValueError("Round review working memory exceeds limit")
     component_ids = set(seeds)
     for node in graph["nodes"]:
         if node["id"] in seeds or node.get("parent_id") in seeds:
@@ -2840,33 +2880,47 @@ def _write_round_review(
         if seeds & set(pair):
             component_ids.update(pair)
 
-    masks: dict[str, np.ndarray] = {}
-    for component_id, node in nodes.items():
+    def load_mask(component_id: str) -> np.ndarray:
+        node = nodes[component_id]
         payload = _read_bound_file(
             graph_root / Path(*PurePosixPath(node["mask"]).parts),
             reconstruction,
-            max_bytes=PRESENTATION_ASSET_LIMIT,
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
             label=f"round review mask {component_id}",
         )
         if hashlib.sha256(payload).hexdigest() != node["mask_sha256"]:
             raise RuntimeError(f"Round review mask hash mismatch: {component_id}")
-        mask = _round_review_image(payload, node["mask"]).convert("L")
-        if mask.size != page_size:
-            raise ValueError("Round review component mask dimensions differ")
-        masks[component_id] = np.asarray(mask) > 0
-    for seed in seeds:
-        for component_id, mask in masks.items():
-            if component_id != seed and np.any(masks[seed] & mask):
-                component_ids.add(component_id)
+        return _round_review_mask(payload, node["mask"], page_size)
+
     if include_unexplained:
-        dilated = np.asarray(residual.filter(ImageFilter.MaxFilter(7))) > 0
-        component_ids.update(
-            component_id for component_id, mask in masks.items()
-            if np.any(mask & dilated)
-        )
+        residual = _round_review_mask(_verified_staged_evidence(
+            staging, reconstruction, records, "unexplained-mask.png",
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
+        ), "unexplained-mask.png", page_size)
+        residual_image = Image.fromarray(residual.astype(np.uint8) * 255)
+        dilated = np.asarray(residual_image.filter(ImageFilter.MaxFilter(7))) > 0
+        del residual_image
+    else:
+        residual = np.zeros((page_size[1], page_size[0]), dtype=bool)
+        dilated = None
+    seed_masks = {component_id: load_mask(component_id) for component_id in seeds}
+    for component_id in nodes:
+        mask = seed_masks.get(component_id)
+        if mask is None:
+            mask = load_mask(component_id)
+        if any(
+            component_id != seed and np.any(seed_mask & mask)
+            for seed, seed_mask in seed_masks.items()
+        ) or (dilated is not None and np.any(mask & dilated)):
+            component_ids.add(component_id)
+        if len(component_ids) > ROUND_REVIEW_MAX_COMPONENTS:
+            raise ValueError("Round review component count exceeds limit")
+        if component_id not in seeds:
+            del mask
     ordered_ids = sorted(component_ids)
     if len(ordered_ids) > ROUND_REVIEW_MAX_COMPONENTS:
         raise ValueError("Round review component count exceeds limit")
+    del seed_masks, dilated
 
     manifest_by_id = {
         component["component_id"]: component for component in manifest["components"]
@@ -2874,28 +2928,22 @@ def _write_round_review(
     active_ids = set(_presentation_component_ids(graph))
     if set(manifest_by_id) != active_ids:
         raise ValueError("Round review presentation assets do not match graph")
-    isolation: dict[str, Image.Image] = {}
     run_root = reconstruction.parents[2]
     for component_id in ordered_ids:
-        if component_id in active_ids:
-            reference = manifest_by_id[component_id]["rgba"]
-            asset_path = run_root / Path(*PurePosixPath(reference["path"]).parts)
-            payload = _read_bound_file(
-                asset_path, reconstruction, max_bytes=PRESENTATION_ASSET_LIMIT,
-                label=f"round review presentation {component_id}",
+        if component_id not in active_ids:
+            continue
+        reference = manifest_by_id[component_id]["rgba"]
+        asset_path = run_root / Path(*PurePosixPath(reference["path"]).parts)
+        payload = _read_bound_file(
+            asset_path, reconstruction, max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
+            label=f"round review presentation {component_id}",
+        )
+        if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+            raise RuntimeError(
+                f"Round review presentation hash mismatch: {component_id}"
             )
-            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
-                raise RuntimeError(
-                    f"Round review presentation hash mismatch: {component_id}"
-                )
-            layer = _round_review_image(payload, reference["path"])
-            if layer.size != page_size:
-                raise ValueError("Round review presentation dimensions differ")
-            isolation[component_id] = layer
-        else:
-            layer = images["source.png"].copy()
-            layer.putalpha(Image.fromarray(masks[component_id].astype(np.uint8) * 255))
-            isolation[component_id] = layer
+        if _round_review_size(payload, reference["path"]) != page_size:
+            raise ValueError("Round review presentation dimensions differ")
 
     panel_names = (
         "source", "isolation", "ownership", "reconstructed", "difference",
@@ -2908,6 +2956,8 @@ def _write_round_review(
     font = ImageDraw.Draw(Image.new("L", (1, 1))).getfont()
     for component_id in ordered_ids:
         left, top, right, bottom = nodes[component_id]["bbox"]
+        if right > page_size[0] or bottom > page_size[1]:
+            raise ValueError("Round review component bbox exceeds page dimensions")
         crop = (left, top, right, bottom)
         width, height = right - left, bottom - top
         label_width = math.ceil(font.getlength(component_id)) + 8
@@ -2924,23 +2974,26 @@ def _write_round_review(
         or atlas_width * atlas_height > ROUND_REVIEW_MAX_PIXELS
     ):
         raise ValueError("Round review atlas dimensions exceed limits")
-    residual_rgb = Image.new("RGBA", page_size, (0, 0, 0, 255))
-    residual_rgb.paste((255, 0, 0, 255), mask=residual)
+    atlas_pixels = atlas_width * atlas_height
+    max_crop_pixels = max(width * height for _, _, width, height, _, _ in rows)
+    compose_working_bytes = max(
+        ROUND_REVIEW_MAX_ENCODED_BYTES
+        + page_pixels * 7
+        + max_crop_pixels * 5
+        + atlas_pixels * 4,
+        atlas_pixels * 12,
+    )
+    if compose_working_bytes > ROUND_REVIEW_MAX_WORKING_BYTES:
+        raise ValueError("Round review composition memory exceeds limit")
     atlas = Image.new("RGBA", (atlas_width, atlas_height), (24, 24, 24, 255))
     draw = ImageDraw.Draw(atlas)
     y = 0
     row_metadata = []
     for component_id, crop, width, height, row_height, label_width in rows:
         draw.text((4, y + 4), component_id, fill="white")
-        panels = (
-            images["source.png"], isolation[component_id], images["ownership.png"],
-            images["reconstructed.png"], images["difference.png"], residual_rgb,
-        )
-        for index, (panel_name, panel) in enumerate(zip(panel_names, panels, strict=True)):
-            x = index * width
-            atlas.alpha_composite(panel.crop(crop), (x, y + header_height))
+        for index, panel_name in enumerate(panel_names):
             draw.text(
-                (x + 2, y + 20), panel_name, fill="white",
+                (index * width + 2, y + 20), panel_name, fill="white",
             )
         row_metadata.append({
             "id": component_id,
@@ -2949,6 +3002,76 @@ def _write_round_review(
             "label_width": label_width,
         })
         y += row_height
+
+    panel_indexes = {
+        "source.png": 0,
+        "ownership.png": 2,
+        "reconstructed.png": 3,
+        "difference.png": 4,
+    }
+    for name, panel_index in panel_indexes.items():
+        panel = _round_review_image(_verified_staged_evidence(
+            staging, reconstruction, records, name,
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
+        ), name)
+        if panel.size != page_size:
+            raise ValueError("Round review evidence dimensions differ")
+        y = 0
+        for component_id, crop, width, _, row_height, _ in rows:
+            cropped = panel.crop(crop)
+            atlas.alpha_composite(
+                cropped, (panel_index * width, y + header_height)
+            )
+            del cropped
+            if name == "source.png" and component_id not in active_ids:
+                isolated = panel.crop(crop)
+                mask = load_mask(component_id)
+                alpha = Image.fromarray(mask.astype(np.uint8) * 255).crop(crop)
+                isolated.putalpha(alpha)
+                atlas.alpha_composite(isolated, (width, y + header_height))
+                del alpha, isolated, mask
+            y += row_height
+        del panel
+
+    y = 0
+    for component_id, crop, width, _, row_height, _ in rows:
+        if component_id not in active_ids:
+            y += row_height
+            continue
+        reference = manifest_by_id[component_id]["rgba"]
+        asset_path = run_root / Path(*PurePosixPath(reference["path"]).parts)
+        payload = _read_bound_file(
+            asset_path, reconstruction,
+            max_bytes=ROUND_REVIEW_MAX_ENCODED_BYTES,
+            label=f"round review presentation {component_id}",
+        )
+        if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+            raise RuntimeError(
+                f"Round review presentation hash mismatch: {component_id}"
+            )
+        layer = _round_review_image(payload, reference["path"])
+        if layer.size != page_size:
+            raise ValueError("Round review presentation dimensions differ")
+        isolated = layer.crop(crop)
+        del layer
+        atlas.alpha_composite(isolated, (width, y + header_height))
+        del isolated
+        y += row_height
+
+    y = 0
+    for _, crop, width, height, row_height, _ in rows:
+        left, top, right, bottom = crop
+        residual_crop = Image.fromarray(
+            residual[top:bottom, left:right].astype(np.uint8) * 255
+        )
+        residual_panel = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+        residual_panel.paste((255, 0, 0, 255), mask=residual_crop)
+        atlas.alpha_composite(
+            residual_panel, (5 * width, y + header_height)
+        )
+        del residual_crop, residual_panel
+        y += row_height
+    del residual
     metadata = PngImagePlugin.PngInfo()
     metadata.add_text("component_ids", json.dumps(ordered_ids, ensure_ascii=False))
     metadata.add_text("panel_names", json.dumps(panel_names))
@@ -2956,7 +3079,10 @@ def _write_round_review(
     output = io.BytesIO()
     atlas.save(output, format="PNG", pnginfo=metadata, optimize=False)
     payload = output.getvalue()
-    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+    if (
+        len(payload) > ROUND_REVIEW_MAX_ENCODED_BYTES
+        or not payload.startswith(b"\x89PNG\r\n\x1a\n")
+    ):
         raise RuntimeError("Round review PNG encoding failed")
     return payload, include_unexplained
 
