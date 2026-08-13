@@ -986,6 +986,7 @@ def _prepare_rerun_fixture(
     missing_cache: bool = False,
     source_change_before_manifest: bool = False,
     wrong_component_shape: bool = False,
+    forbid_cache_cleanup: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1100,6 +1101,19 @@ def _prepare_rerun_fixture(
         monkeypatch.setattr(
             image_to_ppt, "_write_prepared_page", changing_write_prepared
         )
+    if forbid_cache_cleanup:
+        original_unlink = Path.unlink
+
+        def guarded_unlink(path, *args, **kwargs):
+            if Path(path).name in {
+                "first-ocr-mask.png",
+                "first-text-cleanup-mask.png",
+                "first-visual-cache.json",
+            }:
+                raise AssertionError("text delta cache cleanup must not use path unlink")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", guarded_unlink)
 
     recovered = _ocr_item("NX", 0.96, 1)
     recovered["box"] = [45, 24, 35, 9]
@@ -1281,7 +1295,7 @@ def test_prepare_uses_full_second_visual_pass_when_reuse_is_not_provable(
     assert process_text_counts == [0, 1]
     with Image.open(prepared["components"][0]["path"]) as component:
         assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
-    assert not (Path(prepared["_work_dir"]) / "first-visual-cache.json").exists()
+    assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
 
 
 def test_disjoint_text_delta_matches_full_visual_recompute_evidence(
@@ -1405,6 +1419,20 @@ def test_text_delta_untrusted_cache_binding_uses_full_visual_fallback(
     assert calls == [0, 1]
     with Image.open(prepared["components"][0]["path"]) as component:
         assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+
+
+def test_text_delta_full_fallback_never_path_unlinks_cache_assets(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, calls = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        affected_text_delta=True,
+        forbid_cache_cleanup=True,
+    )
+
+    assert calls == [0, 1]
 
 
 def test_prepare_preserves_stable_diagnostic_when_another_candidate_recovers(

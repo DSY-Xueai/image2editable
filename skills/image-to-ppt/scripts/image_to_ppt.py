@@ -3837,19 +3837,9 @@ def prepare_component_layers(
                 primary_traceback,
                 exception_boundary,
             )
-        for first_asset in (first_ocr_mask_path, first_cleanup_mask_path):
-            try:
-                first_asset.unlink(missing_ok=True)
-            except OSError:
-                pass
         if reused:
             sweep_mask = None
             break
-        if cache_path is not None:
-            try:
-                cache_path.unlink(missing_ok=True)
-            except OSError:
-                pass
         _remove_owned_first_visual_assets(slide_data, owned_work_dir)
         sweep_mask = None
 
