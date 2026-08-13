@@ -1091,6 +1091,67 @@ def _delete_windows_batch_result(file_descriptor: int) -> None:
         raise RuntimeError("SAM batch result could not be cleaned")
 
 
+def _create_linux_batch_capability_directory(root: Path) -> tuple[Path, tuple[int, int]]:
+    probe = Path(
+        tempfile.mkdtemp(
+            prefix=".sam-batch-capability-",
+            dir=root,
+        )
+    )
+    status = probe.lstat()
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or stat.S_IMODE(status.st_mode) != 0o700
+    ):
+        error = RuntimeError("SAM batch capability directory is unsafe")
+        try:
+            probe.rmdir()
+        except BaseException as exc:
+            error.add_note(f"SAM batch capability cleanup failed: {exc}")
+        raise error
+    return probe, (status.st_dev, status.st_ino)
+
+
+def _remove_linux_batch_capability_directory(
+    probe: Path,
+    identity: tuple[int, int],
+) -> None:
+    status = probe.lstat()
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISDIR(status.st_mode)
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        raise RuntimeError("SAM batch capability directory changed")
+    probe.rmdir()
+
+
+def _unlink_linux_batch_capability_result(
+    file_descriptor: int,
+    parent_handle: int,
+    result_name: str,
+) -> None:
+    descriptor_status = os.fstat(file_descriptor)
+    result_status = os.stat(
+        result_name,
+        dir_fd=parent_handle,
+        follow_symlinks=False,
+    )
+    if (
+        not stat.S_ISREG(result_status.st_mode)
+        or (result_status.st_dev, result_status.st_ino)
+        != (descriptor_status.st_dev, descriptor_status.st_ino)
+    ):
+        raise RuntimeError("SAM batch capability result identity changed")
+    # The random 0700 directory is private to this probe. Same-UID malicious
+    # replacement is outside the isolation boundary, so dirfd-relative unlink
+    # safely removes the entry just published from this descriptor.
+    os.unlink(result_name, dir_fd=parent_handle)
+    if os.fstat(file_descriptor).st_nlink != 0 or os.listdir(parent_handle):
+        raise RuntimeError("SAM batch capability result cleanup failed")
+
+
 def sam_candidate_batch_output_supported(work_dir: Path) -> bool:
     work_dir = Path(os.path.abspath(work_dir))
     if sys.platform.startswith("linux"):
@@ -1107,21 +1168,37 @@ def sam_candidate_batch_output_supported(work_dir: Path) -> bool:
             != (root_status_before.st_dev, root_status_before.st_ino)
         ):
             raise RuntimeError("SAM batch capability directory changed")
+        probe, probe_identity = _create_linux_batch_capability_directory(root)
         result_binding = {
-            "parent": root,
-            "parent_identity": (root_status.st_dev, root_status.st_ino),
+            "path": probe / f"result-{secrets.token_hex(16)}",
+            "parent": probe,
+            "parent_identity": probe_identity,
         }
-        parent_handle = _open_batch_result_parent(result_binding)
+        parent_handle = None
         descriptor = None
         primary_error = None
         unsupported = False
+        published = False
+        result_cleaned = False
         try:
+            parent_handle = _open_batch_result_parent(result_binding)
             descriptor = os.open(
                 ".",
                 os.O_RDWR | os.O_TMPFILE,
                 0o600,
                 dir_fd=parent_handle,
             )
+            _publish_batch_result(descriptor, parent_handle, result_binding)
+            published = True
+            _unlink_linux_batch_capability_result(
+                descriptor,
+                parent_handle,
+                result_binding["path"].name,
+            )
+            result_cleaned = True
+        except _BatchResultPublishingUnsupported as exc:
+            unsupported = True
+            primary_error = exc
         except OSError as exc:
             # With the directory already bound and the flags fixed, these are the
             # documented old-kernel/filesystem O_TMPFILE unsupported outcomes.
@@ -1134,23 +1211,43 @@ def sam_candidate_batch_output_supported(work_dir: Path) -> bool:
             }
             if exc.errno in unsupported_errors:
                 unsupported = True
+                primary_error = exc
             else:
                 primary_error = exc
+        except BaseException as exc:
+            primary_error = exc
         finally:
             cleanup_errors = []
             try:
-                if descriptor is not None:
+                if descriptor is not None and published and not result_cleaned:
                     try:
-                        os.close(descriptor)
+                        _unlink_linux_batch_capability_result(
+                            descriptor,
+                            parent_handle,
+                            result_binding["path"].name,
+                        )
+                        result_cleaned = True
                     except BaseException as exc:
                         cleanup_errors.append(exc)
             finally:
                 try:
-                    _close_batch_result_parent(parent_handle)
-                except BaseException as exc:
-                    cleanup_errors.append(exc)
+                    if descriptor is not None:
+                        try:
+                            os.close(descriptor)
+                        except BaseException as exc:
+                            cleanup_errors.append(exc)
+                finally:
+                    if parent_handle is not None:
+                        try:
+                            _close_batch_result_parent(parent_handle)
+                        except BaseException as exc:
+                            cleanup_errors.append(exc)
+            try:
+                _remove_linux_batch_capability_directory(probe, probe_identity)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
         if cleanup_errors:
-            if primary_error is not None:
+            if primary_error is not None and not unsupported:
                 for cleanup_error in cleanup_errors:
                     primary_error.add_note(
                         f"SAM batch capability cleanup failed: {cleanup_error}"
@@ -1284,7 +1381,15 @@ def _publish_batch_result(
         os.fsencode(result_name),
         0x1000,
     )
-    if error in {errno.ENOENT, errno.EPERM} and sys.platform.startswith("linux"):
+    unsupported_errors = {
+        errno.EINVAL,
+        errno.ENOENT,
+        errno.ENOSYS,
+        errno.ENOTSUP,
+        errno.EOPNOTSUPP,
+        errno.EPERM,
+    }
+    if error in unsupported_errors:
         error = _linkat_batch_result(
             -100,
             os.fsencode(f"/proc/self/fd/{file_descriptor}"),
@@ -1296,6 +1401,10 @@ def _publish_batch_result(
         return
     if error == errno.EEXIST:
         raise RuntimeError("SAM batch result path already exists")
+    if error in unsupported_errors:
+        raise _BatchResultPublishingUnsupported(
+            "SAM batch result publishing is unsupported"
+        )
     raise RuntimeError("SAM batch result could not be published")
 
 

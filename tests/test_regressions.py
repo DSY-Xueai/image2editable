@@ -5,6 +5,7 @@ import hashlib
 import json
 from numbers import Integral
 import os
+import stat
 import subprocess
 import sys
 import types
@@ -2325,6 +2326,25 @@ def test_candidate_batch_linux_publish_falls_back_to_proc_fd_without_capability(
     ]
 
 
+def test_candidate_batch_linux_publish_reports_both_link_mechanisms_unsupported(
+    monkeypatch,
+) -> None:
+    outcomes = iter([errno.ENOENT, errno.ENOENT])
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(
+        sam_worker,
+        "_linkat_batch_result",
+        lambda *args: next(outcomes),
+    )
+
+    with pytest.raises(sam_worker._BatchResultPublishingUnsupported):
+        sam_worker._publish_batch_result(
+            17,
+            19,
+            {"path": Path("capability-result")},
+        )
+
+
 def test_candidate_batch_other_posix_never_creates_partial_final(
     tmp_path: Path,
     monkeypatch,
@@ -2830,6 +2850,23 @@ def test_candidate_batch_output_capability_is_false_without_path_probe(
     assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is False
 
 
+def _mock_linux_candidate_batch_probe_directory(tmp_path: Path, monkeypatch) -> Path:
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
+    identity = (probe_dir.stat().st_dev, probe_dir.stat().st_ino)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, identity),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_remove_linux_batch_capability_directory",
+        lambda path, expected: path.rmdir(),
+    )
+    return probe_dir
+
+
 @pytest.mark.parametrize(
     "error_number",
     [errno.EOPNOTSUPP, errno.EINVAL, errno.EISDIR, errno.ENOENT, errno.ENOSYS],
@@ -2841,6 +2878,7 @@ def test_candidate_batch_linux_known_unsupported_filesystem_returns_false(
 ) -> None:
     monkeypatch.setattr(sam_worker.sys, "platform", "linux")
     monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    _mock_linux_candidate_batch_probe_directory(tmp_path, monkeypatch)
     monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
     monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
     monkeypatch.setattr(
@@ -2860,6 +2898,7 @@ def test_candidate_batch_linux_indeterminate_probe_error_prevents_inference(
 ) -> None:
     monkeypatch.setattr(sam_worker.sys, "platform", "linux")
     monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    _mock_linux_candidate_batch_probe_directory(tmp_path, monkeypatch)
     monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
     monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
     monkeypatch.setattr(
@@ -2919,8 +2958,24 @@ def test_candidate_batch_linux_supported_probe_closes_anonymous_descriptor(
     monkeypatch,
 ) -> None:
     closed = []
+    published = []
+    cleaned = []
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
     monkeypatch.setattr(sam_worker.sys, "platform", "linux")
     monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, probe_dir.stat()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_remove_linux_batch_capability_directory",
+        lambda path, identity: path.rmdir(),
+        raising=False,
+    )
     monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
     monkeypatch.setattr(
         sam_worker,
@@ -2929,10 +2984,190 @@ def test_candidate_batch_linux_supported_probe_closes_anonymous_descriptor(
     )
     monkeypatch.setattr(sam_worker.os, "open", lambda *args, **kwargs: 91)
     monkeypatch.setattr(sam_worker.os, "close", closed.append)
+    monkeypatch.setattr(
+        sam_worker,
+        "_publish_batch_result",
+        lambda descriptor, parent, binding: published.append(
+            (descriptor, parent, binding["path"])
+        ),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_unlink_linux_batch_capability_result",
+        lambda descriptor, parent, name: cleaned.append((descriptor, parent, name)),
+        raising=False,
+    )
 
     assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is True
     assert closed == [91, 90]
+    assert len(published) == 1
+    assert published[0][:2] == (91, 90)
+    assert published[0][2].parent == probe_dir
+    assert cleaned == [(91, 90, published[0][2].name)]
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_candidate_batch_linux_private_probe_directory_is_mode_700(
+    tmp_path: Path,
+) -> None:
+    probe_dir, identity = sam_worker._create_linux_batch_capability_directory(
+        tmp_path
+    )
+
+    assert stat.S_IMODE(probe_dir.stat().st_mode) == 0o700
+    sam_worker._remove_linux_batch_capability_directory(probe_dir, identity)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name == "posix", reason="simulates invalid permission bits")
+def test_candidate_batch_linux_unsafe_private_probe_directory_is_removed(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="unsafe"):
+        sam_worker._create_linux_batch_capability_directory(tmp_path)
+
+    assert not list(tmp_path.iterdir())
+
+
+def test_candidate_batch_linux_publish_unsupported_returns_false_and_cleans(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
+    cleaned = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, probe_dir.stat()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_remove_linux_batch_capability_directory",
+        lambda path, identity: path.rmdir(),
+        raising=False,
+    )
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
+    monkeypatch.setattr(sam_worker.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(sam_worker.os, "close", lambda descriptor: None)
+    monkeypatch.setattr(
+        sam_worker,
+        "_publish_batch_result",
+        lambda *args: (_ for _ in ()).throw(
+            sam_worker._BatchResultPublishingUnsupported("unsupported")
+        ),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_unlink_linux_batch_capability_result",
+        lambda *args: cleaned.append(args),
+        raising=False,
+    )
+
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is False
+    assert cleaned == []
+    assert not list(tmp_path.iterdir())
+
+
+def test_candidate_batch_linux_probe_cleanup_failure_is_not_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, probe_dir.stat()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_remove_linux_batch_capability_directory",
+        lambda path, identity: path.rmdir(),
+        raising=False,
+    )
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
+    monkeypatch.setattr(sam_worker.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(sam_worker.os, "close", lambda descriptor: None)
+    monkeypatch.setattr(sam_worker, "_publish_batch_result", lambda *args: None)
+    monkeypatch.setattr(
+        sam_worker,
+        "_unlink_linux_batch_capability_result",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+
+def test_candidate_batch_linux_probe_parent_open_failure_removes_private_dir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, (probe_dir.stat().st_dev, probe_dir.stat().st_ino)),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_open_batch_result_parent",
+        lambda binding: (_ for _ in ()).throw(RuntimeError("open failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="open failed"):
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert not list(tmp_path.iterdir())
+
+
+def test_candidate_batch_linux_probe_target_occupancy_is_not_overwritten(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    probe_dir = tmp_path / "private-probe"
+    probe_dir.mkdir(mode=0o700)
+    intruder = b"occupied"
+    occupied = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_linux_batch_capability_directory",
+        lambda root: (probe_dir, (probe_dir.stat().st_dev, probe_dir.stat().st_ino)),
+    )
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
+    monkeypatch.setattr(sam_worker.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(sam_worker.os, "close", lambda descriptor: None)
+
+    def occupy_target(descriptor, parent, binding):
+        binding["path"].write_bytes(intruder)
+        occupied.append(binding["path"])
+        raise RuntimeError("already exists")
+
+    monkeypatch.setattr(sam_worker, "_publish_batch_result", occupy_target)
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert occupied[0].read_bytes() == intruder
+    occupied[0].unlink()
+    probe_dir.rmdir()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
@@ -3044,6 +3279,7 @@ def test_candidate_batch_linux_close_failure_does_not_hide_primary_error(
 ) -> None:
     monkeypatch.setattr(sam_worker.sys, "platform", "linux")
     monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    _mock_linux_candidate_batch_probe_directory(tmp_path, monkeypatch)
     monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
     monkeypatch.setattr(
         sam_worker,
