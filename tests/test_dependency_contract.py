@@ -1,6 +1,8 @@
-import ast
 import re
+import types
 from pathlib import Path
+
+from scripts import visual_segment
 
 
 SAM_PIN = "SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4"
@@ -10,9 +12,6 @@ STANDALONE_REQUIREMENTS = ROOT / "skills" / "image-to-ppt" / "references" / "req
 SKILL = ROOT / "skills" / "image-to-ppt" / "SKILL.md"
 README = ROOT / "README.md"
 README_EN = ROOT / "README_EN.md"
-STANDALONE_VISUAL_SEGMENT = (
-    ROOT / "skills" / "image-to-ppt" / "scripts" / "visual_segment.py"
-)
 PYPROJECT = ROOT / "pyproject.toml"
 
 
@@ -46,32 +45,59 @@ def test_standalone_sam_dependency_matches_product_pin() -> None:
 
 
 def test_standalone_sam_dependency_does_not_follow_a_branch() -> None:
-    sam_line = next(
+    sam_lines = [
         line
         for line in STANDALONE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
         if line.startswith("SAM-2 @ git+")
+    ]
+
+    assert sam_lines == [SAM_PIN]
+    assert re.fullmatch(r"[0-9a-f]{40}", sam_lines[0].rsplit("@", 1)[1])
+
+
+def test_standalone_declares_accelerate_used_by_visual_segmentation(
+    monkeypatch,
+) -> None:
+    expected = "accelerate>=0.26.0"
+    events = []
+
+    class EmptyWeights:
+        def __enter__(self):
+            events.append("empty-enter")
+
+        def __exit__(self, *args):
+            events.append("empty-exit")
+
+    class Model:
+        def load_state_dict(self, state, assign=False):
+            return [], []
+
+        def eval(self):
+            return self
+
+    model = Model()
+    build_sam = types.SimpleNamespace(
+        compose=lambda **kwargs: {"model": "config"},
+        OmegaConf=types.SimpleNamespace(resolve=lambda config: None),
+        instantiate=lambda config, **kwargs: (
+            events.append("instantiate") or model
+        ),
+    )
+    torch = types.SimpleNamespace(load=lambda *args, **kwargs: {"model": {}})
+
+    def fake_import(name):
+        events.append(name)
+        return types.SimpleNamespace(init_empty_weights=lambda: EmptyWeights())
+
+    monkeypatch.setattr(visual_segment.importlib, "import_module", fake_import)
+    visual_segment._build_resource_safe_sam_model(
+        build_sam,
+        torch,
+        Path("sam.pt"),
+        "cpu",
     )
 
-    assert re.fullmatch(r"[0-9a-f]{40}", sam_line.rsplit("@", 1)[1])
-
-
-def test_standalone_declares_accelerate_used_by_visual_segmentation() -> None:
-    expected = "accelerate>=0.26.0"
-    tree = ast.parse(STANDALONE_VISUAL_SEGMENT.read_text(encoding="utf-8"))
-    dynamic_imports = {
-        call.args[0].value
-        for call in ast.walk(tree)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and isinstance(call.func.value, ast.Name)
-        and call.func.value.id == "importlib"
-        and call.func.attr == "import_module"
-        and call.args
-        and isinstance(call.args[0], ast.Constant)
-        and isinstance(call.args[0].value, str)
-    }
-
-    assert "accelerate" in dynamic_imports
+    assert events == ["accelerate", "empty-enter", "instantiate", "empty-exit"]
     assert expected in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
     assert expected in STANDALONE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
 
@@ -92,6 +118,13 @@ def test_cross_platform_docs_prefer_the_verified_current_environment() -> None:
     assert "设备预检" in skill_text
     assert "设备预检" in readme_text
     assert "device preflight" in readme_en_text
+    probe = (
+        "python -c \"import sys, torch; print({'platform': sys.platform, "
+        "'cuda': torch.cuda.is_available(), 'rocm': torch.version.hip})\""
+    )
+    assert probe in skill_text
+    assert probe in readme_text
+    assert probe in readme_en_text
     assert "我这台机器" not in skill_text + readme_text
     assert "this machine" not in readme_en_text.lower()
 
