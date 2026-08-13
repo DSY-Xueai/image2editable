@@ -1980,6 +1980,8 @@ def _execute_legacy_round(
             prompts,
             work_dir=output_dir.parent,
         )
+        if type(masks) is not list or len(masks) != len(prompts):
+            raise RuntimeError("SAM component worker returned an invalid mask count")
         return [
             {"component_id": prompt["component_id"], "mask": mask}
             for prompt, mask in zip(prompts, masks)

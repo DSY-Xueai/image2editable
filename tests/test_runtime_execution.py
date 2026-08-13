@@ -2580,6 +2580,8 @@ def test_execute_legacy_round_aggregates_background_actions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from scripts import sam_worker
+
     run_dir = tmp_path / "run"
     reconstruction = run_dir / "pages/page_001/reconstruction"
     round_dir = reconstruction / "round-01"
@@ -2638,6 +2640,14 @@ def test_execute_legacy_round_aggregates_background_actions(
     })
 
     def execute_round(pixels, graph, actions, **kwargs):
+        prompt = {
+            "component_id": "component",
+            "box": [1, 1, 4, 4],
+            "positive": [],
+            "negative": [],
+        }
+        with pytest.raises(RuntimeError, match="mask count"):
+            kwargs["sam_batch_runner"](image=pixels, prompts=[prompt])
         output_dir = kwargs["output_dir"]
         output_dir.mkdir(parents=True)
         (output_dir / "component-graph.json").write_text(
@@ -2665,6 +2675,14 @@ def test_execute_legacy_round_aggregates_background_actions(
         }
     )
     monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
+    monkeypatch.setattr(
+        sam_worker,
+        "run_component_prompt_batch_worker",
+        lambda *args, **kwargs: [
+            np.ones((8, 12), dtype=bool),
+            np.ones((8, 12), dtype=bool),
+        ],
+    )
     monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *a, **k: None)
     monkeypatch.setattr(legacy, "_effective_text_context", lambda **kwargs: (
         [], np.zeros((8, 12), dtype=bool), np.full((8, 12, 3), 255, dtype=np.uint8)
