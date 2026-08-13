@@ -22,8 +22,97 @@ from scripts import (
     lama_inpaint,
     sam_worker,
     text_detect,
+    visual_worker,
     visual_segment,
 )
+
+
+def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 6), "red").save(source)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({
+        "text_analysis": {"items": [], "mask_path": "mask.png"},
+        "source_sha256": "0" * 64,
+        "source_size": source.stat().st_size,
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        visual_worker,
+        "_load_process_image",
+        lambda: pytest.fail("visual pipeline must not load before source validation"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
+        "--lang", "en", "--request", str(request),
+        "--result", str(tmp_path / "result.json"),
+    ])
+
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        visual_worker.main()
+
+
+def test_visual_worker_processes_verified_in_memory_source_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 6), "red").save(source)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({
+        "text_analysis": {"items": [], "mask_path": "mask.png"},
+        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source_size": source.stat().st_size,
+    }), encoding="utf-8")
+
+    def fake_process(path, work_dir, *args, **kwargs):
+        Image.new("RGB", (8, 6), "black").save(path)
+        snapshot = kwargs["_source_image"]
+        assert snapshot.shape == (6, 8, 3)
+        assert tuple(snapshot[0, 0]) == (255, 0, 0)
+        return {"snapshot": "verified"}
+
+    monkeypatch.setattr(visual_worker, "_load_process_image", lambda: fake_process)
+    monkeypatch.setattr(sys, "argv", [
+        "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
+        "--lang", "en", "--request", str(request),
+        "--result", str(tmp_path / "result.json"),
+    ])
+
+    assert visual_worker.main() == 0
+    assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == {
+        "snapshot": "verified"
+    }
+
+
+def test_isolated_visual_request_binds_source_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 6), "red").save(source)
+    captured = {}
+
+    def fake_worker(command, **kwargs):
+        request_path = Path(command[command.index("--request") + 1])
+        captured.update(json.loads(request_path.read_text(encoding="utf-8")))
+        return types.SimpleNamespace(returncode=1, stderr="stop", stdout="")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_worker)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        image_to_ppt._process_image_isolated(
+            source,
+            tmp_path,
+            "en",
+            {"items": [], "mask_path": str(tmp_path / "mask.png")},
+        )
+
+    source_content = source.read_bytes()
+    assert captured["source_sha256"] == hashlib.sha256(source_content).hexdigest()
+    assert captured["source_size"] == len(source_content)
 
 from image_to_ppt import _parse_reference_option
 from image_to_ppt import _merge_foreground_masks

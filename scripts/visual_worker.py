@@ -1,10 +1,70 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import stat
 import sys
+
+import numpy as np
+from PIL import Image
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse_flag
+    )
+
+
+def _read_source_snapshot(
+    image_path: Path,
+    work_dir: Path,
+    expected_size: int,
+) -> bytes:
+    root = Path(os.path.abspath(work_dir))
+    source = Path(os.path.abspath(image_path))
+    if source.parent != root:
+        raise ValueError("visual source must be directly inside the work directory")
+    root_before = os.lstat(root)
+    path_before = os.lstat(source)
+    try:
+        with source.open("rb") as stream:
+            handle_before = os.fstat(stream.fileno())
+            if handle_before.st_size != expected_size:
+                raise ValueError("visual source size mismatch")
+            content = stream.read(expected_size + 1)
+            handle_after = os.fstat(stream.fileno())
+        path_after = os.lstat(source)
+        root_after = os.lstat(root)
+    except OSError as exc:
+        raise ValueError("visual source changed while being read") from exc
+
+    for status in (root_before, root_after):
+        if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+            raise ValueError("visual work directory changed while being read")
+    if (root_before.st_dev, root_before.st_ino) != (
+        root_after.st_dev, root_after.st_ino
+    ):
+        raise ValueError("visual work directory changed while being read")
+    statuses = (path_before, handle_before, handle_after, path_after)
+    for status in statuses:
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+        ):
+            raise ValueError("visual source changed while being read")
+    identities = {
+        (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+        for status in statuses
+    }
+    if len(identities) != 1 or len(content) != expected_size:
+        raise ValueError("visual source changed while being read")
+    return content
 
 
 def _load_process_image():
@@ -28,6 +88,26 @@ def main() -> int:
     args = parser.parse_args()
 
     request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    expected_sha256 = request.get("source_sha256")
+    expected_size = request.get("source_size")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+        or not isinstance(expected_size, int)
+        or isinstance(expected_size, bool)
+        or expected_size <= 0
+    ):
+        raise ValueError("visual source binding is invalid")
+    source_content = _read_source_snapshot(
+        Path(args.image),
+        Path(args.work_dir),
+        expected_size,
+    )
+    if hashlib.sha256(source_content).hexdigest() != expected_sha256:
+        raise ValueError("visual source sha256 mismatch")
+    with Image.open(io.BytesIO(source_content)) as stored_source:
+        source_image = np.asarray(stored_source.convert("RGB")).copy()
     process_image = _load_process_image()
     slide_data = process_image(
         Path(args.image),
@@ -38,6 +118,7 @@ def main() -> int:
         text_analysis=request["text_analysis"],
         defer_quality=True,
         _resource_isolation=True,
+        _source_image=source_image,
     )
     result_path = Path(args.result)
     temporary_path = result_path.with_name(f".{result_path.name}.tmp")

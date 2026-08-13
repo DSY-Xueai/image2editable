@@ -215,9 +215,10 @@ git commit -m "性能：合并组件修复轮 SAM 推理"
 
 **Files:**
 - Modify: `image_to_ppt.py`
+- Modify: `scripts/visual_worker.py`
 - Modify: `tests/test_targeted_ocr.py`
 - Modify: `tests/test_regressions.py`
-- Mirror: `skills/image-to-ppt/scripts/image_to_ppt.py`
+- Mirror: `skills/image-to-ppt/scripts/image_to_ppt.py`、`skills/image-to-ppt/scripts/visual_worker.py`
 
 - [ ] **Step 1: 写依赖闭包 RED 测试**
 
@@ -250,6 +251,8 @@ Expected: FAIL，scope 函数尚不存在。
 
 仅当 OCR 文字确实新增、cleanup 差集非空、`scope == set()`，且全部缓存、关系、hash、协议和 shape 完整时，零 DINO/SAM 复用首 pass 视觉资产，并重新执行 text-clean、背景、removal、foreground/ownership 和原质量证据路径。`scope` 非空、本身为 `None` 或输出无法通过完整性校验时调用原来的第二次 `_process_image_isolated()`。本任务不在全局视觉流水线上伪实现非空 scope 的局部 SAM；该能力需未来先独立拆分视觉流水线。不吞掉原完整路径异常，不输出原图成功。
 
+安全复用还要求：从 element/semantic mask 的实际非零范围重算 bbox 并绑定 cache key；依赖闭包超过 mask crop、候选 pair 或局部像素预算时返回 `None`；caller 安全读取 source 字节并把 SHA-256/字节数交给 visual worker，worker 在任何模型加载前完成文件身份与 hash 校验，从内存快照解码，首 pass hash 与 prepared manifest 不一致时执行完整第二 pass。
+
 - [ ] **Step 4: 验证增量与完整路径等价**
 
 Run: `python -m pytest tests/test_targeted_ocr.py tests/test_regressions.py -k "targeted or text_delta or visual_pass" -q`
@@ -259,7 +262,7 @@ Expected: PASS；夹具验证安全空 scope 不启动第二个视觉 worker，�
 - [ ] **Step 5: 镜像并提交**
 
 ```powershell
-git add image_to_ppt.py skills/image-to-ppt/scripts/image_to_ppt.py tests/test_targeted_ocr.py tests/test_regressions.py docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md docs/superpowers/plans/2026-08-13-cross-platform-conversion-performance.md
+git add image_to_ppt.py scripts/visual_worker.py skills/image-to-ppt/scripts/image_to_ppt.py skills/image-to-ppt/scripts/visual_worker.py tests/test_targeted_ocr.py tests/test_regressions.py docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md docs/superpowers/plans/2026-08-13-cross-platform-conversion-performance.md
 git commit -m "性能：复用未受 OCR 影响的视觉资产"
 ```
 

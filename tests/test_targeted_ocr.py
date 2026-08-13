@@ -761,24 +761,28 @@ def _text_delta_graph(root: Path, old_mask: np.ndarray) -> tuple[dict, dict]:
             {
                 "id": "child",
                 "mask": _write_text_delta_mask(root, "child", child),
+                "bbox": [30, 20, 40, 28],
                 "parents": ["parent"],
                 "children": [],
             },
             {
                 "id": "parent",
                 "mask": _write_text_delta_mask(root, "parent", parent),
+                "bbox": [28, 18, 42, 30],
                 "parents": [],
                 "children": ["child"],
             },
             {
                 "id": "touching_neighbor",
                 "mask": _write_text_delta_mask(root, "neighbor", neighbor),
+                "bbox": [44, 20, 50, 28],
                 "parents": [],
                 "children": [],
             },
             {
                 "id": "distant",
                 "mask": _write_text_delta_mask(root, "distant", distant),
+                "bbox": [75, 55, 85, 65],
                 "parents": [],
                 "children": [],
             },
@@ -937,6 +941,95 @@ def test_text_delta_three_pixel_safety_margin_reopens_nearby_node(
     )
 
     assert scope == {"child", "parent", "touching_neighbor"}
+
+
+def test_text_delta_component_bbox_reopens_transparent_mask_region(
+    tmp_path: Path,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[20:24, 20:24] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+    ring = np.zeros_like(old_mask)
+    ring[5:35, 5:40] = 255
+    ring[8:32, 8:37] = 0
+    child_path = Path(tmp_path, graph["nodes"][0]["mask"]["path"])
+    Image.fromarray(ring).save(child_path)
+    graph["nodes"][0]["mask"]["sha256"] = image_to_ppt.hashlib.sha256(
+        child_path.read_bytes()
+    ).hexdigest()
+    graph["nodes"][0]["bbox"] = [5, 5, 40, 35]
+    identity["cache_key"] = image_to_ppt.hashlib.sha256(json.dumps({
+        "schema_version": identity["schema_version"],
+        "source_sha256": identity["source_sha256"],
+        "old_cleanup_mask_sha256": identity["old_cleanup_mask_sha256"],
+        "sam_protocol_sha256": identity["sam_protocol_sha256"],
+        "dino_protocol_sha256": identity["dino_protocol_sha256"],
+        "prepared_manifest_sha256": identity["prepared_manifest_sha256"],
+        "nodes": graph["nodes"],
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    graph["cache_key"] = identity["cache_key"]
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) == {"child", "parent", "touching_neighbor"}
+
+
+def test_text_delta_pairwise_budget_requires_full_recompute(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[70:75, 90:95] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+    monkeypatch.setattr(image_to_ppt, "_TEXT_DELTA_MAX_PAIRWISE_PIXELS", 1)
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) is None
+
+
+def test_text_delta_pair_candidate_budget_counts_disjoint_nodes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[70:75, 90:95] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+    graph["nodes"] = [graph["nodes"][0], graph["nodes"][3]]
+    graph["nodes"][0]["parents"] = []
+    identity["cache_key"] = image_to_ppt.hashlib.sha256(json.dumps({
+        "schema_version": identity["schema_version"],
+        "source_sha256": identity["source_sha256"],
+        "old_cleanup_mask_sha256": identity["old_cleanup_mask_sha256"],
+        "sam_protocol_sha256": identity["sam_protocol_sha256"],
+        "dino_protocol_sha256": identity["dino_protocol_sha256"],
+        "prepared_manifest_sha256": identity["prepared_manifest_sha256"],
+        "nodes": graph["nodes"],
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    graph["cache_key"] = identity["cache_key"]
+    monkeypatch.setattr(image_to_ppt, "_TEXT_DELTA_MAX_PAIRWISE_CANDIDATES", 0)
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) is None
 
 
 def test_text_delta_only_dilates_one_full_page_array(
@@ -1224,6 +1317,9 @@ def _prepare_rerun_fixture(
             "_element_mask_paths": child_paths,
             "_semantic_mask_paths": parent_paths,
             "_foreground_evidence_mask_path": str(foreground_evidence_path),
+            "_visual_source_sha256": image_to_ppt.hashlib.sha256(
+                Path(path).read_bytes()
+            ).hexdigest(),
         }
 
     monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)

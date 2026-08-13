@@ -113,6 +113,9 @@ _TEXT_DELTA_CACHE_SCHEMA_VERSION = 1
 _TEXT_DELTA_MAX_NODES = 4096
 _TEXT_DELTA_CACHE_NAME = "first-visual-cache.json"
 _TEXT_DELTA_CACHE_MAX_BYTES = 8 * 1024 * 1024
+_TEXT_DELTA_MAX_MASK_CROP_PIXELS = 128 * 1024 * 1024
+_TEXT_DELTA_MAX_PAIRWISE_CANDIDATES = 100_000
+_TEXT_DELTA_MAX_PAIRWISE_PIXELS = 128 * 1024 * 1024
 _TEXT_DELTA_SAM_PROTOCOL_SHA256 = hashlib.sha256(
     b"sam2.1_hiera_large|candidate_batch_v1|visual_pipeline_v1"
 ).hexdigest()
@@ -2058,10 +2061,20 @@ def _process_image_isolated(
     lang: str,
     text_analysis: dict,
 ) -> dict:
+    _, source_content = _read_prepared_owned_bytes(
+        work_dir,
+        image_path,
+        "isolated visual source",
+    )
+    source_sha256 = hashlib.sha256(source_content).hexdigest()
     request_path = (work_dir / "visual-worker-request.json").resolve()
     result_path = (work_dir / "visual-worker-result.json").resolve()
     request_path.write_text(
-        json.dumps({"text_analysis": text_analysis}, ensure_ascii=False),
+        json.dumps({
+            "text_analysis": text_analysis,
+            "source_sha256": source_sha256,
+            "source_size": len(source_content),
+        }, ensure_ascii=False),
         encoding="utf-8",
     )
     module_dir = Path(__file__).resolve().parent
@@ -2091,7 +2104,9 @@ def _process_image_isolated(
         raise RuntimeError(f"Isolated visual worker failed: {detail}")
     if not result_path.is_file():
         raise RuntimeError("Isolated visual worker did not create its result")
-    return json.loads(result_path.read_text(encoding="utf-8"))
+    slide_data = json.loads(result_path.read_text(encoding="utf-8"))
+    slide_data["_visual_source_sha256"] = source_sha256
+    return slide_data
 
 
 def _pack_mask_references(references):
@@ -2131,6 +2146,7 @@ def _process_image(
     text_analysis: dict | None = None,
     defer_quality: bool = False,
     _resource_isolation: bool = False,
+    _source_image: np.ndarray | None = None,
 ) -> dict:
     work_dir.mkdir(parents=True, exist_ok=True)
     background_kwargs = (
@@ -2138,7 +2154,11 @@ def _process_image(
         if _resource_isolation
         else {}
     )
-    img = _load_rgb(str(image_path))
+    img = (
+        np.asarray(_source_image, dtype=np.uint8).copy()
+        if _source_image is not None
+        else _load_rgb(str(image_path))
+    )
     img_h, img_w = img.shape[:2]
     if text_analysis is None:
         text_items, text_mask = detect_text(image_path, lang=lang)
@@ -2737,10 +2757,11 @@ def _text_delta_recompute_scope(
         trusted_root = _validate_prepared_work_dir(graph_dir, create=False)
         nodes = {}
         masks = {}
+        total_crop_pixels = 0
         for node in graph["nodes"]:
             if (
                 not isinstance(node, dict)
-                or set(node) != {"id", "mask", "parents", "children"}
+                or set(node) != {"id", "mask", "bbox", "parents", "children"}
                 or not isinstance(node["id"], str)
                 or not node["id"]
                 or len(node["id"]) > 128
@@ -2769,6 +2790,12 @@ def _text_delta_recompute_scope(
             ys, xs = np.nonzero(mask)
             left, top = int(xs.min()), int(ys.min())
             right, bottom = int(xs.max()) + 1, int(ys.max()) + 1
+            if node["bbox"] != [left, top, right, bottom]:
+                return None
+            crop_pixels = (right - left) * (bottom - top)
+            total_crop_pixels += crop_pixels
+            if total_crop_pixels > _TEXT_DELTA_MAX_MASK_CROP_PIXELS:
+                return None
             masks[node["id"]] = (
                 (left, top, right, bottom),
                 mask[top:bottom, left:right].copy(),
@@ -2789,17 +2816,25 @@ def _text_delta_recompute_scope(
         }
         kernel = np.ones((7, 7), dtype=np.uint8)
         node_ids = list(nodes)
+        pairwise_candidates = 0
+        pairwise_pixels = 0
         for left_index, left_id in enumerate(node_ids):
             (lx1, ly1, lx2, ly2), left_crop = masks[left_id]
             left_dilated = cv2.dilate(
                 np.pad(left_crop.astype(np.uint8), 3), kernel, iterations=1
             ) > 0
             for right_id in node_ids[left_index + 1:]:
+                pairwise_candidates += 1
+                if pairwise_candidates > _TEXT_DELTA_MAX_PAIRWISE_CANDIDATES:
+                    return None
                 (rx1, ry1, rx2, ry2), right_crop = masks[right_id]
                 x1, y1 = max(lx1 - 3, rx1), max(ly1 - 3, ry1)
                 x2, y2 = min(lx2 + 3, rx2), min(ly2 + 3, ry2)
                 if x1 >= x2 or y1 >= y2:
                     continue
+                pairwise_pixels += (x2 - x1) * (y2 - y1)
+                if pairwise_pixels > _TEXT_DELTA_MAX_PAIRWISE_PIXELS:
+                    return None
                 left_view = left_dilated[
                     y1 - (ly1 - 3):y2 - (ly1 - 3),
                     x1 - (lx1 - 3):x2 - (lx1 - 3),
@@ -2816,9 +2851,9 @@ def _text_delta_recompute_scope(
             difference.astype(np.uint8), kernel, iterations=1
         ) > 0
         scope = set()
-        for node_id, (bbox, crop) in masks.items():
+        for node_id, (bbox, _) in masks.items():
             left, top, right, bottom = bbox
-            if np.any(crop & difference[top:bottom, left:right]):
+            if np.any(difference[top:bottom, left:right]):
                 scope.add(node_id)
         pending = list(scope)
         while pending:
@@ -2843,9 +2878,23 @@ def _write_first_visual_cache(
     for index, (child, parent) in enumerate(zip(element_records, semantic_records)):
         child_id = f"component_{index:04d}:child"
         parent_id = f"component_{index:04d}:semantic"
+        bboxes = []
+        for label, record in (("element mask", child), ("semantic mask", parent)):
+            _, content = _read_prepared_asset_bytes(work_dir, record, label)
+            with Image.open(io.BytesIO(content)) as stored:
+                grayscale = stored.convert("L")
+                try:
+                    bbox = grayscale.getbbox()
+                finally:
+                    grayscale.close()
+            if bbox is None:
+                raise ValueError("first visual cache mask is empty")
+            bboxes.append(list(bbox))
         nodes.extend((
-            {"id": child_id, "mask": child, "parents": [parent_id], "children": []},
-            {"id": parent_id, "mask": parent, "parents": [], "children": [child_id]},
+            {"id": child_id, "mask": child, "bbox": bboxes[0],
+             "parents": [parent_id], "children": []},
+            {"id": parent_id, "mask": parent, "bbox": bboxes[1],
+             "parents": [], "children": [child_id]},
         ))
     graph = {
         "schema_version": _TEXT_DELTA_CACHE_SCHEMA_VERSION,
@@ -3451,6 +3500,9 @@ def _reuse_disjoint_text_delta(
         if payload["identity"].get("prepared_manifest_sha256") != manifest_sha256:
             return False
         expected_nodes = []
+        cached_nodes = payload["graph"].get("nodes")
+        if not isinstance(cached_nodes, list):
+            return False
         for index, (child, parent) in enumerate(zip(
             manifest["assets"]["element_masks"],
             manifest["assets"]["semantic_masks"],
@@ -3458,10 +3510,14 @@ def _reuse_disjoint_text_delta(
         )):
             child_id = f"component_{index:04d}:child"
             parent_id = f"component_{index:04d}:semantic"
+            if index * 2 + 1 >= len(cached_nodes):
+                return False
             expected_nodes.extend((
                 {"id": child_id, "mask": child,
+                 "bbox": cached_nodes[index * 2].get("bbox"),
                  "parents": [parent_id], "children": []},
                 {"id": parent_id, "mask": parent,
+                 "bbox": cached_nodes[index * 2 + 1].get("bbox"),
                  "parents": [], "children": [child_id]},
             ))
         if payload["graph"].get("nodes") != expected_nodes:
@@ -3674,6 +3730,8 @@ def prepare_component_layers(
     for visual_pass in range(2):
         object_detector = None
         mask_generator = None
+        visual_source_image = None
+        visual_source_sha256 = None
         exception_boundary = sys.exc_info()[1]
         primary_exception = None
         primary_traceback = None
@@ -3685,7 +3743,22 @@ def prepare_component_layers(
                     lang,
                     text_analysis,
                 )
+                visual_source_sha256 = slide_data.pop(
+                    "_visual_source_sha256", None
+                )
             else:
+                _, visual_source_content = _read_prepared_owned_bytes(
+                    owned_work_dir,
+                    owned_source,
+                    "visual source",
+                )
+                visual_source_sha256 = hashlib.sha256(
+                    visual_source_content
+                ).hexdigest()
+                with Image.open(io.BytesIO(visual_source_content)) as stored_source:
+                    visual_source_image = np.asarray(
+                        stored_source.convert("RGB")
+                    ).copy()
                 object_detector = create_object_detector()
                 mask_generator = create_sam_generator(resolve_sam_checkpoint())
                 slide_data = _process_image(
@@ -3696,6 +3769,7 @@ def prepare_component_layers(
                     lang,
                     text_analysis=text_analysis,
                     defer_quality=True,
+                    _source_image=visual_source_image,
                 )
         except BaseException as exc:
             primary_exception = exc
@@ -3704,6 +3778,7 @@ def prepare_component_layers(
         finally:
             mask_generator = None
             object_detector = None
+            visual_source_image = None
             _run_cleanup_preserving_exception(
                 _release_visual_resources,
                 "visual resources",
@@ -3759,6 +3834,7 @@ def prepare_component_layers(
         if (
             first_manifest["assets"]["source_image"]["sha256"]
             == source_for_delta_sha256
+            == visual_source_sha256
         ):
             try:
                 cache_path = _write_first_visual_cache(
@@ -4299,6 +4375,7 @@ def _prepare_multiple_images(
                     lang,
                     text_analysis,
                 )
+                slide_data.pop("_visual_source_sha256", None)
             else:
                 slide_data = _process_image(
                     image_path,
