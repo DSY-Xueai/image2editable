@@ -1080,6 +1080,7 @@ def _prepare_rerun_fixture(
     source_change_before_manifest: bool = False,
     wrong_component_shape: bool = False,
     forbid_cache_cleanup: bool = False,
+    replace_mask_after_first_worker: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1298,6 +1299,15 @@ def _prepare_rerun_fixture(
         Image.new("RGB", (120, 70), "black").save(
             target / "background-difference.png"
         )
+        with Image.open(text_analysis["mask_path"]) as used_text_mask:
+            used_text_mask_array = np.asarray(
+                used_text_mask.convert("L"), dtype=np.uint8
+            ).copy()
+        visual_text_mask_sha256 = image_to_ppt.hashlib.sha256(
+            np.ascontiguousarray(used_text_mask_array).tobytes()
+        ).hexdigest()
+        if replace_mask_after_first_worker and pass_index == 1:
+            Image.new("L", (120, 70), 255).save(text_analysis["mask_path"])
         return {
             "background_path": str(background),
             "background_original_path": str(background),
@@ -1320,6 +1330,8 @@ def _prepare_rerun_fixture(
             "_visual_source_sha256": image_to_ppt.hashlib.sha256(
                 Path(path).read_bytes()
             ).hexdigest(),
+            "_visual_text_mask_sha256": visual_text_mask_sha256,
+            "_visual_text_clean_sha256": None,
         }
 
     monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)
@@ -1372,6 +1384,20 @@ def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
         removal_mask = np.asarray(removal.convert("L")) > 0
     assert np.all(removal_mask[18:39, 39:86])
     assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
+
+
+def test_text_delta_mask_changed_after_first_worker_uses_full_visual_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, calls = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        safe_text_delta=True,
+        replace_mask_after_first_worker=True,
+    )
+
+    assert calls == [0, 1]
 
 
 @pytest.mark.parametrize("case", ["affected", "corrupt_cache"])

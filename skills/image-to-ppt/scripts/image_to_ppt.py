@@ -2484,6 +2484,15 @@ def _process_image(
         "_element_mask_paths": element_mask_paths,
         "_semantic_mask_paths": semantic_mask_paths,
         "_foreground_evidence_mask_path": str(foreground_evidence_path),
+        "_visual_text_mask_sha256": hashlib.sha256(
+            np.ascontiguousarray(text_mask, dtype=np.uint8).tobytes()
+        ).hexdigest(),
+        "_visual_text_clean_sha256": (
+            hashlib.sha256(
+                np.ascontiguousarray(text_clean_image, dtype=np.uint8).tobytes()
+            ).hexdigest()
+            if text_clean_image is not None else None
+        ),
     }
     if text_clean_path is not None:
         slide_data["_text_clean_path"] = str(text_clean_path)
@@ -3768,6 +3777,8 @@ def prepare_component_layers(
         mask_generator = None
         visual_source_image = None
         visual_source_sha256 = None
+        visual_text_mask_sha256 = None
+        visual_text_clean_sha256 = None
         exception_boundary = sys.exc_info()[1]
         primary_exception = None
         primary_traceback = None
@@ -3807,6 +3818,12 @@ def prepare_component_layers(
                     defer_quality=True,
                     _source_image=visual_source_image,
                 )
+            visual_text_mask_sha256 = slide_data.pop(
+                "_visual_text_mask_sha256", None
+            )
+            visual_text_clean_sha256 = slide_data.pop(
+                "_visual_text_clean_sha256", None
+            )
         except BaseException as exc:
             primary_exception = exc
             primary_traceback = exc.__traceback__
@@ -3867,10 +3884,40 @@ def prepare_component_layers(
         first_state_path = _write_prepared_page(slide_data, owned_work_dir)
         _, first_manifest = _load_component_layer_state(first_state_path)
         cache_path = None
+        first_text_mask_sha256 = None
+        first_text_clean_sha256 = None
+        try:
+            _, first_text_mask_content = _read_prepared_asset_bytes(
+                owned_work_dir,
+                first_manifest["assets"]["ocr_mask"],
+                "first visual OCR mask",
+            )
+            with Image.open(io.BytesIO(first_text_mask_content)) as stored_mask:
+                normalized_mask = stored_mask.convert("L")
+                first_text_mask_sha256 = hashlib.sha256(
+                    normalized_mask.tobytes()
+                ).hexdigest()
+            first_text_clean_record = first_manifest["assets"]["text_clean"]
+            if first_text_clean_record is not None:
+                _, first_text_clean_content = _read_prepared_asset_bytes(
+                    owned_work_dir,
+                    first_text_clean_record,
+                    "first visual text clean image",
+                )
+                with Image.open(io.BytesIO(first_text_clean_content)) as stored_clean:
+                    normalized_clean = stored_clean.convert("RGB")
+                    first_text_clean_sha256 = hashlib.sha256(
+                        normalized_clean.tobytes()
+                    ).hexdigest()
+        except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
+            first_text_mask_sha256 = None
+            first_text_clean_sha256 = None
         if (
             first_manifest["assets"]["source_image"]["sha256"]
             == source_for_delta_sha256
             == visual_source_sha256
+            and first_text_mask_sha256 == visual_text_mask_sha256
+            and first_text_clean_sha256 == visual_text_clean_sha256
         ):
             try:
                 cache_path = _write_first_visual_cache(
@@ -4412,6 +4459,8 @@ def _prepare_multiple_images(
                     text_analysis,
                 )
                 slide_data.pop("_visual_source_sha256", None)
+                slide_data.pop("_visual_text_mask_sha256", None)
+                slide_data.pop("_visual_text_clean_sha256", None)
             else:
                 slide_data = _process_image(
                     image_path,
