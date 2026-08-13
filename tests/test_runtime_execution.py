@@ -770,20 +770,18 @@ def test_image_component_retry_passes_source_image_once_to_sam_worker(
     _install_component_e2e_boundaries(monkeypatch)
     calls: list[dict[str, Any]] = []
 
-    def fake_sam_worker(image, *, box, positive, negative, work_dir):
+    def fake_sam_worker(image, prompts, *, work_dir):
         calls.append({
             "shape": image.shape,
-            "box": box,
-            "positive": positive,
-            "negative": negative,
+            "prompts": copy.deepcopy(prompts),
             "work_dir": Path(work_dir),
         })
         mask = np.zeros(image.shape[:2], dtype=bool)
         mask[8:24, 8:24] = True
-        return mask
+        return [mask]
 
     monkeypatch.setattr(
-        "scripts.sam_worker.run_component_prompt_worker", fake_sam_worker
+        "scripts.sam_worker.run_component_prompt_batch_worker", fake_sam_worker
     )
     run_dir = runtime.prepare_job(
         source, run_dir=tmp_path / "run", slide_size="16:9",
@@ -806,9 +804,12 @@ def test_image_component_retry_passes_source_image_once_to_sam_worker(
 
     assert calls == [{
         "shape": (32, 32, 3),
-        "box": [8.0, 8.0, 24.0, 24.0],
-        "positive": [],
-        "negative": [],
+        "prompts": [{
+            "component_id": "component_0001",
+            "box": [8.0, 8.0, 24.0, 24.0],
+            "positive": [],
+            "negative": [],
+        }],
         "work_dir": run_dir / "pages/page_001/reconstruction",
     }]
 
