@@ -90,6 +90,12 @@ from scripts.visual_segment import (
     write_segmentation_diagnostics,
 )
 from scripts.worker_resources import run_isolated_worker
+from scripts.sam_worker import (
+    sam_candidate_batch_max_automatic_candidates,
+    sam_candidate_batch_max_prompted_candidates,
+    sam_candidate_batch_max_proposals,
+    sam_candidate_batch_result_max_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1504,12 +1510,6 @@ def _generate_sam_candidates_isolated(
 
 
 _SAM_CANDIDATE_BATCH_SCHEMA_VERSION = 1
-_SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES = 512 * 1024 * 1024
-_SAM_CANDIDATE_BATCH_MAX_PROPOSALS = 16_384
-_SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES = (
-    2 * _SAM_CANDIDATE_BATCH_MAX_PROPOSALS
-)
-_SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES = 16 * 16 * 3
 _SAM_CANDIDATE_BATCH_MAX_STRING_LENGTH = 256
 _SAM_CANDIDATE_BATCH_FIELDS = {
     "mask",
@@ -1540,52 +1540,77 @@ def _validate_sam_candidate_batch_string(
     return value
 
 
-def _validate_sam_candidate_batch_score(value) -> float:
-    if (
-        type(value) not in {int, float}
-        or not math.isfinite(value)
-        or not 0.0 <= value <= 1.0
-    ):
-        raise RuntimeError("SAM candidate batch returned an invalid score")
+def _validate_sam_candidate_batch_finite_number(value, label: str):
+    if type(value) is int:
+        return value
+    try:
+        finite = math.isfinite(value)
+    except (TypeError, OverflowError):
+        finite = False
+    if type(value) is not float or not finite:
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
     return value
 
 
-def _validate_sam_candidate_batch_box(
+def _validate_sam_candidate_batch_crop_box(
+    value,
+    label: str,
+    image_shape: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(type(coordinate) is not int for coordinate in value)
+    ):
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    x1, y1, x2, y2 = value
+    height, width = image_shape
+    if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    return tuple(value)
+
+
+def _validate_sam_candidate_batch_intersecting_box(
     value,
     label: str,
     image_shape: tuple[int, int],
 ) -> tuple[float, float, float, float] | None:
     if value is None:
         return None
-    if (
-        not isinstance(value, list)
-        or len(value) != 4
-        or any(
-            type(coordinate) not in {int, float} or not math.isfinite(coordinate)
-            for coordinate in value
-        )
+    if not isinstance(value, list) or len(value) != 4:
+        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
+    coordinates = tuple(
+        _validate_sam_candidate_batch_finite_number(coordinate, label)
+        for coordinate in value
+    )
+    x1, y1, x2, y2 = coordinates
+    height, width = image_shape
+    if not (
+        x1 < x2
+        and y1 < y2
+        and x1 < width
+        and y1 < height
+        and x2 > 0
+        and y2 > 0
     ):
         raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
-    x1, y1, x2, y2 = value
-    height, width = image_shape
-    if not (0.0 <= x1 < x2 <= width and 0.0 <= y1 < y2 <= height):
-        raise RuntimeError(f"SAM candidate batch returned an invalid {label}")
-    return tuple(value)
+    return coordinates
+
+
+def _validate_sam_candidate_batch_score(value):
+    return _validate_sam_candidate_batch_finite_number(value, "score")
 
 
 def _validate_sam_candidate_batch_records(
     records,
     image_shape: tuple[int, int],
-    kind: str,
+    candidate_limit: int,
 ) -> list[tuple[bytes, dict]]:
     if not isinstance(records, list):
         raise RuntimeError("SAM candidate batch records must be a list")
-    limit = (
-        _SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES
-        if kind == "prompted"
-        else _SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES
-    )
-    if len(records) > limit:
+    if len(records) > candidate_limit:
         raise RuntimeError("SAM candidate batch returned too many candidates")
     validated = []
     expected_bytes = (int(np.prod(image_shape)) + 7) // 8
@@ -1622,7 +1647,7 @@ def _validate_sam_candidate_batch_records(
                 record["source"],
                 "source",
             ),
-            "crop_box": _validate_sam_candidate_batch_box(
+            "crop_box": _validate_sam_candidate_batch_crop_box(
                 record["crop_box"],
                 "crop box",
                 image_shape,
@@ -1638,7 +1663,7 @@ def _validate_sam_candidate_batch_records(
                 "role",
                 allow_empty=True,
             ),
-            "object_box": _validate_sam_candidate_batch_box(
+            "object_box": _validate_sam_candidate_batch_intersecting_box(
                 record["object_box"],
                 "object box",
                 image_shape,
@@ -1662,7 +1687,7 @@ def _decode_sam_candidate_batch_records(
     return candidates
 
 
-def _read_sam_candidate_batch_result(path: Path) -> bytes:
+def _read_sam_candidate_batch_result(path: Path, limit: int) -> bytes:
     try:
         before = path.lstat()
     except OSError as exc:
@@ -1673,7 +1698,7 @@ def _read_sam_candidate_batch_result(path: Path) -> bytes:
         _is_link_or_reparse(before)
         or not stat.S_ISREG(before.st_mode)
         or before.st_nlink != 1
-        or before.st_size > _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES
+        or before.st_size > limit
     ):
         raise RuntimeError("SAM candidate batch result is unsafe or too large")
     flags = os.O_RDONLY
@@ -1696,14 +1721,14 @@ def _read_sam_candidate_batch_result(path: Path) -> bytes:
                 descriptor,
                 min(
                     1024 * 1024,
-                    _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES + 1 - total,
+                    limit + 1 - total,
                 ),
             )
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
-            if total > _SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES:
+            if total > limit:
                 raise RuntimeError("SAM candidate batch result is too large")
         stable = os.fstat(descriptor)
     finally:
@@ -1733,8 +1758,14 @@ def _generate_sam_candidate_batch_isolated(
     proposals: list[ObjectProposal],
     work_dir: Path,
 ) -> tuple[list[MaskCandidate], list[MaskCandidate]]:
-    if len(proposals) > _SAM_CANDIDATE_BATCH_MAX_PROPOSALS:
+    image_shape = tuple(image.shape[:2])
+    maximum_proposals = sam_candidate_batch_max_proposals(image_shape)
+    if len(proposals) > maximum_proposals:
         raise RuntimeError("SAM candidate batch has too many proposals")
+    result_limit = sam_candidate_batch_result_max_bytes(
+        image_shape,
+        len(proposals),
+    )
     with tempfile.TemporaryDirectory(
         prefix="sam-batch-",
         dir=work_dir,
@@ -1804,7 +1835,10 @@ def _generate_sam_candidate_batch_isolated(
             raise RuntimeError(f"Isolated SAM candidate batch failed: {detail}")
         try:
             payload = json.loads(
-                _read_sam_candidate_batch_result(result_path).decode("utf-8"),
+                _read_sam_candidate_batch_result(
+                    result_path,
+                    result_limit,
+                ).decode("utf-8"),
                 parse_constant=_reject_sam_candidate_batch_json_constant,
             )
             if not isinstance(payload, dict) or set(payload) != {
@@ -1846,27 +1880,27 @@ def _generate_sam_candidate_batch_isolated(
                     )
                 records = output["candidates"]
                 candidate_limit = (
-                    _SAM_CANDIDATE_BATCH_MAX_PROMPTED_CANDIDATES
+                    sam_candidate_batch_max_prompted_candidates(len(proposals))
                     if expected[1] == "prompted"
-                    else _SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES
+                    else sam_candidate_batch_max_automatic_candidates()
                 )
                 if not isinstance(records, list) or len(records) > candidate_limit:
                     raise RuntimeError(
                         "SAM candidate batch returned an invalid candidate count"
                     )
-                candidate_groups.append((records, expected[1]))
+                candidate_groups.append((records, candidate_limit))
             validated = [
                 _validate_sam_candidate_batch_records(
                     records,
-                    tuple(image.shape[:2]),
-                    kind,
+                    image_shape,
+                    candidate_limit,
                 )
-                for records, kind in candidate_groups
+                for records, candidate_limit in candidate_groups
             ]
             decoded = [
                 _decode_sam_candidate_batch_records(
                     records,
-                    tuple(image.shape[:2]),
+                    image_shape,
                 )
                 for records in validated
             ]

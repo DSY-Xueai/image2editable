@@ -93,12 +93,19 @@ _BATCH_SCHEMA_VERSION = 1
 _BATCH_MAX_OPERATIONS = 2
 _BATCH_MAX_REQUEST_BYTES = 64 * 1024
 _BATCH_MAX_INPUT_BYTES = 256 * 1024 * 1024
-_BATCH_MAX_PROPOSALS_BYTES = 16 * 1024 * 1024
-_BATCH_MAX_RESULT_BYTES = 512 * 1024 * 1024
-_BATCH_MAX_PROPOSALS = 16_384
-_BATCH_MAX_PROMPTED_CANDIDATES = 2 * _BATCH_MAX_PROPOSALS
-_BATCH_MAX_AUTOMATIC_CANDIDATES = 16 * 16 * 3
+# generate_object_proposals defaults plus GroundingDINO Tiny's num_queries.
+_BATCH_DINO_CROP_SIZE = 768
+_BATCH_DINO_OVERLAP = 128
+_BATCH_DINO_MAX_QUERIES = 900
+# create_sam_generator uses a 16x16 point grid and SAM2 defaults to 3 masks/point.
+_BATCH_SAM_POINTS_PER_SIDE = 16
+_BATCH_SAM_MASKS_PER_POINT = 3
+_BATCH_PROMPTED_MASKS_PER_PROPOSAL = 2
 _BATCH_MAX_STRING_LENGTH = 256
+_BATCH_JSON_ENVELOPE_BYTES = 4096
+_BATCH_JSON_RECORD_OVERHEAD_BYTES = 512
+# Python's default JSON integer conversion limit is 4300 decimal digits.
+_BATCH_JSON_NUMBER_BYTES = 4300
 _BATCH_CANDIDATE_FIELDS = {
     "mask",
     "mask_shape",
@@ -119,6 +126,105 @@ _BATCH_PROPOSAL_FIELDS = {
     "crop_box",
     "touches_crop_edge",
 }
+
+
+def _batch_image_shape(image_shape: tuple[int, int]) -> tuple[int, int]:
+    if (
+        not isinstance(image_shape, tuple)
+        or len(image_shape) != 2
+        or any(type(value) is not int or value <= 0 for value in image_shape)
+    ):
+        raise ValueError("SAM candidate batch image shape is invalid")
+    return image_shape
+
+
+def _batch_dino_axis_tiles(length: int) -> int:
+    crop = min(_BATCH_DINO_CROP_SIZE, length)
+    if length <= crop:
+        return 1
+    step = _BATCH_DINO_CROP_SIZE - _BATCH_DINO_OVERLAP
+    return (length - crop + step - 1) // step + 1
+
+
+def sam_candidate_batch_max_proposals(image_shape: tuple[int, int]) -> int:
+    height, width = _batch_image_shape(image_shape)
+    tiled_crops = _batch_dino_axis_tiles(height) * _batch_dino_axis_tiles(width)
+    crop_count = (
+        1
+        if height <= _BATCH_DINO_CROP_SIZE and width <= _BATCH_DINO_CROP_SIZE
+        else 1 + tiled_crops
+    )
+    return crop_count * _BATCH_DINO_MAX_QUERIES
+
+
+def sam_candidate_batch_max_prompted_candidates(proposal_count: int) -> int:
+    if type(proposal_count) is not int or proposal_count < 0:
+        raise ValueError("SAM candidate batch proposal count is invalid")
+    return proposal_count * _BATCH_PROMPTED_MASKS_PER_PROPOSAL
+
+
+def sam_candidate_batch_max_automatic_candidates() -> int:
+    return (
+        _BATCH_SAM_POINTS_PER_SIDE
+        * _BATCH_SAM_POINTS_PER_SIDE
+        * _BATCH_SAM_MASKS_PER_POINT
+    )
+
+
+def _batch_json_record_budget(
+    image_shape: tuple[int, int],
+    *,
+    string_fields: int,
+    number_fields: int,
+) -> int:
+    height, width = _batch_image_shape(image_shape)
+    number_bytes = max(
+        _BATCH_JSON_NUMBER_BYTES,
+        len(str(max(height, width))),
+    )
+    return (
+        _BATCH_JSON_RECORD_OVERHEAD_BYTES
+        + string_fields * _BATCH_MAX_STRING_LENGTH * 4
+        + number_fields * number_bytes
+    )
+
+
+def sam_candidate_batch_proposals_max_bytes(image_shape: tuple[int, int]) -> int:
+    record_bytes = _batch_json_record_budget(
+        image_shape,
+        string_fields=3,
+        number_fields=9,
+    )
+    return (
+        _BATCH_JSON_ENVELOPE_BYTES
+        + sam_candidate_batch_max_proposals(image_shape) * record_bytes
+    )
+
+
+def sam_candidate_batch_result_max_bytes(
+    image_shape: tuple[int, int],
+    proposal_count: int,
+) -> int:
+    height, width = _batch_image_shape(image_shape)
+    maximum_proposals = sam_candidate_batch_max_proposals(image_shape)
+    if (
+        type(proposal_count) is not int
+        or proposal_count < 0
+        or proposal_count > maximum_proposals
+    ):
+        raise ValueError("SAM candidate batch proposal count exceeds its limit")
+    packed_bytes = (height * width + 7) // 8
+    encoded_mask_bytes = ((packed_bytes + 2) // 3) * 4
+    record_bytes = encoded_mask_bytes + _batch_json_record_budget(
+        image_shape,
+        string_fields=3,
+        number_fields=11,
+    )
+    candidate_count = (
+        sam_candidate_batch_max_prompted_candidates(proposal_count)
+        + sam_candidate_batch_max_automatic_candidates()
+    )
+    return _BATCH_JSON_ENVELOPE_BYTES + candidate_count * record_bytes
 
 
 def _is_link_or_reparse(status: os.stat_result) -> bool:
@@ -146,7 +252,7 @@ def _validate_batch_directory_chain(directory: Path) -> os.stat_result:
     return status
 
 
-def _bind_batch_regular_file(path: Path, limit: int, label: str) -> dict:
+def _bind_batch_regular_file(path: Path, limit: int | None, label: str) -> dict:
     try:
         status = path.lstat()
     except OSError as exc:
@@ -155,7 +261,7 @@ def _bind_batch_regular_file(path: Path, limit: int, label: str) -> dict:
         _is_link_or_reparse(status)
         or not stat.S_ISREG(status.st_mode)
         or status.st_nlink != 1
-        or status.st_size > limit
+        or (limit is not None and status.st_size > limit)
     ):
         raise ValueError(f"{label} is unsafe or exceeds its size limit")
     return {
@@ -182,7 +288,10 @@ def _read_batch_bound_bytes(binding: dict) -> bytes:
         or (status.st_dev, status.st_ino) != binding["identity"]
         or status.st_size != binding["size"]
         or status.st_mtime_ns != binding["mtime_ns"]
-        or status.st_size > binding["limit"]
+        or (
+            binding["limit"] is not None
+            and status.st_size > binding["limit"]
+        )
     ):
         raise ValueError(f"{label} changed before it was read")
     flags = os.O_RDONLY
@@ -200,16 +309,19 @@ def _read_batch_bound_bytes(binding: dict) -> bytes:
             raise ValueError(f"{label} identity changed")
         chunks = []
         total = 0
+        limit = binding["limit"]
+        if limit is None:
+            raise ValueError(f"{label} size limit was not bound")
         while True:
             chunk = os.read(
                 descriptor,
-                min(1024 * 1024, binding["limit"] + 1 - total),
+                min(1024 * 1024, limit + 1 - total),
             )
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
-            if total > binding["limit"]:
+            if total > limit:
                 raise ValueError(f"{label} exceeds its size limit")
         stable = os.fstat(descriptor)
         if (
@@ -383,7 +495,7 @@ def _validate_batch_request(request_path: Path, result_path: Path) -> tuple[list
             )
             proposals_binding = _bind_batch_regular_file(
                 proposals_path,
-                _BATCH_MAX_PROPOSALS_BYTES,
+                None,
                 "SAM batch proposals",
             )
             validated_operation["text_mask_binding"] = text_mask_binding
@@ -391,6 +503,11 @@ def _validate_batch_request(request_path: Path, result_path: Path) -> tuple[list
             bound_inputs[text_mask_path] = text_mask_binding
             bound_inputs[proposals_path] = proposals_binding
         validated.append(validated_operation)
+    if (
+        validated[0]["image_binding"]["identity"]
+        != validated[1]["image_binding"]["identity"]
+    ):
+        raise ValueError("SAM batch operations must use the same image")
     if result_binding["path"] in bound_inputs:
         raise ValueError("SAM batch result must not alias a request input")
     return validated, result_binding
@@ -407,32 +524,38 @@ def _validate_batch_string(value, label: str, *, allow_empty: bool = False) -> s
     return value
 
 
-def _validate_batch_score(value, label: str) -> float:
-    if (
-        type(value) not in {int, float}
-        or not math.isfinite(value)
-        or not 0.0 <= value <= 1.0
-    ):
+def _validate_batch_finite_number(value, label: str):
+    if type(value) is int:
+        return value
+    try:
+        finite = math.isfinite(value)
+    except (TypeError, OverflowError):
+        finite = False
+    if type(value) is not float or not finite:
         raise ValueError(f"invalid {label}")
     return value
 
 
-def _validate_batch_box(
+def _validate_batch_probability(value, label: str):
+    value = _validate_batch_finite_number(value, label)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def _validate_batch_crop_box(
     value,
     label: str,
     image_shape: tuple[int, int],
     *,
     allow_none: bool,
-) -> tuple[float, float, float, float] | None:
+) -> tuple[int, int, int, int] | None:
     if value is None and allow_none:
         return None
     if (
         not isinstance(value, list)
         or len(value) != 4
-        or any(
-            type(coordinate) not in {int, float} or not math.isfinite(coordinate)
-            for coordinate in value
-        )
+        or any(type(coordinate) is not int for coordinate in value)
     ):
         raise ValueError(f"invalid {label}")
     x1, y1, x2, y2 = value
@@ -442,8 +565,37 @@ def _validate_batch_box(
     return tuple(value)
 
 
+def _validate_batch_intersecting_box(
+    value,
+    label: str,
+    image_shape: tuple[int, int],
+    *,
+    allow_none: bool,
+) -> tuple[float, float, float, float] | None:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError(f"invalid {label}")
+    coordinates = tuple(
+        _validate_batch_finite_number(coordinate, label) for coordinate in value
+    )
+    x1, y1, x2, y2 = coordinates
+    height, width = image_shape
+    if not (
+        x1 < x2
+        and y1 < y2
+        and x1 < width
+        and y1 < height
+        and x2 > 0
+        and y2 > 0
+    ):
+        raise ValueError(f"invalid {label}")
+    return coordinates
+
+
 def _validate_batch_proposals(records, image_shape: tuple[int, int]) -> list[dict]:
-    if not isinstance(records, list) or len(records) > _BATCH_MAX_PROPOSALS:
+    maximum = sam_candidate_batch_max_proposals(image_shape)
+    if not isinstance(records, list) or len(records) > maximum:
         raise ValueError("prompted proposal count exceeds its limit")
     validated = []
     for record in records:
@@ -453,13 +605,13 @@ def _validate_batch_proposals(records, image_shape: tuple[int, int]) -> list[dic
             raise ValueError("invalid prompted proposal crop-edge flag")
         validated.append(
             {
-                "box_xyxy": _validate_batch_box(
+                "box_xyxy": _validate_batch_intersecting_box(
                     record["box_xyxy"],
                     "prompted proposal box",
                     image_shape,
                     allow_none=False,
                 ),
-                "score": _validate_batch_score(
+                "score": _validate_batch_probability(
                     record["score"],
                     "prompted proposal score",
                 ),
@@ -475,7 +627,7 @@ def _validate_batch_proposals(records, image_shape: tuple[int, int]) -> list[dic
                     record["source"],
                     "prompted proposal source",
                 ),
-                "crop_box": _validate_batch_box(
+                "crop_box": _validate_batch_crop_box(
                     record["crop_box"],
                     "prompted proposal crop box",
                     image_shape,
@@ -507,8 +659,14 @@ def _load_batch_inputs(operations: list[dict]) -> None:
                 text_mask = np.asarray(stored_mask.convert("L")).copy()
             if text_mask.shape != operation["image"].shape[:2]:
                 raise ValueError("prompted text mask shape does not match the image")
+            proposal_binding = operation["proposals_binding"]
+            proposal_binding["limit"] = sam_candidate_batch_proposals_max_bytes(
+                tuple(operation["image"].shape[:2])
+            )
+            if proposal_binding["size"] > proposal_binding["limit"]:
+                raise ValueError("SAM batch proposals exceed their size limit")
             proposal_records = _validate_batch_proposals(
-                _read_batch_bound_json(operation["proposals_binding"]),
+                _read_batch_bound_json(proposal_binding),
                 tuple(operation["image"].shape[:2]),
             )
             operation["text_mask"] = text_mask
@@ -549,9 +707,11 @@ def _validate_batch_output(payload: dict, operations: list[dict]) -> None:
         if not isinstance(records, list):
             raise RuntimeError("invalid SAM batch candidate records")
         candidate_limit = (
-            _BATCH_MAX_PROMPTED_CANDIDATES
+            sam_candidate_batch_max_prompted_candidates(
+                len(expected.get("proposal_records", []))
+            )
             if expected["kind"] == "prompted"
-            else _BATCH_MAX_AUTOMATIC_CANDIDATES
+            else sam_candidate_batch_max_automatic_candidates()
         )
         if len(records) > candidate_limit:
             raise RuntimeError("SAM batch candidate count exceeds its limit")
@@ -584,12 +744,15 @@ def _validate_batch_output(payload: dict, operations: list[dict]) -> None:
             if len(packed) != expected_bytes:
                 raise RuntimeError("invalid SAM batch candidate mask length")
             try:
-                _validate_batch_score(record["score"], "SAM batch candidate score")
+                _validate_batch_finite_number(
+                    record["score"],
+                    "SAM batch candidate score",
+                )
                 _validate_batch_string(
                     record["source"],
                     "SAM batch candidate source",
                 )
-                _validate_batch_box(
+                _validate_batch_crop_box(
                     record["crop_box"],
                     "SAM batch candidate crop box",
                     expected_shape,
@@ -605,7 +768,7 @@ def _validate_batch_output(payload: dict, operations: list[dict]) -> None:
                     "SAM batch candidate role",
                     allow_empty=True,
                 )
-                _validate_batch_box(
+                _validate_batch_intersecting_box(
                     record["object_box"],
                     "SAM batch candidate object box",
                     expected_shape,
@@ -623,9 +786,11 @@ def _write_batch_result(
     operations: list[dict],
 ) -> None:
     _validate_batch_output(payload, operations)
-    payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    if len(payload_bytes) > _BATCH_MAX_RESULT_BYTES:
-        raise RuntimeError("SAM batch result exceeds its size limit")
+    prompted = operations[0]
+    result_limit = sam_candidate_batch_result_max_bytes(
+        tuple(prompted["image"].shape[:2]),
+        len(prompted.get("proposal_records", [])),
+    )
     result_path = result_binding["path"]
     _verify_batch_result_binding(result_binding)
     file_descriptor, temporary_name = tempfile.mkstemp(
@@ -636,8 +801,15 @@ def _write_batch_result(
     temporary_path = Path(temporary_name)
     try:
         descriptor_identity = None
+        written = 0
+        encoder = json.JSONEncoder(ensure_ascii=False)
         with os.fdopen(file_descriptor, "wb") as temporary_file:
-            temporary_file.write(payload_bytes)
+            for chunk in encoder.iterencode(payload):
+                encoded = chunk.encode("utf-8")
+                written += len(encoded)
+                if written > result_limit:
+                    raise RuntimeError("SAM batch result exceeds its size limit")
+                temporary_file.write(encoded)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
             descriptor_stat = os.fstat(temporary_file.fileno())
@@ -646,8 +818,8 @@ def _write_batch_result(
                 not stat.S_ISREG(path_stat.st_mode)
                 or (descriptor_stat.st_dev, descriptor_stat.st_ino)
                 != (path_stat.st_dev, path_stat.st_ino)
-                or descriptor_stat.st_size != len(payload_bytes)
-                or path_stat.st_size != len(payload_bytes)
+                or descriptor_stat.st_size != written
+                or path_stat.st_size != written
             ):
                 raise RuntimeError("SAM batch result temp identity changed")
             descriptor_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
@@ -656,7 +828,7 @@ def _write_batch_result(
             _is_link_or_reparse(closed_stat)
             or not stat.S_ISREG(closed_stat.st_mode)
             or (closed_stat.st_dev, closed_stat.st_ino) != descriptor_identity
-            or closed_stat.st_size != len(payload_bytes)
+            or closed_stat.st_size != written
         ):
             raise RuntimeError("SAM batch result temp identity changed")
         _verify_batch_result_binding(result_binding)
@@ -733,6 +905,15 @@ def _run_candidate_batch(request_path: Path, result_path: Path) -> int:
                 include_geometry=False,
                 min_score=0.90,
             )
+        candidate_limit = (
+            sam_candidate_batch_max_prompted_candidates(
+                len(operation.get("proposal_records", []))
+            )
+            if operation["kind"] == "prompted"
+            else sam_candidate_batch_max_automatic_candidates()
+        )
+        if not isinstance(candidates, list) or len(candidates) > candidate_limit:
+            raise RuntimeError("SAM batch generated candidate count exceeds its limit")
         output_operations.append(
             {
                 "id": operation["id"],
@@ -829,7 +1010,7 @@ def main() -> int:
             raise ValueError("batch mode requires request")
         return _run_candidate_batch(Path(args.request), Path(args.result))
     if not args.image:
-        raise ValueError(f"{args.mode} mode requires image")
+        parser.error(f"{args.mode} mode requires image")
 
     (
         proposal_type,

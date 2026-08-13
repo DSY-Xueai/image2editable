@@ -1058,7 +1058,7 @@ def test_candidate_batch_main_matches_legacy_candidate_records(
         return [
             image_to_ppt.MaskCandidate(
                 prompted_mask.copy(),
-                0.89,
+                -0.25,
                 "grounded:full:object",
                 (0, 0, 8, 6),
                 True,
@@ -1148,9 +1148,10 @@ def test_candidate_batch_legacy_main_still_requires_image(
         ],
     )
 
-    with pytest.raises(ValueError, match="automatic mode requires image"):
+    with pytest.raises(SystemExit) as error:
         sam_worker.main()
 
+    assert error.value.code == 2
     assert loads == []
 
 
@@ -1235,6 +1236,8 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
         ("touches_crop_edge", 1),
         ("label", "bad\nlabel"),
         ("source", "bad\u202esource"),
+        ("score", True),
+        ("object_box", [9.0, 1.0, 12.0, 4.0]),
     ],
 )
 def test_candidate_batch_caller_rejects_invalid_candidate_metadata(
@@ -1261,6 +1264,42 @@ def test_candidate_batch_caller_rejects_invalid_candidate_metadata(
             [],
             tmp_path,
         )
+
+
+def test_candidate_batch_caller_accepts_negative_finite_sam_score(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    record = _candidate_batch_record()
+    record["score"] = -0.25
+    record["object_box"] = [-2.5, -1.0, 5.0, 4.0]
+    payload = _candidate_batch_payload(prompted=[record])
+
+    def fake_run(command, **kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+    proposal = image_to_ppt.ObjectProposal(
+        box_xyxy=(1.0, 1.0, 7.0, 5.0),
+        score=0.91,
+        label="badge",
+        role="object",
+        source="full",
+        crop_box=(0, 0, 8, 6),
+    )
+
+    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
+        image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+        image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+        [proposal],
+        tmp_path,
+    )
+
+    assert [candidate.score for candidate in prompted] == [-0.25]
+    assert prompted[0].object_box == (-2.5, -1.0, 5.0, 4.0)
+    assert automatic == []
 
 
 def test_candidate_batch_caller_validates_all_records_before_constructing_any(
@@ -1305,6 +1344,7 @@ def test_candidate_batch_caller_validates_all_records_before_constructing_any(
         ("crop_box", "0,0,8,6"),
         ("touches_crop_edge", 1),
         ("source", "bad\u202esource"),
+        ("score", True),
     ],
 )
 def test_candidate_batch_worker_rejects_invalid_proposal_before_loading_model(
@@ -1330,6 +1370,49 @@ def test_candidate_batch_worker_rejects_invalid_proposal_before_loading_model(
     assert loads == []
 
 
+def test_candidate_batch_worker_accepts_intersecting_out_of_bounds_dino_box() -> None:
+    record = {
+        "box_xyxy": [-2.5, -1.0, 5.0, 4.0],
+        "score": 0.91,
+        "label": "badge",
+        "role": "object",
+        "source": "full",
+        "crop_box": [0, 0, 8, 6],
+        "touches_crop_edge": False,
+    }
+
+    validated = sam_worker._validate_batch_proposals([record], (6, 8))
+
+    assert validated[0]["box_xyxy"] == (-2.5, -1.0, 5.0, 4.0)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("box_xyxy", [9.0, 1.0, 12.0, 4.0]),
+        ("box_xyxy", [0.0, 1.0, float("inf"), 4.0]),
+        ("crop_box", [0.0, 0, 8, 6]),
+    ],
+)
+def test_candidate_batch_worker_rejects_invalid_box_domains(
+    field: str,
+    value,
+) -> None:
+    record = {
+        "box_xyxy": [1.0, 1.0, 7.0, 5.0],
+        "score": 0.91,
+        "label": "badge",
+        "role": "object",
+        "source": "full",
+        "crop_box": [0, 0, 8, 6],
+        "touches_crop_edge": False,
+    }
+    record[field] = value
+
+    with pytest.raises(ValueError):
+        sam_worker._validate_batch_proposals([record], (6, 8))
+
+
 @pytest.mark.parametrize(
     "operation_change",
     ["missing", "extra", "reordered"],
@@ -1353,6 +1436,29 @@ def test_candidate_batch_worker_requires_exact_candidate_operations(
     monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
 
     with pytest.raises(ValueError):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert loads == []
+
+
+def test_candidate_batch_worker_requires_one_shared_image_before_loading_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    other_image = fixture["root"] / "other-image.png"
+    Image.new("RGB", (16, 12), "black").save(other_image)
+    request = json.loads(fixture["request"].read_text(encoding="utf-8"))
+    request["operations"][1]["image"] = other_image.name
+    fixture["request"].write_text(json.dumps(request), encoding="utf-8")
+    loads = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
+
+    with pytest.raises(ValueError, match="same image"):
         _run_candidate_batch_worker_main(
             monkeypatch,
             fixture["request"],
@@ -1398,9 +1504,8 @@ def test_candidate_batch_worker_bounds_proposals_before_loading_model(
     )
     monkeypatch.setattr(
         sam_worker,
-        "_BATCH_MAX_PROPOSALS",
-        1,
-        raising=False,
+        "sam_candidate_batch_max_proposals",
+        lambda image_shape: 1,
     )
     loads = []
     monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
@@ -1416,24 +1521,28 @@ def test_candidate_batch_worker_bounds_proposals_before_loading_model(
 
 
 @pytest.mark.parametrize(
-    ("fixture_name", "limit_name"),
+    ("fixture_name", "limit_kind"),
     [
-        ("image", "_BATCH_MAX_INPUT_BYTES"),
-        ("proposals", "_BATCH_MAX_PROPOSALS_BYTES"),
+        ("image", "image"),
+        ("proposals", "proposals"),
     ],
 )
 def test_candidate_batch_worker_bounds_input_files_before_loading_model(
     tmp_path: Path,
     monkeypatch,
     fixture_name: str,
-    limit_name: str,
+    limit_kind: str,
 ) -> None:
     fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
-    monkeypatch.setattr(
-        sam_worker,
-        limit_name,
-        fixture[fixture_name].stat().st_size - 1,
-    )
+    limit = fixture[fixture_name].stat().st_size - 1
+    if limit_kind == "image":
+        monkeypatch.setattr(sam_worker, "_BATCH_MAX_INPUT_BYTES", limit)
+    else:
+        monkeypatch.setattr(
+            sam_worker,
+            "sam_candidate_batch_proposals_max_bytes",
+            lambda image_shape: limit,
+        )
     loads = []
     monkeypatch.setattr(sam_worker, "_load_tools", lambda: loads.append("load"))
 
@@ -1460,9 +1569,8 @@ def test_candidate_batch_worker_bounds_candidates_before_decoding_masks(
     )
     monkeypatch.setattr(
         sam_worker,
-        "_BATCH_MAX_AUTOMATIC_CANDIDATES",
-        1,
-        raising=False,
+        "sam_candidate_batch_max_automatic_candidates",
+        lambda: 1,
     )
     decode_calls = []
     monkeypatch.setattr(
@@ -1477,6 +1585,42 @@ def test_candidate_batch_worker_bounds_candidates_before_decoding_masks(
     assert decode_calls == []
 
 
+def test_candidate_batch_worker_rejects_generated_candidate_overflow_before_encoding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
+    candidate = object()
+    maximum = sam_worker.sam_candidate_batch_max_automatic_candidates()
+    monkeypatch.setattr(
+        sam_worker,
+        "_load_tools",
+        lambda: (
+            image_to_ppt.ObjectProposal,
+            lambda *args, **kwargs: object(),
+            lambda *args, **kwargs: [candidate] * (maximum + 1),
+            lambda *args, **kwargs: [],
+            lambda: Path("sam2.1-large.pt"),
+            visual_segment.VisualElement,
+            lambda *args: None,
+        ),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_candidate_record",
+        lambda candidate: pytest.fail("overflow candidates must not be encoded"),
+    )
+
+    with pytest.raises(RuntimeError, match="candidate count"):
+        _run_candidate_batch_worker_main(
+            monkeypatch,
+            fixture["request"],
+            fixture["root"] / "result.json",
+        )
+
+    assert not (fixture["root"] / "result.json").exists()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -1485,6 +1629,8 @@ def test_candidate_batch_worker_bounds_candidates_before_decoding_masks(
         ("crop_box", "0,0,8,6"),
         ("touches_crop_edge", 1),
         ("source", "bad\u202esource"),
+        ("score", True),
+        ("object_box", [9.0, 1.0, 12.0, 4.0]),
     ],
 )
 def test_candidate_batch_worker_rejects_invalid_candidate_metadata(
@@ -1516,8 +1662,8 @@ def test_candidate_batch_caller_bounds_candidates_before_decoding_masks(
     )
     monkeypatch.setattr(
         image_to_ppt,
-        "_SAM_CANDIDATE_BATCH_MAX_AUTOMATIC_CANDIDATES",
-        1,
+        "sam_candidate_batch_max_automatic_candidates",
+        lambda: 1,
     )
     decode_calls = []
 
@@ -1551,9 +1697,8 @@ def test_candidate_batch_caller_bounds_result_before_parsing(
     payload_bytes = json.dumps(_candidate_batch_payload()).encode("utf-8")
     monkeypatch.setattr(
         image_to_ppt,
-        "_SAM_CANDIDATE_BATCH_MAX_RESULT_BYTES",
-        len(payload_bytes) - 1,
-        raising=False,
+        "sam_candidate_batch_result_max_bytes",
+        lambda image_shape, proposal_count: len(payload_bytes) - 1,
     )
 
     def fake_run(command, **kwargs):
@@ -1605,13 +1750,71 @@ def test_candidate_batch_caller_rejects_oversized_mask_before_decoding(
 
 
 def test_candidate_batch_limits_cover_current_sam_generation_bounds() -> None:
-    assert sam_worker._BATCH_MAX_OPERATIONS == 2
-    assert sam_worker._BATCH_MAX_AUTOMATIC_CANDIDATES >= 16 * 16 * 3
-    assert sam_worker._BATCH_MAX_PROPOSALS >= 16_384
+    image_shape = (4096, 4096)
+    assert sam_worker.sam_candidate_batch_max_proposals(image_shape) == 50 * 900
+    assert sam_worker.sam_candidate_batch_max_automatic_candidates() == 16 * 16 * 3
     assert (
-        sam_worker._BATCH_MAX_PROMPTED_CANDIDATES
-        >= 2 * sam_worker._BATCH_MAX_PROPOSALS
+        sam_worker.sam_candidate_batch_max_prompted_candidates(50 * 900)
+        == 2 * 50 * 900
     )
+
+
+def test_candidate_batch_multitile_proposal_boundary_is_dynamic() -> None:
+    image_shape = (4096, 4096)
+    maximum = sam_worker.sam_candidate_batch_max_proposals(image_shape)
+    record = {
+        "box_xyxy": [1.0, 1.0, 7.0, 5.0],
+        "score": 0.91,
+        "label": "badge",
+        "role": "object",
+        "source": "full",
+        "crop_box": [0, 0, 4096, 4096],
+        "touches_crop_edge": False,
+    }
+
+    assert len(
+        sam_worker._validate_batch_proposals([record] * maximum, image_shape)
+    ) == maximum
+    with pytest.raises(ValueError, match="proposal count"):
+        sam_worker._validate_batch_proposals(
+            [record] * (maximum + 1),
+            image_shape,
+        )
+
+
+def test_candidate_batch_4k_result_budget_covers_exact_automatic_masks() -> None:
+    image_shape = (2160, 3840)
+    packed_bytes = (image_shape[0] * image_shape[1] + 7) // 8
+    encoded_bytes = ((packed_bytes + 2) // 3) * 4
+    metadata_record = _candidate_batch_record((1, 8))
+    metadata_record["mask"] = ""
+    metadata_record["score"] = -(10**4299)
+    metadata_record["source"] = "😀" * 256
+    metadata_record["label"] = "😀" * 256
+    metadata_record["role"] = "😀" * 256
+    metadata_record["object_box"] = [-(10**4299), -1, 8, 1]
+    metadata_bytes = len(
+        json.dumps(metadata_record, ensure_ascii=False).encode("utf-8")
+    )
+    automatic_count = 16 * 16 * 3
+    minimum = automatic_count * (encoded_bytes + metadata_bytes)
+
+    automatic_budget = sam_worker.sam_candidate_batch_result_max_bytes(
+        image_shape,
+        proposal_count=0,
+    )
+    maximum_proposals = sam_worker.sam_candidate_batch_max_proposals(image_shape)
+    worker_budget = sam_worker.sam_candidate_batch_result_max_bytes(
+        image_shape,
+        proposal_count=maximum_proposals,
+    )
+    caller_budget = image_to_ppt.sam_candidate_batch_result_max_bytes(
+        image_shape,
+        proposal_count=maximum_proposals,
+    )
+    assert automatic_budget >= minimum
+    assert caller_budget == worker_budget
+    assert worker_budget > 1024**3
 
 
 @pytest.mark.parametrize(
@@ -1930,6 +2133,11 @@ def test_candidate_batch_worker_uses_exclusive_random_result_temp(
         return actual_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
 
     monkeypatch.setattr(sam_worker.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(
+        sam_worker.json,
+        "dumps",
+        lambda *args, **kwargs: pytest.fail("batch writer must stream JSON"),
+    )
 
     sam_worker._write_batch_result(result_binding, payload, operations)
 
