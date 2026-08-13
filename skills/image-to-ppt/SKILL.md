@@ -13,8 +13,10 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 - 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
 - 安装 `simple-lama-inpainting==0.1.2`。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，wrapper 首次运行可把模型下载到本地 cache。
 - 开始转换前运行 `image2editable doctor`。若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。** 我确认后安装所选项、再次运行 `doctor`，通过后继续转换。
-- 优先使用 Linux/WSL；SAM 官方建议 Windows 用户使用 WSL。
-- 自动使用可用的 CUDA；CPU 也受支持，但推理较慢。
+- 优先使用当前平台已正确安装、且通过 `doctor` 与设备预检的硬件加速环境，不要仅为 WSL 建议离开已经可用的环境。
+- Windows/Linux 沿用 PyTorch 的设备接口：PyTorch 报告 CUDA 可用时使用 CUDA，ROCm 环境使用 PyTorch 提供的兼容设备接口。
+- macOS 保持当前受支持的设备选择；在完成真实 Apple Silicon 回归前，不把 MPS 自动设为新默认。
+- CPU 仍运行完整模型和相同质量门禁，包括 SAM 2.1 large，不替换为轻量分割模型，但推理会显著较慢。
 
 首次运行时把 Grounding DINO tiny、SAM 2.1 large 和默认 LaMa 模型下载到用户本地 cache。源码和权重不存放在此 skill 中。大/深遮罩需要 LaMa；依赖缺失或初始化失败时明确失败，不降级到容易产生条带拖影的 OpenCV 修复。
 

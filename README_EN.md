@@ -49,6 +49,12 @@ After conversion, you can edit recovered text, move separated visual elements, a
 
 ## Quick start
 
+### Runtime environment
+
+Prefer a correctly installed hardware-accelerated environment on the current platform that passes `doctor` and the device preflight; do not leave an already working environment solely because of a WSL recommendation. Windows and Linux use the existing PyTorch device interface: CUDA is used when PyTorch reports it as available, while ROCm uses PyTorch's compatible device interface. macOS keeps the current supported device selection; MPS will not become a new automatic default until real Apple Silicon regression testing is complete.
+
+CPU still runs the full model and the same quality gates, including SAM 2.1 Large; it does not switch to a lightweight segmentation model, but it is significantly slower than a working hardware-accelerated environment. Runtime depends on the platform, environment, and input complexity, so the project does not promise results for a specific GPU model or a uniform speedup factor.
+
 ### Install with the **skills CLI**
 
 ```bash

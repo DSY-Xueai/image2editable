@@ -49,6 +49,12 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 
 ## 快速上手
 
+### 运行环境
+
+优先使用当前平台已经正确安装、且通过 `doctor` 与设备预检的硬件加速环境；不要仅为 WSL 建议离开已经可用的环境。Windows/Linux 沿用 PyTorch 的设备接口：PyTorch 报告 CUDA 可用时使用 CUDA，ROCm 环境使用 PyTorch 提供的兼容设备接口。macOS 保持当前受支持的设备选择；在完成真实 Apple Silicon 回归前，不把 MPS 自动设为新默认。
+
+CPU 仍运行完整模型和相同质量门禁，包括 SAM 2.1 Large，不替换为轻量分割模型，但会显著慢于可用的硬件加速环境。实际耗时取决于平台、运行环境和输入复杂度，项目不对特定 GPU 型号或统一加速倍数作承诺。
+
 ### 通过 **使用 skills CLI** 安装
 
 ```bash
