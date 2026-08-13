@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import secrets
 import stat
 import sys
 import tempfile
@@ -425,6 +426,8 @@ def _validate_batch_request(request_path: Path, result_path: Path) -> tuple[list
         "parent": root,
         "parent_identity": (root_status.st_dev, root_status.st_ino),
     }
+    if sys.platform == "win32":
+        result_binding["parent_handle_identity"] = _windows_path_identity(root)
 
     request = _read_batch_bound_json(request_binding)
     if not isinstance(request, dict) or set(request) != {
@@ -780,6 +783,371 @@ def _validate_batch_output(payload: dict, operations: list[dict]) -> None:
                 raise RuntimeError("invalid SAM batch candidate crop-edge flag")
 
 
+def _windows_handle_identity(handle) -> tuple[int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileTime(ctypes.Structure):
+        _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", FileTime),
+            ("access_time", FileTime),
+            ("write_time", FileTime),
+            ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD),
+            ("index_low", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(FileInformation),
+    ]
+    kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
+    information = FileInformation()
+    if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
+        raise RuntimeError("SAM batch result directory changed")
+    return (
+        information.volume_serial,
+        (information.index_high << 32) | information.index_low,
+    )
+
+
+def _open_windows_directory_handle(parent: Path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(
+        str(parent),
+        0x80000000,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x02000000,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise RuntimeError("SAM batch result directory changed")
+    return handle
+
+
+def _windows_path_identity(parent: Path) -> tuple[int, int]:
+    handle = _open_windows_directory_handle(parent)
+    try:
+        return _windows_handle_identity(handle)
+    finally:
+        _close_batch_result_parent(handle)
+
+
+def _open_batch_result_parent(result_binding: dict):
+    parent = result_binding["parent"]
+    if sys.platform == "win32":
+        handle = _open_windows_directory_handle(parent)
+        try:
+            actual = _windows_handle_identity(handle)
+        except Exception:
+            _close_batch_result_parent(handle)
+            raise
+        expected = result_binding.get("parent_handle_identity")
+        if expected is not None:
+            matches = actual == expected
+        else:
+            matches = actual[1] == result_binding["parent_identity"][1]
+        if not matches:
+            _close_batch_result_parent(handle)
+            raise RuntimeError("SAM batch result directory changed")
+        return handle
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(parent, flags)
+    except OSError as exc:
+        raise RuntimeError("SAM batch result directory changed") from exc
+    status = os.fstat(descriptor)
+    if (status.st_dev, status.st_ino) != result_binding["parent_identity"]:
+        os.close(descriptor)
+        raise RuntimeError("SAM batch result directory changed")
+    return descriptor
+
+
+def _close_batch_result_parent(parent_handle) -> None:
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.WinDLL("kernel32").CloseHandle(parent_handle)
+    else:
+        os.close(parent_handle)
+
+
+def _create_batch_result_file(result_binding: dict, parent_handle):
+    result_path = result_binding["path"]
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        invalid_handle = ctypes.c_void_p(-1).value
+        for _ in range(16):
+            temporary_path = result_path.with_name(
+                f".{result_path.name}.{secrets.token_hex(16)}.tmp"
+            )
+            handle = kernel32.CreateFileW(
+                str(temporary_path),
+                0x80000000 | 0x40000000 | 0x00010000,
+                0x00000001 | 0x00000004,
+                None,
+                1,
+                0x00000080,
+                None,
+            )
+            if handle != invalid_handle:
+                try:
+                    descriptor = msvcrt.open_osfhandle(
+                        handle,
+                        os.O_RDWR | getattr(os, "O_BINARY", 0),
+                    )
+                except Exception:
+                    kernel32.CloseHandle(handle)
+                    raise
+                return descriptor, temporary_path, False
+            if ctypes.get_last_error() not in {80, 183}:
+                break
+        raise RuntimeError("SAM batch result temp could not be created")
+
+    if sys.platform.startswith("linux") and hasattr(os, "O_TMPFILE"):
+        try:
+            descriptor = os.open(
+                ".",
+                os.O_RDWR | os.O_TMPFILE,
+                0o600,
+                dir_fd=parent_handle,
+            )
+            return descriptor, None, False
+        except OSError:
+            pass
+    try:
+        descriptor = os.open(
+            result_path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=parent_handle,
+        )
+    except FileExistsError as exc:
+        raise RuntimeError("SAM batch result path already exists") from exc
+    except OSError as exc:
+        raise RuntimeError("SAM batch result could not be created") from exc
+    return descriptor, result_path, True
+
+
+def _publish_windows_batch_result(
+    file_descriptor: int,
+    parent_handle,
+    result_name: str,
+) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [
+            ("status", ctypes.c_void_p),
+            ("information", ctypes.c_size_t),
+        ]
+
+    class FileRenameInformation(ctypes.Structure):
+        _fields_ = [
+            ("replace_if_exists", ctypes.c_ubyte),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.ULONG),
+            ("file_name", wintypes.WCHAR * 1),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtSetInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    encoded_name = result_name.encode("utf-16-le")
+    file_name_offset = FileRenameInformation.file_name.offset
+    information = ctypes.create_string_buffer(
+        file_name_offset + len(encoded_name) + 2
+    )
+    header = FileRenameInformation.from_buffer(information)
+    header.replace_if_exists = 0
+    header.root_directory = parent_handle
+    header.file_name_length = len(encoded_name)
+    ctypes.memmove(
+        ctypes.addressof(information) + file_name_offset,
+        encoded_name,
+        len(encoded_name),
+    )
+    io_status = IoStatusBlock()
+    status = ntdll.NtSetInformationFile(
+        msvcrt.get_osfhandle(file_descriptor),
+        ctypes.byref(io_status),
+        information,
+        len(information),
+        10,
+    )
+    if status == 0:
+        return
+    if status & 0xFFFFFFFF == 0xC0000035:
+        raise RuntimeError("SAM batch result path already exists")
+    raise RuntimeError("SAM batch result could not be published")
+
+
+def _delete_windows_batch_result(file_descriptor: int) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [
+            ("status", ctypes.c_void_p),
+            ("information", ctypes.c_size_t),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtSetInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    delete_file = ctypes.c_ubyte(1)
+    io_status = IoStatusBlock()
+    status = ntdll.NtSetInformationFile(
+        msvcrt.get_osfhandle(file_descriptor),
+        ctypes.byref(io_status),
+        ctypes.byref(delete_file),
+        1,
+        13,
+    )
+    if status != 0:
+        raise RuntimeError("SAM batch result could not be cleaned")
+
+
+def _publish_batch_result(
+    file_descriptor: int,
+    parent_handle,
+    result_binding: dict,
+) -> None:
+    result_name = result_binding["path"].name
+    if sys.platform == "win32":
+        _publish_windows_batch_result(file_descriptor, parent_handle, result_name)
+        return
+    import errno
+
+    error = _linkat_batch_result(
+        file_descriptor,
+        b"",
+        parent_handle,
+        os.fsencode(result_name),
+        0x1000,
+    )
+    if error in {errno.ENOENT, errno.EPERM} and sys.platform.startswith("linux"):
+        error = _linkat_batch_result(
+            -100,
+            os.fsencode(f"/proc/self/fd/{file_descriptor}"),
+            parent_handle,
+            os.fsencode(result_name),
+            0x400,
+        )
+    if error == 0:
+        return
+    if error == errno.EEXIST:
+        raise RuntimeError("SAM batch result path already exists")
+    raise RuntimeError("SAM batch result could not be published")
+
+
+def _linkat_batch_result(
+    old_fd: int,
+    old_path: bytes,
+    new_fd: int,
+    new_path: bytes,
+    flags: int,
+) -> int:
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    linkat = libc.linkat
+    linkat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    linkat.restype = ctypes.c_int
+    if linkat(old_fd, old_path, new_fd, new_path, flags) == 0:
+        return 0
+    return ctypes.get_errno()
+
+
+def _bound_result_status(result_binding: dict, parent_handle):
+    if sys.platform == "win32":
+        return os.stat(result_binding["path"], follow_symlinks=False)
+    return os.stat(
+        result_binding["path"].name,
+        dir_fd=parent_handle,
+        follow_symlinks=False,
+    )
+
+
+def _unlink_owned_posix_result(
+    result_binding: dict,
+    parent_handle,
+    descriptor_identity: tuple[int, int] | None,
+) -> None:
+    if descriptor_identity is None:
+        return
+    try:
+        status = _bound_result_status(result_binding, parent_handle)
+    except OSError:
+        return
+    if (
+        stat.S_ISREG(status.st_mode)
+        and (status.st_dev, status.st_ino) == descriptor_identity
+    ):
+        try:
+            os.unlink(result_binding["path"].name, dir_fd=parent_handle)
+        except OSError:
+            pass
+
+
 def _write_batch_result(
     result_binding: dict,
     payload: dict,
@@ -791,19 +1159,24 @@ def _write_batch_result(
         tuple(prompted["image"].shape[:2]),
         len(prompted.get("proposal_records", [])),
     )
-    result_path = result_binding["path"]
     _verify_batch_result_binding(result_binding)
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{result_path.name}.",
-        suffix=".tmp",
-        dir=result_path.parent,
-    )
-    temporary_path = Path(temporary_name)
+    parent_handle = _open_batch_result_parent(result_binding)
+    file_descriptor = None
+    descriptor_identity = None
+    published = False
+    completed = False
     try:
-        descriptor_identity = None
+        file_descriptor, _, published = _create_batch_result_file(
+            result_binding,
+            parent_handle,
+        )
+        opened_status = os.fstat(file_descriptor)
+        if not stat.S_ISREG(opened_status.st_mode):
+            raise RuntimeError("SAM batch result temp is not a regular file")
+        descriptor_identity = (opened_status.st_dev, opened_status.st_ino)
         written = 0
         encoder = json.JSONEncoder(ensure_ascii=False)
-        with os.fdopen(file_descriptor, "wb") as temporary_file:
+        with os.fdopen(file_descriptor, "wb", closefd=False) as temporary_file:
             for chunk in encoder.iterencode(payload):
                 encoded = chunk.encode("utf-8")
                 written += len(encoded)
@@ -812,37 +1185,77 @@ def _write_batch_result(
                 temporary_file.write(encoded)
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
-            descriptor_stat = os.fstat(temporary_file.fileno())
-            path_stat = os.stat(temporary_path, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(path_stat.st_mode)
-                or (descriptor_stat.st_dev, descriptor_stat.st_ino)
-                != (path_stat.st_dev, path_stat.st_ino)
-                or descriptor_stat.st_size != written
-                or path_stat.st_size != written
-            ):
-                raise RuntimeError("SAM batch result temp identity changed")
-            descriptor_identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
-        closed_stat = os.stat(temporary_path, follow_symlinks=False)
+        descriptor_status = os.fstat(file_descriptor)
         if (
-            _is_link_or_reparse(closed_stat)
-            or not stat.S_ISREG(closed_stat.st_mode)
-            or (closed_stat.st_dev, closed_stat.st_ino) != descriptor_identity
-            or closed_stat.st_size != written
+            not stat.S_ISREG(descriptor_status.st_mode)
+            or descriptor_status.st_size != written
         ):
             raise RuntimeError("SAM batch result temp identity changed")
-        _verify_batch_result_binding(result_binding)
-        try:
-            os.link(temporary_path, result_path)
-        except FileExistsError as exc:
-            raise RuntimeError("SAM batch result path already exists") from exc
-        except OSError as exc:
-            raise RuntimeError("SAM batch result could not be published") from exc
+        final_identity = (
+            descriptor_status.st_dev,
+            descriptor_status.st_ino,
+        )
+        if final_identity != descriptor_identity:
+            raise RuntimeError("SAM batch result temp identity changed")
+        if not published:
+            _verify_batch_result_binding(result_binding)
+            _publish_batch_result(file_descriptor, parent_handle, result_binding)
+            published = True
+        _verify_batch_result_parent(result_binding)
+        result_status = _bound_result_status(result_binding, parent_handle)
+        if (
+            _is_link_or_reparse(result_status)
+            or not stat.S_ISREG(result_status.st_mode)
+            or (result_status.st_dev, result_status.st_ino) != descriptor_identity
+            or result_status.st_size != written
+        ):
+            raise RuntimeError("SAM batch result identity changed")
+        completed = True
     finally:
-        temporary_path.unlink(missing_ok=True)
+        delete_windows_file = False
+        try:
+            if file_descriptor is not None and not completed:
+                if sys.platform == "win32":
+                    _delete_windows_batch_result(file_descriptor)
+                elif published:
+                    delete_windows_file = os.name == "nt"
+                    if not delete_windows_file:
+                        _unlink_owned_posix_result(
+                            result_binding,
+                            parent_handle,
+                            descriptor_identity,
+                        )
+        finally:
+            try:
+                if file_descriptor is not None:
+                    os.close(file_descriptor)
+                if delete_windows_file:
+                    try:
+                        status = result_binding["path"].lstat()
+                        if (
+                            stat.S_ISREG(status.st_mode)
+                            and (status.st_dev, status.st_ino)
+                            == descriptor_identity
+                        ):
+                            result_binding["path"].unlink()
+                    except OSError:
+                        pass
+            finally:
+                _close_batch_result_parent(parent_handle)
 
 
 def _verify_batch_result_binding(result_binding: dict) -> None:
+    _verify_batch_result_parent(result_binding)
+    try:
+        result_binding["path"].lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError("SAM batch result path changed") from exc
+    raise RuntimeError("SAM batch result path already exists")
+
+
+def _verify_batch_result_parent(result_binding: dict) -> None:
     parent = result_binding["parent"]
     try:
         parent_status = parent.lstat()
@@ -855,13 +1268,6 @@ def _verify_batch_result_binding(result_binding: dict) -> None:
         != result_binding["parent_identity"]
     ):
         raise RuntimeError("SAM batch result directory changed")
-    try:
-        result_binding["path"].lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise RuntimeError("SAM batch result path changed") from exc
-    raise RuntimeError("SAM batch result path already exists")
 
 
 def _run_candidate_batch(request_path: Path, result_path: Path) -> int:

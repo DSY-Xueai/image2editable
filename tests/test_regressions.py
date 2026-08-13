@@ -2125,24 +2125,386 @@ def test_candidate_batch_worker_uses_exclusive_random_result_temp(
         "parent": tmp_path,
         "parent_identity": (root_status.st_dev, root_status.st_ino),
     }
-    mkstemp_calls = []
-    actual_mkstemp = sam_worker.tempfile.mkstemp
+    created_files = []
+    actual_create = sam_worker._create_batch_result_file
 
-    def fake_mkstemp(*, prefix, suffix, dir):
-        mkstemp_calls.append((prefix, suffix, Path(dir)))
-        return actual_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+    def tracked_create(binding, parent_handle):
+        created = actual_create(binding, parent_handle)
+        created_files.append(created[1:])
+        return created
 
-    monkeypatch.setattr(sam_worker.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(sam_worker, "_create_batch_result_file", tracked_create)
     monkeypatch.setattr(
         sam_worker.json,
         "dumps",
         lambda *args, **kwargs: pytest.fail("batch writer must stream JSON"),
     )
+    monkeypatch.setattr(
+        sam_worker.json.JSONEncoder,
+        "encode",
+        lambda *args, **kwargs: pytest.fail("batch writer must use iterencode"),
+    )
 
     sam_worker._write_batch_result(result_binding, payload, operations)
 
-    assert mkstemp_calls == [(".result.json.", ".tmp", tmp_path)]
+    assert len(created_files) == 1
+    created_path, direct_result = created_files[0]
+    if created_path is not None and not direct_result:
+        assert created_path.parent == tmp_path
+        assert created_path.name.startswith(".result.json.")
+        assert created_path.name.endswith(".tmp")
     assert json.loads(result_path.read_text(encoding="utf-8")) == payload
+
+
+def test_candidate_batch_worker_publishes_verified_temp_inode_when_path_is_replaced(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    attack = b"unverified replacement"
+    actual_verify = sam_worker._verify_batch_result_binding
+    verify_calls = 0
+    replaced_path = None
+    replacement_name = None
+
+    def replace_temp_after_verification(binding):
+        nonlocal verify_calls, replaced_path, replacement_name
+        actual_verify(binding)
+        verify_calls += 1
+        if verify_calls == 2:
+            temporary_paths = list(tmp_path.glob(".result.json.*.tmp"))
+            if not temporary_paths:
+                return
+            temporary_path = temporary_paths[0]
+            replacement_name = temporary_path.name
+            replaced_path = tmp_path / "validated-original"
+            temporary_path.replace(replaced_path)
+            temporary_path.write_bytes(attack)
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_verify_batch_result_binding",
+        replace_temp_after_verification,
+    )
+
+    sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert json.loads(result_path.read_text(encoding="utf-8")) == payload
+    if replaced_path is not None:
+        assert (tmp_path / replacement_name).read_bytes() == attack
+
+
+def test_candidate_batch_worker_rejects_parent_replacement_during_publish(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owned_parent = tmp_path / "owned"
+    owned_parent.mkdir()
+    moved_parent = tmp_path / "moved"
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = owned_parent / "result.json"
+    root_status = owned_parent.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": owned_parent,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    attack = b"replacement-parent temp"
+    actual_verify = sam_worker._verify_batch_result_binding
+    verify_calls = 0
+
+    def replace_parent_after_verification(binding):
+        nonlocal verify_calls
+        actual_verify(binding)
+        verify_calls += 1
+        if verify_calls == 2:
+            temporary_paths = list(owned_parent.glob(".result.json.*.tmp"))
+            temporary_name = (
+                temporary_paths[0].name
+                if temporary_paths
+                else ".result.json.replacement.tmp"
+            )
+            try:
+                owned_parent.replace(moved_parent)
+            except PermissionError as exc:
+                pytest.skip(f"open directory handles prevent rename: {exc}")
+            owned_parent.mkdir()
+            (owned_parent / temporary_name).write_bytes(attack)
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_verify_batch_result_binding",
+        replace_parent_after_verification,
+    )
+
+    with pytest.raises(RuntimeError, match="directory changed"):
+        sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert not result_path.exists()
+    assert not (moved_parent / "result.json").exists()
+    assert next(owned_parent.glob(".result.json.*.tmp")).read_bytes() == attack
+
+
+def test_candidate_batch_worker_cleans_partial_stream_when_limit_is_exceeded(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload(automatic=[_candidate_batch_record()])
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    monkeypatch.setattr(
+        sam_worker,
+        "sam_candidate_batch_result_max_bytes",
+        lambda image_shape, proposal_count: 32,
+    )
+
+    with pytest.raises(RuntimeError, match="size limit"):
+        sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert not result_path.exists()
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+def test_candidate_batch_linux_publish_falls_back_to_proc_fd_without_capability(
+    monkeypatch,
+) -> None:
+    import errno
+
+    calls = []
+    outcomes = iter([errno.ENOENT, 0])
+
+    def fake_linkat(old_fd, old_path, new_fd, new_path, flags):
+        calls.append((old_fd, old_path, new_fd, new_path, flags))
+        return next(outcomes)
+
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(
+        sam_worker,
+        "_linkat_batch_result",
+        fake_linkat,
+        raising=False,
+    )
+
+    sam_worker._publish_batch_result(
+        17,
+        19,
+        {"path": Path("result.json")},
+    )
+
+    assert calls == [
+        (17, b"", 19, b"result.json", 0x1000),
+        (-100, b"/proc/self/fd/17", 19, b"result.json", 0x400),
+    ]
+
+
+def test_candidate_batch_posix_direct_result_is_removed_after_stream_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    if sys.platform == "win32":
+        monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            sam_worker,
+            "_open_batch_result_parent",
+            lambda binding: 7,
+        )
+        monkeypatch.setattr(
+            sam_worker,
+            "_close_batch_result_parent",
+            lambda handle: None,
+        )
+        monkeypatch.setattr(
+            sam_worker,
+            "_create_batch_result_file",
+            lambda binding, parent_handle: (
+                os.open(binding["path"], os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+                binding["path"],
+                True,
+            ),
+        )
+        monkeypatch.setattr(
+            sam_worker,
+            "_unlink_owned_posix_result",
+            lambda binding, parent_handle, identity: (
+                binding["path"].unlink()
+                if identity is not None and binding["path"].exists()
+                else None
+            ),
+        )
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    monkeypatch.setattr(
+        sam_worker,
+        "sam_candidate_batch_result_max_bytes",
+        lambda image_shape, proposal_count: 32,
+    )
+
+    with pytest.raises(RuntimeError, match="size limit"):
+        sam_worker._write_batch_result(
+            binding,
+            _candidate_batch_payload(automatic=[_candidate_batch_record()]),
+            operations,
+        )
+
+    assert not result_path.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing contract")
+def test_candidate_batch_windows_temp_denies_external_writers(tmp_path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    parent_handle = sam_worker._open_batch_result_parent(result_binding)
+    file_descriptor = None
+    try:
+        file_descriptor, temporary_path, published = (
+            sam_worker._create_batch_result_file(result_binding, parent_handle)
+        )
+        assert temporary_path is not None
+        assert not published
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        attacker_handle = kernel32.CreateFileW(
+            str(temporary_path),
+            0x40000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x00000080,
+            None,
+        )
+        if attacker_handle != ctypes.c_void_p(-1).value:
+            kernel32.CloseHandle(attacker_handle)
+            pytest.fail("batch result temp accepted an external writer")
+        assert ctypes.get_last_error() == 32
+    finally:
+        if file_descriptor is not None:
+            sam_worker._delete_windows_batch_result(file_descriptor)
+            os.close(file_descriptor)
+        sam_worker._close_batch_result_parent(parent_handle)
+
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+def test_candidate_batch_cleanup_failure_still_closes_file_and_parent_handles(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    file_descriptor, temporary_name = sam_worker.tempfile.mkstemp(dir=tmp_path)
+    parent_handle = object()
+    closed = []
+    actual_close = sam_worker.os.close
+    monkeypatch.setattr(sam_worker.sys, "platform", "win32")
+    monkeypatch.setattr(
+        sam_worker,
+        "_open_batch_result_parent",
+        lambda actual_binding: parent_handle,
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_create_batch_result_file",
+        lambda actual_binding, actual_parent: (
+            file_descriptor,
+            Path(temporary_name),
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_delete_windows_batch_result",
+        lambda descriptor: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+    )
+    monkeypatch.setattr(
+        sam_worker.os,
+        "close",
+        lambda descriptor: closed.append(("file", descriptor)),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_close_batch_result_parent",
+        lambda handle: closed.append(("parent", handle)),
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "sam_candidate_batch_result_max_bytes",
+        lambda image_shape, proposal_count: 32,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        sam_worker._write_batch_result(
+            binding,
+            _candidate_batch_payload(automatic=[_candidate_batch_record()]),
+            operations,
+        )
+
+    assert closed == [("file", file_descriptor), ("parent", parent_handle)]
+    actual_close(file_descriptor)
+    Path(temporary_name).unlink()
 
 
 def test_candidate_batch_worker_does_not_replace_result_created_during_publish(
@@ -2163,13 +2525,21 @@ def test_candidate_batch_worker_does_not_replace_result_created_during_publish(
         "parent_identity": (root_status.st_dev, root_status.st_ino),
     }
     intruder = b"created during publish"
-    actual_link = sam_worker.os.link
+    actual_verify = sam_worker._verify_batch_result_binding
+    verify_calls = 0
 
-    def racing_link(source, destination):
-        Path(destination).write_bytes(intruder)
-        return actual_link(source, destination)
+    def create_result_after_verification(binding):
+        nonlocal verify_calls
+        actual_verify(binding)
+        verify_calls += 1
+        if verify_calls == 2:
+            result_path.write_bytes(intruder)
 
-    monkeypatch.setattr(sam_worker.os, "link", racing_link)
+    monkeypatch.setattr(
+        sam_worker,
+        "_verify_batch_result_binding",
+        create_result_after_verification,
+    )
 
     with pytest.raises(RuntimeError, match="already exists"):
         sam_worker._write_batch_result(result_binding, payload, operations)
