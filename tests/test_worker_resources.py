@@ -225,3 +225,90 @@ def test_runner_records_worker_outcome_without_changing_subprocess_call(monkeypa
             },
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("check", "outcome", "expected_status", "raises"),
+    [
+        (False, subprocess.CompletedProcess(["worker"], 7), "failed", None),
+        (True, subprocess.CalledProcessError(7, ["worker"]), "failed", subprocess.CalledProcessError),
+        (True, subprocess.TimeoutExpired(["worker"], 600), "error", subprocess.TimeoutExpired),
+        (True, RuntimeError("spawn failed"), "error", RuntimeError),
+    ],
+)
+def test_runner_records_failure_status_and_preserves_subprocess_outcome(
+    monkeypatch,
+    check,
+    outcome,
+    expected_status,
+    raises,
+) -> None:
+    worker_resources = _load_worker_resources()
+    monkeypatch.setattr(worker_resources, "trim_parent_working_set_before_worker", lambda: None)
+    times = iter([3.0, 3.5])
+    monkeypatch.setattr(worker_resources.time, "perf_counter", lambda: next(times))
+    events = []
+
+    class Trace:
+        def event(self, event, **fields):
+            events.append((event, fields))
+
+    def run(*args, **kwargs):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(worker_resources.subprocess, "run", run)
+
+    if raises is None:
+        assert worker_resources.run_isolated_worker(
+            ["worker"], check=check, performance_trace=Trace()
+        ) is outcome
+    else:
+        with pytest.raises(raises) as caught:
+            worker_resources.run_isolated_worker(
+                ["worker"], check=check, performance_trace=Trace()
+            )
+        assert caught.value is outcome
+
+    assert events == [
+        ("worker", {"duration_ms": 500, "status": expected_status})
+    ]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        subprocess.CompletedProcess(["worker"], 0),
+        subprocess.TimeoutExpired(["worker"], 600),
+    ],
+)
+def test_runner_keeps_subprocess_outcome_when_trace_recording_fails(
+    monkeypatch,
+    outcome,
+) -> None:
+    worker_resources = _load_worker_resources()
+    monkeypatch.setattr(worker_resources, "trim_parent_working_set_before_worker", lambda: None)
+    times = iter([3.0, 3.5])
+    monkeypatch.setattr(worker_resources.time, "perf_counter", lambda: next(times))
+    def run(*args, **kwargs):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(worker_resources.subprocess, "run", run)
+
+    class BrokenTrace:
+        def event(self, event, **fields):
+            raise OSError("trace unavailable")
+
+    if isinstance(outcome, BaseException):
+        with pytest.raises(type(outcome)) as caught:
+            worker_resources.run_isolated_worker(
+                ["worker"], performance_trace=BrokenTrace()
+            )
+        assert caught.value is outcome
+    else:
+        assert worker_resources.run_isolated_worker(
+            ["worker"], performance_trace=BrokenTrace()
+        ) is outcome

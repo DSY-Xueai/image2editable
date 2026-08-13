@@ -170,6 +170,7 @@ def run_local_service_agent(
     *,
     service_config: object,
     timeout_seconds: int = 600,
+    performance_trace=None,
 ) -> dict:
     from image2editable.component_repair import (
         load_component_agent_graph,
@@ -195,12 +196,22 @@ def run_local_service_agent(
     messages = _service_messages(
         _messages(request, graph, quality_text, evidence, request_sha256)
     )
-    plan = json.loads(
-        complete(service_config, messages=messages, timeout_seconds=timeout_seconds)
+    started = time.perf_counter() if performance_trace is not None else None
+    try:
+        plan = json.loads(
+            complete(service_config, messages=messages, timeout_seconds=timeout_seconds)
+        )
+        validate_component_plan(plan, request=request, graph=graph)
+        if plan.get("request_sha256") != request_sha256:
+            raise ValueError("component plan request_sha256 does not match current request")
+    except BaseException:
+        _record_local_agent_performance(
+            performance_trace, started, request_path, request, status="error"
+        )
+        raise
+    _record_local_agent_performance(
+        performance_trace, started, request_path, request, status="success"
     )
-    validate_component_plan(plan, request=request, graph=graph)
-    if plan.get("request_sha256") != request_sha256:
-        raise ValueError("component plan request_sha256 does not match current request")
     return plan
 
 

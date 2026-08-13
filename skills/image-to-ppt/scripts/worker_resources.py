@@ -59,6 +59,16 @@ def run_isolated_worker(
     started = time.perf_counter()
     try:
         completed = subprocess.run(command, **kwargs)
+    except subprocess.CalledProcessError:
+        _record_worker_performance(
+            performance_trace,
+            started,
+            stage=stage,
+            model=model,
+            operation_count=operation_count,
+            status="failed",
+        )
+        raise
     except BaseException:
         _record_worker_performance(
             performance_trace,

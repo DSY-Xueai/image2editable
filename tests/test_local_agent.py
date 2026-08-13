@@ -285,6 +285,171 @@ def test_local_worker_invocation_preserves_default_subprocess_behavior(
             },
         )
     ]
+
+
+def test_local_agent_keeps_success_result_when_trace_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+
+    def invoke(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps(_plan(request_path)), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    class BrokenTrace:
+        def event(self, event, **fields):
+            raise OSError("trace unavailable")
+
+    monkeypatch.setattr(local_agent, "_invoke_worker", invoke)
+
+    assert local_agent.run_local_agent(
+        request_path,
+        model_receipt=_receipt(tmp_path),
+        performance_trace=BrokenTrace(),
+    ) == _plan(request_path)
+
+
+def test_local_agent_keeps_worker_timeout_when_trace_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+
+    class BrokenTrace:
+        def event(self, event, **fields):
+            raise OSError("trace unavailable")
+
+    monkeypatch.setattr(
+        local_agent,
+        "_invoke_worker",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["worker"], 600)
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        local_agent.run_local_agent(
+            request_path,
+            model_receipt=_receipt(tmp_path),
+            performance_trace=BrokenTrace(),
+        )
+
+
+def test_local_agent_records_failed_worker_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    times = iter([2.0, 2.5])
+    monkeypatch.setattr(local_agent.time, "perf_counter", lambda: next(times))
+    events = []
+
+    class Trace:
+        def event(self, event, **fields):
+            events.append((event, fields))
+
+    monkeypatch.setattr(
+        local_agent,
+        "_invoke_worker",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 7),
+    )
+
+    with pytest.raises(RuntimeError, match="exit code 7"):
+        local_agent.run_local_agent(
+            request_path,
+            model_receipt=_receipt(tmp_path),
+            performance_trace=Trace(),
+        )
+
+    assert events[0][1]["status"] == "failed"
+    assert events[0][1]["duration_ms"] == 500
+
+
+def test_local_service_agent_records_content_free_performance_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    times = iter([5.0, 5.25])
+    monkeypatch.setattr(local_agent.time, "perf_counter", lambda: next(times))
+    events = []
+
+    class Trace:
+        def event(self, event, **fields):
+            events.append((event, fields))
+
+    monkeypatch.setattr(
+        "image2editable.local_service.complete",
+        lambda *args, **kwargs: json.dumps(_plan(request_path)),
+    )
+
+    assert local_agent.run_local_service_agent(
+        request_path,
+        service_config=object(),
+        performance_trace=Trace(),
+    ) == _plan(request_path)
+
+    assert events[0][0] == "local_agent"
+    assert set(events[0][1]) == {"image_count", "total_bytes", "duration_ms", "status"}
+    image_paths = [
+        request_path.parent / Path(*record["path"].split("/"))
+        for record in load_component_agent_request(request_path)["evidence"].values()
+        if record["path"].endswith(".png")
+    ]
+    assert events[0][1]["image_count"] == len(image_paths)
+    assert events[0][1]["total_bytes"] == sum(path.stat().st_size for path in image_paths)
+    assert events[0][1]["duration_ms"] == 250
+    assert events[0][1]["status"] == "success"
+
+
+def test_local_service_keeps_original_error_when_trace_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    expected = RuntimeError("service unavailable")
+
+    class BrokenTrace:
+        def event(self, event, **fields):
+            raise OSError("trace unavailable")
+
+    monkeypatch.setattr(
+        "image2editable.local_service.complete",
+        lambda *args, **kwargs: (_ for _ in ()).throw(expected),
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        local_agent.run_local_service_agent(
+            request_path,
+            service_config=object(),
+            performance_trace=BrokenTrace(),
+        )
+
+    assert caught.value is expected
+
+
+def test_local_service_keeps_success_result_when_trace_recording_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+
+    class BrokenTrace:
+        def event(self, event, **fields):
+            raise OSError("trace unavailable")
+
+    monkeypatch.setattr(
+        "image2editable.local_service.complete",
+        lambda *args, **kwargs: json.dumps(_plan(request_path)),
+    )
+
+    assert local_agent.run_local_service_agent(
+        request_path,
+        service_config=object(),
+        performance_trace=BrokenTrace(),
+    ) == _plan(request_path)
 def test_local_service_agent_uses_the_user_configured_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
