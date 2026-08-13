@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
 
@@ -243,6 +244,167 @@ def test_transitions_require_their_own_status_enum(
 ) -> None:
     with pytest.raises(TypeError, match=enum_name):
         transition(document, target)  # type: ignore[operator]
+
+
+def test_bound_performance_trace_refuses_file_limit_growth(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = runtime.RunStore.open(run_dir)
+    trace = runtime._page_performance_trace(store, "page_001")
+    assert trace is not None
+    assert trace.path == run_dir / "performance-page_001.jsonl"
+    monkeypatch.setattr(runtime, "_PERFORMANCE_TRACE_LIMIT", 32)
+
+    with pytest.raises(RuntimeError, match="size limit"):
+        trace.event(
+            "span", page_id="page_001", stage="visual_prepare", duration_ms=1
+        )
+
+    assert trace.path.stat().st_size == 0
+
+
+def test_runtime_performance_summary_contract_rejects_content_fields() -> None:
+    valid = {
+        "pages": {
+            "page_001": {
+                "model_loads": {"sam": 1},
+                "stage_runs": {"visual_prepare": 1},
+                "stage_duration_ms": {"visual_prepare": 4},
+                "worker_runs": {},
+                "worker_duration_ms": {},
+                "inference_runs": {"sam": 1},
+                "inference_operations": {"sam": 2},
+                "inference_duration_ms": {"sam": 3},
+                "agent_runs": 1,
+                "agent_image_count": 4,
+                "agent_total_bytes": 20,
+                "agent_duration_ms": 5,
+            }
+        }
+    }
+
+    runtime._validate_performance_summary(valid, ["page_001"])
+
+    invalid = deepcopy(valid)
+    invalid["pages"]["page_001"]["source_path"] = "secret.png"
+    with pytest.raises(RuntimeError, match="performance summary"):
+        runtime._validate_performance_summary(invalid, ["page_001"])
+
+
+def test_invalid_performance_event_is_skipped_atomically(monkeypatch) -> None:
+    summary = runtime._empty_page_performance()
+    first = {
+        "event": "local_agent", "image_count": 2, "total_bytes": 1,
+        "duration_ms": 1, "status": "success",
+    }
+    runtime._aggregate_performance_event(summary, first)
+    monkeypatch.setattr(runtime, "_PERFORMANCE_MAX_INTEGER", 2)
+
+    candidate = {
+        key: dict(value) if isinstance(value, dict) else value
+        for key, value in summary.items()
+    }
+    with pytest.raises(ValueError, match="integer limit"):
+        runtime._aggregate_performance_event(candidate, first)
+
+    assert summary["agent_runs"] == 1
+    assert summary["agent_image_count"] == 2
+    assert candidate == summary
+
+
+def test_unpaired_model_load_finish_does_not_increment_summary() -> None:
+    summary = runtime._empty_page_performance()
+    pending = set()
+
+    with pytest.raises(ValueError, match="model load"):
+        runtime._aggregate_performance_event(
+            summary,
+            {
+                "event": "model_load_finish",
+                "page_id": "page_001",
+                "model": "sam",
+                "duration_ms": 1,
+                "status": "success",
+            },
+            pending_model_loads=pending,
+            page_id="page_001",
+        )
+
+    assert summary["model_loads"] == {}
+
+
+def test_empty_page_trace_still_produces_empty_page_summary(tmp_path) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = runtime.RunStore.open(run_dir)
+
+    summary = runtime._performance_summary(store, ["page_001"])
+
+    assert summary == {"pages": {"page_001": runtime._empty_page_performance()}}
+    assert (run_dir / "performance-page_001.jsonl").is_file()
+
+
+def test_performance_summary_write_failure_is_isolated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = runtime.RunStore.open(run_dir)
+    trace = runtime._page_performance_trace(store, "page_001")
+    assert trace is not None
+    trace.event(
+        "span", page_id="page_001", stage="visual_prepare", duration_ms=1
+    )
+
+    monkeypatch.setattr(
+        runtime,
+        "_run_owned_directory",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unsafe")),
+    )
+
+    summary = runtime._read_page_performance(store, "page_001")
+    runtime._write_performance_summaries(
+        store, {"pages": {"page_001": summary}}
+    )
+
+    assert summary is not None
+    assert summary["stage_runs"] == {"visual_prepare": 1}
+    assert "Performance summary could not be written" in caplog.text
+
+
+def test_performance_trace_concurrent_appends_never_exceed_limit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    store = runtime.RunStore.open(run_dir)
+    traces = [runtime._page_performance_trace(store, "page_001") for _ in range(16)]
+    assert all(trace is not None for trace in traces)
+    monkeypatch.setattr(runtime, "_PERFORMANCE_TRACE_LIMIT", 512)
+
+    def append(index: int) -> None:
+        try:
+            traces[index].event(
+                "span",
+                page_id="page_001",
+                stage="visual_prepare",
+                duration_ms=index,
+            )
+        except RuntimeError:
+            pass
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(append, range(16)))
+
+    payload = traces[0].path.read_bytes()
+    assert len(payload) <= runtime._PERFORMANCE_TRACE_LIMIT
+    assert all(json.loads(line)["event"] == "span" for line in payload.splitlines())
 
 
 @pytest.mark.parametrize(

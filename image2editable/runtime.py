@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -31,7 +32,7 @@ from image2editable.contracts import (
     validate_schema_version,
 )
 from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
-from image2editable.execution import ExecutionLease
+from image2editable.execution import ExecutionLease, _lock, _unlock
 from image2editable.legacy import (
     _safe_rmtree,
     _load_legacy_ref,
@@ -47,6 +48,7 @@ from image2editable.resources import (
     validate_resource_policy,
 )
 from image2editable.store import RunStore
+from scripts.performance_trace import PerformanceTrace, _validate_event, _validate_field
 
 
 _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
@@ -55,6 +57,374 @@ _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
 COMPONENT_QUALITY_GATE_VERSION = "component-quality-v2"
 _LOCAL_MODEL_PROVENANCE = "local-agent-model.json"
 _LOCAL_MODEL_PROVENANCE_LIMIT = 16 * 1024 * 1024
+_PERFORMANCE_TRACE_PREFIX = "performance-"
+_PERFORMANCE_SUMMARY_NAME = "performance-summary.json"
+_PERFORMANCE_TRACE_LIMIT = 16 * 1024 * 1024
+_PERFORMANCE_LINE_LIMIT = 16 * 1024
+_PERFORMANCE_MAX_LINES = 100_000
+_PERFORMANCE_MAX_FIELDS = 16
+_PERFORMANCE_MAX_INTEGER = 1_000_000_000_000
+_PERFORMANCE_MAPS = {
+    "model_loads": "model",
+    "stage_runs": "stage",
+    "stage_duration_ms": "stage",
+    "worker_runs": "model",
+    "worker_duration_ms": "model",
+    "inference_runs": "model",
+    "inference_operations": "model",
+    "inference_duration_ms": "model",
+}
+_PERFORMANCE_SCALARS = {
+    "agent_runs", "agent_image_count", "agent_total_bytes", "agent_duration_ms",
+}
+_LOGGER = logging.getLogger(__name__)
+
+
+class _BoundPerformanceTrace(PerformanceTrace):
+    def __init__(
+        self,
+        path: Path,
+        identity: tuple[int, int],
+        root: Path,
+        root_identity: tuple[int, int],
+    ) -> None:
+        super().__init__(path)
+        self._identity = identity
+        self._root = root
+        self._root_identity = root_identity
+
+    def _require_root(self) -> None:
+        status = self._root.lstat()
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISDIR(status.st_mode)
+            or (status.st_dev, status.st_ino) != self._root_identity
+        ):
+            raise RuntimeError("Performance trace root identity changed")
+
+    def event(self, event: str, **fields) -> None:
+        _validate_event(event, fields)
+        if any(
+            type(value) is int and value > _PERFORMANCE_MAX_INTEGER
+            for value in fields.values()
+        ):
+            raise RuntimeError("Performance trace integer limit exceeded")
+        encoded = json.dumps(
+            {"schema_version": 1, "event": event, **fields},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        flags = os.O_RDWR
+        for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+            flags |= getattr(os, name, 0)
+        self._require_root()
+        try:
+            descriptor = os.open(self.path, flags)
+            with os.fdopen(descriptor, "r+b") as stream:
+                stream.seek(0)
+                _lock(stream)
+                try:
+                    opened = os.fstat(stream.fileno())
+                    current = self.path.lstat()
+                    self._require_root()
+                    if (
+                        len(encoded) > _PERFORMANCE_LINE_LIMIT
+                        or opened.st_size + len(encoded) > _PERFORMANCE_TRACE_LIMIT
+                        or _is_link_or_reparse(current)
+                        or not stat.S_ISREG(opened.st_mode)
+                        or not stat.S_ISREG(current.st_mode)
+                        or opened.st_nlink != 1
+                        or current.st_nlink != 1
+                        or (opened.st_dev, opened.st_ino) != self._identity
+                        or (current.st_dev, current.st_ino) != self._identity
+                    ):
+                        raise RuntimeError(
+                            "Performance trace identity or size limit changed"
+                        )
+                    stream.seek(0, os.SEEK_END)
+                    stream.write(encoded)
+                    stream.flush()
+                finally:
+                    stream.seek(0)
+                    _unlock(stream)
+        except OSError:
+            raise RuntimeError("Performance trace append failed") from None
+
+
+def _page_performance_trace(
+    store: RunStore, page_id: str
+) -> PerformanceTrace | None:
+    try:
+        if page_id not in store.read_json("page_jobs.json")["pages"]:
+            raise RuntimeError("Performance trace page is not part of the Run")
+        _validate_field("page_id", page_id)
+        root_status = store.root.lstat()
+        if _is_link_or_reparse(root_status) or not stat.S_ISDIR(root_status.st_mode):
+            raise RuntimeError("Performance trace root is unsafe")
+        path = store.root / f"{_PERFORMANCE_TRACE_PREFIX}{page_id}.jsonl"
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOINHERIT", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(descriptor)
+        status = path.lstat()
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_nlink != 1
+            or status.st_size > _PERFORMANCE_TRACE_LIMIT
+        ):
+            raise RuntimeError("Performance trace is not a safe regular file")
+        return _BoundPerformanceTrace(
+            path,
+            (status.st_dev, status.st_ino),
+            store.root,
+            (root_status.st_dev, root_status.st_ino),
+        )
+    except Exception:
+        _LOGGER.warning("Performance trace could not be bound for page %s", page_id)
+        return None
+
+
+def _empty_page_performance() -> dict[str, Any]:
+    return {
+        "model_loads": {},
+        "stage_runs": {},
+        "stage_duration_ms": {},
+        "worker_runs": {},
+        "worker_duration_ms": {},
+        "inference_runs": {},
+        "inference_operations": {},
+        "inference_duration_ms": {},
+        "agent_runs": 0,
+        "agent_image_count": 0,
+        "agent_total_bytes": 0,
+        "agent_duration_ms": 0,
+    }
+
+
+def _metric_update(
+    summary: dict[str, Any], field: str, key: str | None, value: int
+) -> tuple[str, str | None, int]:
+    current = summary[field] if key is None else summary[field].get(key, 0)
+    updated = current + value
+    if updated > _PERFORMANCE_MAX_INTEGER:
+        raise ValueError("performance aggregate integer limit exceeded")
+    return field, key, updated
+
+
+def _aggregate_performance_event(
+    summary: dict[str, Any],
+    event: dict[str, Any],
+    *,
+    pending_model_loads: set[tuple[str, str]] | None = None,
+    page_id: str | None = None,
+) -> None:
+    kind = event["event"]
+    model = event.get("model")
+    stage = event.get("stage")
+    updates = []
+    if kind in {"model_load_start", "model_load_finish"}:
+        if pending_model_loads is None or event.get("page_id") != page_id:
+            raise ValueError("performance model load page identity is invalid")
+        key = (event["page_id"], model)
+        if kind == "model_load_start":
+            if key in pending_model_loads:
+                raise ValueError("performance model load start is duplicated")
+            pending_model_loads.add(key)
+        else:
+            if key not in pending_model_loads:
+                raise ValueError("performance model load finish is unpaired")
+            pending_model_loads.remove(key)
+            if event["status"] == "success":
+                updates.append(_metric_update(summary, "model_loads", model, 1))
+    elif kind == "span":
+        updates.extend((
+            _metric_update(summary, "stage_runs", stage, 1),
+            _metric_update(
+                summary, "stage_duration_ms", stage, event["duration_ms"]
+            ),
+        ))
+    elif kind == "worker" and model is not None:
+        updates.extend((
+            _metric_update(summary, "worker_runs", model, 1),
+            _metric_update(
+                summary, "worker_duration_ms", model, event["duration_ms"]
+            ),
+        ))
+    elif kind == "inference_finish" and model is not None:
+        updates.extend((
+            _metric_update(summary, "inference_runs", model, 1),
+            _metric_update(
+                summary, "inference_operations", model,
+                event.get("operation_count", 0),
+            ),
+            _metric_update(
+                summary, "inference_duration_ms", model, event["duration_ms"]
+            ),
+        ))
+    elif kind == "local_agent":
+        for name, source in (
+            ("agent_runs", None),
+            ("agent_image_count", "image_count"),
+            ("agent_total_bytes", "total_bytes"),
+            ("agent_duration_ms", "duration_ms"),
+        ):
+            value = 1 if source is None else event[source]
+            updates.append(_metric_update(summary, name, None, value))
+    for field, key, value in updates:
+        if key is None:
+            summary[field] = value
+        else:
+            summary[field][key] = value
+
+
+def _read_page_performance(
+    store: RunStore, page_id: str
+) -> dict[str, Any]:
+    path = store.root / f"{_PERFORMANCE_TRACE_PREFIX}{page_id}.jsonl"
+    try:
+        payload = _read_bound_file(
+            path,
+            store.root,
+            max_bytes=_PERFORMANCE_TRACE_LIMIT,
+            label="performance trace",
+        )
+    except Exception:
+        _LOGGER.warning("Performance trace could not be read for page %s", page_id)
+        return _empty_page_performance()
+    summary = _empty_page_performance()
+    lines = payload.splitlines()
+    pending_model_loads: set[tuple[str, str]] = set()
+    if len(lines) > _PERFORMANCE_MAX_LINES:
+        _LOGGER.warning("Performance trace line limit exceeded for page %s", page_id)
+        return summary
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            if not line or len(line) > _PERFORMANCE_LINE_LIMIT:
+                raise ValueError("performance trace line size is invalid")
+            event = json.loads(line)
+            if not isinstance(event, dict) or len(event) > _PERFORMANCE_MAX_FIELDS:
+                raise ValueError("performance trace event is invalid")
+            if event.get("schema_version") != 1 or type(
+                event.get("schema_version")
+            ) is not int:
+                raise ValueError("performance trace schema version is invalid")
+            kind = event.get("event")
+            fields = {
+                name: value for name, value in event.items()
+                if name not in {"schema_version", "event"}
+            }
+            _validate_event(kind, fields)
+            if "page_id" in fields and fields["page_id"] != page_id:
+                raise ValueError("performance trace page identity is invalid")
+            if any(
+                type(value) is int and value > _PERFORMANCE_MAX_INTEGER
+                for value in fields.values()
+            ):
+                raise ValueError("performance trace integer limit exceeded")
+            _aggregate_performance_event(
+                summary,
+                event,
+                pending_model_loads=pending_model_loads,
+                page_id=page_id,
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Skipping invalid performance trace event for page %s at line %d",
+                page_id, line_number,
+            )
+    return summary
+
+
+def _performance_summary(
+    store: RunStore, page_ids: Sequence[str]
+) -> dict[str, Any]:
+    pages = {}
+    for page_id in page_ids:
+        _page_performance_trace(store, page_id)
+        pages[page_id] = _read_page_performance(store, page_id)
+    return {"pages": pages}
+
+
+def _write_performance_summaries(
+    store: RunStore, performance: dict[str, Any]
+) -> None:
+    for page_id, summary in performance["pages"].items():
+        try:
+            page = _run_owned_directory(store, Path("pages") / page_id)
+            if page is None:
+                raise RuntimeError("Performance summary page directory is missing")
+            reconstruction_path = page[0] / "reconstruction"
+            try:
+                reconstruction_path.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            current_page = _run_owned_directory(store, Path("pages") / page_id)
+            if current_page is None or current_page[1] != page[1]:
+                raise RuntimeError("Performance summary page identity changed")
+            reconstruction = _run_owned_directory(
+                store, Path("pages") / page_id / "reconstruction"
+            )
+            if reconstruction is not None:
+                store.write_json(
+                    Path("pages") / page_id / "reconstruction"
+                    / _PERFORMANCE_SUMMARY_NAME,
+                    summary,
+                )
+        except Exception:
+            _LOGGER.warning(
+                "Performance summary could not be written for page %s", page_id
+            )
+
+
+def _validate_performance_summary(
+    performance: object, expected_page_ids: Sequence[str]
+) -> None:
+    fields = set(_PERFORMANCE_MAPS) | _PERFORMANCE_SCALARS
+    if not isinstance(performance, dict) or set(performance) != {"pages"}:
+        raise RuntimeError("Run performance summary fields are invalid")
+    pages = performance["pages"]
+    if not isinstance(pages, dict) or set(pages) != set(expected_page_ids):
+        raise RuntimeError("Run performance summary pages are invalid")
+    for page_id, page in pages.items():
+        try:
+            _validate_field("page_id", page_id)
+        except ValueError as error:
+            raise RuntimeError("Run performance summary page id is invalid") from error
+        if not isinstance(page, dict) or set(page) != fields:
+            raise RuntimeError("Run performance summary page fields are invalid")
+        for field, identifier_kind in _PERFORMANCE_MAPS.items():
+            metrics = page[field]
+            if not isinstance(metrics, dict):
+                raise RuntimeError("Run performance summary metric is invalid")
+            for name, value in metrics.items():
+                try:
+                    _validate_field(identifier_kind, name)
+                except ValueError as error:
+                    raise RuntimeError(
+                        "Run performance summary metric name is invalid"
+                    ) from error
+                if (
+                    type(value) is not int or value < 0
+                    or value > _PERFORMANCE_MAX_INTEGER
+                ):
+                    raise RuntimeError("Run performance summary metric is invalid")
+        if any(
+            type(page[field]) is not int
+            or page[field] < 0
+            or page[field] > _PERFORMANCE_MAX_INTEGER
+            for field in _PERFORMANCE_SCALARS
+        ):
+            raise RuntimeError("Run performance summary scalar is invalid")
 
 
 def _discover_powerpoint_renderer():
@@ -327,18 +697,26 @@ def _advance_legacy_pages(
         else None
     )
     for page_id in page_ids:
+        performance_trace = _page_performance_trace(store, page_id)
         if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
             continue
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         if not (reconstruction / "component_state.json").is_file():
-            initialize_legacy_page(store, page_id, _lease=lease)
+            initialize_legacy_page(
+                store, page_id, _lease=lease,
+                performance_trace=performance_trace,
+            )
         for _ in range(MAX_REPAIR_ROUNDS * 6 + 4):
-            outcome = advance_legacy_page(store, page_id, _lease=lease)
+            outcome = advance_legacy_page(
+                store, page_id, _lease=lease,
+                performance_trace=performance_trace,
+            )
             if outcome["status"] == "awaiting_agent" and provider == "local":
                 request_path = _local_component_request_path(store, page_id)
                 plan = _run_local_service_agent(
                     request_path,
                     service_config=local_service,
+                    performance_trace=performance_trace,
                 )
                 record_local_component_plan(
                     store,
@@ -574,6 +952,7 @@ def _run_local_agent(
     *,
     model_receipt: dict,
     resource_policy: dict,
+    performance_trace=None,
 ) -> dict:
     from image2editable.local_agent import run_local_agent
 
@@ -581,6 +960,7 @@ def _run_local_agent(
         request_path,
         model_receipt=model_receipt,
         resource_policy=resource_policy,
+        performance_trace=performance_trace,
     )
 
 
@@ -594,10 +974,15 @@ def _run_local_service_agent(
     request_path: str | Path,
     *,
     service_config: object,
+    performance_trace=None,
 ) -> dict:
     from image2editable.local_agent import run_local_service_agent
 
-    return run_local_service_agent(request_path, service_config=service_config)
+    return run_local_service_agent(
+        request_path,
+        service_config=service_config,
+        performance_trace=performance_trace,
+    )
 
 
 def _ensure_legacy_pages_processing(
@@ -1052,6 +1437,8 @@ def _validate_pptx_public_summary(
             raise RuntimeError("Host PPTX summary cannot contain Local model state")
         expected_public_keys.add("agent_model")
         _validate_agent_model_summary(summary["agent_model"])
+    if "performance" in summary:
+        expected_public_keys.add("performance")
     if set(summary) != expected_public_keys:
         raise RuntimeError("PPTX execution summary fields are invalid")
     try:
@@ -1160,6 +1547,8 @@ def _validate_pptx_shadow_public_summary(
             raise RuntimeError("Host PPTX summary cannot contain Local model state")
         expected_keys.add("agent_model")
         _validate_agent_model_summary(summary["agent_model"])
+    if "performance" in summary:
+        expected_keys.add("performance")
     if set(summary) != expected_keys:
         raise RuntimeError("PPTX shadow summary fields are invalid")
     page_results = summary.get("page_results")
@@ -1429,6 +1818,8 @@ def _run_job(
             ) = _pptx_manifest_expectations(manifest, page_jobs)
             validate_pptx_inventories(store, manifest)
             summary = store.read_json("run_summary.json")
+            if "performance" in summary:
+                _validate_performance_summary(summary["performance"], manifest["pages"])
             if "page_results" in summary:
                 _validate_completed_shadow_pages(
                     store,
@@ -1471,6 +1862,8 @@ def _run_job(
             return summary
         summary = store.read_json("run_summary.json")
         validate_schema_version(summary)
+        if "performance" in summary:
+            _validate_performance_summary(summary["performance"], manifest["pages"])
         _validate_completed_resource_policy(summary, resource_policy)
         return summary
     if state["status"] != RunStatus.PREPARED.value:
@@ -1543,7 +1936,10 @@ def _run_job(
                 # component extraction.  Full-page candidates use the
                 # deterministic layer builder; other approved candidates use
                 # the existing isolated CV initializer.
-                initialize_legacy_page(store, page_id, _lease=_lease)
+                initialize_legacy_page(
+                    store, page_id, _lease=_lease,
+                    performance_trace=_page_performance_trace(store, page_id),
+                )
             existing_component_pages = [
                 page_id
                 for page_id in page_ids
@@ -1752,8 +2148,11 @@ def _run_job(
             local_model = _local_model_summary(store)
             if local_model is not None:
                 summary["agent_model"] = local_model
+        performance = _performance_summary(store, page_ids)
+        summary["performance"] = performance
         store.write_json("run_summary.json", summary)
         store.transition_run(RunStatus.COMPLETED)
+        _write_performance_summaries(store, performance)
         return summary
     except Exception as error:
         compensation_error = None

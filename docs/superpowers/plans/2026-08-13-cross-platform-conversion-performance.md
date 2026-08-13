@@ -164,6 +164,7 @@ git commit -m "性能：批量执行同阶段 SAM 候选生成"
 - Modify: `scripts/sam_worker.py`
 - Modify: `image2editable/component_repair.py`
 - Modify: `image2editable/legacy.py`
+- Modify: `image2editable/local_agent.py`
 - Modify: `tests/test_component_repair.py`
 - Modify: `tests/test_regressions.py`
 - Mirror corresponding product scripts under `skills/image-to-ppt/scripts/`
@@ -393,6 +394,8 @@ git commit -m "文档：固定 SAM 依赖并修正跨平台建议"
 - Modify: `image2editable/runtime.py`
 - Modify: `image2editable/legacy.py`
 - Modify: `tests/test_runtime_execution.py`
+- Modify: `tests/test_runtime_contracts.py`
+- Modify: `docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md`
 - Update ignored local file: `Course.md`
 
 - [ ] **Step 1: 写 run summary RED 测试**
@@ -402,8 +405,9 @@ git commit -m "文档：固定 SAM 依赖并修正跨平台建议"
 ```python
 def test_run_summary_reports_performance_counts_without_content(run_store):
     summary = execute_run(run_store)
-    perf = summary["performance"]
-    assert perf["sam_model_loads"] == 1
+    perf = summary["performance"]["pages"]["page_001"]
+    assert perf["model_loads"] == {}  # 没有真实 finish 事件时不虚报加载
+    assert perf["inference_operations"]["sam"] >= 1
     assert perf["agent_image_count"] >= 0
     assert "path" not in json.dumps(perf).lower()
 ```
@@ -416,7 +420,7 @@ Expected: FAIL，summary 尚无 performance 聚合。
 
 - [ ] **Step 3: 实现只读聚合**
 
-runtime 在完成页边界时读取该页 JSONL，按 event/model/stage 聚合 count 和 duration；坏行跳过并记录日志，不改变页面状态。同步更新 `Course.md`：当前状态、本轮变更、关键文件、入口、测试事实和 CPU-only/Mac 真机验证限制。
+runtime 在完成页边界时读取该页 JSONL，按 event/model/stage 聚合 count 和 duration；只有真实且成功的 `model_load_finish` 才计入模型加载，没有 emitter 时保持空映射，不用 worker 或推理次数代替。坏行跳过并记录日志，不改变页面状态。同步更新 `Course.md`：当前状态、本轮变更、关键文件、入口、测试事实和 CPU-only/Mac 真机验证限制。
 
 - [ ] **Step 4: 运行 GREEN**
 

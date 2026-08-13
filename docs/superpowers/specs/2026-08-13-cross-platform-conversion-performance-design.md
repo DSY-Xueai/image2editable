@@ -36,17 +36,18 @@
 
 ### 1. 性能记录
 
-新增页级 JSONL 性能记录器，使用单调时钟记录以下事件：
+新增页级 JSONL 性能记录器，使用单调时钟记录实际发生的以下事件：
 
+- `span`
+- `worker`
+- `local_agent`
 - `worker_start` / `worker_finish`
 - `model_load_start` / `model_load_finish`
 - `inference_start` / `inference_finish`
-- `agent_request_published`
-- `agent_plan_recorded`
 
-记录字段限定为 schema version、run/page、阶段、模型类别、操作数量、耗时、进程号、平台、Python、设备类别、CUDA/MPS 可用状态、输入文件数量和总字节数。不得记录图像内容、OCR 文本、提示文本、文件原始路径或模型响应正文。
+记录字段限定为 schema version、page、阶段、模型类别、操作数量、耗时、状态、平台、Python、设备类别、CUDA/MPS 可用状态、输入图片数量和总字节数。不得记录图像内容、OCR 文本、提示文本、文件原始路径或模型响应正文。
 
-每页汇总写入现有 reconstruction 目录，run summary 只引用汇总数值。性能记录失败不得改变转换结果，但必须写入普通运行日志。
+原始 JSONL 使用受信且稳定的 Run 根目录直接子文件 `performance-<page_id>.jsonl`，遵循 `RunStore` 的 P0 single-writer 边界；追加时仍锁定文件、复核 Run 根与文件身份并在锁内执行大小检查。它不宣称抵御 Run 根本身被有权限的外部进程并发移动。每页汇总写入现有 reconstruction 目录，run summary 只引用全部页面的汇总数值；无事件页面保留完整空 schema。模型加载次数只统计同页同模型一一配对且真实成功的 `model_load_start` → `model_load_finish`；尚未接入该事件的模型保持空映射，不得用 worker、span 或 inference 次数冒充模型加载次数。性能记录失败不得改变转换结果，但必须写入不包含异常路径正文的普通运行日志。
 
 ### 2. SAM 阶段批处理
 

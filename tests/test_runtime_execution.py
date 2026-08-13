@@ -831,7 +831,7 @@ def test_local_provider_runs_complete_without_host_receipt(
     plans = []
     monkeypatch.setattr(runtime, "_local_service_config", lambda: expected_service)
 
-    def fake_local_agent(request_path, *, service_config):
+    def fake_local_agent(request_path, *, service_config, performance_trace=None):
         request_path = Path(request_path)
         request = json.loads(request_path.read_text(encoding="utf-8"))
         plan = {
@@ -1205,7 +1205,7 @@ def test_image_host_pauses_without_assembly_or_completed_summary(
     )
     calls = {"initialize": 0, "assemble": 0}
 
-    def initialize(store: RunStore, page_id: str, *, _lease=None) -> dict:
+    def initialize(store: RunStore, page_id: str, *, _lease=None, **kwargs) -> dict:
         calls["initialize"] += 1
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         reconstruction.mkdir(parents=True, exist_ok=True)
@@ -1254,14 +1254,16 @@ def test_image_resume_does_not_repeat_initialized_layers(
     )
     calls = {"initialize": 0, "advance": 0, "assemble": 0}
 
-    def initialize(store: RunStore, page_id: str, *, _lease=None) -> dict:
+    def initialize(store: RunStore, page_id: str, *, _lease=None, **kwargs) -> dict:
         calls["initialize"] += 1
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         reconstruction.mkdir(parents=True, exist_ok=True)
         _write_mock_component_state(store, page_id)
         return {"status": "request_published", "page_id": page_id}
 
-    def advance(store: RunStore, page_id: str, *, _lease=None) -> dict:
+    def advance(
+        store: RunStore, page_id: str, *, _lease=None, performance_trace=None
+    ) -> dict:
         calls["advance"] += 1
         status = "awaiting_agent" if calls["advance"] == 1 else "ready_for_assembly"
         return {"status": status, "page_id": page_id}
@@ -2695,12 +2697,24 @@ def test_execute_legacy_round_aggregates_background_actions(
         legacy.importlib, "import_module", lambda name: fake_image_module
     )
 
-    legacy._execute_legacy_round(store, "page_001", object())
+    class Trace:
+        def __init__(self) -> None:
+            self.events = []
+
+        def event(self, event, **fields) -> None:
+            self.events.append((event, fields))
+
+    trace = Trace()
+
+    legacy._execute_legacy_round(
+        store, "page_001", object(), performance_trace=trace
+    )
 
     assert captured["repair_requests"] == [
         ({"text_left"}, 0.01),
         ({"component_right"}, 0.02),
     ]
+    assert [fields["status"] for _, fields in trace.events] == ["failed"]
 
 
 def test_agent_can_rebuild_uniform_canvas_under_active_components(
@@ -4496,6 +4510,21 @@ def test_run_job_preserves_pptx_without_calling_legacy(
     assert output.read_bytes() == source_bytes
     assert store.read_json("run_summary.json") == summary
     assert store.read_json("run_state.json")["status"] == "completed"
+    assert summary["performance"] == {
+        "pages": {
+            "page_001": runtime._empty_page_performance(),
+            "page_002": runtime._empty_page_performance(),
+        }
+    }
+    assert (run_dir / "performance-page_001.jsonl").is_file()
+    assert (run_dir / "performance-page_002.jsonl").is_file()
+    for page_id in ("page_001", "page_002"):
+        assert json.loads(
+            (
+                run_dir / "pages" / page_id / "reconstruction"
+                / "performance-summary.json"
+            ).read_text(encoding="utf-8")
+        ) == runtime._empty_page_performance()
     assert {
         page["status"]
         for page in store.read_json("page_jobs.json")["pages"].values()
@@ -5995,6 +6024,12 @@ def test_run_job_completes_and_writes_summary_and_page_results(
         "outputs": outputs,
         "resource_policy": safe_default_policy(),
         "quality_gate_version": runtime.COMPONENT_QUALITY_GATE_VERSION,
+        "performance": {
+            "pages": {
+                "page_001": runtime._empty_page_performance(),
+                "page_002": runtime._empty_page_performance(),
+            }
+        },
     }
     assert store.read_json("run_summary.json") == summary
     assert store.read_json("run_state.json")["status"] == "completed"
@@ -6009,6 +6044,136 @@ def test_run_job_completes_and_writes_summary_and_page_results(
             store.read_json("page_jobs.json")["pages"][page_id]["status"]
             == "validated"
         )
+
+
+def test_run_summary_reports_performance_counts_without_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+
+    def initialize(store: RunStore, page_id: str, **kwargs) -> dict:
+        trace = kwargs["performance_trace"]
+        assert trace.path == store.root / f"performance-{page_id}.jsonl"
+        trace.event(
+            "model_load_start", page_id=page_id, model="sam",
+        )
+        trace.event(
+            "model_load_finish", page_id=page_id, model="sam",
+            duration_ms=11, status="success",
+        )
+        trace.event(
+            "model_load_finish", page_id=page_id, model="dino",
+            duration_ms=13, status="failed",
+        )
+        trace.event(
+            "span", page_id=page_id, stage="visual_prepare", model="sam",
+            operation_count=2, duration_ms=17,
+        )
+        trace.event(
+            "worker", page_id=page_id, stage="visual_prepare", model="sam",
+            operation_count=2, duration_ms=19, status="success",
+        )
+        trace.event(
+            "inference_finish", page_id=page_id, stage="sam_candidates",
+            model="sam", operation_count=2, duration_ms=23, status="success",
+        )
+        trace.event(
+            "local_agent", image_count=4, total_bytes=4096,
+            duration_ms=29, status="success",
+        )
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir()
+        (reconstruction / "component_state.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        return {"status": "initialized", "page_id": page_id}
+
+    monkeypatch.setattr(runtime, "initialize_legacy_page", initialize)
+    monkeypatch.setattr(
+        runtime,
+        "advance_legacy_page",
+        lambda store, page_id, **kwargs: {
+            "status": "ready_for_assembly", "page_id": page_id,
+        },
+    )
+    monkeypatch.setattr(runtime, "assemble_legacy_results", lambda store: {})
+
+    summary = runtime.run_job(run_dir)
+
+    assert summary["performance"] == {
+        "pages": {
+            "page_001": {
+                "model_loads": {"sam": 1},
+                "stage_runs": {"visual_prepare": 1},
+                "stage_duration_ms": {"visual_prepare": 17},
+                "worker_runs": {"sam": 1},
+                "worker_duration_ms": {"sam": 19},
+                "inference_runs": {"sam": 1},
+                "inference_operations": {"sam": 2},
+                "inference_duration_ms": {"sam": 23},
+                "agent_runs": 1,
+                "agent_image_count": 4,
+                "agent_total_bytes": 4096,
+                "agent_duration_ms": 29,
+            }
+        }
+    }
+    serialized = json.dumps(summary["performance"]).casefold()
+    for forbidden in ("path", "ocr text", "prompt", "response", str(source).casefold()):
+        assert forbidden not in serialized
+    assert json.loads(
+        (run_dir / "pages/page_001/reconstruction/performance-summary.json")
+        .read_text(encoding="utf-8")
+    ) == summary["performance"]["pages"]["page_001"]
+
+
+def test_invalid_performance_events_do_not_change_completed_page_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+
+    def initialize(store: RunStore, page_id: str, **kwargs) -> dict:
+        trace_path = kwargs["performance_trace"].path
+        with trace_path.open("a", encoding="utf-8") as stream:
+            stream.write("not-json\n")
+            stream.write('{"schema_version":1,"event":"unknown"}\n')
+            stream.write(json.dumps({
+                "schema_version": 1,
+                "event": "span",
+                "page_id": page_id,
+                "stage": "visual_prepare",
+                "duration_ms": 7,
+            }) + "\n")
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        reconstruction.mkdir()
+        (reconstruction / "component_state.json").write_text(
+            "{}", encoding="utf-8"
+        )
+        return {"status": "initialized", "page_id": page_id}
+
+    monkeypatch.setattr(runtime, "initialize_legacy_page", initialize)
+    monkeypatch.setattr(
+        runtime, "advance_legacy_page",
+        lambda store, page_id, **kwargs: {
+            "status": "ready_for_assembly", "page_id": page_id,
+        },
+    )
+    monkeypatch.setattr(runtime, "assemble_legacy_results", lambda store: {})
+
+    summary = runtime.run_job(run_dir)
+
+    assert summary["status"] == "completed"
+    assert summary["performance"]["pages"]["page_001"]["stage_runs"] == {
+        "visual_prepare": 1
+    }
+    assert RunStore.open(run_dir).read_json("page_jobs.json")["pages"][
+        "page_001"
+    ]["status"] == "validated"
+    assert "Skipping invalid performance trace event" in caplog.text
 
 
 def test_run_job_records_execution_failure_for_run_and_all_pages(

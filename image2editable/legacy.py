@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, nullcontext, redirect_stdout
 import ctypes
 import errno
 import hashlib
 import importlib
 import io
 import json
+import logging
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -14,6 +15,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from typing import Any
 import uuid
 
@@ -43,6 +45,9 @@ from image2editable.inputs import sha256_file
 from image2editable.store import RunStore
 from image2editable.execution import ExecutionLease
 from scripts.psd_assemble import assemble_psd
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _absolute_outputs(value: Any) -> Any:
@@ -490,7 +495,8 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
 
 
 def initialize_legacy_page(
-    store: RunStore, page_id: str, *, _lease: ExecutionLease
+    store: RunStore, page_id: str, *, _lease: ExecutionLease,
+    performance_trace=None,
 ) -> dict[str, Any]:
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     state_path = reconstruction / "component_state.json"
@@ -498,12 +504,20 @@ def initialize_legacy_page(
         return {"status": "already_initialized", "page_id": page_id}
     manifest = store.read_json("job_manifest.json")
     source = _source_path(store, page_id)
-    prepared = importlib.import_module("image_to_ppt").prepare_component_layers(
-        source,
-        reconstruction / "initial",
-        lang=manifest["options"]["lang"],
-        resource_isolation=True,
+    performance = (
+        performance_trace.span(
+            "visual_prepare", page_id=page_id, operation_count=1
+        )
+        if performance_trace is not None
+        else nullcontext()
     )
+    with performance:
+        prepared = importlib.import_module("image_to_ppt").prepare_component_layers(
+            source,
+            reconstruction / "initial",
+            lang=manifest["options"]["lang"],
+            resource_isolation=True,
+        )
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
     )
@@ -1317,12 +1331,15 @@ def _render_component_evidence(
 
 
 def advance_legacy_page(
-    store: RunStore, page_id: str, *, _lease: ExecutionLease
+    store: RunStore, page_id: str, *, _lease: ExecutionLease,
+    performance_trace=None,
 ) -> dict[str, Any]:
     outcome = advance_component_repair(store, page_id, _lease=_lease)
     status = outcome["status"]
     if status == "needs_execution":
-        _execute_legacy_round(store, page_id, _lease)
+        _execute_legacy_round(
+            store, page_id, _lease, performance_trace=performance_trace
+        )
         return {"status": "processing", "page_id": page_id}
     if status == "needs_quality":
         record_component_quality(store, page_id, _lease=_lease)
@@ -1926,8 +1943,29 @@ def _quality_assets(
     }
 
 
+def _record_inference_performance(
+    performance_trace, started: float, page_id: str,
+    operation_count: int, status: str,
+) -> None:
+    if performance_trace is None:
+        return
+    try:
+        performance_trace.event(
+            "inference_finish",
+            page_id=page_id,
+            stage="component_sam",
+            model="sam",
+            operation_count=operation_count,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            status=status,
+        )
+    except Exception:
+        _LOGGER.warning("Performance trace recording failed")
+
+
 def _execute_legacy_round(
-    store: RunStore, page_id: str, lease: ExecutionLease
+    store: RunStore, page_id: str, lease: ExecutionLease,
+    *, performance_trace=None,
 ) -> None:
     import numpy as np
     from scripts.sam_worker import run_component_prompt_batch_worker
@@ -1975,13 +2013,37 @@ def _execute_legacy_round(
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
     def sam_batch_runner(*, image, prompts):
-        masks = run_component_prompt_batch_worker(
-            image,
-            prompts,
-            work_dir=output_dir.parent,
-        )
+        started = time.perf_counter()
+        try:
+            masks = run_component_prompt_batch_worker(
+                image,
+                prompts,
+                work_dir=output_dir.parent,
+            )
+        except BaseException:
+            _record_inference_performance(
+                performance_trace, started, page_id, len(prompts), "error"
+            )
+            raise
         if type(masks) is not list or len(masks) != len(prompts):
+            _record_inference_performance(
+                performance_trace, started, page_id, len(prompts), "failed"
+            )
             raise RuntimeError("SAM component worker returned an invalid mask count")
+        if any(
+            not isinstance(mask, np.ndarray)
+            or mask.dtype != np.bool_
+            or mask.shape != image.shape[:2]
+            or not mask.any()
+            for mask in masks
+        ):
+            _record_inference_performance(
+                performance_trace, started, page_id, len(prompts), "failed"
+            )
+            raise RuntimeError("SAM component worker returned an invalid mask")
+        _record_inference_performance(
+            performance_trace, started, page_id, len(prompts), "success"
+        )
         return [
             {"component_id": prompt["component_id"], "mask": mask}
             for prompt, mask in zip(prompts, masks)

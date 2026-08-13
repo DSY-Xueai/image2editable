@@ -325,7 +325,7 @@ def _record_local_agent_performance(
             status=status,
         )
     except Exception:
-        _LOGGER.warning("Performance trace recording failed", exc_info=True)
+        _LOGGER.warning("Performance trace recording failed")
 
 
 def _read_plan(path: Path) -> dict:
