@@ -752,6 +752,7 @@ def _text_delta_graph(root: Path, old_mask: np.ndarray) -> tuple[dict, dict]:
         ).hexdigest(),
         "sam_protocol_sha256": image_to_ppt._TEXT_DELTA_SAM_PROTOCOL_SHA256,
         "dino_protocol_sha256": image_to_ppt._TEXT_DELTA_DINO_PROTOCOL_SHA256,
+        "prepared_manifest_sha256": "d" * 64,
     }
     graph = {
         "schema_version": 1,
@@ -789,6 +790,7 @@ def _text_delta_graph(root: Path, old_mask: np.ndarray) -> tuple[dict, dict]:
         "old_cleanup_mask_sha256": identity["old_cleanup_mask_sha256"],
         "sam_protocol_sha256": identity["sam_protocol_sha256"],
         "dino_protocol_sha256": identity["dino_protocol_sha256"],
+        "prepared_manifest_sha256": identity["prepared_manifest_sha256"],
         "nodes": graph["nodes"],
     }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     identity["cache_key"] = cache_key
@@ -823,6 +825,7 @@ def test_text_delta_reopens_intersections_parents_children_and_neighbors(
         "old_mask_hash",
         "sam_protocol_hash",
         "dino_protocol_hash",
+        "prepared_manifest_hash",
         "cache_identity",
         "missing_relation",
         "unreadable_mask",
@@ -848,6 +851,8 @@ def test_text_delta_incomplete_or_mismatched_cache_requires_full_recompute(
         identity["sam_protocol_sha256"] = "c" * 64
     elif mutation == "dino_protocol_hash":
         identity["dino_protocol_sha256"] = "c" * 64
+    elif mutation == "prepared_manifest_hash":
+        identity["prepared_manifest_sha256"] = "c" * 64
     elif mutation == "cache_identity":
         graph["cache_key"] = "c" * 64
     elif mutation == "missing_relation":
@@ -914,6 +919,56 @@ def test_text_delta_cleanup_mask_shrink_requires_full_recompute(tmp_path: Path) 
     ) is None
 
 
+def test_text_delta_three_pixel_safety_margin_reopens_nearby_node(
+    tmp_path: Path,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[20:24, 26:28] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+
+    scope = image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    )
+
+    assert scope == {"child", "parent", "touching_neighbor"}
+
+
+def test_text_delta_only_dilates_one_full_page_array(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old_mask = np.zeros((720, 1280), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[600:605, 1100:1105] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+    dilated_shapes = []
+    original_dilate = image_to_ppt.cv2.dilate
+
+    def recording_dilate(value, *args, **kwargs):
+        dilated_shapes.append(np.asarray(value).shape)
+        return original_dilate(value, *args, **kwargs)
+
+    monkeypatch.setattr(image_to_ppt.cv2, "dilate", recording_dilate)
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) == set()
+    assert dilated_shapes.count(old_mask.shape) == 1
+    assert all(shape == old_mask.shape or np.prod(shape) < 1000
+               for shape in dilated_shapes)
+
+
 def _prepare_rerun_fixture(
     tmp_path: Path,
     monkeypatch,
@@ -927,6 +982,10 @@ def _prepare_rerun_fixture(
     stable_visual_output: bool = False,
     background_error: bool = False,
     second_pass_error: bool = False,
+    cache_error: bool = False,
+    missing_cache: bool = False,
+    source_change_before_manifest: bool = False,
+    wrong_component_shape: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -997,6 +1056,49 @@ def _prepare_rerun_fixture(
 
         monkeypatch.setattr(
             image_to_ppt, "_write_first_visual_cache", corrupting_write_cache
+        )
+    if cache_error:
+        monkeypatch.setattr(
+            image_to_ppt,
+            "_write_first_visual_cache",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                ValueError("first visual cache exceeds its size limit")
+            ),
+        )
+    if missing_cache or wrong_component_shape:
+        original_write_cache = image_to_ppt._write_first_visual_cache
+
+        def changing_write_cache(manifest, target, cleanup):
+            if wrong_component_shape:
+                component = manifest["components"][0]
+                component_path = Path(target, component["asset"]["path"])
+                Image.new("RGBA", (1, 1), "red").save(component_path)
+                component["asset"]["sha256"] = image_to_ppt.hashlib.sha256(
+                    component_path.read_bytes()
+                ).hexdigest()
+            path = original_write_cache(manifest, target, cleanup)
+            if missing_cache:
+                path.unlink()
+            return path
+
+        monkeypatch.setattr(
+            image_to_ppt, "_write_first_visual_cache", changing_write_cache
+        )
+    if source_change_before_manifest:
+        original_write_prepared = image_to_ppt._write_prepared_page
+        prepared_writes = 0
+
+        def changing_write_prepared(slide_data, target):
+            nonlocal prepared_writes
+            if prepared_writes == 0:
+                with Image.open(slide_data["original_image_path"]) as original:
+                    size = original.size
+                Image.new("RGB", size, "black").save(slide_data["original_image_path"])
+            prepared_writes += 1
+            return original_write_prepared(slide_data, target)
+
+        monkeypatch.setattr(
+            image_to_ppt, "_write_prepared_page", changing_write_prepared
         )
 
     recovered = _ocr_item("NX", 0.96, 1)
@@ -1265,6 +1367,44 @@ def test_text_delta_full_fallback_preserves_original_visual_error(
             affected_text_delta=True,
             second_pass_error=True,
         )
+
+
+def test_text_delta_cache_limit_uses_full_visual_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, calls = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        safe_text_delta=True,
+        cache_error=True,
+    )
+
+    assert calls == [0, 1]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+
+
+@pytest.mark.parametrize(
+    "case", ["missing_cache", "source_changed", "wrong_component_shape"]
+)
+def test_text_delta_untrusted_cache_binding_uses_full_visual_fallback(
+    tmp_path: Path,
+    monkeypatch,
+    case: str,
+) -> None:
+    prepared, calls = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        safe_text_delta=True,
+        missing_cache=case == "missing_cache",
+        source_change_before_manifest=case == "source_changed",
+        wrong_component_shape=case == "wrong_component_shape",
+    )
+
+    assert calls == [0, 1]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
 
 
 def test_prepare_preserves_stable_diagnostic_when_another_candidate_recovers(
