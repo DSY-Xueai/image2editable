@@ -5089,7 +5089,11 @@ def _prepare_round_two_review_session(page_session: dict) -> None:
     Image.fromarray(residual).save(evidence["unexplained-mask.png"])
     evidence["quality-report.json"].write_text(json.dumps({
         "schema_version": 1,
-        "violations": ["unexplained_visual_residual", "contained_parent_review"],
+        "report": {
+            "violations": [
+                "unexplained_visual_residual", "contained_parent_review"
+            ],
+        },
         "contained_parent_pairs": [["contained", "failed"]],
     }), encoding="utf-8")
     _refresh_test_presentation_manifest(page_session)

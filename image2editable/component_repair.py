@@ -2786,15 +2786,14 @@ def _write_round_review(
         staging, reconstruction, records, "quality-report.json",
         max_bytes=GRAPH_JSON_LIMIT,
     ).decode("utf-8"))
+    report = quality.get("report") if isinstance(quality, dict) else None
+    violations = report.get("violations") if isinstance(report, dict) else None
     if (
-        not isinstance(quality, dict)
-        or not isinstance(quality.get("violations", []), list)
-        or any(type(value) is not str for value in quality.get("violations", []))
+        not isinstance(violations, list)
+        or any(type(value) is not str for value in violations)
     ):
         raise ValueError("Round review quality evidence is invalid")
-    include_unexplained = (
-        "unexplained_visual_residual" in quality.get("violations", [])
-    )
+    include_unexplained = "unexplained_visual_residual" in violations
     residual = Image.new("L", page_size, 0)
     if include_unexplained:
         if "unexplained-mask.png" not in records:
