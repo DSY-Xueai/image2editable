@@ -12,7 +12,7 @@ from PIL import Image
 import pytest
 
 import image_to_ppt
-from scripts import text_detect
+from scripts import text_detect, worker_resources
 from scripts.visual_segment import MaskCandidate, VisualElement
 
 
@@ -827,14 +827,18 @@ def test_resource_safe_proposals_run_object_worker(
     assert not any(path.name.startswith("object-") for path in tmp_path.iterdir())
 
 
-def test_resource_safe_sam_phases_run_separate_workers(
+def test_resource_safe_sam_candidate_batch_runs_one_worker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     image = np.zeros((10, 20, 3), dtype=np.uint8)
+    image[:, :, 1] = 37
     text_mask = np.zeros((10, 20), dtype=np.uint8)
-    expected_mask = np.zeros((10, 20), dtype=bool)
-    expected_mask[2:8, 4:16] = True
+    text_mask[0, 0] = 255
+    prompted_mask = np.zeros((10, 20), dtype=bool)
+    prompted_mask[2:8, 4:16] = True
+    automatic_mask = np.zeros((10, 20), dtype=bool)
+    automatic_mask[3:7, 6:14] = True
     proposal = image_to_ppt.ObjectProposal(
         box_xyxy=(4.0, 2.0, 16.0, 8.0),
         score=0.95,
@@ -845,78 +849,153 @@ def test_resource_safe_sam_phases_run_separate_workers(
     )
     calls = []
     events = []
+    temporary_roots = []
 
     def fake_run(command, **kwargs):
         events.append("spawn")
         calls.append((command, kwargs))
+        request_path = Path(command[command.index("--request") + 1])
         result_path = Path(command[command.index("--result") + 1])
+        temporary_root = request_path.parent.resolve()
+        temporary_roots.append(temporary_root)
+        assert result_path.parent.resolve() == temporary_root
+        assert temporary_root.is_relative_to(tmp_path.resolve())
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        assert request == {
+            "schema_version": 1,
+            "operations": [
+                {
+                    "id": "prompted",
+                    "kind": "prompted",
+                    "image": "image.png",
+                    "text_mask": "text-mask.png",
+                    "proposals": "proposals.json",
+                },
+                {
+                    "id": "automatic",
+                    "kind": "automatic",
+                    "image": "image.png",
+                },
+            ],
+        }
+        for operation in request["operations"]:
+            for field in ("image", "text_mask", "proposals"):
+                if field not in operation:
+                    continue
+                relative_path = Path(operation[field])
+                assert not relative_path.is_absolute()
+                assert ".." not in relative_path.parts
+                controlled_path = (temporary_root / relative_path).resolve()
+                assert controlled_path.is_relative_to(temporary_root)
+                assert controlled_path.is_file()
+        assert np.array_equal(
+            np.asarray(Image.open(temporary_root / "image.png").convert("RGB")),
+            image,
+        )
+        assert np.array_equal(
+            np.asarray(Image.open(temporary_root / "text-mask.png").convert("L")),
+            text_mask,
+        )
+        assert json.loads(
+            (temporary_root / "proposals.json").read_text(encoding="utf-8")
+        ) == [{
+            **proposal.__dict__,
+            "box_xyxy": list(proposal.box_xyxy),
+            "crop_box": list(proposal.crop_box),
+        }]
         result_path.write_text(
             json.dumps(
-                [
-                    {
-                        "mask": base64.b64encode(
-                            np.packbits(expected_mask, axis=None)
-                        ).decode("ascii"),
-                        "mask_shape": [10, 20],
-                        "score": 0.93,
-                        "source": "sam",
-                        "crop_box": [0, 0, 20, 10],
-                        "touches_crop_edge": False,
-                        "label": "icon",
-                        "role": "object",
-                        "object_box": [4.0, 2.0, 16.0, 8.0],
-                    }
-                ]
+                {
+                    "schema_version": 1,
+                    "operations": [
+                        {
+                            "id": "prompted",
+                            "kind": "prompted",
+                            "candidates": [
+                                {
+                                    "mask": base64.b64encode(
+                                        np.packbits(prompted_mask, axis=None)
+                                    ).decode("ascii"),
+                                    "mask_shape": [10, 20],
+                                    "score": 0.93,
+                                    "source": "grounded:full:object",
+                                    "crop_box": [0, 0, 20, 10],
+                                    "touches_crop_edge": False,
+                                    "label": "icon",
+                                    "role": "object",
+                                    "object_box": [4.0, 2.0, 16.0, 8.0],
+                                }
+                            ],
+                        },
+                        {
+                            "id": "automatic",
+                            "kind": "automatic",
+                            "candidates": [
+                                {
+                                    "mask": base64.b64encode(
+                                        np.packbits(automatic_mask, axis=None)
+                                    ).decode("ascii"),
+                                    "mask_shape": [10, 20],
+                                    "score": 0.97,
+                                    "source": "sam",
+                                    "crop_box": [0, 0, 20, 10],
+                                    "touches_crop_edge": False,
+                                    "label": "",
+                                    "role": "",
+                                    "object_box": None,
+                                }
+                            ],
+                        },
+                    ],
+                }
             ),
             encoding="utf-8",
         )
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(
-        image_to_ppt,
-        "run_isolated_worker",
-        fake_run,
-        raising=False,
+        worker_resources,
+        "trim_parent_working_set_before_worker",
+        lambda: events.append("trim"),
     )
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: pytest.fail("SAM must use the shared runner"),
-    )
+    monkeypatch.setattr(worker_resources.subprocess, "run", fake_run)
+    monkeypatch.setenv("SAM_BATCH_RESOURCE_TEST", "kept")
 
-    prompted = image_to_ppt._generate_sam_candidates_isolated(
+    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
         image,
         text_mask,
         [proposal],
         tmp_path,
-        mode="prompted",
-    )
-    automatic = image_to_ppt._generate_sam_candidates_isolated(
-        image,
-        None,
-        None,
-        tmp_path,
-        mode="automatic",
     )
 
-    assert len(calls) == 2
-    assert events == ["spawn", "spawn"]
-    assert [
-        command[command.index("--mode") + 1] for command, _ in calls
-    ] == ["prompted", "automatic"]
-    assert "--proposals" in calls[0][0]
-    assert "--text-mask" in calls[0][0]
-    assert "--proposals" not in calls[1][0]
-    assert "--text-mask" not in calls[1][0]
-    assert all(
-        kwargs == {"capture_output": True, "text": True}
-        for _, kwargs in calls
+    assert events == ["trim", "spawn"]
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    worker_path = (
+        Path(image_to_ppt.__file__).resolve().parent / "scripts" / "sam_worker.py"
     )
-    assert np.array_equal(prompted[0].mask, expected_mask)
-    assert np.array_equal(automatic[0].mask, expected_mask)
+    assert command[:2] == [sys.executable, str(worker_path)]
+    assert command[command.index("--mode") + 1] == "batch"
+    assert "--request" in command
+    assert "--image" not in command
+    assert kwargs["capture_output"] is True
+    assert kwargs["text"] is True
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
+    assert kwargs["env"]["PYTHONUTF8"] == "1"
+    assert kwargs["env"]["SAM_BATCH_RESOURCE_TEST"] == "kept"
+    assert np.array_equal(prompted[0].mask, prompted_mask)
+    assert np.array_equal(automatic[0].mask, automatic_mask)
+    assert [prompted[0].source, automatic[0].source] == [
+        "grounded:full:object",
+        "sam",
+    ]
     assert prompted[0].crop_box == (0, 0, 20, 10)
     assert prompted[0].object_box == (4.0, 2.0, 16.0, 8.0)
-    assert not any(path.name.startswith("sam-") for path in tmp_path.iterdir())
+    assert automatic[0].object_box is None
+    assert len(temporary_roots) == 1
+    assert not temporary_roots[0].exists()
+    assert not any(path.name.startswith("sam-batch-") for path in tmp_path.iterdir())
 
 
 def test_resource_safe_hole_recheck_runs_separate_worker(
