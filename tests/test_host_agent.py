@@ -17,6 +17,18 @@ from image2editable.component_repair import (
     build_component_agent_request,
     initialize_component_repair_state,
 )
+
+
+def test_host_skill_uses_request_review_evidence_without_skipping_quality() -> None:
+    text = (Path(__file__).resolve().parents[1] / "skills/image-to-ppt/SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "review_evidence" in text
+    assert "只查看并逐项核验" in text
+    assert "完整 request" in text
+    assert "质量门禁" in text
+    assert "后续 `agent next` 返回当前组件请求及九项绝对证据路径" not in text
 from image2editable.contracts import RunStatus
 from image2editable.host_agent import next_host_agent_item, record_host_plan
 from image2editable.inputs import prepare_image_job

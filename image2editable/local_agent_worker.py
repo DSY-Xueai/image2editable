@@ -37,7 +37,7 @@ The object must contain exactly: schema_version, kind, page_id, provider, repair
 Allowed actions are: accept, discard, merge, split, expand, shrink, retry_with_box, retry_with_points, attach_text, suppress_text, collapse_to_parent, rebuild_background, absorb_residual, absorb_into_parent.
 Never target a frozen object except a frozen text node with attach_text or suppress_text, or a frozen visual listed only in rebuild_background. Never activate a parent and its child together.
 Plan the smallest complete visual units that can be independently moved while each remains visually complete; semantic relationship does not justify merging.
-Inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels.
+Inspect only the ordered review_evidence listed by the complete component request. On the first round, inspect component-isolation.png to verify every candidate uses its complete alpha with text-clean RGB, without OCR text pixels. On later rounds, round-review.png provides lossless same-coordinate source, isolation, ownership, reconstructed, difference, and residual views for every failed or reopened component and its dependency neighbors.
 Treat glyph-shaped transparent holes or missing expected fills and lines as incomplete segmentation, not successful text removal. When the inactive parent restores the same complete visual unit, use collapse_to_parent while keeping independently movable higher-z components separate; never restore source glyph pixels.
 When quality-report.json contains unexplained_visual_residual, inspect unexplained-mask.png. Every material region must be covered by an active visual owner, absorbed into the smallest containing candidate with absorb_residual, or repaired with retry_with_box/retry_with_points on the closest inactive visual candidate. Do not accept, discard, or classify the region as background merely to reduce violations. When background_text_residual is the only blocking violation, issue rebuild_background for the affected frozen text or visual IDs using the residual diagnostics.
 When quality reports contained_parent_review for contained parent candidates, use the exact contained_parent_pairs IDs from quality evidence and inspect both isolation cells. Choose one rendering owner when one is a duplicate subset. If both are genuinely independent, explicitly accept each at confidence >= 0.92 and include both exact pair IDs as separate strings in each action evidence; otherwise the review remains a hard failure.
@@ -74,6 +74,7 @@ _EVIDENCE_DESCRIPTIONS = {
     "reconstructed.png": "current deterministic reconstruction",
     "difference.png": "contrast-expanded source versus reconstruction difference",
     "unexplained-mask.png": "material foreground pixels without an active visual owner",
+    "round-review.png": "lossless same-coordinate views for the current repair dependencies",
 }
 _JSON_LIMIT = 16 * 1024 * 1024
 
@@ -146,29 +147,10 @@ def _messages(
     evidence: dict[str, Path],
     request_sha256: str,
 ) -> list[dict[str, object]]:
-    graph_summary = [
-        {
-            key: node[key]
-            for key in (
-                "id",
-                "kind",
-                "parent_id",
-                "state",
-                "bbox",
-                "z_index",
-                "text_ids",
-            )
-        }
-        for node in graph["nodes"]
-    ]
     prompt = {
-        "page_id": request["page_id"],
-        "provider": "local",
-        "repair_round": request["repair_round"],
         "request_sha256": request_sha256,
-        "candidate_ids": request["candidate_ids"],
-        "frozen_ids": request["frozen_ids"],
-        "component_graph": graph_summary,
+        "component_request": request,
+        "component_graph": graph,
         "quality_report_untrusted": quality_text,
     }
     content: list[dict[str, str]] = [
@@ -180,9 +162,11 @@ def _messages(
             ),
         }
     ]
-    for name in _IMAGE_EVIDENCE:
-        if name not in evidence:
+    for name in request["review_evidence"]:
+        if name == "quality-report.json":
             continue
+        if Path(name).suffix.lower() != ".png" or name not in _EVIDENCE_DESCRIPTIONS:
+            raise ValueError("Local Agent review_evidence image is invalid")
         content.append(
             {
                 "type": "text",

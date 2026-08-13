@@ -60,7 +60,7 @@ def test_host_skill_requires_residual_driven_repairs() -> None:
     assert "background_text_residual" in text
 
 
-def _request_path(tmp_path: Path) -> Path:
+def _request_path(tmp_path: Path, *, repair_round: int = 1) -> Path:
     reconstruction = tmp_path / "pages" / "page_001" / "reconstruction"
     evidence_root = reconstruction / "evidence-source"
     masks = evidence_root / "masks"
@@ -127,8 +127,104 @@ def _request_path(tmp_path: Path) -> Path:
             "reconstruction_dir": reconstruction,
             "evidence": evidence,
         },
-        repair_round=1,
+        repair_round=repair_round,
     )
+
+
+def _message_image_names(request_path: Path) -> list[str]:
+    request = load_component_agent_request(request_path)
+    evidence = {
+        name: request_path.parent / record["path"]
+        for name, record in request["evidence"].items()
+    }
+    messages = local_agent_worker._messages(
+        request,
+        json.loads(evidence["component-graph.json"].read_text(encoding="utf-8")),
+        evidence["quality-report.json"].read_text(encoding="utf-8"),
+        evidence,
+        hashlib.sha256(request_path.read_bytes()).hexdigest(),
+    )
+    return [
+        Path(item["image"]).name
+        for item in messages[1]["content"]
+        if item["type"] == "image"
+    ]
+
+
+def test_local_message_keeps_complete_request_and_graph_json(tmp_path: Path) -> None:
+    request_path = _request_path(tmp_path, repair_round=2)
+    request = load_component_agent_request(request_path)
+    evidence = {
+        name: request_path.parent / record["path"]
+        for name, record in request["evidence"].items()
+    }
+    graph = json.loads(evidence["component-graph.json"].read_text(encoding="utf-8"))
+
+    messages = local_agent_worker._messages(
+        request, graph, evidence["quality-report.json"].read_text(encoding="utf-8"),
+        evidence, hashlib.sha256(request_path.read_bytes()).hexdigest(),
+    )
+    prompt = json.loads(messages[1]["content"][0]["text"].split("\n", 1)[1])
+
+    assert prompt["component_request"] == request
+    assert prompt["component_graph"] == graph
+
+
+def test_first_round_local_message_keeps_existing_image_order(tmp_path: Path) -> None:
+    request_path = _request_path(tmp_path)
+
+    assert _message_image_names(request_path) == [
+        name for name in local_agent_worker._IMAGE_EVIDENCE
+        if name in load_component_agent_request(request_path)["evidence"]
+    ]
+
+
+def test_later_round_local_message_only_sends_review_evidence_images(
+    tmp_path: Path,
+) -> None:
+    request_path = _request_path(tmp_path, repair_round=2)
+
+    assert _message_image_names(request_path) == [
+        "source.png", "reconstructed.png", "difference.png", "round-review.png"
+    ]
+
+
+def test_later_round_local_telemetry_counts_only_review_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path, repair_round=2)
+    request = load_component_agent_request(request_path)
+    observed = []
+
+    class Trace:
+        def event(self, event, **fields):
+            observed.append((event, fields))
+
+    def invoke(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps(_plan(request_path)), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(local_agent, "_invoke_worker", invoke)
+    monkeypatch.setattr(local_agent.time, "perf_counter", lambda: 1.0)
+
+    local_agent.run_local_agent(
+        request_path,
+        model_receipt=_receipt(tmp_path),
+        performance_trace=Trace(),
+    )
+
+    image_paths = [
+        request_path.parent / request["evidence"][name]["path"]
+        for name in request["review_evidence"]
+        if name.endswith(".png")
+    ]
+    assert observed == [("local_agent", {
+        "image_count": len(image_paths),
+        "total_bytes": sum(path.stat().st_size for path in image_paths),
+        "duration_ms": 0,
+        "status": "success",
+    })]
 
 
 def _receipt(tmp_path: Path) -> dict[str, object]:

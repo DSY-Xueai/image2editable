@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -17,8 +18,11 @@ from scripts.initial_diagnostics import validate_initial_diagnostics
 
 from image2editable.component_contracts import (
     COMPONENT_EVIDENCE_NAMES,
+    FULL_COMPONENT_REVIEW_EVIDENCE,
+    INCREMENTAL_COMPONENT_REVIEW_EVIDENCE,
     LEGACY_COMPONENT_EVIDENCE_NAMES,
     MAX_REPAIR_ROUNDS,
+    ROUND_REVIEW_EVIDENCE_NAME,
     validate_agent_provider,
     validate_component_agent_request,
     validate_component_graph,
@@ -41,6 +45,9 @@ GRAPH_JSON_LIMIT = 16 * 1024 * 1024
 REQUEST_JSON_LIMIT = 4 * 1024 * 1024
 MARKER_JSON_LIMIT = 64 * 1024
 PRESENTATION_ASSET_LIMIT = 256 * 1024 * 1024
+ROUND_REVIEW_MAX_COMPONENTS = 64
+ROUND_REVIEW_MAX_DIMENSION = 8192
+ROUND_REVIEW_MAX_PIXELS = 64 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
@@ -2715,6 +2722,229 @@ def _snapshot_quality_directory_chain(
     return identities
 
 
+def _verified_staged_evidence(
+    staging: Path,
+    reconstruction: Path,
+    records: dict[str, dict[str, str]],
+    name: str,
+    *,
+    max_bytes: int,
+) -> bytes:
+    record = records[name]
+    payload = _read_bound_file(
+        staging / record["path"], reconstruction,
+        max_bytes=max_bytes, label=f"round review {name}",
+    )
+    if hashlib.sha256(payload).hexdigest() != record["sha256"]:
+        raise RuntimeError(f"Round review evidence hash mismatch: {name}")
+    return payload
+
+
+def _round_review_image(payload: bytes, name: str):
+    from PIL import Image
+
+    with Image.open(io.BytesIO(payload)) as image:
+        if image.format != "PNG":
+            raise ValueError(f"Round review evidence is not PNG: {name}")
+        image.load()
+        return image.convert("RGBA")
+
+
+def _write_round_review(
+    *,
+    staging: Path,
+    reconstruction: Path,
+    records: dict[str, dict[str, str]],
+    graph: dict,
+    manifest: dict,
+    graph_root: Path,
+) -> tuple[bytes, bool]:
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter, PngImagePlugin
+
+    visual_names = (
+        "source.png", "ownership.png", "reconstructed.png", "difference.png",
+    )
+    images = {
+        name: _round_review_image(_verified_staged_evidence(
+            staging, reconstruction, records, name,
+            max_bytes=PRESENTATION_ASSET_LIMIT,
+        ), name)
+        for name in visual_names
+    }
+    page_size = images["source.png"].size
+    if (
+        page_size[0] <= 0
+        or page_size[1] <= 0
+        or page_size[0] > ROUND_REVIEW_MAX_DIMENSION
+        or page_size[1] > ROUND_REVIEW_MAX_DIMENSION
+        or page_size[0] * page_size[1] > ROUND_REVIEW_MAX_PIXELS
+        or any(image.size != page_size for image in images.values())
+    ):
+        raise ValueError("Round review page dimensions exceed limits")
+    quality = json.loads(_verified_staged_evidence(
+        staging, reconstruction, records, "quality-report.json",
+        max_bytes=GRAPH_JSON_LIMIT,
+    ).decode("utf-8"))
+    if (
+        not isinstance(quality, dict)
+        or not isinstance(quality.get("violations", []), list)
+        or any(type(value) is not str for value in quality.get("violations", []))
+    ):
+        raise ValueError("Round review quality evidence is invalid")
+    include_unexplained = (
+        "unexplained_visual_residual" in quality.get("violations", [])
+    )
+    residual = Image.new("L", page_size, 0)
+    if include_unexplained:
+        if "unexplained-mask.png" not in records:
+            raise ValueError("Round review unexplained mask is missing")
+        residual_rgba = _round_review_image(_verified_staged_evidence(
+            staging, reconstruction, records, "unexplained-mask.png",
+            max_bytes=PRESENTATION_ASSET_LIMIT,
+        ), "unexplained-mask.png")
+        if residual_rgba.size != page_size:
+            raise ValueError("Round review residual dimensions differ")
+        residual = residual_rgba.convert("L")
+
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    seeds = {
+        node["id"] for node in graph["nodes"]
+        if node["state"] in {"pending", "pending_gate", "failed"}
+    }
+    if not seeds:
+        raise ValueError("Round review has no failed or reopened components")
+    component_ids = set(seeds)
+    for node in graph["nodes"]:
+        if node["id"] in seeds or node.get("parent_id") in seeds:
+            if node.get("parent_id") is not None:
+                component_ids.add(node["parent_id"])
+            component_ids.add(node["id"])
+    pairs = quality.get("contained_parent_pairs", [])
+    if not isinstance(pairs, list):
+        raise ValueError("Round review contained pairs are invalid")
+    for pair in pairs:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or pair != sorted(set(pair))
+            or any(type(component_id) is not str or component_id not in nodes for component_id in pair)
+        ):
+            raise ValueError("Round review contained pairs are invalid")
+        if seeds & set(pair):
+            component_ids.update(pair)
+
+    masks: dict[str, np.ndarray] = {}
+    for component_id, node in nodes.items():
+        payload = _read_bound_file(
+            graph_root / Path(*PurePosixPath(node["mask"]).parts),
+            reconstruction,
+            max_bytes=PRESENTATION_ASSET_LIMIT,
+            label=f"round review mask {component_id}",
+        )
+        if hashlib.sha256(payload).hexdigest() != node["mask_sha256"]:
+            raise RuntimeError(f"Round review mask hash mismatch: {component_id}")
+        mask = _round_review_image(payload, node["mask"]).convert("L")
+        if mask.size != page_size:
+            raise ValueError("Round review component mask dimensions differ")
+        masks[component_id] = np.asarray(mask) > 0
+    for seed in seeds:
+        for component_id, mask in masks.items():
+            if component_id != seed and np.any(masks[seed] & mask):
+                component_ids.add(component_id)
+    if include_unexplained:
+        dilated = np.asarray(residual.filter(ImageFilter.MaxFilter(7))) > 0
+        component_ids.update(
+            component_id for component_id, mask in masks.items()
+            if np.any(mask & dilated)
+        )
+    ordered_ids = sorted(component_ids)
+    if len(ordered_ids) > ROUND_REVIEW_MAX_COMPONENTS:
+        raise ValueError("Round review component count exceeds limit")
+
+    manifest_by_id = {
+        component["component_id"]: component for component in manifest["components"]
+    }
+    active_ids = set(_presentation_component_ids(graph))
+    if set(manifest_by_id) != active_ids:
+        raise ValueError("Round review presentation assets do not match graph")
+    isolation: dict[str, Image.Image] = {}
+    run_root = reconstruction.parents[2]
+    for component_id in ordered_ids:
+        if component_id in active_ids:
+            reference = manifest_by_id[component_id]["rgba"]
+            asset_path = run_root / Path(*PurePosixPath(reference["path"]).parts)
+            payload = _read_bound_file(
+                asset_path, reconstruction, max_bytes=PRESENTATION_ASSET_LIMIT,
+                label=f"round review presentation {component_id}",
+            )
+            if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+                raise RuntimeError(
+                    f"Round review presentation hash mismatch: {component_id}"
+                )
+            layer = _round_review_image(payload, reference["path"])
+            if layer.size != page_size:
+                raise ValueError("Round review presentation dimensions differ")
+            isolation[component_id] = layer
+        else:
+            layer = images["source.png"].copy()
+            layer.putalpha(Image.fromarray(masks[component_id].astype(np.uint8) * 255))
+            isolation[component_id] = layer
+
+    panel_names = (
+        "source", "isolation", "ownership", "reconstructed", "difference",
+        "residual",
+    )
+    rows = []
+    atlas_width = 0
+    atlas_height = 0
+    header_height = 40
+    for component_id in ordered_ids:
+        left, top, right, bottom = nodes[component_id]["bbox"]
+        crop = (left, top, right, bottom)
+        width, height = right - left, bottom - top
+        row_width = width * len(panel_names)
+        row_height = height + header_height
+        atlas_width = max(atlas_width, row_width)
+        atlas_height += row_height
+        rows.append((component_id, crop, width, height, row_height))
+    if (
+        atlas_width <= 0
+        or atlas_height <= 0
+        or atlas_width > ROUND_REVIEW_MAX_DIMENSION
+        or atlas_height > ROUND_REVIEW_MAX_DIMENSION
+        or atlas_width * atlas_height > ROUND_REVIEW_MAX_PIXELS
+    ):
+        raise ValueError("Round review atlas dimensions exceed limits")
+    residual_rgb = Image.new("RGBA", page_size, (0, 0, 0, 255))
+    residual_rgb.paste((255, 0, 0, 255), mask=residual)
+    atlas = Image.new("RGBA", (atlas_width, atlas_height), (24, 24, 24, 255))
+    draw = ImageDraw.Draw(atlas)
+    y = 0
+    for component_id, crop, width, height, row_height in rows:
+        draw.text((4, y + 4), component_id, fill="white")
+        panels = (
+            images["source.png"], isolation[component_id], images["ownership.png"],
+            images["reconstructed.png"], images["difference.png"], residual_rgb,
+        )
+        for index, (panel_name, panel) in enumerate(zip(panel_names, panels, strict=True)):
+            x = index * width
+            atlas.alpha_composite(panel.crop(crop), (x, y + header_height))
+            draw.text(
+                (x + 2, y + 20), panel_name, fill="white",
+            )
+        y += row_height
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("component_ids", ",".join(ordered_ids))
+    metadata.add_text("panel_names", ",".join(panel_names))
+    output = io.BytesIO()
+    atlas.save(output, format="PNG", pnginfo=metadata, optimize=False)
+    payload = output.getvalue()
+    if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise RuntimeError("Round review PNG encoding failed")
+    return payload, include_unexplained
+
+
 def build_component_agent_request(
     page_session: dict,
     *,
@@ -2767,13 +2997,59 @@ def _build_component_agent_request_locked(
         graph_source = _contained_path(
             Path(sources["component-graph.json"]), reconstruction
         )
-        _validate_presentation_manifest(
+        manifest = _validate_presentation_manifest(
             staging / "presentation-manifest.json",
             reconstruction,
             source_sha256=records["source.png"]["sha256"],
             graph_sha256=records["component-graph.json"]["sha256"],
             expected_component_ids=_presentation_component_ids(graph),
         )
+        review_evidence = [
+            name for name in FULL_COMPONENT_REVIEW_EVIDENCE if name in records
+        ]
+        if repair_round > 1:
+            try:
+                atlas_payload, include_unexplained = _write_round_review(
+                    staging=staging,
+                    reconstruction=reconstruction,
+                    records=records,
+                    graph=graph,
+                    manifest=manifest,
+                    graph_root=graph_source.parent,
+                )
+                _write_exclusive(
+                    staging / ROUND_REVIEW_EVIDENCE_NAME,
+                    atlas_payload,
+                    reconstruction,
+                )
+            except Exception:
+                atlas_path = staging / ROUND_REVIEW_EVIDENCE_NAME
+                try:
+                    atlas_status = atlas_path.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    _require_single_directory_identity(staging, staging_identity)
+                    if (
+                        _is_link_or_reparse(atlas_status)
+                        or not stat.S_ISREG(atlas_status.st_mode)
+                        or atlas_status.st_nlink != 1
+                    ):
+                        raise RuntimeError(
+                            "Failed round review output cannot be removed safely"
+                        )
+                    atlas_path.unlink()
+                    _require_single_directory_identity(staging, staging_identity)
+            else:
+                records[ROUND_REVIEW_EVIDENCE_NAME] = {
+                    "path": ROUND_REVIEW_EVIDENCE_NAME,
+                    "sha256": hashlib.sha256(atlas_payload).hexdigest(),
+                }
+                review_evidence = [
+                    name for name in INCREMENTAL_COMPONENT_REVIEW_EVIDENCE
+                    if name in records
+                    and (name != "unexplained-mask.png" or include_unexplained)
+                ]
         request = {
             "schema_version": 1,
             "page_id": page_id,
@@ -2788,6 +3064,7 @@ def _build_component_agent_request_locked(
                 node["id"] for node in graph["nodes"] if node["state"] == "frozen"
             ),
             "evidence": records,
+            "review_evidence": review_evidence,
         }
         validate_component_agent_request(request)
         request_bytes = json.dumps(

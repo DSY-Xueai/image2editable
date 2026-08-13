@@ -312,12 +312,10 @@ def _record_local_agent_performance(
     if performance_trace is None or started is None:
         return
     try:
-        from image2editable.local_agent_worker import _IMAGE_EVIDENCE
-
         image_paths = [
             request_path.parent / Path(*request["evidence"][name]["path"].split("/"))
-            for name in _IMAGE_EVIDENCE
-            if name in request["evidence"]
+            for name in request["review_evidence"]
+            if name.endswith(".png")
         ]
         performance_trace.event(
             "local_agent",

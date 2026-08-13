@@ -5047,6 +5047,139 @@ def _refresh_test_presentation_manifest(page_session: dict) -> None:
         )
 
 
+def _prepare_round_two_review_session(page_session: dict) -> None:
+    evidence = page_session["evidence"]
+    size = (12, 12)
+    for name, path in evidence.items():
+        if Path(path).suffix == ".png":
+            Image.fromarray(np.zeros(size, dtype=np.uint8)).save(path)
+    Image.fromarray(np.full(size, 220, dtype=np.uint8)).save(evidence["source.png"])
+    masks = Path(evidence["component-graph.json"]).parent / "masks"
+    nodes = []
+    definitions = [
+        ("failed", "child", "parent", "pending", [2, 2, 6, 6], (2, 2, 6, 6)),
+        ("parent", "parent", None, "inactive", [1, 1, 7, 7], (1, 1, 7, 7)),
+        ("contained", "parent", None, "frozen", [2, 2, 5, 5], (2, 2, 5, 5)),
+        ("overlap", "parent", None, "frozen", [5, 5, 9, 9], (5, 5, 9, 9)),
+        ("residual_neighbor", "parent", None, "frozen", [9, 9, 11, 11], (9, 9, 11, 11)),
+        ("unrelated", "parent", None, "frozen", [0, 9, 2, 11], (0, 9, 2, 11)),
+    ]
+    for z_index, (component_id, kind, parent_id, state, bbox, area) in enumerate(definitions):
+        mask = np.zeros(size, dtype=np.uint8)
+        left, top, right, bottom = area
+        mask[top:bottom, left:right] = 255
+        mask_path = masks / f"{component_id}.png"
+        Image.fromarray(mask).save(mask_path)
+        nodes.append({
+            "id": component_id,
+            "kind": kind,
+            "parent_id": parent_id,
+            "state": state,
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": bbox,
+            "z_index": z_index,
+            "text_ids": [],
+        })
+    evidence["component-graph.json"].write_text(
+        json.dumps({"nodes": nodes}), encoding="utf-8"
+    )
+    residual = np.zeros(size, dtype=np.uint8)
+    residual[8, 8] = 255
+    Image.fromarray(residual).save(evidence["unexplained-mask.png"])
+    evidence["quality-report.json"].write_text(json.dumps({
+        "schema_version": 1,
+        "violations": ["unexplained_visual_residual", "contained_parent_review"],
+        "contained_parent_pairs": [["contained", "failed"]],
+    }), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
+
+
+def test_first_round_review_evidence_preserves_full_visual_message(
+    page_session: dict,
+) -> None:
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    request = load_component_agent_request(request_path)
+
+    assert request["review_evidence"] == [
+        *component_repair.FULL_COMPONENT_REVIEW_EVIDENCE
+    ]
+
+
+def test_round_two_review_contains_failed_node_and_every_dependency_neighbor(
+    page_session: dict,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    atlas_path = request_path.parent / request["evidence"]["round-review.png"]["path"]
+    with Image.open(atlas_path) as atlas:
+        assert atlas.info["component_ids"].split(",") == [
+            "contained", "failed", "overlap", "parent", "residual_neighbor"
+        ]
+        assert atlas.info["panel_names"].split(",") == [
+            "source", "isolation", "ownership", "reconstructed", "difference",
+            "residual",
+        ]
+        assert np.all(np.asarray(atlas.convert("RGB"))[40:43, 0:3] == 220)
+    assert request["review_evidence"] == [
+        "source.png", "reconstructed.png", "difference.png",
+        "unexplained-mask.png", "quality-report.json", "round-review.png",
+    ]
+
+
+def test_round_review_write_failure_falls_back_to_full_evidence(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+    monkeypatch.setattr(
+        component_repair,
+        "_write_round_review",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    request = load_component_agent_request(request_path)
+
+    assert "round-review.png" not in request["evidence"]
+    assert request["review_evidence"] == [
+        *component_repair.FULL_COMPONENT_REVIEW_EVIDENCE
+    ]
+
+
+def test_partial_round_review_write_is_removed_before_full_fallback(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+
+    def fail_after_partial_write(*, staging: Path, **kwargs):
+        (staging / "round-review.png").write_bytes(b"partial")
+        raise OSError("write interrupted")
+
+    monkeypatch.setattr(component_repair, "_write_round_review", fail_after_partial_write)
+
+    request_path = build_component_agent_request(page_session, repair_round=2)
+
+    assert not (request_path.parent / "round-review.png").exists()
+    assert "round-review.png" not in load_component_agent_request(request_path)[
+        "evidence"
+    ]
+
+
+def test_round_review_tamper_is_rejected_with_full_request_hash_checks(
+    page_session: dict,
+) -> None:
+    _prepare_round_two_review_session(page_session)
+    request_path = build_component_agent_request(page_session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    atlas_path = request_path.parent / request["evidence"]["round-review.png"]["path"]
+    atlas_path.write_bytes(atlas_path.read_bytes() + b"tampered")
+
+    with pytest.raises(RuntimeError, match="evidence hash mismatch"):
+        load_component_agent_request(request_path)
+
+
 build_component_agent_request = _build_component_agent_request
 
 

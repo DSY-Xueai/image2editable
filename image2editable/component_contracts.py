@@ -28,6 +28,26 @@ LEGACY_COMPONENT_EVIDENCE_NAMES = frozenset(
 COMPONENT_EVIDENCE_NAMES = LEGACY_COMPONENT_EVIDENCE_NAMES | {
     "unexplained-mask.png"
 }
+ROUND_REVIEW_EVIDENCE_NAME = "round-review.png"
+FULL_COMPONENT_REVIEW_EVIDENCE = (
+    "source.png",
+    "numbered-masks.png",
+    "ocr-overlay.png",
+    "component-isolation.png",
+    "ownership.png",
+    "reconstructed.png",
+    "difference.png",
+    "unexplained-mask.png",
+    "quality-report.json",
+)
+INCREMENTAL_COMPONENT_REVIEW_EVIDENCE = (
+    "source.png",
+    "reconstructed.png",
+    "difference.png",
+    "unexplained-mask.png",
+    "quality-report.json",
+    ROUND_REVIEW_EVIDENCE_NAME,
+)
 
 _COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
     {
@@ -40,6 +60,7 @@ _COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
         "candidate_ids",
         "frozen_ids",
         "evidence",
+        "review_evidence",
     }
 )
 
@@ -395,6 +416,7 @@ def validate_component_action(action: object, *, graph: dict | None = None) -> d
             name: {"path": name, "sha256": "0" * 64}
             for name in COMPONENT_EVIDENCE_NAMES
         },
+        "review_evidence": list(FULL_COMPONENT_REVIEW_EVIDENCE),
     }
     validate_component_plan(
         {
@@ -638,9 +660,12 @@ def validate_component_agent_request(request: object) -> dict:
     if set(request["candidate_ids"]) & set(request["frozen_ids"]):
         raise ValueError("candidate_ids and frozen_ids must be disjoint")
     evidence = request["evidence"]
-    if not isinstance(evidence, dict) or frozenset(evidence) not in {
+    evidence_names = frozenset(evidence) if isinstance(evidence, dict) else frozenset()
+    if evidence_names not in {
         LEGACY_COMPONENT_EVIDENCE_NAMES,
         COMPONENT_EVIDENCE_NAMES,
+        LEGACY_COMPONENT_EVIDENCE_NAMES | {ROUND_REVIEW_EVIDENCE_NAME},
+        COMPONENT_EVIDENCE_NAMES | {ROUND_REVIEW_EVIDENCE_NAME},
     }:
         raise ValueError("component agent request evidence fields are invalid")
     for name, record in evidence.items():
@@ -657,6 +682,34 @@ def validate_component_agent_request(request: object) -> dict:
         ):
             raise ValueError(f"component evidence path is invalid: {name}")
         _validate_sha256(record["sha256"], f"component evidence sha256: {name}")
+    review_evidence = request["review_evidence"]
+    if (
+        not isinstance(review_evidence, list)
+        or any(type(name) is not str for name in review_evidence)
+        or len(review_evidence) != len(set(review_evidence))
+        or any(name not in evidence for name in review_evidence)
+    ):
+        raise ValueError("component agent request review_evidence is invalid")
+    canonical = [
+        name for name in (*FULL_COMPONENT_REVIEW_EVIDENCE, ROUND_REVIEW_EVIDENCE_NAME)
+        if name in review_evidence
+    ]
+    full = [name for name in FULL_COMPONENT_REVIEW_EVIDENCE if name in evidence]
+    if review_evidence != canonical:
+        raise ValueError("component agent request review_evidence order is invalid")
+    if request["repair_round"] == 1:
+        if review_evidence != full or ROUND_REVIEW_EVIDENCE_NAME in evidence:
+            raise ValueError("component agent request review_evidence is invalid")
+    elif ROUND_REVIEW_EVIDENCE_NAME not in evidence:
+        if review_evidence != full:
+            raise ValueError("component agent request review_evidence fallback is invalid")
+    else:
+        required = {
+            "source.png", "reconstructed.png", "difference.png",
+            "quality-report.json", ROUND_REVIEW_EVIDENCE_NAME,
+        }
+        if not required <= set(review_evidence):
+            raise ValueError("component agent request review_evidence is incomplete")
     return request
 
 
