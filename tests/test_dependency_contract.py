@@ -1,3 +1,4 @@
+import ast
 import re
 from pathlib import Path
 
@@ -9,6 +10,9 @@ STANDALONE_REQUIREMENTS = ROOT / "skills" / "image-to-ppt" / "references" / "req
 SKILL = ROOT / "skills" / "image-to-ppt" / "SKILL.md"
 README = ROOT / "README.md"
 README_EN = ROOT / "README_EN.md"
+STANDALONE_VISUAL_SEGMENT = (
+    ROOT / "skills" / "image-to-ppt" / "scripts" / "visual_segment.py"
+)
 PYPROJECT = ROOT / "pyproject.toml"
 
 
@@ -53,7 +57,21 @@ def test_standalone_sam_dependency_does_not_follow_a_branch() -> None:
 
 def test_standalone_declares_accelerate_used_by_visual_segmentation() -> None:
     expected = "accelerate>=0.26.0"
+    tree = ast.parse(STANDALONE_VISUAL_SEGMENT.read_text(encoding="utf-8"))
+    dynamic_imports = {
+        call.args[0].value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "importlib"
+        and call.func.attr == "import_module"
+        and call.args
+        and isinstance(call.args[0], ast.Constant)
+        and isinstance(call.args[0].value, str)
+    }
 
+    assert "accelerate" in dynamic_imports
     assert expected in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
     assert expected in STANDALONE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
 
@@ -71,6 +89,32 @@ def test_cross_platform_docs_prefer_the_verified_current_environment() -> None:
     assert "prefer Linux/WSL" not in readme_en_text
     assert "current platform" in readme_en_text
     assert "passes `doctor`" in readme_en_text
+    assert "设备预检" in skill_text
+    assert "设备预检" in readme_text
+    assert "device preflight" in readme_en_text
+    assert "我这台机器" not in skill_text + readme_text
+    assert "this machine" not in readme_en_text.lower()
+
+
+def test_cross_platform_docs_define_supported_device_interfaces() -> None:
+    skill_text = SKILL.read_text(encoding="utf-8")
+    readme_text = README.read_text(encoding="utf-8")
+    readme_en_text = README_EN.read_text(encoding="utf-8")
+
+    for text in (skill_text, readme_text):
+        assert "Windows/Linux" in text
+        assert "PyTorch" in text
+        assert "CUDA" in text
+        assert "ROCm" in text
+        assert "真实 Apple Silicon 回归前" in text
+        assert "不把 MPS 自动设为新默认" in text
+
+    assert "Windows and Linux" in readme_en_text
+    assert "PyTorch" in readme_en_text
+    assert "CUDA" in readme_en_text
+    assert "ROCm" in readme_en_text
+    assert "real Apple Silicon regression testing" in readme_en_text
+    assert "MPS will not become a new automatic default" in readme_en_text
 
 
 def test_cross_platform_docs_keep_the_full_quality_model_on_cpu() -> None:
@@ -80,10 +124,30 @@ def test_cross_platform_docs_keep_the_full_quality_model_on_cpu() -> None:
 
     assert "SAM 2.1 large" in skill_text
     assert "CPU 仍运行完整模型" in skill_text
+    assert "相同质量门禁" in skill_text
+    assert "不替换为轻量分割模型" in skill_text
+    assert "显著较慢" in skill_text
     assert "SAM 2.1 Large" in readme_text
     assert "CPU 仍运行完整模型" in readme_text
+    assert "相同质量门禁" in readme_text
+    assert "不替换为轻量分割模型" in readme_text
+    assert "显著慢" in readme_text
     assert "SAM 2.1 Large" in readme_en_text
     assert "CPU still runs the full model" in readme_en_text
+    assert "same quality gates" in readme_en_text
+    assert "does not switch to a lightweight segmentation model" in readme_en_text
+    assert "significantly slower" in readme_en_text
+
+
+def test_readmes_do_not_promise_hardware_specific_or_uniform_speedups() -> None:
+    readme_text = README.read_text(encoding="utf-8")
+    readme_en_text = README_EN.read_text(encoding="utf-8")
+
+    assert "不对特定 GPU 型号或统一加速倍数作承诺" in readme_text
+    assert (
+        "does not promise results for a specific GPU model or a uniform speedup factor"
+        in readme_en_text
+    )
 
 
 def test_requirements_keeps_pillow_floor() -> None:
