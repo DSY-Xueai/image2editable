@@ -14,7 +14,14 @@ import pytest
 from PIL import Image
 
 import image_to_ppt
-from scripts import bg_model, fg_extract, lama_inpaint, text_detect, visual_segment
+from scripts import (
+    bg_model,
+    fg_extract,
+    lama_inpaint,
+    sam_worker,
+    text_detect,
+    visual_segment,
+)
 
 from image_to_ppt import _parse_reference_option
 from image_to_ppt import _merge_foreground_masks
@@ -774,6 +781,516 @@ def test_sam_cuda_inference_uses_bfloat16_autocast(monkeypatch) -> None:
         "exit:autocast:cuda:bfloat16",
         "exit:inference",
     ]
+
+
+def _candidate_batch_signature(candidate) -> tuple:
+    return (
+        candidate.mask.tolist(),
+        candidate.score,
+        candidate.source,
+        candidate.crop_box,
+        candidate.touches_crop_edge,
+        candidate.label,
+        candidate.role,
+        candidate.object_box,
+    )
+
+
+def _candidate_batch_record(shape=(6, 8)) -> dict:
+    mask = image_to_ppt.np.zeros(shape, dtype=bool)
+    mask[1:-1, 2:-2] = True
+    return {
+        "mask": image_to_ppt.base64.b64encode(
+            image_to_ppt.np.packbits(mask, axis=None)
+        ).decode("ascii"),
+        "mask_shape": list(shape),
+        "score": 0.94,
+        "source": "sam",
+        "crop_box": [0, 0, shape[1], shape[0]],
+        "touches_crop_edge": False,
+        "label": "",
+        "role": "",
+        "object_box": None,
+    }
+
+
+def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    batch_helper = getattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        None,
+    )
+    assert batch_helper is not None
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    image[:, :, 1] = 37
+    text_mask = image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8)
+    text_mask[0, 0] = 255
+    proposal = image_to_ppt.ObjectProposal(
+        box_xyxy=(1.0, 1.0, 7.0, 5.0),
+        score=0.91,
+        label="badge",
+        role="object",
+        source="full",
+        crop_box=(0, 0, 8, 6),
+        touches_crop_edge=True,
+    )
+    prompted_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
+    prompted_mask[1:5, 1:7] = True
+    automatic_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
+    automatic_mask[2:4, 2:6] = True
+    generator = object()
+    events = []
+    calls = []
+
+    def create_generator(checkpoint, *, resource_safe):
+        events.append(("create", checkpoint, resource_safe))
+        return generator
+
+    def generate_prompted(actual_image, proposals, actual_generator, actual_text_mask):
+        events.append("prompted")
+        assert actual_generator is generator
+        assert image_to_ppt.np.array_equal(actual_image, image)
+        assert image_to_ppt.np.array_equal(actual_text_mask, text_mask)
+        assert proposals == [proposal]
+        return [
+            image_to_ppt.MaskCandidate(
+                mask=prompted_mask.copy(),
+                score=0.89,
+                source="grounded:full:object",
+                crop_box=(0, 0, 8, 6),
+                touches_crop_edge=True,
+                label="badge",
+                role="object",
+                object_box=(1.0, 1.0, 7.0, 5.0),
+            )
+        ]
+
+    def generate_automatic(actual_image, actual_generator, **kwargs):
+        events.append(("automatic", kwargs))
+        assert actual_generator is generator
+        assert image_to_ppt.np.array_equal(actual_image, image)
+        return [
+            image_to_ppt.MaskCandidate(
+                mask=automatic_mask.copy(),
+                score=0.97,
+                source="sam",
+                crop_box=(0, 0, 8, 6),
+                touches_crop_edge=False,
+                label="shape",
+                role="decoration",
+                object_box=None,
+            )
+        ]
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_load_tools",
+        lambda: (
+            image_to_ppt.ObjectProposal,
+            create_generator,
+            generate_automatic,
+            generate_prompted,
+            lambda: Path("sam2.1-large.pt"),
+            visual_segment.VisualElement,
+            lambda *args: None,
+        ),
+    )
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        request_path = Path(command[command.index("--request") + 1])
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        assert set(request) == {"schema_version", "operations"}
+        assert request["schema_version"] == 1
+        assert request["operations"] == [
+            {
+                "id": "prompted",
+                "kind": "prompted",
+                "image": "image.png",
+                "text_mask": "text-mask.png",
+                "proposals": "proposals.json",
+            },
+            {"id": "automatic", "kind": "automatic", "image": "image.png"},
+        ]
+        previous_argv = sys.argv
+        try:
+            sys.argv = command[1:]
+            returncode = sam_worker.main()
+        finally:
+            sys.argv = previous_argv
+        return subprocess.CompletedProcess(command, returncode, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+
+    prompted, automatic = batch_helper(image, text_mask, [proposal], tmp_path)
+
+    expected_prompted = generate_prompted(image, [proposal], generator, text_mask)
+    expected_automatic = generate_automatic(
+        image,
+        generator,
+        crop_size=max(image.shape[:2]),
+        include_geometry=False,
+        min_score=0.90,
+    )
+    assert [_candidate_batch_signature(item) for item in prompted] == [
+        _candidate_batch_signature(item) for item in expected_prompted
+    ]
+    assert [_candidate_batch_signature(item) for item in automatic] == [
+        _candidate_batch_signature(item) for item in expected_automatic
+    ]
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command[command.index("--mode") + 1] == "batch"
+    assert "--image" not in command
+    assert kwargs == {"capture_output": True, "text": True}
+    assert events[:3] == [
+        ("create", Path("sam2.1-large.pt"), True),
+        "prompted",
+        (
+            "automatic",
+            {"crop_size": 8, "include_geometry": False, "min_score": 0.90},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "empty",
+        "missing",
+        "duplicate-id",
+        "reordered",
+        "unknown-kind",
+        "wrong-mask-shape",
+    ],
+)
+def test_candidate_batch_caller_rejects_the_entire_malformed_result(
+    tmp_path: Path,
+    monkeypatch,
+    malformation: str,
+) -> None:
+    batch_helper = getattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        None,
+    )
+    assert batch_helper is not None
+    payload = {
+        "schema_version": 1,
+        "operations": [
+            {
+                "id": "prompted",
+                "kind": "prompted",
+                "candidates": [_candidate_batch_record()],
+            },
+            {
+                "id": "automatic",
+                "kind": "automatic",
+                "candidates": [_candidate_batch_record()],
+            },
+        ],
+    }
+    if malformation == "empty":
+        payload = {}
+    elif malformation == "missing":
+        payload["operations"].pop()
+    elif malformation == "duplicate-id":
+        payload["operations"][1]["id"] = "prompted"
+    elif malformation == "reordered":
+        payload["operations"].reverse()
+    elif malformation == "unknown-kind":
+        payload["operations"][1]["kind"] = "mystery"
+    else:
+        payload["operations"][1]["candidates"][0]["mask_shape"] = [3, 8]
+
+    result_path = None
+
+    def fake_run(command, **kwargs):
+        nonlocal result_path
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
+
+    with pytest.raises(RuntimeError, match="SAM candidate batch"):
+        batch_helper(
+            image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+    assert result_path is not None
+    assert not result_path.exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_request",
+    ["unknown-kind", "duplicate-id", "escape"],
+)
+def test_candidate_batch_worker_rejects_invalid_schema_before_loading_sam(
+    tmp_path: Path,
+    monkeypatch,
+    invalid_request: str,
+) -> None:
+    Image.new("RGB", (8, 6), "white").save(tmp_path / "image.png")
+    Image.new("L", (8, 6), 0).save(tmp_path / "text-mask.png")
+    (tmp_path / "proposals.json").write_text("[]", encoding="utf-8")
+    operations = [
+        {
+            "id": "prompted",
+            "kind": "prompted",
+            "image": "image.png",
+            "text_mask": "text-mask.png",
+            "proposals": "proposals.json",
+        },
+        {"id": "automatic", "kind": "automatic", "image": "image.png"},
+    ]
+    if invalid_request == "unknown-kind":
+        operations[1]["kind"] = "mystery"
+    elif invalid_request == "duplicate-id":
+        operations[1]["id"] = "prompted"
+    elif invalid_request == "escape":
+        operations[1]["image"] = "../image.png"
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps({"schema_version": 1, "operations": operations}),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "result.json"
+    result_path.write_text("stale", encoding="utf-8")
+    load_events = []
+    monkeypatch.setattr(sam_worker, "_load_tools", lambda: load_events.append("load"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sam_worker.py",
+            "--mode",
+            "batch",
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(ValueError):
+        sam_worker.main()
+
+    assert load_events == []
+    assert not result_path.exists()
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+def test_candidate_batch_worker_rejects_resolved_path_escape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    batch_root = tmp_path / "batch"
+    batch_root.mkdir()
+    linked_image = batch_root / "linked-image.png"
+    linked_image.write_bytes(b"inside placeholder")
+    outside_image = tmp_path / "outside.png"
+    outside_image.write_bytes(b"outside target")
+    resolved_root = batch_root.resolve()
+    resolved_outside = outside_image.resolve()
+    original_resolve = Path.resolve
+
+    def fake_resolve(path, *args, **kwargs):
+        if path == linked_image:
+            return resolved_outside
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(ValueError, match="stay inside"):
+        sam_worker._batch_file(resolved_root, linked_image.name, "image")
+
+
+def test_candidate_batch_worker_validates_output_before_replacing_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    Image.new("RGB", (8, 6), "white").save(tmp_path / "image.png")
+    Image.new("L", (8, 6), 0).save(tmp_path / "text-mask.png")
+    (tmp_path / "proposals.json").write_text("[]", encoding="utf-8")
+    request_path = tmp_path / "request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "operations": [
+                    {
+                        "id": "prompted",
+                        "kind": "prompted",
+                        "image": "image.png",
+                        "text_mask": "text-mask.png",
+                        "proposals": "proposals.json",
+                    },
+                    {"id": "automatic", "kind": "automatic", "image": "image.png"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "result.json"
+    result_path.write_text("stale", encoding="utf-8")
+    wrong_mask = image_to_ppt.np.ones((2, 2), dtype=bool)
+    monkeypatch.setattr(
+        sam_worker,
+        "_load_tools",
+        lambda: (
+            image_to_ppt.ObjectProposal,
+            lambda *args, **kwargs: object(),
+            lambda *args, **kwargs: [
+                image_to_ppt.MaskCandidate(wrong_mask, 0.99, "sam")
+            ],
+            lambda *args, **kwargs: [],
+            lambda: Path("sam.pt"),
+            visual_segment.VisualElement,
+            lambda *args: None,
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sam_worker.py",
+            "--mode",
+            "batch",
+            "--request",
+            str(request_path),
+            "--result",
+            str(result_path),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="mask shape"):
+        sam_worker.main()
+
+    assert not result_path.exists()
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+def test_candidate_batch_worker_uses_exclusive_random_result_temp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [{"id": "automatic", "kind": "automatic", "image": image}]
+    payload = {
+        "schema_version": 1,
+        "operations": [
+            {
+                "id": "automatic",
+                "kind": "automatic",
+                "candidates": [_candidate_batch_record()],
+            }
+        ],
+    }
+    result_path = tmp_path / "result.json"
+    mkstemp_calls = []
+    actual_mkstemp = sam_worker.tempfile.mkstemp
+
+    def fake_mkstemp(*, prefix, suffix, dir):
+        mkstemp_calls.append((prefix, suffix, Path(dir)))
+        return actual_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+
+    monkeypatch.setattr(sam_worker.tempfile, "mkstemp", fake_mkstemp)
+
+    sam_worker._write_batch_result(result_path, payload, operations)
+
+    assert mkstemp_calls == [(".result.json.", ".tmp", tmp_path)]
+    assert json.loads(result_path.read_text(encoding="utf-8")) == payload
+
+
+def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.full((10, 20, 3), 40, dtype=image_to_ppt.np.uint8)
+    image_path = tmp_path / "source.png"
+    Image.fromarray(image).save(image_path)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    text_mask_path = work_dir / "source-text-mask.png"
+    Image.fromarray(image_to_ppt.np.zeros((10, 20), dtype=image_to_ppt.np.uint8)).save(
+        text_mask_path
+    )
+    mask = image_to_ppt.np.zeros((10, 20), dtype=bool)
+    mask[2:8, 4:16] = True
+    candidate = image_to_ppt.MaskCandidate(mask.copy(), 0.95, "sam")
+    element = visual_segment.VisualElement(mask.copy(), 0, 0.95, "sam")
+    batch_calls = []
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_filtered_object_proposals_isolated",
+        lambda *args: [],
+    )
+
+    def fake_batch(actual_image, actual_text_mask, proposals, target):
+        batch_calls.append((actual_image.copy(), actual_text_mask.copy(), proposals, target))
+        return ([candidate], []) if len(batch_calls) == 1 else ([], [])
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        fake_batch,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidates_isolated",
+        lambda *args, **kwargs: pytest.fail("pipeline must use one SAM candidate batch"),
+    )
+    monkeypatch.setattr(image_to_ppt, "filter_prompt_free_candidates", lambda *args: [])
+    monkeypatch.setattr(image_to_ppt, "generate_geometry_candidates", lambda *args: [])
+    monkeypatch.setattr(
+        image_to_ppt,
+        "combine_residual_candidates",
+        lambda **kwargs: ([], 0),
+    )
+    monkeypatch.setattr(image_to_ppt, "resolve_visual_elements", lambda candidates: [element])
+    monkeypatch.setattr(image_to_ppt, "validate_visual_masks", lambda masks: None)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_clean_background",
+        lambda actual_image, *args, **kwargs: actual_image.copy(),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_recheck_visual_element_holes_isolated",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(image_to_ppt, "_release_visual_resources", lambda: None)
+    monkeypatch.setattr(image_to_ppt, "export_visual_components", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_widescreen_background",
+        lambda background, **kwargs: (background, 0, 0, "identity"),
+    )
+
+    image_to_ppt._process_image(
+        image_path,
+        work_dir,
+        object_detector=None,
+        mask_generator=None,
+        lang="en",
+        text_analysis={"items": [], "mask_path": str(text_mask_path)},
+        defer_quality=True,
+        _resource_isolation=True,
+    )
+
+    assert len(batch_calls) == 2
+    assert image_to_ppt.np.array_equal(batch_calls[0][0], image)
+    assert image_to_ppt.np.array_equal(batch_calls[1][0], image)
+    assert all(call[2] == [] and call[3] == work_dir for call in batch_calls)
 
 
 def test_sam_rle_mask_is_decoded_without_full_frame_copy(monkeypatch) -> None:

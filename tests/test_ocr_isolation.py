@@ -1149,14 +1149,14 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         lambda *args: [],
     )
 
-    def fake_sam(*args, mode, **kwargs):
-        sam_calls.append(mode)
-        return [candidate] if len(sam_calls) == 1 else []
+    def fake_sam_batch(*args, **kwargs):
+        sam_calls.append("batch")
+        return ([candidate], []) if len(sam_calls) == 1 else ([], [])
 
     monkeypatch.setattr(
         image_to_ppt,
-        "_generate_sam_candidates_isolated",
-        fake_sam,
+        "_generate_sam_candidate_batch_isolated",
+        fake_sam_batch,
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -1260,12 +1260,12 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     )
 
     if persistent_residual:
-        assert sam_calls == ["prompted", "automatic"] * 4
+        assert sam_calls == ["batch"] * 4
         assert resolved_candidate_counts[-1] == 4
         assert background_calls == ["clean"] * 4 + ["widescreen"]
         assert len(isolated_calls) == 5
     else:
-        assert sam_calls == ["prompted", "automatic", "prompted", "automatic"]
+        assert sam_calls == ["batch", "batch"]
         assert background_calls == ["clean", "clean", "clean", "widescreen"]
         assert len(isolated_calls) == 4
     assert all(

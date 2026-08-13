@@ -1503,6 +1503,196 @@ def _generate_sam_candidates_isolated(
     return candidates
 
 
+_SAM_CANDIDATE_BATCH_SCHEMA_VERSION = 1
+_SAM_CANDIDATE_BATCH_FIELDS = {
+    "mask",
+    "mask_shape",
+    "score",
+    "source",
+    "crop_box",
+    "touches_crop_edge",
+    "label",
+    "role",
+    "object_box",
+}
+
+
+def _decode_sam_candidate_batch_records(
+    records,
+    image_shape: tuple[int, int],
+) -> list[MaskCandidate]:
+    if not isinstance(records, list):
+        raise RuntimeError("SAM candidate batch records must be a list")
+    candidates = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != _SAM_CANDIDATE_BATCH_FIELDS:
+            raise RuntimeError("SAM candidate batch returned an invalid candidate")
+        mask_shape = record["mask_shape"]
+        if (
+            not isinstance(mask_shape, list)
+            or len(mask_shape) != 2
+            or any(type(value) is not int for value in mask_shape)
+            or tuple(mask_shape) != image_shape
+        ):
+            raise RuntimeError("SAM candidate batch returned the wrong mask shape")
+        try:
+            packed_bytes = base64.b64decode(record["mask"], validate=True)
+        except Exception as exc:
+            raise RuntimeError("SAM candidate batch returned an invalid mask") from exc
+        expected_bytes = (int(np.prod(image_shape)) + 7) // 8
+        if len(packed_bytes) != expected_bytes:
+            raise RuntimeError("SAM candidate batch returned an invalid mask length")
+        mask = np.unpackbits(
+            np.frombuffer(packed_bytes, dtype=np.uint8),
+            count=int(np.prod(image_shape)),
+        ).reshape(image_shape).astype(bool, copy=False)
+        candidate_fields = {
+            key: value
+            for key, value in record.items()
+            if key not in {"mask", "mask_shape"}
+        }
+        if candidate_fields["crop_box"] is not None:
+            candidate_fields["crop_box"] = tuple(candidate_fields["crop_box"])
+        if candidate_fields["object_box"] is not None:
+            candidate_fields["object_box"] = tuple(candidate_fields["object_box"])
+        candidates.append(MaskCandidate(mask=mask, **candidate_fields))
+    return candidates
+
+
+def _generate_sam_candidate_batch_isolated(
+    image: np.ndarray,
+    text_mask: np.ndarray,
+    proposals: list[ObjectProposal],
+    work_dir: Path,
+) -> tuple[list[MaskCandidate], list[MaskCandidate]]:
+    with tempfile.TemporaryDirectory(
+        prefix="sam-batch-",
+        dir=work_dir,
+    ) as temporary_dir:
+        temporary_dir = Path(temporary_dir)
+        image_path = temporary_dir / "image.png"
+        text_mask_path = temporary_dir / "text-mask.png"
+        proposals_path = temporary_dir / "proposals.json"
+        request_path = temporary_dir / "request.json"
+        result_path = temporary_dir / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGB").save(image_path)
+        Image.fromarray(
+            np.asarray(text_mask, dtype=np.uint8),
+            mode="L",
+        ).save(text_mask_path)
+        proposals_path.write_text(
+            json.dumps(
+                [proposal.__dict__ for proposal in proposals],
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": _SAM_CANDIDATE_BATCH_SCHEMA_VERSION,
+                    "operations": [
+                        {
+                            "id": "prompted",
+                            "kind": "prompted",
+                            "image": image_path.name,
+                            "text_mask": text_mask_path.name,
+                            "proposals": proposals_path.name,
+                        },
+                        {
+                            "id": "automatic",
+                            "kind": "automatic",
+                            "image": image_path.name,
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        module_dir = Path(__file__).resolve().parent
+        worker_path = module_dir / "scripts" / "sam_worker.py"
+        if not worker_path.is_file():
+            worker_path = module_dir / "sam_worker.py"
+        result_path.unlink(missing_ok=True)
+        completed = run_isolated_worker(
+            [
+                sys.executable,
+                str(worker_path),
+                "--mode",
+                "batch",
+                "--request",
+                str(request_path),
+                "--result",
+                str(result_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            result_path.unlink(missing_ok=True)
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"Isolated SAM candidate batch failed: {detail}")
+        if not result_path.is_file():
+            raise RuntimeError(
+                "Isolated SAM candidate batch did not create its result"
+            )
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or set(payload) != {
+                "schema_version",
+                "operations",
+            }:
+                raise RuntimeError("SAM candidate batch returned an invalid result")
+            if (
+                type(payload["schema_version"]) is not int
+                or payload["schema_version"] != _SAM_CANDIDATE_BATCH_SCHEMA_VERSION
+            ):
+                raise RuntimeError(
+                    "SAM candidate batch returned an invalid schema version"
+                )
+            output_operations = payload["operations"]
+            expected_operations = [
+                ("prompted", "prompted"),
+                ("automatic", "automatic"),
+            ]
+            if not isinstance(output_operations, list) or len(output_operations) != len(
+                expected_operations
+            ):
+                raise RuntimeError(
+                    "SAM candidate batch returned the wrong operation count"
+                )
+            decoded = []
+            for output, expected in zip(output_operations, expected_operations):
+                if not isinstance(output, dict) or set(output) != {
+                    "id",
+                    "kind",
+                    "candidates",
+                }:
+                    raise RuntimeError(
+                        "SAM candidate batch returned an invalid operation"
+                    )
+                if (output["id"], output["kind"]) != expected:
+                    raise RuntimeError(
+                        "SAM candidate batch returned operations out of order"
+                    )
+                decoded.append(
+                    _decode_sam_candidate_batch_records(
+                        output["candidates"],
+                        tuple(image.shape[:2]),
+                    )
+                )
+        except RuntimeError:
+            result_path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            result_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "SAM candidate batch returned an invalid result"
+            ) from exc
+    return decoded[0], decoded[1]
+
+
 def _packed_mask_fields(mask: np.ndarray, name: str = "mask") -> dict:
     binary = np.asarray(mask, dtype=bool)
     return {
@@ -1749,19 +1939,14 @@ def _process_image(
             proposal_detector,
         )
     if _resource_isolation:
-        candidates = _generate_sam_candidates_isolated(
+        (
+            candidates,
+            prompt_free_candidates,
+        ) = _generate_sam_candidate_batch_isolated(
             img,
             text_ink_mask,
             proposals,
             work_dir,
-            mode="prompted",
-        )
-        prompt_free_candidates = _generate_sam_candidates_isolated(
-            img,
-            None,
-            None,
-            work_dir,
-            mode="automatic",
         )
     else:
         candidates = generate_prompted_mask_candidates(
@@ -1828,19 +2013,14 @@ def _process_image(
                 _restore_mask_references(packed_masks)
                 element_masks = [element.mask for element in elements]
         if _resource_isolation:
-            prompted_residual_candidates = _generate_sam_candidates_isolated(
+            (
+                prompted_residual_candidates,
+                prompt_free_residual_candidates,
+            ) = _generate_sam_candidate_batch_isolated(
                 clean_background,
                 text_ink_mask,
                 residual_proposals,
                 work_dir,
-                mode="prompted",
-            )
-            prompt_free_residual_candidates = _generate_sam_candidates_isolated(
-                clean_background,
-                None,
-                None,
-                work_dir,
-                mode="automatic",
             )
             prompt_free_residual_candidates.extend(
                 generate_geometry_candidates(clean_background)

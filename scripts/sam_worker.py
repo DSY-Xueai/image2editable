@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 
@@ -81,6 +82,260 @@ def _candidate_record(candidate) -> dict:
     }
 
 
+_BATCH_SCHEMA_VERSION = 1
+_BATCH_CANDIDATE_FIELDS = {
+    "mask",
+    "mask_shape",
+    "score",
+    "source",
+    "crop_box",
+    "touches_crop_edge",
+    "label",
+    "role",
+    "object_box",
+}
+
+
+def _batch_file(root: Path, value, field: str) -> Path:
+    if not isinstance(value, str) or not value or Path(value).name != value:
+        raise ValueError(f"batch {field} must be a relative file name")
+    try:
+        path = (root / value).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"batch {field} does not exist") from exc
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"batch {field} must stay inside the request directory") from exc
+    if not path.is_file():
+        raise ValueError(f"batch {field} does not exist")
+    return path
+
+
+def _validate_batch_request(request_path: Path, result_path: Path) -> list[dict]:
+    root = request_path.resolve().parent
+    result_path = result_path.resolve()
+    if result_path.parent != root:
+        raise ValueError("batch result must stay beside its request")
+    result_path.unlink(missing_ok=True)
+
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    if not isinstance(request, dict) or set(request) != {
+        "schema_version",
+        "operations",
+    }:
+        raise ValueError("invalid SAM batch request")
+    if (
+        type(request["schema_version"]) is not int
+        or request["schema_version"] != _BATCH_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported SAM batch schema version")
+    operations = request["operations"]
+    if not isinstance(operations, list) or not operations:
+        raise ValueError("SAM batch operations must be a non-empty list")
+
+    ids = set()
+    validated = []
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise ValueError("invalid SAM batch operation")
+        operation_id = operation.get("id")
+        kind = operation.get("kind")
+        if (
+            not isinstance(operation_id, str)
+            or not operation_id
+            or operation_id in ids
+        ):
+            raise ValueError("SAM batch operation IDs must be unique strings")
+        ids.add(operation_id)
+        if kind == "prompted":
+            expected_fields = {"id", "kind", "image", "text_mask", "proposals"}
+        elif kind == "automatic":
+            expected_fields = {"id", "kind", "image"}
+        else:
+            raise ValueError(f"unsupported SAM batch operation kind: {kind}")
+        if set(operation) != expected_fields:
+            raise ValueError(f"invalid {kind} SAM batch operation")
+
+        validated_operation = {
+            "id": operation_id,
+            "kind": kind,
+            "image_path": _batch_file(root, operation["image"], "image"),
+        }
+        if kind == "prompted":
+            validated_operation["text_mask_path"] = _batch_file(
+                root,
+                operation["text_mask"],
+                "text_mask",
+            )
+            validated_operation["proposals_path"] = _batch_file(
+                root,
+                operation["proposals"],
+                "proposals",
+            )
+        validated.append(validated_operation)
+    return validated
+
+
+def _load_batch_inputs(operations: list[dict]) -> None:
+    images = {}
+    for operation in operations:
+        image_path = operation["image_path"]
+        if image_path not in images:
+            with Image.open(image_path) as stored_image:
+                images[image_path] = np.asarray(stored_image.convert("RGB")).copy()
+        operation["image"] = images[image_path]
+        if operation["kind"] == "prompted":
+            with Image.open(operation["text_mask_path"]) as stored_mask:
+                text_mask = np.asarray(stored_mask.convert("L")).copy()
+            if text_mask.shape != operation["image"].shape[:2]:
+                raise ValueError("prompted text mask shape does not match the image")
+            proposal_records = json.loads(
+                operation["proposals_path"].read_text(encoding="utf-8")
+            )
+            if not isinstance(proposal_records, list):
+                raise ValueError("prompted proposals must be a list")
+            operation["text_mask"] = text_mask
+            operation["proposal_records"] = proposal_records
+
+
+def _validate_batch_output(payload: dict, operations: list[dict]) -> None:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema_version",
+        "operations",
+    }:
+        raise RuntimeError("invalid SAM batch output")
+    if payload["schema_version"] != _BATCH_SCHEMA_VERSION:
+        raise RuntimeError("invalid SAM batch output schema version")
+    output_operations = payload["operations"]
+    if not isinstance(output_operations, list) or len(output_operations) != len(
+        operations
+    ):
+        raise RuntimeError("invalid SAM batch output operation count")
+
+    for expected, actual in zip(operations, output_operations):
+        if not isinstance(actual, dict) or set(actual) != {
+            "id",
+            "kind",
+            "candidates",
+        }:
+            raise RuntimeError("invalid SAM batch output operation")
+        if (actual["id"], actual["kind"]) != (
+            expected["id"],
+            expected["kind"],
+        ):
+            raise RuntimeError("invalid SAM batch output operation order")
+        records = actual["candidates"]
+        if not isinstance(records, list):
+            raise RuntimeError("invalid SAM batch candidate records")
+        expected_shape = tuple(expected["image"].shape[:2])
+        for record in records:
+            if not isinstance(record, dict) or set(record) != _BATCH_CANDIDATE_FIELDS:
+                raise RuntimeError("invalid SAM batch candidate record")
+            shape = record["mask_shape"]
+            if not isinstance(shape, list) or tuple(shape) != expected_shape:
+                raise RuntimeError("SAM batch candidate mask shape does not match image")
+            try:
+                packed = base64.b64decode(record["mask"], validate=True)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("invalid SAM batch candidate mask") from exc
+            expected_bytes = (int(np.prod(expected_shape)) + 7) // 8
+            if len(packed) != expected_bytes:
+                raise RuntimeError("invalid SAM batch candidate mask length")
+
+
+def _write_batch_result(
+    result_path: Path,
+    payload: dict,
+    operations: list[dict],
+) -> None:
+    _validate_batch_output(payload, operations)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{result_path.name}.",
+        suffix=".tmp",
+        dir=result_path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w+", encoding="utf-8") as temporary_file:
+            json.dump(payload, temporary_file, ensure_ascii=False)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+            temporary_file.seek(0)
+            _validate_batch_output(json.load(temporary_file), operations)
+            descriptor_stat = os.fstat(temporary_file.fileno())
+            path_stat = os.stat(temporary_path, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or (descriptor_stat.st_dev, descriptor_stat.st_ino)
+                != (path_stat.st_dev, path_stat.st_ino)
+            ):
+                raise RuntimeError("SAM batch result temp identity changed")
+        os.replace(temporary_path, result_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _run_candidate_batch(request_path: Path, result_path: Path) -> int:
+    operations = _validate_batch_request(request_path, result_path)
+    _load_batch_inputs(operations)
+    (
+        proposal_type,
+        create_generator,
+        generate_automatic,
+        generate_prompted,
+        resolve_checkpoint,
+        _,
+        _,
+    ) = _load_tools()
+    generator = create_generator(resolve_checkpoint(), resource_safe=True)
+    output_operations = []
+    for operation in operations:
+        image = operation["image"]
+        if operation["kind"] == "prompted":
+            proposals = [
+                proposal_type(
+                    **{
+                        **record,
+                        "box_xyxy": tuple(record["box_xyxy"]),
+                        "crop_box": tuple(record["crop_box"]),
+                    }
+                )
+                for record in operation["proposal_records"]
+            ]
+            candidates = generate_prompted(
+                image,
+                proposals,
+                generator,
+                operation["text_mask"],
+            )
+        else:
+            candidates = generate_automatic(
+                image,
+                generator,
+                crop_size=max(image.shape[:2]),
+                include_geometry=False,
+                min_score=0.90,
+            )
+        output_operations.append(
+            {
+                "id": operation["id"],
+                "kind": operation["kind"],
+                "candidates": [
+                    _candidate_record(candidate) for candidate in candidates
+                ],
+            }
+        )
+
+    payload = {
+        "schema_version": _BATCH_SCHEMA_VERSION,
+        "operations": output_operations,
+    }
+    _validate_batch_output(payload, operations)
+    _write_batch_result(result_path, payload, operations)
+    return 0
+
+
 def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndarray:
     """Run one box/point prompt inside the isolated SAM worker process."""
 
@@ -142,16 +397,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("prompted", "automatic", "recheck", "component"),
+        choices=("prompted", "automatic", "recheck", "component", "batch"),
         required=True,
     )
-    parser.add_argument("--image", required=True)
+    parser.add_argument("--image")
+    parser.add_argument("--request")
     parser.add_argument("--text-mask")
     parser.add_argument("--proposals")
     parser.add_argument("--elements")
     parser.add_argument("--prompt")
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
+
+    if args.mode == "batch":
+        if not args.request:
+            raise ValueError("batch mode requires request")
+        return _run_candidate_batch(Path(args.request), Path(args.result))
+    if not args.image:
+        raise ValueError(f"{args.mode} mode requires image")
 
     (
         proposal_type,
