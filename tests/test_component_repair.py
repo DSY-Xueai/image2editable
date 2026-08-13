@@ -2565,9 +2565,12 @@ def test_retry_actions_are_batched_before_graph_mutation(tmp_path: Path) -> None
     left = np.asarray(Image.open(input_dir / "masks/left.png")) > 0
     right = np.asarray(Image.open(input_dir / "masks/right.png")) > 0
 
-    def batch_runner(*, image: np.ndarray, prompts: list[dict]) -> list[np.ndarray]:
+    def batch_runner(*, image: np.ndarray, prompts: list[dict]) -> list[dict]:
         calls.append(prompts)
-        return [left, right]
+        return [
+            {"component_id": "left", "mask": left},
+            {"component_id": "right", "mask": right},
+        ]
 
     result = execute_component_actions(
         image,
@@ -2634,7 +2637,43 @@ def test_retry_batch_rejects_invalid_second_mask_without_graph_mutation_or_outpu
                     {"positive": [[0.8, 0.3]], "negative": []},
                 ),
             ],
-            sam_batch_runner=lambda **_: [valid, invalid],
+            sam_batch_runner=lambda **_: [
+                {"component_id": "left", "mask": valid},
+                {"component_id": "right", "mask": invalid},
+            ],
+            input_dir=input_dir,
+            output_dir=output_dir,
+        )
+
+    assert graph == original_graph
+    assert not output_dir.exists()
+
+
+def test_retry_batch_rejects_reordered_results_before_graph_mutation(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    original_graph = copy.deepcopy(graph)
+    left = np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    right = np.asarray(Image.open(input_dir / "masks/right.png")) > 0
+    output_dir = tmp_path / "round-reordered-batched-retry"
+
+    with pytest.raises(VisualSegmentationError, match="order"):
+        execute_component_actions(
+            image,
+            graph,
+            [
+                _action(
+                    "retry_with_box", ["left"], {"box": [0.25, 0.25, 0.75, 0.75]},
+                ),
+                _action(
+                    "retry_with_points", ["right"], {"positive": [[0.8, 0.3]], "negative": []},
+                ),
+            ],
+            sam_batch_runner=lambda **_: [
+                {"component_id": "right", "mask": right},
+                {"component_id": "left", "mask": left},
+            ],
             input_dir=input_dir,
             output_dir=output_dir,
         )

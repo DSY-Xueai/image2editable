@@ -1975,11 +1975,15 @@ def _execute_legacy_round(
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
     def sam_batch_runner(*, image, prompts):
-        return run_component_prompt_batch_worker(
+        masks = run_component_prompt_batch_worker(
             image,
             prompts,
             work_dir=output_dir.parent,
         )
+        return [
+            {"component_id": prompt["component_id"], "mask": mask}
+            for prompt, mask in zip(prompts, masks)
+        ]
 
     next_graph = execute_component_action_round(
         pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,

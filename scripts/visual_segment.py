@@ -270,8 +270,8 @@ def execute_component_actions(
     retry_masks = {}
     if retry_prompts:
         if sam_batch_runner is not None:
-            proposed_masks = sam_batch_runner(image=image, prompts=retry_prompts)
-            if type(proposed_masks) is not list or len(proposed_masks) != len(retry_prompts):
+            proposed_results = sam_batch_runner(image=image, prompts=retry_prompts)
+            if type(proposed_results) is not list or len(proposed_results) != len(retry_prompts):
                 raise VisualSegmentationError("SAM component retry returned an invalid mask batch")
         else:
             runner = sam_runner
@@ -285,16 +285,26 @@ def execute_component_actions(
                     negative=values["negative"],
                     work_dir=target.parent,
                 )
-            proposed_masks = [
-                runner(
-                    image=image,
-                    box=prompt["box"],
-                    positive=prompt["positive"],
-                    negative=prompt["negative"],
-                )
+            proposed_results = [
+                {
+                    "component_id": prompt["component_id"],
+                    "mask": runner(
+                        image=image,
+                        box=prompt["box"],
+                        positive=prompt["positive"],
+                        negative=prompt["negative"],
+                    ),
+                }
                 for prompt in retry_prompts
             ]
-        for prompt, proposed in zip(retry_prompts, proposed_masks):
+        for prompt, proposed_result in zip(retry_prompts, proposed_results):
+            if (
+                not isinstance(proposed_result, dict)
+                or set(proposed_result) != {"component_id", "mask"}
+                or proposed_result["component_id"] != prompt["component_id"]
+            ):
+                raise VisualSegmentationError("SAM component retry result order is invalid")
+            proposed = proposed_result["mask"]
             if (
                 not isinstance(proposed, np.ndarray)
                 or proposed.dtype != np.bool_
