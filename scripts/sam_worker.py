@@ -950,20 +950,15 @@ def _create_batch_result_file(result_binding: dict, parent_handle):
                 dir_fd=parent_handle,
             )
             return descriptor, None, False
-        except OSError:
-            pass
-    try:
-        descriptor = os.open(
-            result_path.name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-            dir_fd=parent_handle,
+        except OSError as exc:
+            raise RuntimeError(
+                "SAM batch result publishing is unsupported on this Linux filesystem"
+            ) from exc
+    if sys.platform == "darwin":
+        raise RuntimeError(
+            "SAM batch anonymous result source is not supported on Darwin"
         )
-    except FileExistsError as exc:
-        raise RuntimeError("SAM batch result path already exists") from exc
-    except OSError as exc:
-        raise RuntimeError("SAM batch result could not be created") from exc
-    return descriptor, result_path, True
+    raise RuntimeError("SAM batch result publishing is unsupported platform")
 
 
 def _publish_windows_batch_result(
@@ -1071,6 +1066,22 @@ def _publish_batch_result(
         return
     import errno
 
+    if sys.platform == "darwin":
+        error = _fclonefileat_batch_result(
+            file_descriptor,
+            parent_handle,
+            os.fsencode(result_name),
+            0,
+        )
+        if error == 0:
+            return
+        if error == errno.EEXIST:
+            raise RuntimeError("SAM batch result path already exists")
+        if error in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise RuntimeError("SAM batch result cloning is not supported")
+        raise RuntimeError("SAM batch result could not be published")
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("SAM batch result publishing is unsupported platform")
     error = _linkat_batch_result(
         file_descriptor,
         b"",
@@ -1091,6 +1102,32 @@ def _publish_batch_result(
     if error == errno.EEXIST:
         raise RuntimeError("SAM batch result path already exists")
     raise RuntimeError("SAM batch result could not be published")
+
+
+def _fclonefileat_batch_result(
+    source_fd: int,
+    parent_fd: int,
+    result_name: bytes,
+    flags: int,
+) -> int:
+    import ctypes
+    import errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        fclonefileat = libc.fclonefileat
+    except AttributeError:
+        return errno.ENOTSUP
+    fclonefileat.argtypes = [
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+    ]
+    fclonefileat.restype = ctypes.c_int
+    if fclonefileat(source_fd, parent_fd, result_name, flags) == 0:
+        return 0
+    return ctypes.get_errno()
 
 
 def _linkat_batch_result(
@@ -1117,37 +1154,6 @@ def _linkat_batch_result(
     return ctypes.get_errno()
 
 
-def _bound_result_status(result_binding: dict, parent_handle):
-    if sys.platform == "win32":
-        return os.stat(result_binding["path"], follow_symlinks=False)
-    return os.stat(
-        result_binding["path"].name,
-        dir_fd=parent_handle,
-        follow_symlinks=False,
-    )
-
-
-def _unlink_owned_posix_result(
-    result_binding: dict,
-    parent_handle,
-    descriptor_identity: tuple[int, int] | None,
-) -> None:
-    if descriptor_identity is None:
-        return
-    try:
-        status = _bound_result_status(result_binding, parent_handle)
-    except OSError:
-        return
-    if (
-        stat.S_ISREG(status.st_mode)
-        and (status.st_dev, status.st_ino) == descriptor_identity
-    ):
-        try:
-            os.unlink(result_binding["path"].name, dir_fd=parent_handle)
-        except OSError:
-            pass
-
-
 def _write_batch_result(
     result_binding: dict,
     payload: dict,
@@ -1164,7 +1170,7 @@ def _write_batch_result(
     file_descriptor = None
     descriptor_identity = None
     published = False
-    completed = False
+    primary_error = None
     try:
         file_descriptor, _, published = _create_batch_result_file(
             result_binding,
@@ -1197,51 +1203,41 @@ def _write_batch_result(
         )
         if final_identity != descriptor_identity:
             raise RuntimeError("SAM batch result temp identity changed")
-        if not published:
-            _verify_batch_result_binding(result_binding)
-            _publish_batch_result(file_descriptor, parent_handle, result_binding)
-            published = True
-        _verify_batch_result_parent(result_binding)
-        result_status = _bound_result_status(result_binding, parent_handle)
-        if (
-            _is_link_or_reparse(result_status)
-            or not stat.S_ISREG(result_status.st_mode)
-            or (result_status.st_dev, result_status.st_ino) != descriptor_identity
-            or result_status.st_size != written
-        ):
-            raise RuntimeError("SAM batch result identity changed")
-        completed = True
+        _verify_batch_result_binding(result_binding)
+        _publish_batch_result(file_descriptor, parent_handle, result_binding)
+        published = True
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        delete_windows_file = False
+        cleanup_errors = []
         try:
-            if file_descriptor is not None and not completed:
-                if sys.platform == "win32":
+            if (
+                file_descriptor is not None
+                and not published
+                and sys.platform == "win32"
+            ):
+                try:
                     _delete_windows_batch_result(file_descriptor)
-                elif published:
-                    delete_windows_file = os.name == "nt"
-                    if not delete_windows_file:
-                        _unlink_owned_posix_result(
-                            result_binding,
-                            parent_handle,
-                            descriptor_identity,
-                        )
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
         finally:
             try:
                 if file_descriptor is not None:
-                    os.close(file_descriptor)
-                if delete_windows_file:
                     try:
-                        status = result_binding["path"].lstat()
-                        if (
-                            stat.S_ISREG(status.st_mode)
-                            and (status.st_dev, status.st_ino)
-                            == descriptor_identity
-                        ):
-                            result_binding["path"].unlink()
-                    except OSError:
-                        pass
+                        os.close(file_descriptor)
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
             finally:
-                _close_batch_result_parent(parent_handle)
+                try:
+                    _close_batch_result_parent(parent_handle)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        if primary_error is not None:
+            for cleanup_error in cleanup_errors:
+                primary_error.add_note(f"SAM batch cleanup failed: {cleanup_error}")
+        elif not published and cleanup_errors:
+            raise cleanup_errors[0]
 
 
 def _verify_batch_result_binding(result_binding: dict) -> None:

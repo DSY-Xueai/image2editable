@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 from numbers import Integral
@@ -2324,40 +2325,21 @@ def test_candidate_batch_linux_publish_falls_back_to_proc_fd_without_capability(
     ]
 
 
-def test_candidate_batch_posix_direct_result_is_removed_after_stream_failure(
+def test_candidate_batch_other_posix_never_creates_partial_final(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    if sys.platform == "win32":
-        monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
-        monkeypatch.setattr(
-            sam_worker,
-            "_open_batch_result_parent",
-            lambda binding: 7,
-        )
-        monkeypatch.setattr(
-            sam_worker,
-            "_close_batch_result_parent",
-            lambda handle: None,
-        )
-        monkeypatch.setattr(
-            sam_worker,
-            "_create_batch_result_file",
-            lambda binding, parent_handle: (
-                os.open(binding["path"], os.O_WRONLY | os.O_CREAT | os.O_EXCL),
-                binding["path"],
-                True,
-            ),
-        )
-        monkeypatch.setattr(
-            sam_worker,
-            "_unlink_owned_posix_result",
-            lambda binding, parent_handle, identity: (
-                binding["path"].unlink()
-                if identity is not None and binding["path"].exists()
-                else None
-            ),
-        )
+    monkeypatch.setattr(sam_worker.sys, "platform", "freebsd14")
+    monkeypatch.setattr(
+        sam_worker,
+        "_open_batch_result_parent",
+        lambda binding: 7,
+    )
+    monkeypatch.setattr(
+        sam_worker,
+        "_close_batch_result_parent",
+        lambda handle: None,
+    )
     image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
     operations = [
         {"id": "prompted", "kind": "prompted", "image": image},
@@ -2370,18 +2352,90 @@ def test_candidate_batch_posix_direct_result_is_removed_after_stream_failure(
         "parent": tmp_path,
         "parent_identity": (root_status.st_dev, root_status.st_ino),
     }
-    monkeypatch.setattr(
-        sam_worker,
-        "sam_candidate_batch_result_max_bytes",
-        lambda image_shape, proposal_count: 32,
-    )
-
-    with pytest.raises(RuntimeError, match="size limit"):
+    with pytest.raises(RuntimeError, match="unsupported platform"):
         sam_worker._write_batch_result(
             binding,
             _candidate_batch_payload(automatic=[_candidate_batch_record()]),
             operations,
         )
+
+    assert not result_path.exists()
+    assert not hasattr(sam_worker, "_unlink_owned_posix_result")
+
+
+@pytest.mark.parametrize(
+    ("clone_error", "message"),
+    [(0, None), (errno.EEXIST, "already exists"), (errno.ENOTSUP, "not supported")],
+)
+def test_candidate_batch_darwin_fclone_is_descriptor_bound_and_no_clobber(
+    monkeypatch,
+    clone_error: int,
+    message: str | None,
+) -> None:
+    calls = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        sam_worker,
+        "_fclonefileat_batch_result",
+        lambda source_fd, parent_fd, name, flags: (
+            calls.append((source_fd, parent_fd, name, flags)) or clone_error
+        ),
+        raising=False,
+    )
+
+    if message is None:
+        sam_worker._publish_batch_result(17, 19, {"path": Path("result.json")})
+    else:
+        with pytest.raises(RuntimeError, match=message):
+            sam_worker._publish_batch_result(
+                17,
+                19,
+                {"path": Path("result.json")},
+            )
+
+    assert calls == [(17, 19, b"result.json", 0)]
+
+
+def test_candidate_batch_darwin_without_anonymous_source_fails_before_path_creation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: pytest.fail("Darwin must not create a named temp"),
+    )
+    monkeypatch.setattr(
+        sam_worker.os,
+        "unlink",
+        lambda *args, **kwargs: pytest.fail("Darwin must not path-unlink cleanup"),
+    )
+
+    with pytest.raises(RuntimeError, match="anonymous.*not supported"):
+        sam_worker._create_batch_result_file(
+            {"path": tmp_path / "result.json"},
+            19,
+        )
+
+    assert not (tmp_path / "result.json").exists()
+
+
+def test_candidate_batch_linux_tmpfile_failure_does_not_create_final(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+    result_path = tmp_path / "result.json"
+
+    with pytest.raises(RuntimeError, match="unsupported"):
+        sam_worker._create_batch_result_file({"path": result_path}, 19)
 
     assert not result_path.exists()
 
@@ -2439,7 +2493,7 @@ def test_candidate_batch_windows_temp_denies_external_writers(tmp_path: Path) ->
     assert not list(tmp_path.glob(".result.json.*.tmp"))
 
 
-def test_candidate_batch_cleanup_failure_still_closes_file_and_parent_handles(
+def test_candidate_batch_cleanup_failure_preserves_primary_error_and_closes_handles(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2495,7 +2549,7 @@ def test_candidate_batch_cleanup_failure_still_closes_file_and_parent_handles(
         lambda image_shape, proposal_count: 32,
     )
 
-    with pytest.raises(RuntimeError, match="cleanup failed"):
+    with pytest.raises(RuntimeError, match="size limit") as raised:
         sam_worker._write_batch_result(
             binding,
             _candidate_batch_payload(automatic=[_candidate_batch_record()]),
@@ -2503,8 +2557,82 @@ def test_candidate_batch_cleanup_failure_still_closes_file_and_parent_handles(
         )
 
     assert closed == [("file", file_descriptor), ("parent", parent_handle)]
+    assert any("cleanup failed" in note for note in raised.value.__notes__)
     actual_close(file_descriptor)
     Path(temporary_name).unlink()
+
+
+def test_candidate_batch_close_failure_does_not_override_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    actual_close = sam_worker.os.close
+    close_calls = []
+
+    def failing_close(descriptor):
+        close_calls.append(descriptor)
+        actual_close(descriptor)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(sam_worker.os, "close", failing_close)
+    monkeypatch.setattr(
+        sam_worker,
+        "sam_candidate_batch_result_max_bytes",
+        lambda image_shape, proposal_count: 32,
+    )
+
+    with pytest.raises(RuntimeError, match="size limit") as raised:
+        sam_worker._write_batch_result(
+            binding,
+            _candidate_batch_payload(automatic=[_candidate_batch_record()]),
+            operations,
+        )
+
+    assert close_calls
+    assert any("close failed" in note for note in raised.value.__notes__)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows handle publish")
+def test_candidate_batch_windows_close_failure_after_publish_keeps_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = tmp_path / "result.json"
+    root_status = tmp_path.lstat()
+    binding = {
+        "path": result_path,
+        "parent": tmp_path,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    actual_close = sam_worker.os.close
+
+    def failing_close(descriptor):
+        actual_close(descriptor)
+        raise OSError("close failed after publish")
+
+    monkeypatch.setattr(sam_worker.os, "close", failing_close)
+
+    sam_worker._write_batch_result(binding, payload, operations)
+
+    assert json.loads(result_path.read_text(encoding="utf-8")) == payload
 
 
 def test_candidate_batch_worker_does_not_replace_result_created_during_publish(
