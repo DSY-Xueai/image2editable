@@ -2676,9 +2676,399 @@ def test_candidate_batch_worker_does_not_replace_result_created_during_publish(
     assert not list(tmp_path.glob(".result.json.*.tmp"))
 
 
-def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
+def test_candidate_batch_stage_supported_uses_one_batch_worker(
     tmp_path: Path,
     monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    text_mask = image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8)
+    proposal = image_to_ppt.ObjectProposal(
+        box_xyxy=(1.0, 1.0, 7.0, 5.0),
+        score=0.9,
+        label="object",
+        role="foreground",
+        source="dino",
+        crop_box=(0, 0, 8, 6),
+    )
+    prompted = [
+        image_to_ppt.MaskCandidate(
+            image_to_ppt.np.ones((6, 8), dtype=bool), 0.8, "sam"
+        )
+    ]
+    automatic = [
+        image_to_ppt.MaskCandidate(
+            image_to_ppt.np.eye(6, 8, dtype=bool), 0.7, "sam"
+        )
+    ]
+    batch_calls = []
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda work_dir: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        lambda *args: batch_calls.append(args) or (prompted, automatic),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidates_isolated",
+        lambda *args, **kwargs: pytest.fail("legacy workers must not run"),
+    )
+
+    actual = image_to_ppt._generate_sam_candidate_stage_isolated(
+        image,
+        text_mask,
+        [proposal],
+        tmp_path,
+    )
+
+    assert actual == (prompted, automatic)
+    assert batch_calls == [(image, text_mask, [proposal], tmp_path)]
+
+
+def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    text_mask = image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8)
+    proposals = []
+    prompted = [
+        image_to_ppt.MaskCandidate(
+            image_to_ppt.np.ones((6, 8), dtype=bool), 0.8, "sam"
+        )
+    ]
+    automatic = [
+        image_to_ppt.MaskCandidate(
+            image_to_ppt.np.eye(6, 8, dtype=bool), 0.7, "sam"
+        )
+    ]
+    legacy_calls = []
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda work_dir: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        lambda *args: pytest.fail("batch worker must not run"),
+    )
+
+    def fake_legacy(actual_image, actual_mask, actual_proposals, work_dir, *, mode):
+        legacy_calls.append(
+            (actual_image, actual_mask, actual_proposals, work_dir, mode)
+        )
+        return prompted if mode == "prompted" else automatic
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidates_isolated",
+        fake_legacy,
+    )
+
+    actual = image_to_ppt._generate_sam_candidate_stage_isolated(
+        image,
+        text_mask,
+        proposals,
+        tmp_path,
+    )
+
+    assert actual == (prompted, automatic)
+    assert legacy_calls == [
+        (image, text_mask, proposals, tmp_path, "prompted"),
+        (image, None, None, tmp_path, "automatic"),
+    ]
+
+
+def test_candidate_batch_stage_does_not_fallback_after_batch_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda work_dir: True,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("batch failed")),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidates_isolated",
+        lambda *args, **kwargs: pytest.fail("failed batch must not be retried"),
+    )
+
+    with pytest.raises(RuntimeError, match="batch failed"):
+        image_to_ppt._generate_sam_candidate_stage_isolated(
+            image_to_ppt.np.zeros((2, 2, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((2, 2), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+
+@pytest.mark.parametrize("platform", ["darwin", "freebsd14"])
+def test_candidate_batch_output_capability_is_false_without_path_probe(
+    tmp_path: Path,
+    monkeypatch,
+    platform: str,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", platform)
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: pytest.fail("unsupported platforms need no probe file"),
+    )
+
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    [errno.EOPNOTSUPP, errno.EINVAL, errno.EISDIR, errno.ENOENT, errno.ENOSYS],
+)
+def test_candidate_batch_linux_known_unsupported_filesystem_returns_false(
+    tmp_path: Path,
+    monkeypatch,
+    error_number: int,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(error_number, "unsupported")
+        ),
+    )
+
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is False
+
+
+def test_candidate_batch_linux_indeterminate_probe_error_prevents_inference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(sam_worker, "_close_batch_result_parent", lambda handle: None)
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PermissionError(errno.EACCES, "denied")
+        ),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        sam_worker.sam_candidate_batch_output_supported,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidate_batch_isolated",
+        lambda *args: pytest.fail("batch inference must not run"),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_sam_candidates_isolated",
+        lambda *args, **kwargs: pytest.fail("legacy inference must not run"),
+    )
+
+    with pytest.raises(PermissionError, match="denied"):
+        image_to_ppt._generate_sam_candidate_stage_isolated(
+            image_to_ppt.np.zeros((2, 2, 3), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros((2, 2), dtype=image_to_ppt.np.uint8),
+            [],
+            tmp_path,
+        )
+
+
+def test_candidate_batch_linux_missing_work_dir_is_not_treated_as_unsupported(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    missing = tmp_path / "missing"
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            FileNotFoundError(errno.ENOENT, "missing")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        sam_worker.sam_candidate_batch_output_supported(missing)
+
+
+def test_candidate_batch_linux_supported_probe_closes_anonymous_descriptor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    closed = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(
+        sam_worker,
+        "_close_batch_result_parent",
+        lambda handle: closed.append(handle),
+    )
+    monkeypatch.setattr(sam_worker.os, "open", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(sam_worker.os, "close", closed.append)
+
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is True
+    assert closed == [91, 90]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
+def test_candidate_batch_windows_capability_probe_uses_real_publish_api(
+    tmp_path: Path,
+) -> None:
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is True
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
+def test_candidate_batch_windows_unsupported_publish_returns_false(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        sam_worker,
+        "_publish_windows_batch_result",
+        lambda *args: (_ for _ in ()).throw(
+            sam_worker._BatchResultPublishingUnsupported("unsupported")
+        ),
+    )
+
+    assert sam_worker.sam_candidate_batch_output_supported(tmp_path) is False
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
+def test_candidate_batch_windows_probe_retries_delete_before_close(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_delete = sam_worker._delete_windows_batch_result
+    delete_calls = []
+
+    def fail_first_delete(file_descriptor):
+        delete_calls.append(file_descriptor)
+        if len(delete_calls) == 1:
+            raise RuntimeError("first delete failed")
+        return original_delete(file_descriptor)
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_delete_windows_batch_result",
+        fail_first_delete,
+    )
+
+    with pytest.raises(RuntimeError, match="first delete failed"):
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert len(delete_calls) == 2
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
+def test_candidate_batch_windows_unsupported_does_not_hide_close_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_close = sam_worker.os.close
+    monkeypatch.setattr(
+        sam_worker,
+        "_publish_windows_batch_result",
+        lambda *args: (_ for _ in ()).throw(
+            sam_worker._BatchResultPublishingUnsupported("unsupported")
+        ),
+    )
+
+    def close_then_fail(descriptor):
+        original_close(descriptor)
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(sam_worker.os, "close", close_then_fail)
+
+    with pytest.raises(RuntimeError, match="close failed"):
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows capability probe")
+def test_candidate_batch_windows_close_failure_does_not_hide_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_close = sam_worker.os.close
+    monkeypatch.setattr(
+        sam_worker,
+        "_publish_windows_batch_result",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("publish failed")),
+    )
+
+    def close_then_fail(descriptor):
+        original_close(descriptor)
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(sam_worker.os, "close", close_then_fail)
+
+    with pytest.raises(RuntimeError, match="publish failed") as error:
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert any("close failed" in note for note in error.value.__notes__)
+    assert not list(tmp_path.iterdir())
+
+
+def test_candidate_batch_linux_close_failure_does_not_hide_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sam_worker.sys, "platform", "linux")
+    monkeypatch.setattr(sam_worker.os, "O_TMPFILE", 0x410000, raising=False)
+    monkeypatch.setattr(sam_worker, "_open_batch_result_parent", lambda binding: 90)
+    monkeypatch.setattr(
+        sam_worker,
+        "_close_batch_result_parent",
+        lambda handle: (_ for _ in ()).throw(RuntimeError("close failed")),
+    )
+    monkeypatch.setattr(
+        sam_worker.os,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PermissionError(errno.EACCES, "denied")
+        ),
+    )
+
+    with pytest.raises(PermissionError, match="denied") as error:
+        sam_worker.sam_candidate_batch_output_supported(tmp_path)
+
+    assert any("close failed" in note for note in error.value.__notes__)
+
+
+@pytest.mark.parametrize("batch_supported", [True, False])
+def test_candidate_batch_process_routes_initial_and_residual_stage(
+    tmp_path: Path,
+    monkeypatch,
+    batch_supported: bool,
 ) -> None:
     image = image_to_ppt.np.full((10, 20, 3), 40, dtype=image_to_ppt.np.uint8)
     image_path = tmp_path / "source.png"
@@ -2694,6 +3084,13 @@ def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
     candidate = image_to_ppt.MaskCandidate(mask.copy(), 0.95, "sam")
     element = visual_segment.VisualElement(mask.copy(), 0, 0.95, "sam")
     batch_calls = []
+    legacy_calls = []
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda target: batch_supported,
+    )
 
     monkeypatch.setattr(
         image_to_ppt,
@@ -2714,7 +3111,17 @@ def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
     monkeypatch.setattr(
         image_to_ppt,
         "_generate_sam_candidates_isolated",
-        lambda *args, **kwargs: pytest.fail("pipeline must use one SAM candidate batch"),
+        lambda actual_image, actual_mask, proposals, target, *, mode: (
+            legacy_calls.append(
+                (actual_image.copy(), actual_mask, proposals, target, mode)
+            )
+            or (
+                [candidate]
+                if mode == "prompted"
+                and sum(call[4] == "prompted" for call in legacy_calls) == 1
+                else []
+            )
+        ),
     )
     monkeypatch.setattr(image_to_ppt, "filter_prompt_free_candidates", lambda *args: [])
     monkeypatch.setattr(image_to_ppt, "generate_geometry_candidates", lambda *args: [])
@@ -2754,10 +3161,29 @@ def test_candidate_batch_process_uses_one_worker_for_initial_and_residual_stage(
         _resource_isolation=True,
     )
 
-    assert len(batch_calls) == 2
-    assert image_to_ppt.np.array_equal(batch_calls[0][0], image)
-    assert image_to_ppt.np.array_equal(batch_calls[1][0], image)
-    assert all(call[2] == [] and call[3] == work_dir for call in batch_calls)
+    if batch_supported:
+        assert len(batch_calls) == 2
+        assert legacy_calls == []
+        assert image_to_ppt.np.array_equal(batch_calls[0][0], image)
+        assert image_to_ppt.np.array_equal(batch_calls[1][0], image)
+        assert all(call[2] == [] and call[3] == work_dir for call in batch_calls)
+    else:
+        assert batch_calls == []
+        assert [call[4] for call in legacy_calls] == [
+            "prompted",
+            "automatic",
+            "prompted",
+            "automatic",
+        ]
+        assert all(
+            call[2] == [] and call[3] == work_dir
+            for call in (legacy_calls[0], legacy_calls[2])
+        )
+        assert all(
+            call[1] is None and call[2] is None and call[3] == work_dir
+            for call in (legacy_calls[1], legacy_calls[3])
+        )
+        assert all(image_to_ppt.np.array_equal(call[0], image) for call in legacy_calls)
 
 
 def test_sam_rle_mask_is_decoded_without_full_frame_copy(monkeypatch) -> None:

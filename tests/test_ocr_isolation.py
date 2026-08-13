@@ -1227,6 +1227,11 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
         "_generate_filtered_object_proposals_isolated",
         lambda *args: [],
     )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda target: True,
+    )
 
     def fake_sam_batch(*args, **kwargs):
         sam_calls.append("batch")

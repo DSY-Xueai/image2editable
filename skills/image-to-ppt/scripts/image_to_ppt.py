@@ -91,6 +91,7 @@ from scripts.visual_segment import (
 )
 from scripts.worker_resources import run_isolated_worker
 from scripts.sam_worker import (
+    sam_candidate_batch_output_supported,
     sam_candidate_batch_max_automatic_candidates,
     sam_candidate_batch_max_prompted_candidates,
     sam_candidate_batch_max_proposals,
@@ -1915,6 +1916,36 @@ def _generate_sam_candidate_batch_isolated(
     return decoded[0], decoded[1]
 
 
+def _generate_sam_candidate_stage_isolated(
+    image: np.ndarray,
+    text_mask: np.ndarray,
+    proposals: list[ObjectProposal],
+    work_dir: Path,
+) -> tuple[list[MaskCandidate], list[MaskCandidate]]:
+    if sam_candidate_batch_output_supported(work_dir):
+        return _generate_sam_candidate_batch_isolated(
+            image,
+            text_mask,
+            proposals,
+            work_dir,
+        )
+    prompted = _generate_sam_candidates_isolated(
+        image,
+        text_mask,
+        proposals,
+        work_dir,
+        mode="prompted",
+    )
+    automatic = _generate_sam_candidates_isolated(
+        image,
+        None,
+        None,
+        work_dir,
+        mode="automatic",
+    )
+    return prompted, automatic
+
+
 def _packed_mask_fields(mask: np.ndarray, name: str = "mask") -> dict:
     binary = np.asarray(mask, dtype=bool)
     return {
@@ -2164,7 +2195,7 @@ def _process_image(
         (
             candidates,
             prompt_free_candidates,
-        ) = _generate_sam_candidate_batch_isolated(
+        ) = _generate_sam_candidate_stage_isolated(
             img,
             text_ink_mask,
             proposals,
@@ -2238,7 +2269,7 @@ def _process_image(
             (
                 prompted_residual_candidates,
                 prompt_free_residual_candidates,
-            ) = _generate_sam_candidate_batch_isolated(
+            ) = _generate_sam_candidate_stage_isolated(
                 clean_background,
                 text_ink_mask,
                 residual_proposals,

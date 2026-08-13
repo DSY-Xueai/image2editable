@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import io
 import json
 import math
@@ -127,6 +128,10 @@ _BATCH_PROPOSAL_FIELDS = {
     "crop_box",
     "touches_crop_edge",
 }
+
+
+class _BatchResultPublishingUnsupported(RuntimeError):
+    pass
 
 
 def _batch_image_shape(image_shape: tuple[int, int]) -> tuple[int, int]:
@@ -895,7 +900,12 @@ def _close_batch_result_parent(parent_handle) -> None:
         os.close(parent_handle)
 
 
-def _create_batch_result_file(result_binding: dict, parent_handle):
+def _create_batch_result_file(
+    result_binding: dict,
+    parent_handle,
+    *,
+    delete_on_close: bool = False,
+):
     result_path = result_binding["path"]
     if sys.platform == "win32":
         import ctypes
@@ -914,6 +924,7 @@ def _create_batch_result_file(result_binding: dict, parent_handle):
         ]
         kernel32.CreateFileW.restype = wintypes.HANDLE
         invalid_handle = ctypes.c_void_p(-1).value
+        last_error = None
         for _ in range(16):
             temporary_path = result_path.with_name(
                 f".{result_path.name}.{secrets.token_hex(16)}.tmp"
@@ -924,7 +935,7 @@ def _create_batch_result_file(result_binding: dict, parent_handle):
                 0x00000001 | 0x00000004,
                 None,
                 1,
-                0x00000080,
+                0x00000080 | (0x04000000 if delete_on_close else 0),
                 None,
             )
             if handle != invalid_handle:
@@ -937,8 +948,13 @@ def _create_batch_result_file(result_binding: dict, parent_handle):
                     kernel32.CloseHandle(handle)
                     raise
                 return descriptor, temporary_path, False
-            if ctypes.get_last_error() not in {80, 183}:
+            last_error = ctypes.get_last_error()
+            if last_error not in {80, 183}:
                 break
+        if last_error in {1, 50}:
+            raise _BatchResultPublishingUnsupported(
+                "SAM batch result publishing is unsupported"
+            )
         raise RuntimeError("SAM batch result temp could not be created")
 
     if sys.platform.startswith("linux") and hasattr(os, "O_TMPFILE"):
@@ -984,15 +1000,21 @@ def _publish_windows_batch_result(
             ("file_name", wintypes.WCHAR * 1),
         ]
 
-    ntdll = ctypes.WinDLL("ntdll")
-    ntdll.NtSetInformationFile.argtypes = [
+    try:
+        ntdll = ctypes.WinDLL("ntdll")
+        set_information = ntdll.NtSetInformationFile
+    except (AttributeError, OSError) as exc:
+        raise _BatchResultPublishingUnsupported(
+            "SAM batch result publishing API is unsupported"
+        ) from exc
+    set_information.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(IoStatusBlock),
         ctypes.c_void_p,
         wintypes.ULONG,
         ctypes.c_int,
     ]
-    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    set_information.restype = ctypes.c_long
     encoded_name = result_name.encode("utf-16-le")
     file_name_offset = FileRenameInformation.file_name.offset
     information = ctypes.create_string_buffer(
@@ -1008,7 +1030,7 @@ def _publish_windows_batch_result(
         len(encoded_name),
     )
     io_status = IoStatusBlock()
-    status = ntdll.NtSetInformationFile(
+    status = set_information(
         msvcrt.get_osfhandle(file_descriptor),
         ctypes.byref(io_status),
         information,
@@ -1019,6 +1041,10 @@ def _publish_windows_batch_result(
         return
     if status & 0xFFFFFFFF == 0xC0000035:
         raise RuntimeError("SAM batch result path already exists")
+    if status & 0xFFFFFFFF in {0xC0000002, 0xC0000003, 0xC0000010, 0xC00000BB}:
+        raise _BatchResultPublishingUnsupported(
+            "SAM batch result publishing is unsupported"
+        )
     raise RuntimeError("SAM batch result could not be published")
 
 
@@ -1033,26 +1059,195 @@ def _delete_windows_batch_result(file_descriptor: int) -> None:
             ("information", ctypes.c_size_t),
         ]
 
-    ntdll = ctypes.WinDLL("ntdll")
-    ntdll.NtSetInformationFile.argtypes = [
+    try:
+        ntdll = ctypes.WinDLL("ntdll")
+        set_information = ntdll.NtSetInformationFile
+    except (AttributeError, OSError) as exc:
+        raise _BatchResultPublishingUnsupported(
+            "SAM batch result deletion API is unsupported"
+        ) from exc
+    set_information.argtypes = [
         wintypes.HANDLE,
         ctypes.POINTER(IoStatusBlock),
         ctypes.c_void_p,
         wintypes.ULONG,
         ctypes.c_int,
     ]
-    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    set_information.restype = ctypes.c_long
     delete_file = ctypes.c_ubyte(1)
     io_status = IoStatusBlock()
-    status = ntdll.NtSetInformationFile(
+    status = set_information(
         msvcrt.get_osfhandle(file_descriptor),
         ctypes.byref(io_status),
         ctypes.byref(delete_file),
         1,
         13,
     )
+    if status & 0xFFFFFFFF in {0xC0000002, 0xC0000003, 0xC0000010, 0xC00000BB}:
+        raise _BatchResultPublishingUnsupported(
+            "SAM batch result deletion is unsupported"
+        )
     if status != 0:
         raise RuntimeError("SAM batch result could not be cleaned")
+
+
+def sam_candidate_batch_output_supported(work_dir: Path) -> bool:
+    work_dir = Path(os.path.abspath(work_dir))
+    if sys.platform.startswith("linux"):
+        if not hasattr(os, "O_TMPFILE"):
+            return False
+        root_status_before = _validate_batch_directory_chain(work_dir)
+        root = work_dir.resolve(strict=True)
+        root_status = root.lstat()
+        if (
+            root != work_dir
+            or _is_link_or_reparse(root_status)
+            or not stat.S_ISDIR(root_status.st_mode)
+            or (root_status.st_dev, root_status.st_ino)
+            != (root_status_before.st_dev, root_status_before.st_ino)
+        ):
+            raise RuntimeError("SAM batch capability directory changed")
+        result_binding = {
+            "parent": root,
+            "parent_identity": (root_status.st_dev, root_status.st_ino),
+        }
+        parent_handle = _open_batch_result_parent(result_binding)
+        descriptor = None
+        primary_error = None
+        unsupported = False
+        try:
+            descriptor = os.open(
+                ".",
+                os.O_RDWR | os.O_TMPFILE,
+                0o600,
+                dir_fd=parent_handle,
+            )
+        except OSError as exc:
+            # With the directory already bound and the flags fixed, these are the
+            # documented old-kernel/filesystem O_TMPFILE unsupported outcomes.
+            unsupported_errors = {
+                errno.EINVAL,
+                errno.EISDIR,
+                errno.ENOENT,
+                errno.ENOSYS,
+                errno.EOPNOTSUPP,
+            }
+            if exc.errno in unsupported_errors:
+                unsupported = True
+            else:
+                primary_error = exc
+        finally:
+            cleanup_errors = []
+            try:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+            finally:
+                try:
+                    _close_batch_result_parent(parent_handle)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        if cleanup_errors:
+            if primary_error is not None:
+                for cleanup_error in cleanup_errors:
+                    primary_error.add_note(
+                        f"SAM batch capability cleanup failed: {cleanup_error}"
+                    )
+                raise primary_error
+            raise cleanup_errors[0]
+        if unsupported:
+            return False
+        if primary_error is not None:
+            raise primary_error
+        return True
+    if sys.platform != "win32":
+        return False
+
+    root_status_before = _validate_batch_directory_chain(work_dir)
+    root = work_dir.resolve(strict=True)
+    if root != work_dir:
+        raise RuntimeError("SAM batch capability directory is unsafe")
+    root_status = root.lstat()
+    if (
+        _is_link_or_reparse(root_status)
+        or not stat.S_ISDIR(root_status.st_mode)
+        or (root_status.st_dev, root_status.st_ino)
+        != (root_status_before.st_dev, root_status_before.st_ino)
+    ):
+        raise RuntimeError("SAM batch capability directory changed")
+    result_binding = {
+        "path": root / f".sam-batch-capability-{secrets.token_hex(16)}.json",
+        "parent": root,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+        "parent_handle_identity": _windows_path_identity(root),
+    }
+    _verify_batch_result_binding(result_binding)
+    parent_handle = _open_batch_result_parent(result_binding)
+    file_descriptor = None
+    delete_requested = False
+    primary_error = None
+    try:
+        file_descriptor, _, _ = _create_batch_result_file(
+            result_binding,
+            parent_handle,
+            delete_on_close=True,
+        )
+        opened_status = os.fstat(file_descriptor)
+        if not stat.S_ISREG(opened_status.st_mode):
+            raise RuntimeError("SAM batch capability temp is not a regular file")
+        _publish_windows_batch_result(
+            file_descriptor,
+            parent_handle,
+            result_binding["path"].name,
+        )
+        _delete_windows_batch_result(file_descriptor)
+        delete_requested = True
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        cleanup_errors = []
+        try:
+            if file_descriptor is not None and not delete_requested:
+                try:
+                    _delete_windows_batch_result(file_descriptor)
+                    delete_requested = True
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        finally:
+            try:
+                if file_descriptor is not None:
+                    try:
+                        os.close(file_descriptor)
+                    except BaseException as exc:
+                        cleanup_errors.append(exc)
+            finally:
+                try:
+                    _close_batch_result_parent(parent_handle)
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+    if primary_error is not None:
+        for cleanup_error in cleanup_errors:
+            primary_error.add_note(
+                f"SAM batch capability cleanup failed: {cleanup_error}"
+            )
+    try:
+        result_binding["path"].lstat()
+    except FileNotFoundError:
+        if primary_error is not None:
+            if (
+                isinstance(primary_error, _BatchResultPublishingUnsupported)
+                and cleanup_errors
+            ):
+                raise cleanup_errors[0]
+            if isinstance(primary_error, _BatchResultPublishingUnsupported):
+                return False
+            raise primary_error
+        if cleanup_errors:
+            raise cleanup_errors[0]
+        return True
+    raise RuntimeError("SAM batch capability probe left a result path")
 
 
 def _publish_batch_result(
