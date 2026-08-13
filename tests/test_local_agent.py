@@ -88,7 +88,11 @@ def _request_path(tmp_path: Path, *, repair_round: int = 1) -> Path:
         if name == "component-graph.json":
             path.write_text(json.dumps(graph), encoding="utf-8")
         elif name == "quality-report.json":
-            path.write_text('{"violations":[]}', encoding="utf-8")
+            quality = (
+                {"report": {"violations": []}}
+                if repair_round > 1 else {"violations": []}
+            )
+            path.write_text(json.dumps(quality), encoding="utf-8")
         elif name == "presentation-manifest.json":
             continue
         else:
