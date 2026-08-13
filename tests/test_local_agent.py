@@ -207,6 +207,84 @@ def test_local_agent_starts_one_worker_with_offline_bounded_environment(
     assert observed["timeout_seconds"] == 600
 
 
+def test_local_agent_records_only_request_size_duration_and_worker_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    times = iter([4.0, 4.5])
+    monkeypatch.setattr(local_agent.time, "perf_counter", lambda: next(times))
+    observed = []
+
+    class Trace:
+        def event(self, event, **fields):
+            observed.append((event, fields))
+
+    def invoke(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps(_plan(request_path)), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "response body", "")
+
+    monkeypatch.setattr(local_agent, "_invoke_worker", invoke)
+
+    local_agent.run_local_agent(
+        request_path,
+        model_receipt=_receipt(tmp_path),
+        performance_trace=Trace(),
+    )
+
+    image_paths = [
+        request_path.parent / Path(*record["path"].split("/"))
+        for record in load_component_agent_request(request_path)["evidence"].values()
+        if record["path"].endswith(".png")
+    ]
+    assert observed == [
+        (
+            "local_agent",
+            {
+                "image_count": len(image_paths),
+                "total_bytes": sum(path.stat().st_size for path in image_paths),
+                "duration_ms": 500,
+                "status": "success",
+            },
+        )
+    ]
+
+
+def test_local_worker_invocation_preserves_default_subprocess_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = []
+    monkeypatch.setattr(
+        local_agent.subprocess,
+        "run",
+        lambda command, **kwargs: observed.append((command, kwargs))
+        or subprocess.CompletedProcess(command, 0),
+    )
+    import scripts.worker_resources as worker_resources
+
+    monkeypatch.setattr(
+        worker_resources,
+        "trim_parent_working_set_before_worker",
+        lambda: pytest.fail("default Local Agent invocation must not trim parent"),
+    )
+
+    local_agent._invoke_worker(
+        ["worker"], environment={"BASE": "kept"}, timeout_seconds=12
+    )
+
+    assert observed == [
+        (
+            ["worker"],
+            {
+                "env": {"BASE": "kept"},
+                "capture_output": True,
+                "text": True,
+                "check": False,
+                "timeout": 12,
+            },
+        )
+    ]
 def test_local_service_agent_uses_the_user_configured_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

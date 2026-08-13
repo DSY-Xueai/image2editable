@@ -185,3 +185,43 @@ def test_runner_preserves_subprocess_failures(monkeypatch, failure) -> None:
         worker_resources.run_isolated_worker(["worker"], check=True, timeout=600)
 
     assert caught.value is failure
+
+
+def test_runner_records_worker_outcome_without_changing_subprocess_call(monkeypatch) -> None:
+    worker_resources = _load_worker_resources()
+    monkeypatch.setattr(worker_resources, "trim_parent_working_set_before_worker", lambda: None)
+    times = iter([1.0, 1.25])
+    monkeypatch.setattr(worker_resources.time, "perf_counter", lambda: next(times))
+    observed = []
+
+    class Trace:
+        def event(self, event, **fields):
+            observed.append((event, fields))
+
+    monkeypatch.setattr(
+        worker_resources.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0),
+    )
+
+    actual = worker_resources.run_isolated_worker(
+        ["worker"],
+        performance_trace=Trace(),
+        stage="inference",
+        model="sam",
+        operation_count=2,
+    )
+
+    assert actual.returncode == 0
+    assert observed == [
+        (
+            "worker",
+            {
+                "stage": "inference",
+                "model": "sam",
+                "operation_count": 2,
+                "duration_ms": 250,
+                "status": "success",
+            },
+        )
+    ]

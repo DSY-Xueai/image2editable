@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 from image2editable.component_contracts import (
     MAX_REPAIR_ROUNDS,
@@ -27,6 +29,17 @@ _THREAD_ENVIRONMENT = (
     "NUMEXPR_NUM_THREADS",
     "FLAGS_paddle_num_threads",
 )
+_LOGGER = logging.getLogger(__name__)
+_IMAGE_EVIDENCE = (
+    "source.png",
+    "numbered-masks.png",
+    "ocr-overlay.png",
+    "component-isolation.png",
+    "ownership.png",
+    "reconstructed.png",
+    "difference.png",
+    "unexplained-mask.png",
+)
 
 
 def run_local_agent(
@@ -35,6 +48,7 @@ def run_local_agent(
     model_receipt: dict,
     resource_policy: dict | None = None,
     timeout_seconds: int = 600,
+    performance_trace=None,
 ) -> dict:
     from image2editable.component_repair import (
         _ensure_owned_directory,
@@ -68,6 +82,7 @@ def run_local_agent(
             "--output",
             str(output_path),
         ]
+        started = time.perf_counter() if performance_trace is not None else None
         try:
             completed = _invoke_worker(
                 command,
@@ -75,6 +90,9 @@ def run_local_agent(
                 timeout_seconds=timeout_seconds,
             )
         except subprocess.TimeoutExpired as error:
+            _record_local_agent_performance(
+                performance_trace, started, request_path, request, status="error"
+            )
             diagnostic_error = _write_diagnostic(
                 request_path,
                 request,
@@ -91,6 +109,18 @@ def run_local_agent(
             if diagnostic_error is not None:
                 message += "; diagnostic could not be written safely"
             raise RuntimeError(message) from error
+        except BaseException:
+            _record_local_agent_performance(
+                performance_trace, started, request_path, request, status="error"
+            )
+            raise
+        _record_local_agent_performance(
+            performance_trace,
+            started,
+            request_path,
+            request,
+            status="success" if completed.returncode == 0 else "failed",
+        )
         if completed.returncode != 0:
             diagnostic_error = _write_diagnostic(
                 request_path,
@@ -266,6 +296,33 @@ def _invoke_worker(
         check=False,
         timeout=timeout_seconds,
     )
+
+
+def _record_local_agent_performance(
+    performance_trace,
+    started: float | None,
+    request_path: Path,
+    request: dict,
+    *,
+    status: str,
+) -> None:
+    if performance_trace is None or started is None:
+        return
+    try:
+        image_paths = [
+            request_path.parent / Path(*request["evidence"][name]["path"].split("/"))
+            for name in _IMAGE_EVIDENCE
+            if name in request["evidence"]
+        ]
+        performance_trace.event(
+            "local_agent",
+            image_count=len(image_paths),
+            total_bytes=sum(path.stat().st_size for path in image_paths),
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            status=status,
+        )
+    except Exception:
+        _LOGGER.warning("Performance trace recording failed", exc_info=True)
 
 
 def _read_plan(path: Path) -> dict:

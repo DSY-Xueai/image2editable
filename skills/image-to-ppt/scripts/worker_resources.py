@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import logging
 import os
 import subprocess
+import time
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _empty_current_process_working_set_windows() -> None:
@@ -31,7 +36,15 @@ def trim_parent_working_set_before_worker() -> None:
         return
 
 
-def run_isolated_worker(command: list[str], **kwargs):
+def run_isolated_worker(
+    command: list[str],
+    *,
+    performance_trace=None,
+    stage: str | None = None,
+    model: str | None = None,
+    operation_count: int | None = None,
+    **kwargs,
+):
     trim_parent_working_set_before_worker()
     env = os.environ.copy()
     env.update(kwargs.pop("env", {}))
@@ -41,4 +54,52 @@ def run_isolated_worker(command: list[str], **kwargs):
         kwargs["encoding"] = "utf-8"
     if kwargs.get("text") and "errors" not in kwargs:
         kwargs["errors"] = "replace"
-    return subprocess.run(command, **kwargs)
+    if performance_trace is None:
+        return subprocess.run(command, **kwargs)
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(command, **kwargs)
+    except BaseException:
+        _record_worker_performance(
+            performance_trace,
+            started,
+            stage=stage,
+            model=model,
+            operation_count=operation_count,
+            status="error",
+        )
+        raise
+    _record_worker_performance(
+        performance_trace,
+        started,
+        stage=stage,
+        model=model,
+        operation_count=operation_count,
+        status="success" if completed.returncode == 0 else "failed",
+    )
+    return completed
+
+
+def _record_worker_performance(
+    performance_trace,
+    started: float,
+    *,
+    stage: str | None,
+    model: str | None,
+    operation_count: int | None,
+    status: str,
+) -> None:
+    fields = {
+        "duration_ms": round((time.perf_counter() - started) * 1000),
+        "status": status,
+    }
+    if stage is not None:
+        fields["stage"] = stage
+    if model is not None:
+        fields["model"] = model
+    if operation_count is not None:
+        fields["operation_count"] = operation_count
+    try:
+        performance_trace.event("worker", **fields)
+    except Exception:
+        _LOGGER.warning("Performance trace recording failed", exc_info=True)
