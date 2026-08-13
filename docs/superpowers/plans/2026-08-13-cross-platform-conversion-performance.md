@@ -15,8 +15,8 @@
 - Create: `scripts/performance_trace.py` — 无内容数据的 JSONL 性能事件和设备摘要。
 - Create: `tests/test_conversion_performance.py` — 性能事件、批处理调用次数和跨平台探测契约。
 - Modify: `scripts/sam_worker.py` — 候选批处理和组件 prompt 批处理协议。
-- Modify: `scripts/visual_segment.py` — 批量 SAM 结果进入现有 action/候选逻辑，局部 crop 坐标映射。
-- Modify: `image_to_ppt.py` — 候选批处理调用、OCR 增量依赖闭包、残差 crop 调度。
+- Modify: `scripts/visual_segment.py` — 批量 SAM 结果进入现有 action/候选逻辑。
+- Modify: `image_to_ppt.py` — 候选批处理调用、OCR 增量依赖闭包；residual 保持整页调度。
 - Modify: `image2editable/legacy.py` — 同轮多个组件 retry 一次提交给 SAM worker。
 - Modify: `image2editable/component_contracts.py` — Agent review evidence 的严格 schema。
 - Modify: `image2editable/component_repair.py` — 后续轮 review atlas、完整 evidence hash 和发布绑定。
@@ -267,54 +267,28 @@ git add image_to_ppt.py scripts/visual_worker.py skills/image-to-ppt/scripts/ima
 git commit -m "性能：复用未受 OCR 影响的视觉资产"
 ```
 
-## Task 5: 残差 connected-component crop 调度
+## Task 5: 残差 connected-component crop 调度（本轮不实现）
 
-**Files:**
-- Modify: `scripts/visual_segment.py`
-- Modify: `image_to_ppt.py`
-- Modify: `tests/test_regressions.py`
-- Mirror corresponding files under `skills/image-to-ppt/scripts/`
+架构核查结论：保留现有整页 DINO/SAM residual 路径，不修改生产代码和测试，不宣称本项性能收益。
 
-- [ ] **Step 1: 写 crop 规划和回退 RED 测试**
+**阻断证据：**
 
-```python
-@pytest.mark.parametrize("case", ["touches_crop_edge", "fragmented", "bad_mapping"])
-def test_residual_crop_unsafe_cases_require_full_page(case):
-    plan = plan_residual_crops(mask_for(case), page_shape=(720, 1280))
-    assert plan.mode == "full_page"
+- residual 推理前没有独立、完整且可证明覆盖所有待发现视觉元素的 residual mask；
+- `foreground-evidence-mask.png` 在 residual 循环完成后生成，并严格等于已发现 semantic mask 的并集，不能发现漏检元素；
+- source 与 clean background/reconstructed 的差异无法发现原样留在背景中的漏检元素；
+- DINO proposal、已知 candidate、其邻域或图像边缘均不能证明覆盖 automatic SAM 原本可能发现的全部元素，不能用作 crop 调度依据。
+- 现有 SAM candidate batch 只接受同一 image 的 prompted、automatic 两项操作，不支持多个 crop 共享一次 worker 和模型加载；现有隔离 DINO 接口也一次只处理一张 image。
 
-def test_residual_crop_round_trip_preserves_mask_pixels():
-    plan = plan_residual_crops(two_regions(), page_shape=(720, 1280))
-    restored = restore_crop_masks(plan, crop_masks_for(plan))
-    assert np.array_equal(restored & two_regions(), two_regions())
-```
+**本轮约束：**
 
-再测相邻 crop 合并、lossless 原分辨率、padding 不越页面、总 crop 面积无收益时整页回退。
+- 禁止用 DINO proposal 或已知 candidate 裁剪 residual 推理；
+- 禁止添加始终回退 `full_page`、实际没有性能收益的 planner；
+- 继续执行原整页同质量路径，保持候选、模型、阈值、ownership 和质量门禁语义；
+- Task 5 不产生生产提交、测试提交或性能收益声明。
 
-- [ ] **Step 2: 运行 RED**
+**长期路线（独立设计，不纳入本轮）：**
 
-Run: `python -m pytest tests/test_regressions.py -k "residual_crop" -q`
-
-Expected: FAIL，crop planner 尚不存在。
-
-- [ ] **Step 3: 实现保守局部调度**
-
-新增不可配置的内部 planner，输入当前确定性 residual mask 和页面 shape，输出 `local` crops 或 `full_page`。crop 使用原像素 PNG、上下文边距和重叠合并；任何 SAM mask 触碰非页面 crop 边界即丢弃整批局部结果并执行原整页 DINO/SAM。回映射后重新运行现有 `combine_residual_candidates()`、ownership 和 quality gate。
-
-不修改 residual 阈值，不以 crop 外区域为背景，不把局部处理失败转成 warning 成功。
-
-- [ ] **Step 4: 运行 GREEN 与页面质量测试**
-
-Run: `python -m pytest tests/test_regressions.py tests/test_component_quality.py -k "residual or ownership or unexplained" -q`
-
-Expected: PASS；局部与整页夹具输出的显著 residual coverage 一致。
-
-- [ ] **Step 5: 镜像并提交**
-
-```powershell
-git add scripts/visual_segment.py image_to_ppt.py skills/image-to-ppt/scripts/visual_segment.py skills/image-to-ppt/scripts/image_to_ppt.py tests/test_regressions.py tests/test_component_quality.py
-git commit -m "性能：局部调度页面残差重建"
-```
+先在质量阶段建立候选独立的 material-foreground 证据，再据此产生并绑定真实 `unexplained-mask.png`，用它驱动修复闭环中的局部 DINO/SAM；当前从已发现 semantic mask 并集派生的 quality unexplained mask 不能直接满足这一前提。新设计必须覆盖 component repair、legacy runtime、证据协议、多 crop DINO/SAM batch protocol、坐标回映射、整批原子验证与完整质量回退；它不能伪装成初始 residual rounds 的等价替代。
 
 ## Task 6: 后续 Agent 轮使用完整的增量 review evidence
 

@@ -79,18 +79,18 @@ worker 只创建一次 SAM generator，按请求顺序执行全部 operation，�
 
 `_text_delta_recompute_scope` 仍返回完整的相交、父子、mask 重叠和 3px 邻接闭包，为未来独立拆分视觉流水线保留正确契约。无法证明资产不受影响、差集为空但 OCR 内容变化、source/旧 cleanup mask/SAM/DINO protocol/cache identity 任一 hash 不一致、mask 不可读或依赖关系不完整时，同样回退到现有完整第二视觉 pass。回退是完整质量路径，不是整页图片输出。
 
-### 4. 局部残差调度
+### 4. 局部残差调度（本轮不实现）
 
-从确定性的 unexplained/差异 mask 提取 connected components，按原分辨率生成带上下文的无损 crop。相邻或重叠 crop 合并，坐标在进入和离开 worker 时做显式映射。
+本轮保留现有整页 DINO/SAM residual 路径，不实现 connected-component crop，也不记录这项性能收益。架构核查确认，当前每个 residual 推理阶段开始前没有独立、完整且可证明覆盖本轮待发现视觉元素的 residual mask：
 
-局部结果必须满足：
+- `foreground-evidence-mask.png` 在 residual 循环结束后生成，并严格等于已经发现的 semantic mask 并集，不能证明覆盖尚未发现的元素；
+- source 与 clean background/reconstructed 的差异不能发现仍原样留在背景中的漏检元素，因为这些区域的像素没有变化；
+- DINO proposal、已知 candidate 或其邻域都不是完整前景证据。用它们决定 crop 会跳过 crop 外原本可能被 automatic SAM 发现的元素，实质上减少候选和质量。
+- 现有 SAM candidate batch 协议固定为同一张 image 的 prompted、automatic 两项操作，不支持多个 crop 在同一 worker 和模型生命周期中执行；现有隔离 DINO 接口同样一次只处理一张 image。
 
-- crop 完整覆盖绑定残差及安全边距；
-- SAM 结果不触碰 crop 的非页面边界；
-- 回映射后 mask 尺寸、bbox 和像素计数有效；
-- 该轮最终 ownership 与页面质量门禁重新计算。
+因此，禁止用 DINO proposal、已知 candidate、图像边缘或其他未经覆盖证明的近似 mask 调度局部 residual 推理，也禁止实现始终返回 `full_page` 的无收益 planner 来伪装完成。只有整页路径能保持当前候选覆盖、模型、阈值、ownership 和质量门禁语义。
 
-任一条件不满足，或残差 mask 过于分散使 crop 总面积没有实际收益时，自动执行原有整页 DINO/SAM 路径。局部调度只减少输入面积，不删除残差，不改变模型和阈值。
+长期方案应另立设计：先在质量阶段建立候选独立的 material-foreground 证据，再据此生成并绑定真实 `unexplained-mask.png`，以该 mask 驱动修复闭环中的局部 DINO/SAM。当前 quality `unexplained-mask.png` 仍以已发现 semantic mask 并集作为 material foreground，不能直接复用为这一前置证据。同时扩展 DINO/SAM batch 协议，使同一阶段的多个 crop 在一次 worker 和模型生命周期中执行。局部结果仍需满足无损坐标回映射、非页面 crop 边界不触碰、整批验证后才修改 graph，以及任一失败执行原完整质量路径。该方案不纳入本轮性能优化，因为它不能替代初始 residual rounds，且需要重新界定 component repair、legacy runtime、batch protocol 和质量证据协议。
 
 ### 5. Agent 增量证据
 
@@ -122,7 +122,7 @@ standalone skill 的 `references/requirements.txt` 将 SAM 依赖从 `@main` 改
 ## 错误处理和恢复
 
 - 批处理 worker 使用临时输出，全部结果验证后原子发布；崩溃、超时或结果缺失不留下可复用的半批次。
-- 增量 OCR、局部残差或增量证据只要无法证明输入绑定完整，就回退到当前完整路径。
+- 增量 OCR 或增量证据只要无法证明输入绑定完整，就回退到当前完整路径；局部残差属于长期独立设计，本轮保持整页路径。
 - 已经验证并绑定 hash 的 OCR、SAM、组件和 donor 资产继续沿用现有 retry 复用规则。
 - 性能记录不参与质量判断，也不能成为成功条件。
 - 所有新缓存均绑定 source、mask、模型/协议版本和相关参数；不跨不相同页面复用推理结果。
@@ -134,7 +134,7 @@ standalone skill 的 `references/requirements.txt` 将 SAM 依赖从 `@main` 改
 - SAM 批处理：证明一次模型构建处理多项 operation，结果顺序和单项旧路径等价；畸形或部分结果整批拒绝。
 - 修复批处理：同轮多个 box/point 只启动一个 worker，并保持 action 顺序和 graph transition。
 - OCR 增量：不相交资产复用；相交、父子依赖、hash 变化和证据不完整触发重算或完整回退。
-- 残差 crop：坐标回映射、padding、合并、触边回退、分散区域整页回退和最终质量重算。
+- 残差 crop 本轮不实现、不验收；现有 residual 整页路径继续纳入回归。
 - Agent 证据：首轮完整，后续轮只省略 hash 未变且与本轮无关的独立视觉文件；相关节点、关系邻居和当前质量证据完整。
 - 跨平台：用 platform/device probe 单元测试覆盖 Windows、Linux、macOS、CUDA unavailable 和探测失败；不伪造真实硬件性能结论。
 - 依赖和产品/skill 镜像一致性测试。
