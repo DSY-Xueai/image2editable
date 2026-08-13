@@ -251,7 +251,7 @@ Expected: FAIL，scope 函数尚不存在。
 
 仅当 OCR 文字确实新增、cleanup 差集非空、`scope == set()`，且全部缓存、关系、hash、协议和 shape 完整时，零 DINO/SAM 复用首 pass 视觉资产，并重新执行 text-clean、背景、removal、foreground/ownership 和原质量证据路径。`scope` 非空、本身为 `None` 或输出无法通过完整性校验时调用原来的第二次 `_process_image_isolated()`。本任务不在全局视觉流水线上伪实现非空 scope 的局部 SAM；该能力需未来先独立拆分视觉流水线。不吞掉原完整路径异常，不输出原图成功。
 
-安全复用还要求：从 element/semantic mask 的实际非零范围重算 bbox 并绑定 cache key；依赖闭包超过 mask crop、候选 pair 或局部像素预算时返回 `None`；caller 安全读取 source 字节并把 SHA-256/字节数交给 visual worker，worker 在任何模型加载前完成文件身份与 hash 校验，从内存快照解码，首 pass hash 与 prepared manifest 不一致时执行完整第二 pass。
+安全复用还要求：从 element/semantic mask 的实际非零范围重算 bbox 并绑定 cache key；依赖闭包超过 mask crop、候选 pair 或局部像素预算时返回 `None`；caller 安全读取 source 字节并通过进程参数把 SHA-256/字节数交给 visual worker（不信任 workdir 内 request 的绑定字段），worker 在任何模型加载前完成文件身份与 hash 校验，从内存快照解码，首 pass hash 与 prepared manifest 不一致时执行完整第二 pass。
 
 - [ ] **Step 4: 验证增量与完整路径等价**
 

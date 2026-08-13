@@ -84,12 +84,14 @@ def main() -> int:
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--lang", required=True)
     parser.add_argument("--request", required=True)
+    parser.add_argument("--source-sha256", required=True)
+    parser.add_argument("--source-size", required=True, type=int)
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
 
     request = json.loads(Path(args.request).read_text(encoding="utf-8"))
-    expected_sha256 = request.get("source_sha256")
-    expected_size = request.get("source_size")
+    expected_sha256 = args.source_sha256
+    expected_size = args.source_size
     if (
         not isinstance(expected_sha256, str)
         or len(expected_sha256) != 64

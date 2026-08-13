@@ -2072,8 +2072,6 @@ def _process_image_isolated(
     request_path.write_text(
         json.dumps({
             "text_analysis": text_analysis,
-            "source_sha256": source_sha256,
-            "source_size": len(source_content),
         }, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -2093,6 +2091,10 @@ def _process_image_isolated(
             lang,
             "--request",
             str(request_path),
+            "--source-sha256",
+            source_sha256,
+            "--source-size",
+            str(len(source_content)),
             "--result",
             str(result_path),
         ],

@@ -36,8 +36,6 @@ def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
     request = tmp_path / "request.json"
     request.write_text(json.dumps({
         "text_analysis": {"items": [], "mask_path": "mask.png"},
-        "source_sha256": "0" * 64,
-        "source_size": source.stat().st_size,
     }), encoding="utf-8")
     monkeypatch.setattr(
         visual_worker,
@@ -47,6 +45,7 @@ def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
     monkeypatch.setattr(sys, "argv", [
         "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
         "--lang", "en", "--request", str(request),
+        "--source-sha256", "0" * 64, "--source-size", str(source.stat().st_size),
         "--result", str(tmp_path / "result.json"),
     ])
 
@@ -63,9 +62,8 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
     request = tmp_path / "request.json"
     request.write_text(json.dumps({
         "text_analysis": {"items": [], "mask_path": "mask.png"},
-        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-        "source_size": source.stat().st_size,
     }), encoding="utf-8")
+    source_content = source.read_bytes()
 
     def fake_process(path, work_dir, *args, **kwargs):
         Image.new("RGB", (8, 6), "black").save(path)
@@ -78,6 +76,8 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
     monkeypatch.setattr(sys, "argv", [
         "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
         "--lang", "en", "--request", str(request),
+        "--source-sha256", hashlib.sha256(source_content).hexdigest(),
+        "--source-size", str(len(source_content)),
         "--result", str(tmp_path / "result.json"),
     ])
 
@@ -97,7 +97,9 @@ def test_isolated_visual_request_binds_source_snapshot(
 
     def fake_worker(command, **kwargs):
         request_path = Path(command[command.index("--request") + 1])
-        captured.update(json.loads(request_path.read_text(encoding="utf-8")))
+        captured["request"] = json.loads(request_path.read_text(encoding="utf-8"))
+        captured["source_sha256"] = command[command.index("--source-sha256") + 1]
+        captured["source_size"] = command[command.index("--source-size") + 1]
         return types.SimpleNamespace(returncode=1, stderr="stop", stdout="")
 
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_worker)
@@ -112,7 +114,39 @@ def test_isolated_visual_request_binds_source_snapshot(
 
     source_content = source.read_bytes()
     assert captured["source_sha256"] == hashlib.sha256(source_content).hexdigest()
-    assert captured["source_size"] == len(source_content)
+    assert captured["source_size"] == str(len(source_content))
+    assert set(captured["request"]) == {"text_analysis"}
+
+
+def test_visual_worker_does_not_trust_replaced_request_source_binding(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 6), "red").save(source)
+    original = source.read_bytes()
+    Image.new("RGB", (8, 6), "black").save(source)
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({
+        "text_analysis": {"items": [], "mask_path": "mask.png"},
+        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source_size": source.stat().st_size,
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        visual_worker,
+        "_load_process_image",
+        lambda: pytest.fail("replaced source must fail before pipeline load"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
+        "--lang", "en", "--request", str(request),
+        "--source-sha256", hashlib.sha256(original).hexdigest(),
+        "--source-size", str(len(original)),
+        "--result", str(tmp_path / "result.json"),
+    ])
+
+    with pytest.raises(ValueError, match="mismatch"):
+        visual_worker.main()
 
 from image_to_ppt import _parse_reference_option
 from image_to_ppt import _merge_foreground_masks

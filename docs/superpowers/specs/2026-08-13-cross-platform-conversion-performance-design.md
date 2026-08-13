@@ -75,7 +75,7 @@ worker 只创建一次 SAM generator，按请求顺序执行全部 operation，�
 
 组件 bbox 必须由已验证 element/semantic mask 的实际非零范围重算并写入 cache identity，不能信任组件元数据中的旧坐标。依赖闭包对累计 mask crop、候选节点对和局部像素工作量设置固定预算；超过预算不裁剪节点或降低检查精度，直接执行完整第二视觉 pass。
 
-首视觉 pass 的 source hash 必须绑定模型实际读取的字节：caller 通过受控读取器计算 SHA-256 和字节数，隔离 worker 在加载 DINO/SAM 前再次验证普通文件、非 link/reparse、单硬链接、句柄身份稳定、字节数和 SHA-256，并从已验证内存快照解码。后续视觉处理不再从原 source 路径读取图像；首 pass 返回的绑定 hash 与随后 prepared manifest 的 source hash 不一致时禁止复用。
+首视觉 pass 的 source hash 必须绑定模型实际读取的字节：caller 通过受控读取器计算 SHA-256 和字节数，并通过进程参数而非 workdir 内可替换的 request 文件传给隔离 worker；worker 在加载 DINO/SAM 前再次验证普通文件、非 link/reparse、单硬链接、句柄身份稳定、字节数和 SHA-256，并从已验证内存快照解码。后续视觉处理不再从原 source 路径读取图像；首 pass 返回的绑定 hash 与随后 prepared manifest 的 source hash 不一致时禁止复用。
 
 `_text_delta_recompute_scope` 仍返回完整的相交、父子、mask 重叠和 3px 邻接闭包，为未来独立拆分视觉流水线保留正确契约。无法证明资产不受影响、差集为空但 OCR 内容变化、source/旧 cleanup mask/SAM/DINO protocol/cache identity 任一 hash 不一致、mask 不可读或依赖关系不完整时，同样回退到现有完整第二视觉 pass。回退是完整质量路径，不是整页图片输出。
 
