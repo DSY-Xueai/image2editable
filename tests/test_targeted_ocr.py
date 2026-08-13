@@ -723,6 +723,197 @@ def _rewrite_prepared_manifest(path: Path, manifest: dict) -> None:
     )
 
 
+def _write_text_delta_mask(root: Path, name: str, mask: np.ndarray) -> dict:
+    path = root / "masks" / f"{name}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask.astype(np.uint8), mode="L").save(path)
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": image_to_ppt.hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def _text_delta_graph(root: Path, old_mask: np.ndarray) -> tuple[dict, dict]:
+    child = np.zeros_like(old_mask)
+    child[20:28, 30:40] = 255
+    parent = np.zeros_like(old_mask)
+    parent[18:30, 28:42] = 255
+    neighbor = np.zeros_like(old_mask)
+    neighbor[20:28, 44:50] = 255
+    distant = np.zeros_like(old_mask)
+    distant[55:65, 75:85] = 255
+    source_sha256 = "a" * 64
+    identity = {
+        "schema_version": 1,
+        "cache_key": "",
+        "source_sha256": source_sha256,
+        "old_cleanup_mask_sha256": image_to_ppt.hashlib.sha256(
+            np.ascontiguousarray(old_mask, dtype=np.uint8).tobytes()
+        ).hexdigest(),
+        "sam_protocol_sha256": image_to_ppt._TEXT_DELTA_SAM_PROTOCOL_SHA256,
+        "dino_protocol_sha256": image_to_ppt._TEXT_DELTA_DINO_PROTOCOL_SHA256,
+    }
+    graph = {
+        "schema_version": 1,
+        "cache_key": "",
+        "nodes": [
+            {
+                "id": "child",
+                "mask": _write_text_delta_mask(root, "child", child),
+                "parents": ["parent"],
+                "children": [],
+            },
+            {
+                "id": "parent",
+                "mask": _write_text_delta_mask(root, "parent", parent),
+                "parents": [],
+                "children": ["child"],
+            },
+            {
+                "id": "touching_neighbor",
+                "mask": _write_text_delta_mask(root, "neighbor", neighbor),
+                "parents": [],
+                "children": [],
+            },
+            {
+                "id": "distant",
+                "mask": _write_text_delta_mask(root, "distant", distant),
+                "parents": [],
+                "children": [],
+            },
+        ],
+    }
+    cache_key = image_to_ppt.hashlib.sha256(json.dumps({
+        "schema_version": identity["schema_version"],
+        "source_sha256": identity["source_sha256"],
+        "old_cleanup_mask_sha256": identity["old_cleanup_mask_sha256"],
+        "sam_protocol_sha256": identity["sam_protocol_sha256"],
+        "dino_protocol_sha256": identity["dino_protocol_sha256"],
+        "nodes": graph["nodes"],
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    identity["cache_key"] = cache_key
+    graph["cache_key"] = cache_key
+    return graph, identity
+
+
+def test_text_delta_reopens_intersections_parents_children_and_neighbors(
+    tmp_path: Path,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[21:27, 32:38] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+
+    scope = image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    )
+
+    assert scope == {"child", "parent", "touching_neighbor"}
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_hash",
+        "old_mask_hash",
+        "sam_protocol_hash",
+        "dino_protocol_hash",
+        "cache_identity",
+        "missing_relation",
+        "unreadable_mask",
+        "wrong_shape",
+        "path_escape",
+        "graph_content",
+    ],
+)
+def test_text_delta_incomplete_or_mismatched_cache_requires_full_recompute(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    new_mask = old_mask.copy()
+    new_mask[21:27, 32:38] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+    source_sha256 = "a" * 64
+    if mutation == "source_hash":
+        source_sha256 = "c" * 64
+    elif mutation == "old_mask_hash":
+        identity["old_cleanup_mask_sha256"] = "c" * 64
+    elif mutation == "sam_protocol_hash":
+        identity["sam_protocol_sha256"] = "c" * 64
+    elif mutation == "dino_protocol_hash":
+        identity["dino_protocol_sha256"] = "c" * 64
+    elif mutation == "cache_identity":
+        graph["cache_key"] = "c" * 64
+    elif mutation == "missing_relation":
+        graph["nodes"][1]["children"] = []
+    elif mutation == "unreadable_mask":
+        Path(tmp_path, graph["nodes"][0]["mask"]["path"]).write_bytes(b"bad")
+    elif mutation == "wrong_shape":
+        path = Path(tmp_path, graph["nodes"][0]["mask"]["path"])
+        Image.new("L", (10, 10), 255).save(path)
+        graph["nodes"][0]["mask"]["sha256"] = image_to_ppt.hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+    elif mutation == "path_escape":
+        outside = tmp_path.parent / "outside-mask.png"
+        Image.new("L", (100, 80), 255).save(outside)
+        graph["nodes"][0]["mask"] = {
+            "path": "../outside-mask.png",
+            "sha256": image_to_ppt.hashlib.sha256(outside.read_bytes()).hexdigest(),
+        }
+    elif mutation == "graph_content":
+        graph["nodes"][0]["mask"] = dict(graph["nodes"][3]["mask"])
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256=source_sha256,
+        cache_identity=identity,
+    ) is None
+
+
+def test_text_delta_changed_ocr_with_empty_mask_delta_requires_full_recompute(
+    tmp_path: Path,
+) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=old_mask.copy(),
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) is None
+
+
+def test_text_delta_cleanup_mask_shrink_requires_full_recompute(tmp_path: Path) -> None:
+    old_mask = np.zeros((80, 100), dtype=np.uint8)
+    old_mask[5:10, 5:10] = 255
+    new_mask = old_mask.copy()
+    new_mask[5:10, 5:10] = 0
+    new_mask[70:75, 90:95] = 255
+    graph, identity = _text_delta_graph(tmp_path, old_mask)
+
+    assert image_to_ppt._text_delta_recompute_scope(
+        old_mask=old_mask,
+        new_mask=new_mask,
+        graph=graph,
+        graph_dir=tmp_path,
+        source_sha256="a" * 64,
+        cache_identity=identity,
+    ) is None
+
+
 def _prepare_rerun_fixture(
     tmp_path: Path,
     monkeypatch,
@@ -730,6 +921,12 @@ def _prepare_rerun_fixture(
     include_diagnostic: bool = False,
     diagnostics_count: int | None = None,
     check_first_pass_cleanup: bool = False,
+    safe_text_delta: bool = False,
+    affected_text_delta: bool = False,
+    corrupt_cache: bool = False,
+    stable_visual_output: bool = False,
+    background_error: bool = False,
+    second_pass_error: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -748,11 +945,18 @@ def _prepare_rerun_fixture(
     )
     monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
     monkeypatch.setattr(image_to_ppt, "_release_visual_resources", lambda: None)
-    monkeypatch.setattr(
-        image_to_ppt,
-        "_build_text_cleanup_mask",
-        lambda *args, **kwargs: np.zeros((70, 120), dtype=np.uint8),
-    )
+    cleanup_calls = []
+
+    def fake_cleanup(image, text_mask, text_items):
+        cleanup = np.zeros((70, 120), dtype=np.uint8)
+        if safe_text_delta and text_items:
+            cleanup[18:39, 39:86] = 255
+        if affected_text_delta and text_items:
+            cleanup[12:20, 12:20] = 255
+        cleanup_calls.append(cleanup.copy())
+        return cleanup
+
+    monkeypatch.setattr(image_to_ppt, "_build_text_cleanup_mask", fake_cleanup)
     monkeypatch.setattr(
         image_to_ppt,
         "_repair_text_background",
@@ -763,6 +967,37 @@ def _prepare_rerun_fixture(
         "_isolated_large_inpainter",
         lambda work_dir: object(),
     )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_clean_background",
+        lambda image, *args, **kwargs: (
+            (_ for _ in ()).throw(RuntimeError("background failed"))
+            if background_error else image.copy()
+        ),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_widescreen_background",
+        lambda image, **kwargs: (image.copy(), 0, 0, "identity"),
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "build_removal_mask",
+        lambda masks, text_mask: np.logical_or.reduce(
+            [np.asarray(mask) > 0 for mask in masks] + [np.asarray(text_mask) > 0]
+        ).astype(np.uint8) * 255,
+    )
+    if corrupt_cache:
+        original_write_cache = image_to_ppt._write_first_visual_cache
+
+        def corrupting_write_cache(*args, **kwargs):
+            path = original_write_cache(*args, **kwargs)
+            path.write_text("{}", encoding="utf-8")
+            return path
+
+        monkeypatch.setattr(
+            image_to_ppt, "_write_first_visual_cache", corrupting_write_cache
+        )
 
     recovered = _ocr_item("NX", 0.96, 1)
     recovered["box"] = [45, 24, 35, 9]
@@ -802,6 +1037,8 @@ def _prepare_rerun_fixture(
             assert not stale_parent.exists()
             assert outside_component.exists()
         process_text_counts.append(len(text_analysis["items"]))
+        if second_pass_error and pass_index == 2:
+            raise RuntimeError("full visual failed")
         components_dir = target / "components"
         child_dir = target / "element-masks"
         parent_dir = target / "semantic-masks"
@@ -810,7 +1047,8 @@ def _prepare_rerun_fixture(
         parent_dir.mkdir(exist_ok=True)
         component_path = components_dir / "component_0000.png"
         Image.new(
-            "RGBA", (20, 20), "red" if pass_index == 1 else "green"
+            "RGBA", (20, 20),
+            "red" if stable_visual_output or pass_index == 1 else "green",
         ).save(component_path)
         child = np.zeros((70, 120), dtype=np.uint8)
         child[10:30, 10:30] = 255
@@ -895,6 +1133,138 @@ def test_prepare_reruns_all_visual_assets_after_targeted_text_recovery(
         assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
     with Image.open(prepared["_text_mask_path"]) as mask:
         assert mask.getpixel((50, 25)) == 255
+
+
+def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        safe_text_delta=True,
+    )
+
+    assert process_text_counts == [0]
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    assert [component["z_index"] for component in prepared["components"]] == [0]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+    with Image.open(prepared["_element_mask_paths"][0]) as child:
+        child_mask = np.asarray(child.convert("L")) > 0
+    with Image.open(prepared["_semantic_mask_paths"][0]) as parent:
+        parent_mask = np.asarray(parent.convert("L")) > 0
+    assert int(np.count_nonzero(child_mask)) == 400
+    assert int(np.count_nonzero(parent_mask)) == 24 * 24
+    with Image.open(prepared["background_removal_mask_path"]) as removal:
+        removal_mask = np.asarray(removal.convert("L")) > 0
+    assert np.all(removal_mask[18:39, 39:86])
+    assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
+
+
+@pytest.mark.parametrize("case", ["affected", "corrupt_cache"])
+def test_prepare_uses_full_second_visual_pass_when_reuse_is_not_provable(
+    tmp_path: Path,
+    monkeypatch,
+    case: str,
+) -> None:
+    prepared, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        affected_text_delta=case == "affected",
+        safe_text_delta=case == "corrupt_cache",
+        corrupt_cache=case == "corrupt_cache",
+    )
+
+    assert process_text_counts == [0, 1]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+    assert not (Path(prepared["_work_dir"]) / "first-visual-cache.json").exists()
+
+
+def test_disjoint_text_delta_matches_full_visual_recompute_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    incremental_root = tmp_path / "incremental"
+    incremental_root.mkdir()
+    incremental, incremental_calls = _prepare_rerun_fixture(
+        incremental_root,
+        monkeypatch,
+        safe_text_delta=True,
+        stable_visual_output=True,
+    )
+    full_root = tmp_path / "full"
+    full_root.mkdir()
+    full, full_calls = _prepare_rerun_fixture(
+        full_root,
+        monkeypatch,
+        safe_text_delta=True,
+        corrupt_cache=True,
+        stable_visual_output=True,
+    )
+
+    def evidence(prepared: dict, name: str) -> tuple[set[str], np.ndarray, list, list]:
+        store = RunStore(tmp_path / f"run-{name}")
+        store.write_json("job_manifest.json", {
+            "schema_version": 1,
+            "pages": ["page_001"],
+            "options": {"agent_provider": "host"},
+        })
+        reconstruction = store.root / "pages/page_001/reconstruction"
+        reconstruction.mkdir(parents=True)
+        session = legacy._build_initial_page_session(
+            store, "page_001", prepared, reconstruction
+        )
+        graph = json.loads(
+            session["evidence"]["component-graph.json"].read_text(encoding="utf-8")
+        )
+        quality = json.loads(
+            session["evidence"]["quality-report.json"].read_text(encoding="utf-8")
+        )
+        mask_union = np.zeros((70, 120), dtype=bool)
+        for path in prepared["_element_mask_paths"]:
+            with Image.open(path) as mask:
+                mask_union |= np.asarray(mask.convert("L")) > 0
+        visual_ids = {
+            node["id"] for node in graph["nodes"] if node["kind"] != "text"
+        }
+        return visual_ids, mask_union, prepared["text_items"], quality["violations"]
+
+    incremental_evidence = evidence(incremental, "incremental")
+    full_evidence = evidence(full, "full")
+
+    assert incremental_calls == [0]
+    assert full_calls == [0, 1]
+    assert incremental_evidence[0] == full_evidence[0]
+    assert np.array_equal(incremental_evidence[1], full_evidence[1])
+    assert incremental_evidence[2:] == full_evidence[2:]
+
+
+def test_text_delta_incremental_failure_does_not_repeat_expensive_inference(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with pytest.raises(RuntimeError, match="background failed"):
+        _prepare_rerun_fixture(
+            tmp_path,
+            monkeypatch,
+            safe_text_delta=True,
+            background_error=True,
+        )
+
+
+def test_text_delta_full_fallback_preserves_original_visual_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    with pytest.raises(RuntimeError, match="full visual failed"):
+        _prepare_rerun_fixture(
+            tmp_path,
+            monkeypatch,
+            affected_text_delta=True,
+            second_pass_error=True,
+        )
 
 
 def test_prepare_preserves_stable_diagnostic_when_another_candidate_recovers(

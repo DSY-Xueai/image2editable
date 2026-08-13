@@ -71,7 +71,9 @@ worker 只创建一次 SAM generator，按请求顺序执行全部 operation，�
 - 组件输入 source hash、旧文字 mask hash 和模型版本仍匹配；
 - 组件不是与受影响组件具有父子、重叠或共享边界依赖的节点。
 
-受影响节点及其依赖节点重新运行原有 SAM 2.1 Large 路径，并重新生成背景、ownership 和质量证据。无法证明资产不受影响、差集为空但 OCR 内容变化、hash 不一致或依赖关系不完整时，回退到现有整页第二视觉 pass。回退是完整质量路径，不是整页图片输出。
+本轮只对可以证明与全部视觉节点及其 3px 依赖域完全不相交的非空文字差集执行增量复用。此时复用首 pass 已逐项绑定 hash、shape 和关系的 component/element/semantic 资产，不重新运行 DINO/SAM，但重新生成文字清理、背景、removal、foreground/ownership 证据，并由原质量路径复核。受影响闭包非空时不在现有全局视觉流水线上伪装局部 SAM 等价，而是执行原完整第二视觉 pass。
+
+`_text_delta_recompute_scope` 仍返回完整的相交、父子、mask 重叠和 3px 邻接闭包，为未来独立拆分视觉流水线保留正确契约。无法证明资产不受影响、差集为空但 OCR 内容变化、source/旧 cleanup mask/SAM/DINO protocol/cache identity 任一 hash 不一致、mask 不可读或依赖关系不完整时，同样回退到现有完整第二视觉 pass。回退是完整质量路径，不是整页图片输出。
 
 ### 4. 局部残差调度
 

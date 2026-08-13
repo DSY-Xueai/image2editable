@@ -246,21 +246,21 @@ Expected: FAIL，scope 函数尚不存在。
 
 - [ ] **Step 3: 持久化首 pass 推理资产并实现增量路径**
 
-首 pass 保存候选 mask、object proposals、semantic relation、source hash、旧 text cleanup mask hash、SAM/DINO protocol version。新增文字后使用 cleanup mask 差集（该 mask 已包含文本清理安全边距）计算受影响节点，再加入父子、重叠和 3px 邻接依赖。
+首 pass 复用现有 prepared-page 原子清单保存最终 component、element/semantic mask、关系和逐资产 hash，另存最小 cache identity：source hash、旧 text cleanup mask hash、SAM/DINO protocol version。新增文字后使用 cleanup mask 差集（该 mask 已包含文本清理安全边距）计算受影响节点，再加入父子、重叠和 3px 邻接依赖。
 
-未受影响资产按原 hash 复用；受影响区域使用同一个 SAM 2.1 Large batch API 重建，并重新执行背景、ownership 和质量证据生成。`scope is None` 或增量输出无法通过完整性校验时调用原来的第二次 `_process_image_isolated()`，不吞掉异常、不输出原图成功。
+仅当 OCR 文字确实新增、cleanup 差集非空、`scope == set()`，且全部缓存、关系、hash、协议和 shape 完整时，零 DINO/SAM 复用首 pass 视觉资产，并重新执行 text-clean、背景、removal、foreground/ownership 和原质量证据路径。`scope` 非空、本身为 `None` 或输出无法通过完整性校验时调用原来的第二次 `_process_image_isolated()`。本任务不在全局视觉流水线上伪实现非空 scope 的局部 SAM；该能力需未来先独立拆分视觉流水线。不吞掉原完整路径异常，不输出原图成功。
 
 - [ ] **Step 4: 验证增量与完整路径等价**
 
 Run: `python -m pytest tests/test_targeted_ocr.py tests/test_regressions.py -k "targeted or text_delta or visual_pass" -q`
 
-Expected: PASS；夹具比较增量和完整重算后的 active IDs、mask union、text items 和 quality violations。
+Expected: PASS；夹具验证安全空 scope 不启动第二个视觉 worker，并比较其与完整重算的 active IDs、mask union、text items 和 quality violations；普通复杂输入安全执行完整回退。
 
 - [ ] **Step 5: 镜像并提交**
 
 ```powershell
-git add image_to_ppt.py skills/image-to-ppt/scripts/image_to_ppt.py tests/test_targeted_ocr.py tests/test_regressions.py
-git commit -m "性能：增量重算 OCR 影响的视觉组件"
+git add image_to_ppt.py skills/image-to-ppt/scripts/image_to_ppt.py tests/test_targeted_ocr.py tests/test_regressions.py docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md docs/superpowers/plans/2026-08-13-cross-platform-conversion-performance.md
+git commit -m "性能：复用未受 OCR 影响的视觉资产"
 ```
 
 ## Task 5: 残差 connected-component crop 调度

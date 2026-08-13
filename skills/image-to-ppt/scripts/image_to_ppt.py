@@ -109,6 +109,16 @@ _TARGETED_OCR_MAX_CANDIDATES = 24
 _TARGETED_OCR_SINGLE_CROP_PIXELS = 512 * 512
 _TARGETED_OCR_TOTAL_CROP_PIXELS = 6 * 1024 * 1024
 _TARGETED_OCR_MAX_ITEMS_PER_VIEW = 32
+_TEXT_DELTA_CACHE_SCHEMA_VERSION = 1
+_TEXT_DELTA_MAX_NODES = 4096
+_TEXT_DELTA_CACHE_NAME = "first-visual-cache.json"
+_TEXT_DELTA_CACHE_MAX_BYTES = 8 * 1024 * 1024
+_TEXT_DELTA_SAM_PROTOCOL_SHA256 = hashlib.sha256(
+    b"sam2.1_hiera_large|candidate_batch_v1|visual_pipeline_v1"
+).hexdigest()
+_TEXT_DELTA_DINO_PROTOCOL_SHA256 = hashlib.sha256(
+    b"IDEA-Research/grounding-dino-tiny|visual_pipeline_v1"
+).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -2567,6 +2577,7 @@ def _read_prepared_owned_bytes(
     label: str,
     *,
     relative_only: bool = False,
+    max_bytes: int | None = None,
 ) -> tuple[Path, bytes]:
     owned = _prepared_owned_file(
         work_dir,
@@ -2578,7 +2589,11 @@ def _read_prepared_owned_bytes(
         path_before = os.lstat(owned)
         with owned.open("rb") as source:
             handle_before = os.fstat(source.fileno())
-            content = source.read()
+            if max_bytes is not None and handle_before.st_size > max_bytes:
+                raise ValueError(f"{label} asset exceeds its size limit")
+            content = source.read() if max_bytes is None else source.read(max_bytes + 1)
+            if max_bytes is not None and len(content) > max_bytes:
+                raise ValueError(f"{label} asset exceeds its size limit")
             handle_after = os.fstat(source.fileno())
         path_after = os.lstat(owned)
     except OSError as exc:
@@ -2618,6 +2633,8 @@ def _read_prepared_asset_bytes(
     work_dir: Path,
     record: object,
     label: str,
+    *,
+    max_bytes: int | None = None,
 ) -> tuple[Path, bytes]:
     if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
         raise ValueError(f"{label} asset record is invalid")
@@ -2636,10 +2653,229 @@ def _read_prepared_asset_bytes(
         relative,
         label,
         relative_only=True,
+        max_bytes=max_bytes,
     )
     if hashlib.sha256(content).hexdigest() != expected:
         raise ValueError(f"{label} asset sha256 mismatch")
     return owned, content
+
+
+def _text_delta_recompute_scope(
+    *,
+    old_mask: np.ndarray,
+    new_mask: np.ndarray,
+    graph: dict,
+    graph_dir: str | Path,
+    source_sha256: str,
+    cache_identity: dict,
+) -> set[str] | None:
+    """Return the complete visual dependency closure, or None if unprovable."""
+    try:
+        old = np.ascontiguousarray(old_mask, dtype=np.uint8)
+        new = np.ascontiguousarray(new_mask, dtype=np.uint8)
+        if old.ndim != 2 or old.shape != new.shape or not old.size:
+            return None
+        if np.any((old > 0) & (new == 0)):
+            return None
+        difference = (new > 0) & (old == 0)
+        if not np.any(difference):
+            return None
+
+        identity_fields = {
+            "schema_version",
+            "cache_key",
+            "source_sha256",
+            "old_cleanup_mask_sha256",
+            "sam_protocol_sha256",
+            "dino_protocol_sha256",
+        }
+        if not isinstance(cache_identity, dict) or set(cache_identity) != identity_fields:
+            return None
+        digest_fields = identity_fields - {"schema_version"}
+        if (
+            cache_identity["schema_version"] != _TEXT_DELTA_CACHE_SCHEMA_VERSION
+            or any(
+                not isinstance(cache_identity[field], str)
+                or len(cache_identity[field]) != 64
+                or any(character not in "0123456789abcdef"
+                       for character in cache_identity[field])
+                for field in digest_fields
+            )
+            or source_sha256 != cache_identity["source_sha256"]
+            or hashlib.sha256(old.tobytes()).hexdigest()
+            != cache_identity["old_cleanup_mask_sha256"]
+            or cache_identity["sam_protocol_sha256"]
+            != _TEXT_DELTA_SAM_PROTOCOL_SHA256
+            or cache_identity["dino_protocol_sha256"]
+            != _TEXT_DELTA_DINO_PROTOCOL_SHA256
+        ):
+            return None
+        if (
+            not isinstance(graph, dict)
+            or set(graph) != {"schema_version", "cache_key", "nodes"}
+            or graph["schema_version"] != _TEXT_DELTA_CACHE_SCHEMA_VERSION
+            or graph["cache_key"] != cache_identity["cache_key"]
+            or not isinstance(graph["nodes"], list)
+            or len(graph["nodes"]) > _TEXT_DELTA_MAX_NODES
+        ):
+            return None
+        expected_cache_key = hashlib.sha256(json.dumps({
+            "schema_version": cache_identity["schema_version"],
+            "source_sha256": cache_identity["source_sha256"],
+            "old_cleanup_mask_sha256": cache_identity["old_cleanup_mask_sha256"],
+            "sam_protocol_sha256": cache_identity["sam_protocol_sha256"],
+            "dino_protocol_sha256": cache_identity["dino_protocol_sha256"],
+            "nodes": graph["nodes"],
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+            "utf-8"
+        )).hexdigest()
+        if expected_cache_key != cache_identity["cache_key"]:
+            return None
+
+        trusted_root = _validate_prepared_work_dir(graph_dir, create=False)
+        nodes = {}
+        masks = {}
+        for node in graph["nodes"]:
+            if (
+                not isinstance(node, dict)
+                or set(node) != {"id", "mask", "parents", "children"}
+                or not isinstance(node["id"], str)
+                or not node["id"]
+                or len(node["id"]) > 128
+                or node["id"] in nodes
+                or not isinstance(node["parents"], list)
+                or not isinstance(node["children"], list)
+                or len(set(node["parents"])) != len(node["parents"])
+                or len(set(node["children"])) != len(node["children"])
+                or not all(isinstance(value, str) and value
+                           for value in node["parents"] + node["children"])
+            ):
+                return None
+            _, content = _read_prepared_asset_bytes(
+                trusted_root,
+                node["mask"],
+                f"text delta node {node['id']} mask",
+                max_bytes=old.size * 2 + 4096,
+            )
+            with Image.open(io.BytesIO(content)) as stored:
+                if stored.size != (old.shape[1], old.shape[0]):
+                    return None
+                mask = np.asarray(stored.convert("L"), dtype=np.uint8).copy() > 0
+            if not np.any(mask):
+                return None
+            nodes[node["id"]] = node
+            masks[node["id"]] = mask
+
+        for node_id, node in nodes.items():
+            if any(parent not in nodes or node_id not in nodes[parent]["children"]
+                   for parent in node["parents"]):
+                return None
+            if any(child not in nodes or node_id not in nodes[child]["parents"]
+                   for child in node["children"]):
+                return None
+
+        adjacency = {
+            node_id: set(node["parents"] + node["children"])
+            for node_id, node in nodes.items()
+        }
+        kernel = np.ones((7, 7), dtype=np.uint8)
+        dilated = {
+            node_id: cv2.dilate(mask.astype(np.uint8), kernel, iterations=1) > 0
+            for node_id, mask in masks.items()
+        }
+        node_ids = list(nodes)
+        for left_index, left_id in enumerate(node_ids):
+            for right_id in node_ids[left_index + 1:]:
+                if np.any(dilated[left_id] & masks[right_id]):
+                    adjacency[left_id].add(right_id)
+                    adjacency[right_id].add(left_id)
+
+        scope = {
+            node_id for node_id, mask in masks.items()
+            if np.any(mask & difference)
+        }
+        pending = list(scope)
+        while pending:
+            node_id = pending.pop()
+            for related in adjacency[node_id] - scope:
+                scope.add(related)
+                pending.append(related)
+        return scope
+    except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
+        return None
+
+
+def _write_first_visual_cache(
+    prepared_manifest: dict,
+    work_dir: Path,
+    old_cleanup_mask: np.ndarray,
+) -> Path:
+    assets = prepared_manifest["assets"]
+    element_records = assets["element_masks"]
+    semantic_records = assets["semantic_masks"]
+    nodes = []
+    for index, (child, parent) in enumerate(zip(element_records, semantic_records)):
+        child_id = f"component_{index:04d}:child"
+        parent_id = f"component_{index:04d}:semantic"
+        nodes.extend((
+            {"id": child_id, "mask": child, "parents": [parent_id], "children": []},
+            {"id": parent_id, "mask": parent, "parents": [], "children": [child_id]},
+        ))
+    graph = {
+        "schema_version": _TEXT_DELTA_CACHE_SCHEMA_VERSION,
+        "cache_key": "",
+        "nodes": nodes,
+    }
+    old_cleanup = np.ascontiguousarray(old_cleanup_mask, dtype=np.uint8)
+    identity_seed = {
+        "schema_version": _TEXT_DELTA_CACHE_SCHEMA_VERSION,
+        "source_sha256": assets["source_image"]["sha256"],
+        "old_cleanup_mask_sha256": hashlib.sha256(old_cleanup.tobytes()).hexdigest(),
+        "sam_protocol_sha256": _TEXT_DELTA_SAM_PROTOCOL_SHA256,
+        "dino_protocol_sha256": _TEXT_DELTA_DINO_PROTOCOL_SHA256,
+        "nodes": nodes,
+    }
+    cache_key = hashlib.sha256(json.dumps(
+        identity_seed, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+    graph["cache_key"] = cache_key
+    payload = {
+        "schema_version": _TEXT_DELTA_CACHE_SCHEMA_VERSION,
+        "identity": {
+            "schema_version": _TEXT_DELTA_CACHE_SCHEMA_VERSION,
+            "cache_key": cache_key,
+            "source_sha256": assets["source_image"]["sha256"],
+            "old_cleanup_mask_sha256": identity_seed["old_cleanup_mask_sha256"],
+            "sam_protocol_sha256": _TEXT_DELTA_SAM_PROTOCOL_SHA256,
+            "dino_protocol_sha256": _TEXT_DELTA_DINO_PROTOCOL_SHA256,
+        },
+        "graph": graph,
+    }
+    content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(content.encode("utf-8")) > _TEXT_DELTA_CACHE_MAX_BYTES:
+        raise ValueError("first visual cache exceeds its size limit")
+    path = work_dir / _TEXT_DELTA_CACHE_NAME
+    _atomic_write_prepared_text(
+        work_dir, path, content, encoding="utf-8", label="first visual cache"
+    )
+    return path
+
+
+def _read_first_visual_cache(path: Path, work_dir: Path) -> dict:
+    _, content = _read_prepared_owned_bytes(
+        work_dir, path, "first visual cache", max_bytes=_TEXT_DELTA_CACHE_MAX_BYTES
+    )
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("first visual cache is invalid JSON") from exc
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "identity", "graph"}
+        or payload["schema_version"] != _TEXT_DELTA_CACHE_SCHEMA_VERSION
+    ):
+        raise ValueError("first visual cache fields are invalid")
+    return payload
 
 
 def _load_prepared_asset(work_dir: Path, record: object, label: str) -> str:
@@ -3156,6 +3392,133 @@ def load_component_layers(state_path: str | Path) -> dict:
     return loaded
 
 
+def _reuse_disjoint_text_delta(
+    *,
+    cache_path: Path,
+    prepared_state_path: Path,
+    slide_data: dict,
+    work_dir: Path,
+    source_image: np.ndarray,
+    old_cleanup_mask: np.ndarray,
+    new_cleanup_mask: np.ndarray,
+    new_text_mask: np.ndarray,
+    new_text_items: list[dict],
+    text_clean_image: np.ndarray,
+    text_clean_path: Path,
+    resource_isolation: bool,
+) -> bool:
+    """Reuse first-pass visuals only when a non-empty text delta is disjoint."""
+    try:
+        payload = _read_first_visual_cache(cache_path, work_dir)
+        cached, manifest = _load_component_layer_state(prepared_state_path)
+        expected_nodes = []
+        for index, (child, parent) in enumerate(zip(
+            manifest["assets"]["element_masks"],
+            manifest["assets"]["semantic_masks"],
+            strict=True,
+        )):
+            child_id = f"component_{index:04d}:child"
+            parent_id = f"component_{index:04d}:semantic"
+            expected_nodes.extend((
+                {"id": child_id, "mask": child,
+                 "parents": [parent_id], "children": []},
+                {"id": parent_id, "mask": parent,
+                 "parents": [], "children": [child_id]},
+            ))
+        if payload["graph"].get("nodes") != expected_nodes:
+            return False
+        scope = _text_delta_recompute_scope(
+            old_mask=old_cleanup_mask,
+            new_mask=new_cleanup_mask,
+            graph=payload["graph"],
+            graph_dir=work_dir,
+            source_sha256=manifest["assets"]["source_image"]["sha256"],
+            cache_identity=payload["identity"],
+        )
+        if scope != set():
+            return False
+        element_masks = []
+        semantic_masks = []
+        for label, records, output in (
+            ("element mask", manifest["assets"]["element_masks"], element_masks),
+            ("semantic mask", manifest["assets"]["semantic_masks"], semantic_masks),
+        ):
+            for record in records:
+                _, content = _read_prepared_asset_bytes(
+                    work_dir, record, label,
+                    max_bytes=source_image.shape[0] * source_image.shape[1] * 2 + 4096,
+                )
+                with Image.open(io.BytesIO(content)) as stored:
+                    output.append(np.asarray(stored.convert("L")).copy() > 0)
+    except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
+        return False
+
+    background_kwargs = (
+        {"large_inpainter": _isolated_large_inpainter(work_dir)}
+        if resource_isolation
+        else {}
+    )
+    clean_background = build_clean_background(
+        source_image,
+        element_masks,
+        new_cleanup_mask,
+        text_clean_image=text_clean_image,
+        text_restore_mask=new_text_mask,
+        **background_kwargs,
+    )
+    background_original_path = work_dir / "targeted-background-original.png"
+    background_widescreen_path = work_dir / "targeted-background-16x9.png"
+    background_removal_mask_path = work_dir / "targeted-background-removal-mask.png"
+    background_difference_path = work_dir / "targeted-background-difference.png"
+    foreground_evidence_path = work_dir / "targeted-foreground-evidence-mask.png"
+    _save_rgb(background_original_path, clean_background)
+    widescreen, offset_x, offset_y, method = build_widescreen_background(
+        clean_background, **background_kwargs
+    )
+    if method == "identity":
+        background_widescreen_path = background_original_path
+    else:
+        _save_rgb(background_widescreen_path, widescreen)
+    removal = build_removal_mask(element_masks, new_cleanup_mask)
+    Image.fromarray(removal, mode="L").save(background_removal_mask_path)
+    _save_rgb(background_difference_path, cv2.absdiff(source_image, clean_background))
+    foreground = (
+        np.logical_or.reduce(semantic_masks)
+        if semantic_masks
+        else np.zeros(source_image.shape[:2], dtype=bool)
+    )
+    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
+        foreground_evidence_path
+    )
+
+    try:
+        verified, verified_manifest = _load_component_layer_state(prepared_state_path)
+    except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
+        return False
+    if verified_manifest != manifest:
+        return False
+
+    slide_data.update({
+        "background_path": str(background_widescreen_path),
+        "background_original_path": str(background_original_path),
+        "background_widescreen_path": str(background_widescreen_path),
+        "background_removal_mask_path": str(background_removal_mask_path),
+        "background_difference_path": str(background_difference_path),
+        "components": verified["components"],
+        "text_items": new_text_items,
+        "canvas_width": widescreen.shape[1],
+        "canvas_height": widescreen.shape[0],
+        "content_offset_x": offset_x,
+        "content_offset_y": offset_y,
+        "widescreen_background_method": method,
+        "_text_clean_path": str(text_clean_path),
+        "_foreground_evidence_mask_path": str(foreground_evidence_path),
+        "_element_mask_paths": verified["_element_mask_paths"],
+        "_semantic_mask_paths": verified["_semantic_mask_paths"],
+    })
+    return True
+
+
 def prepare_component_layers(
     image_path: str | Path,
     work_dir: str | Path,
@@ -3311,63 +3674,114 @@ def prepare_component_layers(
             lang=lang,
             isolated=resource_isolation,
         )
-        sweep_mask = None
         initial_diagnostics = sweep["diagnostics"]
         if not sweep["recovered_items"]:
+            sweep_mask = None
             break
 
+        source_for_delta = _load_rgb(owned_source)
+        old_cleanup_mask = _build_text_cleanup_mask(
+            source_for_delta,
+            sweep_mask if sweep_mask is not None else np.zeros(
+                source_for_delta.shape[:2], dtype=np.uint8
+            ),
+            text_analysis["items"] if text_analysis["items"] else [],
+        )
+        first_ocr_mask_path = owned_work_dir / "first-ocr-mask.png"
+        first_cleanup_mask_path = owned_work_dir / "first-text-cleanup-mask.png"
+        Image.fromarray(sweep_mask, mode="L").save(first_ocr_mask_path)
+        Image.fromarray(old_cleanup_mask, mode="L").save(first_cleanup_mask_path)
+        slide_data["_text_mask_path"] = str(first_ocr_mask_path)
+        slide_data["_text_cleanup_mask_path"] = str(first_cleanup_mask_path)
+        slide_data["_resource_isolation"] = resource_isolation
+        slide_data["_initial_diagnostics"] = initial_diagnostics
+        first_state_path = _write_prepared_page(slide_data, owned_work_dir)
+        _, first_manifest = _load_component_layer_state(first_state_path)
+        cache_path = _write_first_visual_cache(
+            first_manifest, owned_work_dir, old_cleanup_mask
+        )
+        slide_data["_text_mask_path"] = str(text_mask_path)
         text_items = sweep["items"]
         Image.fromarray(sweep["text_mask"], mode="L").save(text_mask_path)
         text_analysis = {
             "items": text_items,
             "mask_path": str(text_mask_path),
         }
-        if resource_isolation:
+        source_image = source_for_delta
+        stored_mask = sweep["text_mask"]
+        removal_mask = None
+        text_clean = None
+        exception_boundary = sys.exc_info()[1]
+        primary_exception = None
+        primary_traceback = None
+        try:
+            removal_mask = _build_text_cleanup_mask(
+                source_image,
+                stored_mask,
+                text_items,
+            )
+            cleanup_mask_path = (
+                owned_work_dir / "text-clean-removal-mask.png"
+            ).resolve()
+            Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
+            text_clean_path = owned_work_dir / "targeted-text-clean.png"
+            repair_kwargs = (
+                {"large_inpainter": _isolated_large_inpainter(owned_work_dir)}
+                if resource_isolation
+                else {}
+            )
+            text_clean = _repair_text_background(
+                source_image,
+                removal_mask,
+                text_items=text_items,
+                **repair_kwargs,
+            )
+            _save_rgb(text_clean_path, text_clean)
+            text_analysis["text_clean_path"] = str(text_clean_path)
+            reused = _reuse_disjoint_text_delta(
+                cache_path=cache_path,
+                prepared_state_path=first_state_path,
+                slide_data=slide_data,
+                work_dir=owned_work_dir,
+                source_image=source_image,
+                old_cleanup_mask=old_cleanup_mask,
+                new_cleanup_mask=removal_mask,
+                new_text_mask=stored_mask,
+                new_text_items=text_items,
+                text_clean_image=text_clean,
+                text_clean_path=text_clean_path,
+                resource_isolation=resource_isolation,
+            )
+        except BaseException as exc:
+            primary_exception = exc
+            primary_traceback = exc.__traceback__
+            raise
+        finally:
+            source_for_delta = None
             source_image = None
             stored_mask = None
             removal_mask = None
             text_clean = None
-            exception_boundary = sys.exc_info()[1]
-            primary_exception = None
-            primary_traceback = None
-            try:
-                source_image = _load_rgb(owned_source)
-                stored_mask = sweep["text_mask"]
-                removal_mask = _build_text_cleanup_mask(
-                    source_image,
-                    stored_mask,
-                    text_items,
-                )
-                cleanup_mask_path = (
-                    owned_work_dir / "text-clean-removal-mask.png"
-                ).resolve()
-                Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
-                text_clean_path = owned_work_dir / "text-clean.png"
-                text_clean = _repair_text_background(
-                    source_image,
-                    removal_mask,
-                    text_items=text_items,
-                    large_inpainter=_isolated_large_inpainter(owned_work_dir),
-                )
-                _save_rgb(text_clean_path, text_clean)
-                text_analysis["text_clean_path"] = str(text_clean_path)
-            except BaseException as exc:
-                primary_exception = exc
-                primary_traceback = exc.__traceback__
-                raise
-            finally:
-                source_image = None
-                stored_mask = None
-                removal_mask = None
-                text_clean = None
-                _run_cleanup_preserving_exception(
-                    gc.collect,
-                    "targeted text cleanup arrays",
-                    primary_exception,
-                    primary_traceback,
-                    exception_boundary,
-                )
+            old_cleanup_mask = None
+            _run_cleanup_preserving_exception(
+                gc.collect,
+                "targeted text cleanup arrays",
+                primary_exception,
+                primary_traceback,
+                exception_boundary,
+            )
+        for first_asset in (first_ocr_mask_path, first_cleanup_mask_path):
+            _prepared_owned_file(
+                owned_work_dir, first_asset, "first visual cache input"
+            ).unlink()
+        if reused:
+            sweep_mask = None
+            break
+        _prepared_owned_file(
+            owned_work_dir, cache_path, "first visual cache"
+        ).unlink()
         _remove_owned_first_visual_assets(slide_data, owned_work_dir)
+        sweep_mask = None
 
     slide_data["original_image_path"] = str(owned_source)
     slide_data["_resource_isolation"] = resource_isolation
