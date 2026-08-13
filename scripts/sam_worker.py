@@ -108,6 +108,7 @@ _BATCH_JSON_ENVELOPE_BYTES = 4096
 _BATCH_JSON_RECORD_OVERHEAD_BYTES = 512
 # Python's default JSON integer conversion limit is 4300 decimal digits.
 _BATCH_JSON_NUMBER_BYTES = 4300
+_COMPONENT_BATCH_FIELDS = {"component_id", "box", "positive", "negative"}
 _BATCH_CANDIDATE_FIELDS = {
     "mask",
     "mask_shape",
@@ -1458,17 +1459,11 @@ def _linkat_batch_result(
     return ctypes.get_errno()
 
 
-def _write_batch_result(
+def _write_bound_json_result(
     result_binding: dict,
-    payload: dict,
-    operations: list[dict],
+    payload,
+    result_limit: int,
 ) -> None:
-    _validate_batch_output(payload, operations)
-    prompted = operations[0]
-    result_limit = sam_candidate_batch_result_max_bytes(
-        tuple(prompted["image"].shape[:2]),
-        len(prompted.get("proposal_records", [])),
-    )
     _verify_batch_result_binding(result_binding)
     parent_handle = _open_batch_result_parent(result_binding)
     file_descriptor = None
@@ -1542,6 +1537,20 @@ def _write_batch_result(
                 primary_error.add_note(f"SAM batch cleanup failed: {cleanup_error}")
         elif not published and cleanup_errors:
             raise cleanup_errors[0]
+
+
+def _write_batch_result(
+    result_binding: dict,
+    payload: dict,
+    operations: list[dict],
+) -> None:
+    _validate_batch_output(payload, operations)
+    prompted = operations[0]
+    result_limit = sam_candidate_batch_result_max_bytes(
+        tuple(prompted["image"].shape[:2]),
+        len(prompted.get("proposal_records", [])),
+    )
+    _write_bound_json_result(result_binding, payload, result_limit)
 
 
 def _verify_batch_result_binding(result_binding: dict) -> None:
@@ -1638,11 +1647,7 @@ def _run_candidate_batch(request_path: Path, result_path: Path) -> int:
     return 0
 
 
-def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndarray:
-    """Run one box/point prompt inside the isolated SAM worker process."""
-
-    predictor = generator.predictor
-    predictor.set_image(image)
+def _component_prompt_predict(predictor, prompt: dict) -> np.ndarray:
     positive = prompt.get("positive", [])
     negative = prompt.get("negative", [])
     points = np.asarray(positive + negative, dtype=np.float32)
@@ -1655,6 +1660,177 @@ def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndar
         multimask_output=True,
     )
     return np.asarray(masks[int(np.argmax(scores))], dtype=bool)
+
+
+def component_prompt_masks(
+    generator,
+    image: np.ndarray,
+    prompts: list[dict],
+) -> list[np.ndarray]:
+    """Run ordered component prompts after computing the source embedding once."""
+
+    predictor = generator.predictor
+    predictor.set_image(image)
+    return [_component_prompt_predict(predictor, prompt) for prompt in prompts]
+
+
+def component_prompt_mask(generator, image: np.ndarray, prompt: dict) -> np.ndarray:
+    """Run one box/point prompt inside the isolated SAM worker process."""
+
+    return component_prompt_masks(generator, image, [prompt])[0]
+
+
+def _validate_component_prompt_batch(prompts, image_shape: tuple[int, int]) -> list[dict]:
+    if not isinstance(prompts, list) or not prompts:
+        raise ValueError("SAM component prompt batch must be a non-empty list")
+    height, width = image_shape
+    validated = []
+    component_ids = set()
+    for prompt in prompts:
+        if not isinstance(prompt, dict) or set(prompt) != _COMPONENT_BATCH_FIELDS:
+            raise ValueError("SAM component prompt batch item is invalid")
+        component_id = _validate_batch_string(
+            prompt["component_id"], "SAM component id"
+        )
+        if component_id in component_ids:
+            raise ValueError("SAM component prompt batch ids must be unique")
+        component_ids.add(component_id)
+        box = prompt["box"]
+        if box is not None:
+            box = list(_validate_batch_intersecting_box(
+                box,
+                "SAM component box",
+                image_shape,
+                allow_none=False,
+            ))
+            if not (0 <= box[0] < box[2] <= width and 0 <= box[1] < box[3] <= height):
+                raise ValueError("SAM component box is outside the image")
+        points = {}
+        for name in ("positive", "negative"):
+            values = prompt[name]
+            if not isinstance(values, list):
+                raise ValueError(f"SAM component {name} points are invalid")
+            mapped = []
+            for point in values:
+                if not isinstance(point, list) or len(point) != 2:
+                    raise ValueError(f"SAM component {name} point is invalid")
+                x, y = (
+                    _validate_batch_finite_number(value, f"SAM component {name} point")
+                    for value in point
+                )
+                if not (0 <= x < width and 0 <= y < height):
+                    raise ValueError(f"SAM component {name} point is outside the image")
+                mapped.append([x, y])
+            points[name] = mapped
+        if box is None and not points["positive"]:
+            raise ValueError("SAM component prompt requires a box or positive point")
+        validated.append({
+            "component_id": component_id,
+            "box": box,
+            "positive": points["positive"],
+            "negative": points["negative"],
+        })
+    return validated
+
+
+def _component_batch_result_max_bytes(
+    image_shape: tuple[int, int],
+    prompt_count: int,
+) -> int:
+    height, width = _batch_image_shape(image_shape)
+    packed_bytes = (height * width + 7) // 8
+    encoded_mask_bytes = ((packed_bytes + 2) // 3) * 4
+    return _BATCH_JSON_ENVELOPE_BYTES + prompt_count * (
+        encoded_mask_bytes + _BATCH_JSON_RECORD_OVERHEAD_BYTES
+        + _BATCH_MAX_STRING_LENGTH * 4
+    )
+
+
+def _validate_component_batch_request(
+    request_path: Path,
+    result_path: Path,
+) -> tuple[np.ndarray, list[dict], dict]:
+    request_path = Path(os.path.abspath(request_path))
+    result_path = Path(os.path.abspath(result_path))
+    root = request_path.parent
+    if result_path.parent != root:
+        raise ValueError("SAM component batch result must stay beside its request")
+    root_status_before = _validate_batch_directory_chain(root)
+    resolved_root = root.resolve(strict=True)
+    if resolved_root != root:
+        raise ValueError("SAM component batch directory must not resolve through a link")
+    try:
+        result_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError("SAM component batch result already exists")
+    request_binding = _bind_batch_regular_file(
+        request_path,
+        _BATCH_MAX_REQUEST_BYTES,
+        "SAM component batch request",
+    )
+    root_status = root.lstat()
+    if (
+        _is_link_or_reparse(root_status)
+        or not stat.S_ISDIR(root_status.st_mode)
+        or (root_status.st_dev, root_status.st_ino)
+        != (root_status_before.st_dev, root_status_before.st_ino)
+    ):
+        raise ValueError("SAM component batch directory changed during validation")
+    request = _read_batch_bound_json(request_binding)
+    if not isinstance(request, dict) or set(request) != {
+        "schema_version", "image", "prompts"
+    } or request["schema_version"] != _BATCH_SCHEMA_VERSION:
+        raise ValueError("SAM component batch request is invalid")
+    image_path = _batch_file(resolved_root, request["image"], "component image")
+    image_binding = _bind_batch_regular_file(
+        image_path,
+        _BATCH_MAX_INPUT_BYTES,
+        "SAM component batch image",
+    )
+    with Image.open(io.BytesIO(_read_batch_bound_bytes(image_binding))) as stored_image:
+        image = np.asarray(stored_image.convert("RGB")).copy()
+    prompts = _validate_component_prompt_batch(
+        request["prompts"], tuple(image.shape[:2])
+    )
+    result_binding = {
+        "path": resolved_root / result_path.name,
+        "parent": resolved_root,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    if sys.platform == "win32":
+        result_binding["parent_handle_identity"] = _windows_path_identity(resolved_root)
+    return image, prompts, result_binding
+
+
+def _run_component_prompt_batch(request_path: Path, result_path: Path) -> int:
+    image, prompts, result_binding = _validate_component_batch_request(
+        request_path, result_path
+    )
+    (
+        _, create_generator, _, _, resolve_checkpoint, _, _,
+    ) = _load_tools()
+    generator = create_generator(resolve_checkpoint(), resource_safe=True)
+    masks = component_prompt_masks(generator, image, prompts)
+    if len(masks) != len(prompts) or any(
+        not isinstance(mask, np.ndarray)
+        or mask.dtype != np.bool_
+        or mask.shape != image.shape[:2]
+        or not mask.any()
+        for mask in masks
+    ):
+        raise RuntimeError("SAM component batch generated an invalid mask")
+    payload = [
+        {"component_id": prompt["component_id"], **_mask_record(mask)}
+        for prompt, mask in zip(prompts, masks)
+    ]
+    _write_bound_json_result(
+        result_binding,
+        payload,
+        _component_batch_result_max_bytes(tuple(image.shape[:2]), len(prompts)),
+    )
+    return 0
 
 
 def run_component_prompt_worker(
@@ -1695,11 +1871,83 @@ def run_component_prompt_worker(
         return _decode_mask(records[0]).copy()
 
 
+def run_component_prompt_batch_worker(
+    image: np.ndarray,
+    prompts: list[dict],
+    *,
+    work_dir: str | Path,
+) -> list[np.ndarray]:
+    """Run ordered component prompts in one disposable SAM subprocess."""
+
+    work_dir = Path(work_dir)
+    validated_prompts = _validate_component_prompt_batch(
+        prompts, tuple(image.shape[:2])
+    )
+    if not sam_candidate_batch_output_supported(work_dir):
+        return [
+            run_component_prompt_worker(
+                image,
+                box=prompt["box"],
+                positive=prompt["positive"],
+                negative=prompt["negative"],
+                work_dir=work_dir,
+            )
+            for prompt in validated_prompts
+        ]
+    with tempfile.TemporaryDirectory(prefix="component-sam-batch-", dir=work_dir) as temporary:
+        root = Path(temporary)
+        image_path = root / "image.png"
+        request_path = root / "request.json"
+        result_path = root / "result.json"
+        Image.fromarray(np.asarray(image, dtype=np.uint8)).save(image_path)
+        request_path.write_text(
+            json.dumps({
+                "schema_version": _BATCH_SCHEMA_VERSION,
+                "image": image_path.name,
+                "prompts": validated_prompts,
+            }),
+            encoding="utf-8",
+        )
+        run_isolated_worker(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--mode", "component_batch",
+                "--request", str(request_path),
+                "--result", str(result_path),
+            ],
+            check=True,
+            timeout=600,
+        )
+        result_limit = _component_batch_result_max_bytes(
+            tuple(image.shape[:2]), len(validated_prompts)
+        )
+        result_binding = _bind_batch_regular_file(
+            result_path, result_limit, "SAM component batch result"
+        )
+        records = _read_batch_bound_json(result_binding)
+        if not isinstance(records, list) or len(records) != len(validated_prompts):
+            raise RuntimeError("SAM component worker returned an invalid result batch")
+        masks = []
+        for prompt, record in zip(validated_prompts, records):
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"component_id", "mask", "mask_shape"}
+                or record["component_id"] != prompt["component_id"]
+            ):
+                raise RuntimeError("SAM component worker returned results out of order")
+            mask = _decode_mask(record).copy()
+            if mask.shape != image.shape[:2] or not mask.any():
+                raise RuntimeError("SAM component worker returned an invalid mask")
+            masks.append(mask)
+        return masks
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("prompted", "automatic", "recheck", "component", "batch"),
+        choices=("prompted", "automatic", "recheck", "component", "component_batch", "batch"),
         required=True,
     )
     parser.add_argument("--image")
@@ -1715,6 +1963,10 @@ def main() -> int:
         if not args.request:
             raise ValueError("batch mode requires request")
         return _run_candidate_batch(Path(args.request), Path(args.result))
+    if args.mode == "component_batch":
+        if not args.request:
+            raise ValueError("component batch mode requires request")
+        return _run_component_prompt_batch(Path(args.request), Path(args.result))
     if not args.image:
         parser.error(f"{args.mode} mode requires image")
 

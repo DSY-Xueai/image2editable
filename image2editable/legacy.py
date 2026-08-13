@@ -1930,7 +1930,7 @@ def _execute_legacy_round(
     store: RunStore, page_id: str, lease: ExecutionLease
 ) -> None:
     import numpy as np
-    from scripts.sam_worker import run_component_prompt_worker
+    from scripts.sam_worker import run_component_prompt_batch_worker
 
     state = store.read_json(
         f"pages/{page_id}/reconstruction/component_state.json"
@@ -1974,17 +1974,15 @@ def _execute_legacy_round(
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
-    def sam_runner(*, image, box, positive, negative):
-        return run_component_prompt_worker(
+    def sam_batch_runner(*, image, prompts):
+        return run_component_prompt_batch_worker(
             image,
-            box=box,
-            positive=positive,
-            negative=negative,
+            prompts,
             work_dir=output_dir.parent,
         )
 
     next_graph = execute_component_action_round(
-        pixels, graph, plan["actions"], sam_runner=sam_runner,
+        pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,
         input_dir=graph_path.parent, output_dir=output_dir,
     )
     output_graph = output_dir / "component-graph.json"

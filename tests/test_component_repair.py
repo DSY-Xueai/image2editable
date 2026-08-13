@@ -2559,6 +2559,90 @@ def _action_case(tmp_path: Path) -> tuple[np.ndarray, dict, Path]:
     return np.zeros((12, 16, 3), dtype=np.uint8), {"nodes": nodes}, root
 
 
+def test_retry_actions_are_batched_before_graph_mutation(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    calls = []
+    left = np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    right = np.asarray(Image.open(input_dir / "masks/right.png")) > 0
+
+    def batch_runner(*, image: np.ndarray, prompts: list[dict]) -> list[np.ndarray]:
+        calls.append(prompts)
+        return [left, right]
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [
+            _action(
+                "retry_with_box",
+                ["left"],
+                {"box": [0.25, 0.25, 0.75, 0.75]},
+            ),
+            _action(
+                "retry_with_points",
+                ["right"],
+                {"positive": [[0.8, 0.3]], "negative": [[0.5, 0.5]]},
+            ),
+        ],
+        sam_batch_runner=batch_runner,
+        input_dir=input_dir,
+        output_dir=tmp_path / "round-batched-retry",
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == [
+        {
+            "component_id": "left",
+            "box": [4.0, 3.0, 12.0, 9.0],
+            "positive": [],
+            "negative": [],
+        },
+        {
+            "component_id": "right",
+            "box": None,
+            "positive": [[12.0, 3.3]],
+            "negative": [[7.5, 5.5]],
+        },
+    ]
+    by_id = {node["id"]: node for node in result["nodes"]}
+    assert by_id["left"]["state"] == "pending"
+    assert by_id["right"]["state"] == "pending"
+
+
+def test_retry_batch_rejects_invalid_second_mask_without_graph_mutation_or_output(
+    tmp_path: Path,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    original_graph = copy.deepcopy(graph)
+    valid = np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    invalid = np.zeros(image.shape[:2], dtype=bool)
+    output_dir = tmp_path / "round-invalid-batched-retry"
+
+    with pytest.raises(VisualSegmentationError, match="invalid mask"):
+        execute_component_actions(
+            image,
+            graph,
+            [
+                _action(
+                    "retry_with_box",
+                    ["left"],
+                    {"box": [0.25, 0.25, 0.75, 0.75]},
+                ),
+                _action(
+                    "retry_with_points",
+                    ["right"],
+                    {"positive": [[0.8, 0.3]], "negative": []},
+                ),
+            ],
+            sam_batch_runner=lambda **_: [valid, invalid],
+            input_dir=input_dir,
+            output_dir=output_dir,
+        )
+
+    assert graph == original_graph
+    assert not output_dir.exists()
+
+
 def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     output = tmp_path / "round-02"
@@ -4465,6 +4549,111 @@ def test_sam_worker_component_prompt_selects_best_mask_and_can_run_twice() -> No
     second = component_prompt_mask(generator, np.zeros((4, 5, 3), dtype=np.uint8), prompt)
     assert np.array_equal(first, second)
     assert int(first.sum()) == 6
+
+
+def test_component_prompt_batch_sets_source_image_once_and_preserves_order() -> None:
+    from scripts.sam_worker import component_prompt_masks
+
+    class Predictor:
+        def __init__(self) -> None:
+            self.set_image_calls = 0
+
+        def set_image(self, image: np.ndarray) -> None:
+            self.set_image_calls += 1
+
+        def predict(self, **kwargs: object) -> tuple[np.ndarray, np.ndarray, None]:
+            masks = np.zeros((1, 4, 5), dtype=bool)
+            box = kwargs["box"]
+            column = int(np.asarray(box)[0]) if box is not None else 0
+            masks[0, 1:3, column:column + 1] = True
+            return masks, np.asarray([0.9]), None
+
+    predictor = Predictor()
+    generator = type("Generator", (), {"predictor": predictor})()
+    masks = component_prompt_masks(
+        generator,
+        np.zeros((4, 5, 3), dtype=np.uint8),
+        [
+            {"component_id": "left", "box": [1, 1, 2, 3], "positive": [], "negative": []},
+            {"component_id": "right", "box": [3, 1, 4, 3], "positive": [], "negative": []},
+        ],
+    )
+
+    assert predictor.set_image_calls == 1
+    assert [int(np.where(mask)[1].min()) for mask in masks] == [1, 3]
+
+
+def test_component_sam_batch_subprocess_runner_uses_one_worker_and_cleans_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    calls = []
+    monkeypatch.setattr(sam_worker, "sam_candidate_batch_output_supported", lambda _: True)
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((command, kwargs))
+        result_path = Path(command[command.index("--result") + 1])
+        first = np.zeros((4, 5), dtype=bool)
+        first[1:3, 1] = True
+        second = np.zeros((4, 5), dtype=bool)
+        second[1:3, 3] = True
+        result_path.write_text(
+            json.dumps([
+                {"component_id": "left", **sam_worker._mask_record(first)},
+                {"component_id": "right", **sam_worker._mask_record(second)},
+            ]),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(sam_worker, "run_isolated_worker", fake_run)
+    prompts = [
+        {"component_id": "left", "box": [1, 1, 2, 3], "positive": [], "negative": []},
+        {"component_id": "right", "box": [3, 1, 4, 3], "positive": [], "negative": []},
+    ]
+    masks = sam_worker.run_component_prompt_batch_worker(
+        np.zeros((4, 5, 3), dtype=np.uint8),
+        prompts,
+        work_dir=tmp_path,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0][calls[0][0].index("--mode") + 1] == "component_batch"
+    assert calls[0][1]["timeout"] == 600
+    assert [int(np.where(mask)[1].min()) for mask in masks] == [1, 3]
+    assert not list(tmp_path.glob("component-sam-batch-*"))
+
+
+def test_component_sam_batch_unsupported_uses_equal_quality_single_workers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import sam_worker
+
+    calls = []
+    monkeypatch.setattr(sam_worker, "sam_candidate_batch_output_supported", lambda _: False)
+
+    def single(image: np.ndarray, **kwargs: object) -> np.ndarray:
+        calls.append(kwargs)
+        mask = np.zeros(image.shape[:2], dtype=bool)
+        mask[1:3, len(calls)] = True
+        return mask
+
+    monkeypatch.setattr(sam_worker, "run_component_prompt_worker", single)
+    prompts = [
+        {"component_id": "left", "box": [1, 1, 2, 3], "positive": [], "negative": []},
+        {"component_id": "right", "box": None, "positive": [[3, 2]], "negative": []},
+    ]
+    masks = sam_worker.run_component_prompt_batch_worker(
+        np.zeros((4, 5, 3), dtype=np.uint8),
+        prompts,
+        work_dir=tmp_path,
+    )
+
+    assert len(calls) == 2
+    assert [int(np.where(mask)[1].min()) for mask in masks] == [1, 2]
 
 
 def test_component_sam_subprocess_runner_reads_result_and_cleans_workspace(

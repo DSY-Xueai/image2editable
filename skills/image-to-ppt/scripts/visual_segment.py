@@ -137,9 +137,10 @@ def execute_component_actions(
     graph: dict,
     actions: list[dict],
     *,
-    sam_runner,
     input_dir: str | Path,
     output_dir: str | Path,
+    sam_runner=None,
+    sam_batch_runner=None,
 ) -> dict:
     """Execute requested mask edits; never decide quality-gate outcomes."""
 
@@ -237,6 +238,72 @@ def execute_component_actions(
             touched.update(object_ids)
         if name in {"retry_with_box", "retry_with_points"}:
             planned_retry_ids.update(object_ids)
+
+    height, width = image.shape[:2]
+    retry_prompts = []
+    for action in actions:
+        if action["action"] not in {"retry_with_box", "retry_with_points"}:
+            continue
+        parameters = action["parameters"]
+        box = parameters.get("box")
+        retry_prompts.append({
+            "component_id": action["object_ids"][0],
+            "box": (
+                None
+                if box is None
+                else [
+                    box[0] * width,
+                    box[1] * height,
+                    box[2] * width,
+                    box[3] * height,
+                ]
+            ),
+            "positive": [
+                [point[0] * (width - 1), point[1] * (height - 1)]
+                for point in parameters.get("positive", [])
+            ],
+            "negative": [
+                [point[0] * (width - 1), point[1] * (height - 1)]
+                for point in parameters.get("negative", [])
+            ],
+        })
+    retry_masks = {}
+    if retry_prompts:
+        if sam_batch_runner is not None:
+            proposed_masks = sam_batch_runner(image=image, prompts=retry_prompts)
+            if type(proposed_masks) is not list or len(proposed_masks) != len(retry_prompts):
+                raise VisualSegmentationError("SAM component retry returned an invalid mask batch")
+        else:
+            runner = sam_runner
+            if runner is None:
+                from scripts.sam_worker import run_component_prompt_worker
+
+                runner = lambda **values: run_component_prompt_worker(
+                    values["image"],
+                    box=values["box"],
+                    positive=values["positive"],
+                    negative=values["negative"],
+                    work_dir=target.parent,
+                )
+            proposed_masks = [
+                runner(
+                    image=image,
+                    box=prompt["box"],
+                    positive=prompt["positive"],
+                    negative=prompt["negative"],
+                )
+                for prompt in retry_prompts
+            ]
+        for prompt, proposed in zip(retry_prompts, proposed_masks):
+            if (
+                not isinstance(proposed, np.ndarray)
+                or proposed.dtype != np.bool_
+                or proposed.shape != image.shape[:2]
+                or not proposed.any()
+            ):
+                raise VisualSegmentationError("SAM component retry returned an invalid mask")
+            retry_masks[prompt["component_id"]] = proposed.copy()
+
     for action in actions:
         object_ids = action["object_ids"]
         name = action["action"]
@@ -351,30 +418,7 @@ def execute_component_actions(
         elif name in {"retry_with_box", "retry_with_points"}:
             component_id = object_ids[0]
             parameters = action["parameters"]
-            height, width = image.shape[:2]
-            box = parameters.get("box")
-            mapped_box = None if box is None else [box[0] * width, box[1] * height, box[2] * width, box[3] * height]
-            map_points = lambda values: [[point[0] * (width - 1), point[1] * (height - 1)] for point in values]
-            runner = sam_runner
-            if runner is None:
-                from scripts.sam_worker import run_component_prompt_worker
-
-                runner = lambda **values: run_component_prompt_worker(
-                    values["image"],
-                    box=values["box"],
-                    positive=values["positive"],
-                    negative=values["negative"],
-                    work_dir=target.parent,
-                )
-            proposed = runner(
-                image=image,
-                box=mapped_box,
-                positive=map_points(parameters.get("positive", [])),
-                negative=map_points(parameters.get("negative", [])),
-            )
-            proposed = np.asarray(proposed, dtype=bool)
-            if proposed.shape != image.shape[:2] or not proposed.any():
-                raise VisualSegmentationError("SAM component retry returned an invalid mask")
+            proposed = retry_masks[component_id]
             proposed = _complete_opaque_mask_regions(proposed, image)
             masks[component_id] = proposed
             if nodes[component_id]["state"] == "inactive":

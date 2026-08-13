@@ -2282,9 +2282,10 @@ def execute_component_action_round(
     graph: dict,
     actions: list[dict],
     *,
-    sam_runner,
     input_dir: str | Path,
     output_dir: str | Path,
+    sam_runner=None,
+    sam_batch_runner=None,
 ) -> dict:
     from scripts.visual_segment import execute_component_actions
 
@@ -2292,9 +2293,10 @@ def execute_component_action_round(
         image,
         graph,
         actions,
-        sam_runner=sam_runner,
         input_dir=input_dir,
         output_dir=output_dir,
+        sam_runner=sam_runner,
+        sam_batch_runner=sam_batch_runner,
     )
 
 
