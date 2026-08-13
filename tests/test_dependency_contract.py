@@ -12,6 +12,10 @@ STANDALONE_REQUIREMENTS = ROOT / "skills" / "image-to-ppt" / "references" / "req
 SKILL = ROOT / "skills" / "image-to-ppt" / "SKILL.md"
 README = ROOT / "README.md"
 README_EN = ROOT / "README_EN.md"
+ROOT_VISUAL_SEGMENT = ROOT / "scripts" / "visual_segment.py"
+STANDALONE_VISUAL_SEGMENT = (
+    ROOT / "skills" / "image-to-ppt" / "scripts" / "visual_segment.py"
+)
 PYPROJECT = ROOT / "pyproject.toml"
 
 
@@ -60,6 +64,11 @@ def test_standalone_declares_accelerate_used_by_visual_segmentation(
 ) -> None:
     expected = "accelerate>=0.26.0"
     events = []
+
+    assert (
+        ROOT_VISUAL_SEGMENT.read_bytes()
+        == STANDALONE_VISUAL_SEGMENT.read_bytes()
+    )
 
     class EmptyWeights:
         def __enter__(self):
