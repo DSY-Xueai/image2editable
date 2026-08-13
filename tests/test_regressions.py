@@ -33,10 +33,25 @@ def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
 ) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (8, 6), "red").save(source)
+    mask = tmp_path / "mask.png"
+    Image.new("L", (8, 6), 0).save(mask)
+    mask_content = mask.read_bytes()
+    text_clean = tmp_path / "text-clean.png"
+    Image.new("RGB", (8, 6), "white").save(text_clean)
+    text_clean_content = text_clean.read_bytes()
     request = tmp_path / "request.json"
-    request.write_text(json.dumps({
-        "text_analysis": {"items": [], "mask_path": "mask.png"},
-    }), encoding="utf-8")
+    request_content = json.dumps({
+        "text_analysis": {
+            "items": [{"text": "x", "box": [1, 1, 2, 2]}],
+            "mask_path": str(mask),
+            "text_clean_path": str(text_clean),
+        },
+        "text_mask_sha256": hashlib.sha256(mask_content).hexdigest(),
+        "text_mask_size": len(mask_content),
+        "text_clean_sha256": hashlib.sha256(text_clean_content).hexdigest(),
+        "text_clean_size": len(text_clean_content),
+    }).encode("utf-8")
+    request.write_bytes(request_content)
     monkeypatch.setattr(
         visual_worker,
         "_load_process_image",
@@ -45,6 +60,8 @@ def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
     monkeypatch.setattr(sys, "argv", [
         "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
         "--lang", "en", "--request", str(request),
+        "--request-sha256", hashlib.sha256(request_content).hexdigest(),
+        "--request-size", str(len(request_content)),
         "--source-sha256", "0" * 64, "--source-size", str(source.stat().st_size),
         "--result", str(tmp_path / "result.json"),
     ])
@@ -59,10 +76,25 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
 ) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (8, 6), "red").save(source)
+    mask = tmp_path / "mask.png"
+    Image.new("L", (8, 6), 0).save(mask)
+    mask_content = mask.read_bytes()
+    text_clean = tmp_path / "text-clean.png"
+    Image.new("RGB", (8, 6), "white").save(text_clean)
+    text_clean_content = text_clean.read_bytes()
     request = tmp_path / "request.json"
-    request.write_text(json.dumps({
-        "text_analysis": {"items": [], "mask_path": "mask.png"},
-    }), encoding="utf-8")
+    request_content = json.dumps({
+        "text_analysis": {
+            "items": [{"text": "x", "box": [1, 1, 2, 2]}],
+            "mask_path": str(mask),
+            "text_clean_path": str(text_clean),
+        },
+        "text_mask_sha256": hashlib.sha256(mask_content).hexdigest(),
+        "text_mask_size": len(mask_content),
+        "text_clean_sha256": hashlib.sha256(text_clean_content).hexdigest(),
+        "text_clean_size": len(text_clean_content),
+    }).encode("utf-8")
+    request.write_bytes(request_content)
     source_content = source.read_bytes()
 
     def fake_process(path, work_dir, *args, **kwargs):
@@ -70,12 +102,16 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
         snapshot = kwargs["_source_image"]
         assert snapshot.shape == (6, 8, 3)
         assert tuple(snapshot[0, 0]) == (255, 0, 0)
+        assert kwargs["_text_mask"].shape == (6, 8)
+        assert tuple(kwargs["_text_clean_image"][0, 0]) == (255, 255, 255)
         return {"snapshot": "verified"}
 
     monkeypatch.setattr(visual_worker, "_load_process_image", lambda: fake_process)
     monkeypatch.setattr(sys, "argv", [
         "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
         "--lang", "en", "--request", str(request),
+        "--request-sha256", hashlib.sha256(request_content).hexdigest(),
+        "--request-size", str(len(request_content)),
         "--source-sha256", hashlib.sha256(source_content).hexdigest(),
         "--source-size", str(len(source_content)),
         "--result", str(tmp_path / "result.json"),
@@ -93,6 +129,7 @@ def test_isolated_visual_request_binds_source_snapshot(
 ) -> None:
     source = tmp_path / "source.png"
     Image.new("RGB", (8, 6), "red").save(source)
+    Image.new("L", (8, 6), 0).save(tmp_path / "mask.png")
     captured = {}
 
     def fake_worker(command, **kwargs):
@@ -100,6 +137,7 @@ def test_isolated_visual_request_binds_source_snapshot(
         captured["request"] = json.loads(request_path.read_text(encoding="utf-8"))
         captured["source_sha256"] = command[command.index("--source-sha256") + 1]
         captured["source_size"] = command[command.index("--source-size") + 1]
+        captured["request_sha256"] = command[command.index("--request-sha256") + 1]
         return types.SimpleNamespace(returncode=1, stderr="stop", stdout="")
 
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_worker)
@@ -115,7 +153,13 @@ def test_isolated_visual_request_binds_source_snapshot(
     source_content = source.read_bytes()
     assert captured["source_sha256"] == hashlib.sha256(source_content).hexdigest()
     assert captured["source_size"] == str(len(source_content))
-    assert set(captured["request"]) == {"text_analysis"}
+    assert captured["request_sha256"] == hashlib.sha256(
+        (tmp_path / "visual-worker-request.json").read_bytes()
+    ).hexdigest()
+    assert set(captured["request"]) == {
+        "text_analysis", "text_mask_sha256", "text_mask_size",
+        "text_clean_sha256", "text_clean_size",
+    }
 
 
 def test_visual_worker_does_not_trust_replaced_request_source_binding(
@@ -125,13 +169,25 @@ def test_visual_worker_does_not_trust_replaced_request_source_binding(
     source = tmp_path / "source.png"
     Image.new("RGB", (8, 6), "red").save(source)
     original = source.read_bytes()
-    Image.new("RGB", (8, 6), "black").save(source)
     request = tmp_path / "request.json"
-    request.write_text(json.dumps({
-        "text_analysis": {"items": [], "mask_path": "mask.png"},
-        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-        "source_size": source.stat().st_size,
-    }), encoding="utf-8")
+    mask = tmp_path / "mask.png"
+    Image.new("L", (8, 6), 0).save(mask)
+    mask_content = mask.read_bytes()
+    request_payload = {
+        "text_analysis": {"items": [], "mask_path": str(mask)},
+        "text_mask_sha256": hashlib.sha256(mask_content).hexdigest(),
+        "text_mask_size": len(mask_content),
+        "text_clean_sha256": None,
+        "text_clean_size": None,
+        "source_sha256": hashlib.sha256(original).hexdigest(),
+        "source_size": len(original),
+    }
+    request_content = json.dumps(request_payload).encode("utf-8")
+    request.write_bytes(request_content)
+    Image.new("RGB", (8, 6), "black").save(source)
+    request_payload["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    request_payload["source_size"] = source.stat().st_size
+    request.write_bytes(json.dumps(request_payload).encode("utf-8"))
     monkeypatch.setattr(
         visual_worker,
         "_load_process_image",
@@ -140,12 +196,53 @@ def test_visual_worker_does_not_trust_replaced_request_source_binding(
     monkeypatch.setattr(sys, "argv", [
         "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
         "--lang", "en", "--request", str(request),
+        "--request-sha256", hashlib.sha256(request_content).hexdigest(),
+        "--request-size", str(len(request_content)),
         "--source-sha256", hashlib.sha256(original).hexdigest(),
         "--source-size", str(len(original)),
         "--result", str(tmp_path / "result.json"),
     ])
 
     with pytest.raises(ValueError, match="mismatch"):
+        visual_worker.main()
+
+
+def test_visual_worker_rejects_replaced_bound_text_mask_before_pipeline_load(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source.png"
+    Image.new("RGB", (8, 6), "red").save(source)
+    mask = tmp_path / "mask.png"
+    Image.new("L", (8, 6), 0).save(mask)
+    source_content = source.read_bytes()
+    mask_content = mask.read_bytes()
+    request_content = json.dumps({
+        "text_analysis": {"items": [], "mask_path": str(mask)},
+        "text_mask_sha256": hashlib.sha256(mask_content).hexdigest(),
+        "text_mask_size": len(mask_content),
+        "text_clean_sha256": None,
+        "text_clean_size": None,
+    }).encode("utf-8")
+    request = tmp_path / "request.json"
+    request.write_bytes(request_content)
+    Image.new("L", (8, 6), 255).save(mask)
+    monkeypatch.setattr(
+        visual_worker,
+        "_load_process_image",
+        lambda: pytest.fail("replaced text mask must fail before pipeline load"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "visual_worker.py", "--image", str(source), "--work-dir", str(tmp_path),
+        "--lang", "en", "--request", str(request),
+        "--request-sha256", hashlib.sha256(request_content).hexdigest(),
+        "--request-size", str(len(request_content)),
+        "--source-sha256", hashlib.sha256(source_content).hexdigest(),
+        "--source-size", str(len(source_content)),
+        "--result", str(tmp_path / "result.json"),
+    ])
+
+    with pytest.raises(ValueError, match="text mask.*mismatch"):
         visual_worker.main()
 
 from image_to_ppt import _parse_reference_option

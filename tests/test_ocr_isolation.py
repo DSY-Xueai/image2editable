@@ -550,13 +550,15 @@ def test_isolated_visual_processing_runs_page_worker(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    image_path = tmp_path / "source.png"
-    Image.new("RGB", (20, 10), "white").save(image_path)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    image_path = work_dir / "source.png"
+    Image.new("RGB", (20, 10), "white").save(image_path)
+    mask_path = work_dir / "mask.png"
+    Image.new("L", (20, 10), 0).save(mask_path)
     text_analysis = {
         "items": [{"box": [1, 2, 3, 4], "text": "Title"}],
-        "mask_path": str(tmp_path / "mask.png"),
+        "mask_path": str(mask_path),
     }
     calls = []
 
@@ -564,9 +566,15 @@ def test_isolated_visual_processing_runs_page_worker(
         calls.append((command, kwargs))
         request_path = Path(command[command.index("--request") + 1])
         result_path = Path(command[command.index("--result") + 1])
-        assert json.loads(request_path.read_text(encoding="utf-8")) == {
-            "text_analysis": text_analysis
-        }
+        request_content = request_path.read_bytes()
+        request = json.loads(request_content.decode("utf-8"))
+        assert request["text_analysis"] == text_analysis
+        assert request["text_mask_sha256"] == hashlib.sha256(
+            mask_path.read_bytes()
+        ).hexdigest()
+        assert command[command.index("--request-sha256") + 1] == hashlib.sha256(
+            request_content
+        ).hexdigest()
         result_path.write_text(
             json.dumps(
                 {

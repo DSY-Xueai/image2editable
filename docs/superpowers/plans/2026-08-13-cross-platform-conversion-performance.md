@@ -100,6 +100,7 @@ git commit -m "性能：增加转换阶段与设备记录"
 - Modify: `scripts/sam_worker.py`
 - Modify: `image_to_ppt.py`
 - Modify: `tests/test_regressions.py`
+- Modify: `tests/test_ocr_isolation.py`（visual worker 协议契约）
 - Mirror: `skills/image-to-ppt/scripts/sam_worker.py`
 - Mirror: `skills/image-to-ppt/scripts/image_to_ppt.py`
 
@@ -251,7 +252,7 @@ Expected: FAIL，scope 函数尚不存在。
 
 仅当 OCR 文字确实新增、cleanup 差集非空、`scope == set()`，且全部缓存、关系、hash、协议和 shape 完整时，零 DINO/SAM 复用首 pass 视觉资产，并重新执行 text-clean、背景、removal、foreground/ownership 和原质量证据路径。`scope` 非空、本身为 `None` 或输出无法通过完整性校验时调用原来的第二次 `_process_image_isolated()`。本任务不在全局视觉流水线上伪实现非空 scope 的局部 SAM；该能力需未来先独立拆分视觉流水线。不吞掉原完整路径异常，不输出原图成功。
 
-安全复用还要求：从 element/semantic mask 的实际非零范围重算 bbox 并绑定 cache key；依赖闭包超过 mask crop、候选 pair 或局部像素预算时返回 `None`；caller 安全读取 source 字节并通过进程参数把 SHA-256/字节数交给 visual worker（不信任 workdir 内 request 的绑定字段），worker 在任何模型加载前完成文件身份与 hash 校验，从内存快照解码，首 pass hash 与 prepared manifest 不一致时执行完整第二 pass。
+安全复用还要求：从 element/semantic mask 的实际非零范围重算 bbox 并绑定 cache key；依赖闭包超过 mask crop、候选 pair 或局部像素预算时返回 `None`；caller 安全读取 source、OCR mask 和可选 text-clean，source 及 request 的 SHA-256/字节数通过进程参数交给 visual worker，request 内绑定引用资产 hash。worker 在任何模型加载前完成文件身份与 hash 校验，从内存快照解码 source、mask 和 text-clean，不再回读其路径；首 pass hash 与 prepared manifest 不一致时执行完整第二 pass。
 
 - [ ] **Step 4: 验证增量与完整路径等价**
 
@@ -262,7 +263,7 @@ Expected: PASS；夹具验证安全空 scope 不启动第二个视觉 worker，�
 - [ ] **Step 5: 镜像并提交**
 
 ```powershell
-git add image_to_ppt.py scripts/visual_worker.py skills/image-to-ppt/scripts/image_to_ppt.py skills/image-to-ppt/scripts/visual_worker.py tests/test_targeted_ocr.py tests/test_regressions.py docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md docs/superpowers/plans/2026-08-13-cross-platform-conversion-performance.md
+git add image_to_ppt.py scripts/visual_worker.py skills/image-to-ppt/scripts/image_to_ppt.py skills/image-to-ppt/scripts/visual_worker.py tests/test_targeted_ocr.py tests/test_regressions.py tests/test_ocr_isolation.py docs/superpowers/specs/2026-08-13-cross-platform-conversion-performance-design.md docs/superpowers/plans/2026-08-13-cross-platform-conversion-performance.md
 git commit -m "性能：复用未受 OCR 影响的视觉资产"
 ```
 

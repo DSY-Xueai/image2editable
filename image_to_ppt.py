@@ -2067,14 +2067,33 @@ def _process_image_isolated(
         "isolated visual source",
     )
     source_sha256 = hashlib.sha256(source_content).hexdigest()
+    _, text_mask_content = _read_prepared_owned_bytes(
+        work_dir,
+        text_analysis["mask_path"],
+        "isolated visual text mask",
+    )
+    text_clean_content = None
+    if text_analysis.get("text_clean_path") is not None:
+        _, text_clean_content = _read_prepared_owned_bytes(
+            work_dir,
+            text_analysis["text_clean_path"],
+            "isolated visual text clean image",
+        )
     request_path = (work_dir / "visual-worker-request.json").resolve()
     result_path = (work_dir / "visual-worker-result.json").resolve()
-    request_path.write_text(
-        json.dumps({
+    request_content = json.dumps({
             "text_analysis": text_analysis,
-        }, ensure_ascii=False),
-        encoding="utf-8",
-    )
+            "text_mask_sha256": hashlib.sha256(text_mask_content).hexdigest(),
+            "text_mask_size": len(text_mask_content),
+            "text_clean_sha256": (
+                hashlib.sha256(text_clean_content).hexdigest()
+                if text_clean_content is not None else None
+            ),
+            "text_clean_size": (
+                len(text_clean_content) if text_clean_content is not None else None
+            ),
+        }, ensure_ascii=False).encode("utf-8")
+    request_path.write_bytes(request_content)
     module_dir = Path(__file__).resolve().parent
     worker_path = module_dir / "scripts" / "visual_worker.py"
     if not worker_path.is_file():
@@ -2091,6 +2110,10 @@ def _process_image_isolated(
             lang,
             "--request",
             str(request_path),
+            "--request-sha256",
+            hashlib.sha256(request_content).hexdigest(),
+            "--request-size",
+            str(len(request_content)),
             "--source-sha256",
             source_sha256,
             "--source-size",
@@ -2149,6 +2172,8 @@ def _process_image(
     defer_quality: bool = False,
     _resource_isolation: bool = False,
     _source_image: np.ndarray | None = None,
+    _text_mask: np.ndarray | None = None,
+    _text_clean_image: np.ndarray | None = None,
 ) -> dict:
     work_dir.mkdir(parents=True, exist_ok=True)
     background_kwargs = (
@@ -2170,11 +2195,15 @@ def _process_image(
         )
         text_mask_path = (work_dir / "source-text-mask.png").resolve()
         Image.fromarray(text_mask, mode="L").save(text_mask_path)
-    else:
+    elif _text_mask is None:
         text_items = text_analysis["items"]
         text_mask_path = Path(text_analysis["mask_path"]).resolve()
         with Image.open(text_mask_path) as stored_text_mask:
             text_mask = np.asarray(stored_text_mask.convert("L")).copy()
+    else:
+        text_items = text_analysis["items"]
+        text_mask_path = Path(text_analysis["mask_path"]).resolve()
+        text_mask = np.asarray(_text_mask, dtype=np.uint8).copy()
     text_ink_mask = _build_text_ink_mask(img, text_mask)
     valid_text_items = bool(text_items) and all(
         "box" in item for item in text_items
@@ -2203,10 +2232,15 @@ def _process_image(
             _save_rgb(str(text_clean_path), text_clean_image)
         else:
             text_clean_path = Path(text_clean_path).resolve()
-            with Image.open(text_clean_path) as stored_text_clean:
+            if _text_clean_image is not None:
                 text_clean_image = np.asarray(
-                    stored_text_clean.convert("RGB")
+                    _text_clean_image, dtype=np.uint8
                 ).copy()
+            else:
+                with Image.open(text_clean_path) as stored_text_clean:
+                    text_clean_image = np.asarray(
+                        stored_text_clean.convert("RGB")
+                    ).copy()
 
     proposal_detector = (
         None if _resource_isolation else object_detector

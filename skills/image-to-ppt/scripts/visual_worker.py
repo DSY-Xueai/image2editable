@@ -24,24 +24,25 @@ def _read_source_snapshot(
     image_path: Path,
     work_dir: Path,
     expected_size: int,
+    label: str,
 ) -> bytes:
     root = Path(os.path.abspath(work_dir))
     source = Path(os.path.abspath(image_path))
     if source.parent != root:
-        raise ValueError("visual source must be directly inside the work directory")
+        raise ValueError(f"{label} must be directly inside the work directory")
     root_before = os.lstat(root)
     path_before = os.lstat(source)
     try:
         with source.open("rb") as stream:
             handle_before = os.fstat(stream.fileno())
             if handle_before.st_size != expected_size:
-                raise ValueError("visual source size mismatch")
+                raise ValueError(f"{label} size mismatch")
             content = stream.read(expected_size + 1)
             handle_after = os.fstat(stream.fileno())
         path_after = os.lstat(source)
         root_after = os.lstat(root)
     except OSError as exc:
-        raise ValueError("visual source changed while being read") from exc
+        raise ValueError(f"{label} changed while being read") from exc
 
     for status in (root_before, root_after):
         if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
@@ -57,13 +58,13 @@ def _read_source_snapshot(
             or not stat.S_ISREG(status.st_mode)
             or status.st_nlink != 1
         ):
-            raise ValueError("visual source changed while being read")
+            raise ValueError(f"{label} changed while being read")
     identities = {
         (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
         for status in statuses
     }
     if len(identities) != 1 or len(content) != expected_size:
-        raise ValueError("visual source changed while being read")
+        raise ValueError(f"{label} changed while being read")
     return content
 
 
@@ -84,12 +85,21 @@ def main() -> int:
     parser.add_argument("--work-dir", required=True)
     parser.add_argument("--lang", required=True)
     parser.add_argument("--request", required=True)
+    parser.add_argument("--request-sha256", required=True)
+    parser.add_argument("--request-size", required=True, type=int)
     parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--source-size", required=True, type=int)
     parser.add_argument("--result", required=True)
     args = parser.parse_args()
 
-    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    if args.request_size <= 0:
+        raise ValueError("visual request binding is invalid")
+    request_content = _read_source_snapshot(
+        Path(args.request), Path(args.work_dir), args.request_size, "visual request"
+    )
+    if hashlib.sha256(request_content).hexdigest() != args.request_sha256:
+        raise ValueError("visual request sha256 mismatch")
+    request = json.loads(request_content.decode("utf-8"))
     expected_sha256 = args.source_sha256
     expected_size = args.source_size
     if (
@@ -105,11 +115,38 @@ def main() -> int:
         Path(args.image),
         Path(args.work_dir),
         expected_size,
+        "visual source",
     )
     if hashlib.sha256(source_content).hexdigest() != expected_sha256:
         raise ValueError("visual source sha256 mismatch")
     with Image.open(io.BytesIO(source_content)) as stored_source:
         source_image = np.asarray(stored_source.convert("RGB")).copy()
+    text_analysis = request["text_analysis"]
+    text_mask_content = _read_source_snapshot(
+        Path(text_analysis["mask_path"]),
+        Path(args.work_dir),
+        request["text_mask_size"],
+        "visual text mask",
+    )
+    if hashlib.sha256(text_mask_content).hexdigest() != request["text_mask_sha256"]:
+        raise ValueError("visual text mask sha256 mismatch")
+    with Image.open(io.BytesIO(text_mask_content)) as stored_text_mask:
+        text_mask = np.asarray(stored_text_mask.convert("L")).copy()
+    text_clean_image = None
+    if text_analysis.get("text_clean_path") is not None:
+        text_clean_content = _read_source_snapshot(
+            Path(text_analysis["text_clean_path"]),
+            Path(args.work_dir),
+            request["text_clean_size"],
+            "visual text clean image",
+        )
+        if (
+            hashlib.sha256(text_clean_content).hexdigest()
+            != request["text_clean_sha256"]
+        ):
+            raise ValueError("visual text clean image sha256 mismatch")
+        with Image.open(io.BytesIO(text_clean_content)) as stored_text_clean:
+            text_clean_image = np.asarray(stored_text_clean.convert("RGB")).copy()
     process_image = _load_process_image()
     slide_data = process_image(
         Path(args.image),
@@ -117,10 +154,12 @@ def main() -> int:
         None,
         None,
         args.lang,
-        text_analysis=request["text_analysis"],
+        text_analysis=text_analysis,
         defer_quality=True,
         _resource_isolation=True,
         _source_image=source_image,
+        _text_mask=text_mask,
+        _text_clean_image=text_clean_image,
     )
     result_path = Path(args.result)
     temporary_path = result_path.with_name(f".{result_path.name}.tmp")
