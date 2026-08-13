@@ -367,6 +367,50 @@ def test_local_agent_records_failed_worker_status(
     assert events[0][1]["duration_ms"] == 500
 
 
+def test_local_agent_records_one_error_for_invalid_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    times = iter([2.0, 2.5])
+    monkeypatch.setattr(local_agent.time, "perf_counter", lambda: next(times))
+    events = []
+
+    class Trace:
+        def event(self, event, **fields):
+            events.append((event, fields))
+
+    def invoke(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text("not valid JSON", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(local_agent, "_invoke_worker", invoke)
+
+    with pytest.raises(json.JSONDecodeError):
+        local_agent.run_local_agent(
+            request_path,
+            model_receipt=_receipt(tmp_path),
+            performance_trace=Trace(),
+        )
+
+    assert events == [
+        (
+            "local_agent",
+            {
+                "image_count": 8,
+                "total_bytes": sum(
+                    (request_path.parent / Path(*record["path"].split("/"))).stat().st_size
+                    for record in load_component_agent_request(request_path)["evidence"].values()
+                    if record["path"].endswith(".png")
+                ),
+                "duration_ms": 500,
+                "status": "error",
+            },
+        )
+    ]
+
+
 def test_local_service_agent_records_content_free_performance_event(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

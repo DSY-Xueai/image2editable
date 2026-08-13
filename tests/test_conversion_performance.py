@@ -59,6 +59,83 @@ def test_event_and_span_reject_unknown_fields(tmp_path: Path) -> None:
         trace.span("inference", prompt="secret")
 
 
+@pytest.mark.parametrize(
+    ("event", "fields"),
+    [
+        ("unknown", {}),
+        ("worker", {"duration_ms": 1, "status": "success", "stage": "C:/source.png"}),
+        ("worker", {"duration_ms": 1, "status": "success", "model": "prompt response body"}),
+        ("worker", {"duration_ms": True, "status": "success"}),
+        ("worker", {"duration_ms": 1, "status": "pending"}),
+        ("worker", {"duration_ms": 1, "status": "success", "operation_count": []}),
+        ("local_agent", {"duration_ms": 1, "status": "success", "stage": "inference"}),
+    ],
+)
+def test_event_rejects_invalid_schema_values_and_combinations(
+    tmp_path: Path,
+    event: str,
+    fields: dict,
+) -> None:
+    trace = _load_performance_trace().PerformanceTrace(tmp_path / "performance.jsonl")
+
+    with pytest.raises(ValueError):
+        trace.event(event, **fields)
+
+
+def test_event_rejects_unsafe_platform_and_boolean_mismatch(tmp_path: Path) -> None:
+    trace = _load_performance_trace().PerformanceTrace(tmp_path / "performance.jsonl")
+
+    with pytest.raises(ValueError):
+        trace.event(
+            "device_summary",
+            platform="Windows\nresponse body",
+            device="cpu",
+            cuda_available=False,
+            mps_available=False,
+        )
+    with pytest.raises(ValueError):
+        trace.event(
+            "device_summary",
+            platform="Windows",
+            device="cpu",
+            cuda_available=0,
+            mps_available=False,
+        )
+
+
+def test_event_appends_each_valid_record(tmp_path: Path) -> None:
+    target = tmp_path / "performance.jsonl"
+    trace = _load_performance_trace().PerformanceTrace(target)
+
+    trace.event("worker", duration_ms=1, status="success")
+    trace.event("worker", duration_ms=2, status="failed")
+
+    assert [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()] == [
+        {"schema_version": 1, "event": "worker", "duration_ms": 1, "status": "success"},
+        {"schema_version": 1, "event": "worker", "duration_ms": 2, "status": "failed"},
+    ]
+
+
+def test_span_keeps_body_result_when_recording_fails(tmp_path: Path) -> None:
+    trace = _load_performance_trace().PerformanceTrace(tmp_path / "missing" / "performance.jsonl")
+
+    with trace.span("inference"):
+        result = "completed"
+
+    assert result == "completed"
+
+
+def test_span_keeps_body_exception_when_recording_fails(tmp_path: Path) -> None:
+    trace = _load_performance_trace().PerformanceTrace(tmp_path / "missing" / "performance.jsonl")
+    expected = RuntimeError("conversion failed")
+
+    with pytest.raises(RuntimeError) as caught:
+        with trace.span("inference"):
+            raise expected
+
+    assert caught.value is expected
+
+
 class _Torch:
     def __init__(self, cuda: bool, mps: bool) -> None:
         self.cuda = type("Cuda", (), {"is_available": lambda _: cuda})()

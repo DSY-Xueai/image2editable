@@ -30,16 +30,6 @@ _THREAD_ENVIRONMENT = (
     "FLAGS_paddle_num_threads",
 )
 _LOGGER = logging.getLogger(__name__)
-_IMAGE_EVIDENCE = (
-    "source.png",
-    "numbered-masks.png",
-    "ocr-overlay.png",
-    "component-isolation.png",
-    "ownership.png",
-    "reconstructed.png",
-    "difference.png",
-    "unexplained-mask.png",
-)
 
 
 def run_local_agent(
@@ -114,14 +104,10 @@ def run_local_agent(
                 performance_trace, started, request_path, request, status="error"
             )
             raise
-        _record_local_agent_performance(
-            performance_trace,
-            started,
-            request_path,
-            request,
-            status="success" if completed.returncode == 0 else "failed",
-        )
         if completed.returncode != 0:
+            _record_local_agent_performance(
+                performance_trace, started, request_path, request, status="failed"
+            )
             diagnostic_error = _write_diagnostic(
                 request_path,
                 request,
@@ -149,6 +135,9 @@ def run_local_agent(
                 )
             validate_component_plan(plan, request=request, graph=graph)
         except Exception as error:
+            _record_local_agent_performance(
+                performance_trace, started, request_path, request, status="error"
+            )
             _write_diagnostic(
                 request_path,
                 request,
@@ -162,6 +151,9 @@ def run_local_agent(
                 write_exclusive=_write_exclusive,
             )
             raise
+        _record_local_agent_performance(
+            performance_trace, started, request_path, request, status="success"
+        )
         return plan
 
 
@@ -320,6 +312,8 @@ def _record_local_agent_performance(
     if performance_trace is None or started is None:
         return
     try:
+        from image2editable.local_agent_worker import _IMAGE_EVIDENCE
+
         image_paths = [
             request_path.parent / Path(*request["evidence"][name]["path"].split("/"))
             for name in _IMAGE_EVIDENCE
