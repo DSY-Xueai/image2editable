@@ -17,6 +17,12 @@ ROOT_VISUAL_SEGMENT = ROOT / "scripts" / "visual_segment.py"
 STANDALONE_VISUAL_SEGMENT = (
     ROOT / "skills" / "image-to-ppt" / "scripts" / "visual_segment.py"
 )
+ROOT_LAMA_INPAINT = ROOT / "scripts" / "lama_inpaint.py"
+STANDALONE_LAMA_INPAINT = (
+    ROOT / "skills" / "image-to-ppt" / "scripts" / "lama_inpaint.py"
+)
+THIRD_PARTY_NOTICES = ROOT / "THIRD_PARTY_NOTICES.md"
+LAMA_LICENSE = ROOT / "third_party" / "licenses" / "LAMA-APACHE-2.0.txt"
 PYPROJECT = ROOT / "pyproject.toml"
 CLAUDE_PLUGIN = ROOT / ".claude-plugin" / "plugin.json"
 GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
@@ -146,6 +152,41 @@ def test_standalone_sam_dependency_does_not_follow_a_branch() -> None:
 
     assert sam_lines == [SAM_PIN]
     assert re.fullmatch(r"[0-9a-f]{40}", sam_lines[0].rsplit("@", 1)[1])
+
+
+def test_lama_dependencies_use_torch_without_the_old_wrapper() -> None:
+    expected = "torch>=2.5.1,<3"
+
+    for requirements in (REQUIREMENTS, STANDALONE_REQUIREMENTS):
+        lines = requirements.read_text(encoding="utf-8").splitlines()
+        assert lines.count(expected) == 1
+        assert not any(
+            "simple-lama-inpainting" in line.casefold()
+            for line in lines
+        )
+    assert "simple-lama-inpainting" not in PYPROJECT.read_text(
+        encoding="utf-8"
+    ).casefold()
+
+
+def test_lama_adapter_product_and_skill_mirrors_match() -> None:
+    assert ROOT_LAMA_INPAINT.read_bytes() == STANDALONE_LAMA_INPAINT.read_bytes()
+
+
+def test_lama_notice_describes_adapter_reference_and_valid_license() -> None:
+    notice = THIRD_PARTY_NOTICES.read_text(encoding="utf-8")
+    license_text = LAMA_LICENSE.read_text(encoding="utf-8")
+
+    assert "local TorchScript adapter" in notice
+    assert "simple-lama-inpainting" in notice
+    assert "LaMa" in notice
+    assert "Apache License 2.0" in notice
+    assert "third_party/licenses/LAMA-APACHE-2.0.txt" in notice
+    assert "calls LaMa through the `simple-lama-inpainting` wrapper API" not in notice
+    assert LAMA_LICENSE.is_file()
+    assert "Apache License" in license_text
+    assert "Version 2.0, January 2004" in license_text
+    assert "END OF TERMS AND CONDITIONS" in license_text
 
 
 def test_opencv_stays_within_the_verified_major_version() -> None:

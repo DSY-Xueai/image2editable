@@ -23,12 +23,12 @@ The Grounding DINO source code and model weights are not stored in this reposito
 
 ## LaMa / simple-lama-inpainting
 
-image2editable calls LaMa through the `simple-lama-inpainting` wrapper API to repair large masked background regions.
+image2editable includes a local TorchScript adapter for repairing large masked background regions. Its preprocessing and model invocation semantics were implemented with reference to the `simple-lama-inpainting` project and the original LaMa project, both distributed under the Apache License 2.0.
 
 - LaMa authors: Roman Suvorov et al.
 - LaMa source: https://github.com/advimman/lama
-- Wrapper source: https://github.com/enesmsahin/simple-lama-inpainting
+- Adapter reference: https://github.com/enesmsahin/simple-lama-inpainting
 - License: [Apache License 2.0](third_party/licenses/LAMA-APACHE-2.0.txt)
 - Paper: https://arxiv.org/abs/2109.07161
 
-The LaMa source code and model weights are not stored in this repository. The wrapper downloads the model to the user's local cache when first needed, or uses the local TorchScript model selected by `LAMA_MODEL`.
+The upstream LaMa and simple-lama-inpainting source code and the Big-LaMa checkpoint weights are not stored in this repository. The local adapter downloads the pinned Big-LaMa TorchScript checkpoint to the user's model cache when first needed, or uses the local model selected by `LAMA_MODEL`.

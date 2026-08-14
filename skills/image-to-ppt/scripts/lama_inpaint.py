@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import os
+import secrets
+import stat
 import sys
 from pathlib import Path
+from urllib.request import urlretrieve
 
 import numpy as np
 from PIL import Image
@@ -23,23 +29,387 @@ class LargeMaskInpaintError(RuntimeError):
 
 _MODEL = None
 
+BIG_LAMA_MODEL_URL = (
+    "https://github.com/enesmsahin/simple-lama-inpainting/releases/"
+    "download/v0.1.0/big-lama.pt"
+)
+BIG_LAMA_MODEL_SIZE = 205803670
+BIG_LAMA_MODEL_SHA256 = (
+    "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c"
+)
+_CHECKPOINT_NAME = "big-lama.pt"
+_CHECKPOINT_CHUNK_SIZE = 1024 * 1024
+
 
 def _dependency_error(detail: str) -> LargeMaskInpaintError:
     return LargeMaskInpaintError(
-        f"{detail} Install simple-lama-inpainting==0.1.2."
+        f"{detail} Install torch."
     )
+
+
+def _absolute_path(path: str | Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(status.st_mode) or bool(
+        getattr(status, "st_file_attributes", 0) & reparse
+    )
+
+
+def _directory_identity(status: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        getattr(status, "st_file_attributes", 0),
+    )
+
+
+def _snapshot_parent_chain(
+    parent: Path,
+) -> list[tuple[Path, tuple[int, int, int, int]]]:
+    anchor = Path(parent.anchor)
+    current = anchor
+    chain = []
+    for part in (Path(), *parent.relative_to(anchor).parts):
+        if part != Path():
+            current /= part
+        try:
+            status = current.lstat()
+        except OSError as exc:
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint parent is missing: {current}"
+            ) from exc
+        if _is_link_or_reparse(status) or not stat.S_ISDIR(status.st_mode):
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint parent is unsafe: {current}"
+            )
+        chain.append((current, _directory_identity(status)))
+    return chain
+
+
+def _require_parent_chain(
+    chain: list[tuple[Path, tuple[int, int, int, int]]],
+) -> None:
+    for path, expected in chain:
+        try:
+            status = path.lstat()
+        except OSError as exc:
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint parent identity changed: {path}"
+            ) from exc
+        if (
+            _is_link_or_reparse(status)
+            or not stat.S_ISDIR(status.st_mode)
+            or _directory_identity(status) != expected
+        ):
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint parent identity changed: {path}"
+            )
+
+
+def _validate_checkpoint_status(path: Path, status: os.stat_result) -> None:
+    if _is_link_or_reparse(status):
+        raise LargeMaskInpaintError(
+            f"LaMa checkpoint is a link or reparse point: {path}"
+        )
+    if not stat.S_ISREG(status.st_mode):
+        raise LargeMaskInpaintError(
+            f"LaMa checkpoint is not a regular file: {path}"
+        )
+    if status.st_nlink != 1:
+        raise LargeMaskInpaintError(
+            f"LaMa checkpoint is an unsafe hard link: {path}"
+        )
+
+
+def _read_checkpoint_identity(
+    path: Path,
+    *,
+    descriptor: int | None = None,
+) -> dict[str, str | int]:
+    path = _absolute_path(path)
+    chain = _snapshot_parent_chain(path.parent)
+    try:
+        path_status = path.lstat()
+    except FileNotFoundError as exc:
+        raise LargeMaskInpaintError(
+            f"LaMa checkpoint is missing: {path}"
+        ) from exc
+    _validate_checkpoint_status(path, path_status)
+
+    owned_descriptor = descriptor is None
+    if descriptor is None:
+        flags = os.O_RDONLY
+        for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+            flags |= getattr(os, name, 0)
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as exc:
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint cannot be opened safely: {path}"
+            ) from exc
+    try:
+        _require_parent_chain(chain)
+        opened = os.fstat(descriptor)
+        _validate_checkpoint_status(path, opened)
+        if (opened.st_dev, opened.st_ino) != (
+            path_status.st_dev,
+            path_status.st_ino,
+        ):
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint identity changed: {path}"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, _CHECKPOINT_CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+        stable = os.fstat(descriptor)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint identity changed: {path}"
+            ) from exc
+        _validate_checkpoint_status(path, stable)
+        _validate_checkpoint_status(path, current)
+        expected = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        if expected != (
+            stable.st_dev,
+            stable.st_ino,
+            stable.st_size,
+            stable.st_mtime_ns,
+        ) or expected != (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ):
+            raise LargeMaskInpaintError(
+                f"LaMa checkpoint changed while being read: {path}"
+            )
+        _require_parent_chain(chain)
+        return {
+            "basename": path.name,
+            "size": opened.st_size,
+            "sha256": digest.hexdigest(),
+        }
+    finally:
+        if owned_descriptor:
+            os.close(descriptor)
+
+
+def checkpoint_identity(path: str | Path) -> dict[str, str | int]:
+    return _read_checkpoint_identity(_absolute_path(path))
+
+
+def _validate_default_checkpoint(path: Path) -> None:
+    identity = _read_checkpoint_identity(path)
+    if (
+        identity["size"] != BIG_LAMA_MODEL_SIZE
+        or identity["sha256"] != BIG_LAMA_MODEL_SHA256
+    ):
+        raise LargeMaskInpaintError(
+            "Big-LaMa checkpoint integrity verification failed"
+        )
+
+
+def _create_private_checkpoint(parent: Path) -> tuple[Path, int, tuple[int, int]]:
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    for _ in range(100):
+        path = parent / f".big-lama-{secrets.token_hex(16)}.tmp"
+        try:
+            descriptor = os.open(path, flags, 0o600)
+        except FileExistsError:
+            continue
+        status = os.fstat(descriptor)
+        return path, descriptor, (status.st_dev, status.st_ino)
+    raise LargeMaskInpaintError("Cannot allocate a private LaMa checkpoint file")
+
+
+def _cleanup_owned_checkpoint(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        status = path.lstat()
+    except OSError:
+        return
+    if (
+        _is_link_or_reparse(status)
+        or not stat.S_ISREG(status.st_mode)
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+def resolve_lama_checkpoint(
+    *,
+    cache_dir: str | Path | None = None,
+    downloader=urlretrieve,
+) -> Path:
+    custom = os.environ.get("LAMA_MODEL")
+    if custom:
+        path = _absolute_path(custom)
+        checkpoint_identity(path)
+        return path
+
+    if cache_dir is None:
+        cache_dir = os.environ.get("IMAGE2EDITABLE_MODEL_CACHE")
+    if cache_dir is None:
+        cache_dir = Path.home() / ".cache/image2editable/models/runtime"
+    cache = _absolute_path(cache_dir)
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise LargeMaskInpaintError(
+            f"LaMa checkpoint cache cannot be created: {cache}"
+        ) from exc
+    chain = _snapshot_parent_chain(cache)
+    target = cache / _CHECKPOINT_NAME
+    if os.path.lexists(target):
+        _validate_default_checkpoint(target)
+        _require_parent_chain(chain)
+        return target
+
+    temporary, descriptor, temporary_identity = _create_private_checkpoint(cache)
+    try:
+        _require_parent_chain(chain)
+        downloader(BIG_LAMA_MODEL_URL, temporary)
+        os.fsync(descriptor)
+        downloaded = _read_checkpoint_identity(
+            temporary,
+            descriptor=descriptor,
+        )
+        if (
+            downloaded["size"] != BIG_LAMA_MODEL_SIZE
+            or downloaded["sha256"] != BIG_LAMA_MODEL_SHA256
+        ):
+            raise LargeMaskInpaintError(
+                "Big-LaMa checkpoint download failed integrity verification"
+            )
+        _require_parent_chain(chain)
+        try:
+            os.link(temporary, target, follow_symlinks=False)
+        except FileExistsError:
+            _require_parent_chain(chain)
+            _validate_default_checkpoint(target)
+            _require_parent_chain(chain)
+            return target
+        _require_parent_chain(chain)
+        os.close(descriptor)
+        descriptor = None
+        _cleanup_owned_checkpoint(temporary, temporary_identity)
+        _require_parent_chain(chain)
+        _validate_default_checkpoint(target)
+        _require_parent_chain(chain)
+        return target
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        _cleanup_owned_checkpoint(temporary, temporary_identity)
+
+
+def _prepare_image_and_mask(image, mask, *, device):
+    if isinstance(image, Image.Image):
+        image_array = np.array(image, copy=True)
+    elif isinstance(image, np.ndarray):
+        image_array = image.copy()
+    else:
+        raise TypeError("image must be a NumPy array or PIL image")
+    if isinstance(mask, Image.Image):
+        mask_array = np.array(mask, copy=True)
+    elif isinstance(mask, np.ndarray):
+        mask_array = mask.copy()
+    else:
+        raise TypeError("mask must be a NumPy array or PIL image")
+
+    if image_array.ndim != 3 or image_array.shape[2] != 3:
+        raise ValueError("image must be an RGB array with shape (H, W, 3)")
+    if mask_array.ndim != 2:
+        raise ValueError("mask must be an L array with shape (H, W)")
+    if mask_array.shape != image_array.shape[:2]:
+        raise ValueError("mask must match the image height and width")
+
+    image_array = np.transpose(
+        image_array.astype(np.float32) / 255,
+        (2, 0, 1),
+    )
+    mask_array = (mask_array.astype(np.float32) / 255)[None, ...]
+    height, width = mask_array.shape[1:]
+    padding = ((0, 0), (0, (-height) % 8), (0, (-width) % 8))
+    if padding[1][1] or padding[2][1]:
+        image_array = np.pad(image_array, padding, mode="symmetric")
+        mask_array = np.pad(mask_array, padding, mode="symmetric")
+
+    torch = importlib.import_module("torch")
+    image_tensor = torch.from_numpy(image_array).unsqueeze(0).to(device)
+    mask_tensor = torch.from_numpy(mask_array).unsqueeze(0).to(device)
+    mask_tensor = (mask_tensor > 0) * 1
+    return image_tensor, mask_tensor
+
+
+class _BigLama:
+    def __init__(self, checkpoint: str | Path, device) -> None:
+        self._torch = importlib.import_module("torch")
+        self.device = device
+        try:
+            self.model = self._torch.jit.load(
+                str(checkpoint),
+                map_location=device,
+            )
+            self.model.eval()
+            self.model.to(device)
+        except Exception:
+            raise LargeMaskInpaintError(
+                "LaMa model initialization failed."
+            ) from None
+
+    def __call__(self, image, mask) -> Image.Image:
+        image_tensor, mask_tensor = _prepare_image_and_mask(
+            image,
+            mask,
+            device=self.device,
+        )
+        with self._torch.inference_mode():
+            try:
+                output = self.model(image_tensor, mask_tensor)
+            except Exception:
+                raise LargeMaskInpaintError("LaMa inference failed.") from None
+            try:
+                result = output[0].permute(1, 2, 0).detach().cpu().numpy()
+            except Exception:
+                raise LargeMaskInpaintError(
+                    "LaMa returned invalid output."
+                ) from None
+            if not isinstance(result, np.ndarray) or (
+                result.ndim != 3 or result.shape[2] != 3
+            ):
+                raise LargeMaskInpaintError("LaMa returned invalid output.")
+            result = np.clip(result * 255, 0, 255).astype(np.uint8)
+            return Image.fromarray(result, mode="RGB")
 
 
 def _create_model():
     try:
-        from simple_lama_inpainting import SimpleLama
+        torch = importlib.import_module("torch")
     except ModuleNotFoundError as exc:
         raise _dependency_error("LaMa dependency is unavailable.") from exc
-
-    try:
-        return SimpleLama()
-    except Exception as exc:
-        raise _dependency_error("LaMa model initialization failed.") from exc
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return _BigLama(resolve_lama_checkpoint(), device)
 
 
 def _get_model():
