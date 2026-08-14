@@ -1395,6 +1395,7 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     store = RunStore.open(run_dir)
     calls = {"prepare": 0, "request": 0, "state": 0}
+    request_leases = []
     reconstruction = run_dir / "pages" / "page_001" / "reconstruction"
 
     class FakeImageModule:
@@ -1412,8 +1413,11 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
         lambda *args: {"page_id": "page_001"}, raising=False,
     )
 
-    def request(session: dict, *, repair_round: int) -> Path:
+    def request(
+        session: dict, *, repair_round: int, _lease: ExecutionLease | None = None,
+    ) -> Path:
         calls["request"] += 1
+        request_leases.append(_lease)
         path = reconstruction / "agent/round-01/component_agent_request.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
@@ -1438,6 +1442,7 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     assert first["status"] == "initialized"
     assert second["status"] == "already_initialized"
     assert calls == {"prepare": 1, "request": 1, "state": 1}
+    assert request_leases == [lease]
 
 
 @pytest.mark.parametrize("prepared_schema_version", [1, 5])

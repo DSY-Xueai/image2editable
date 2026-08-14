@@ -933,6 +933,90 @@ def test_execution_lease_rejects_replaced_posix_parent_path(
             lease.assert_authorizes(run)
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX execution lease covers publication",
+)
+def test_component_request_reuses_held_execution_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+
+    def reject_nested_publication_lease(path: Path) -> object:
+        raise AssertionError(f"nested publication lease acquired: {path}")
+
+    monkeypatch.setattr(
+        component_repair,
+        "_run_publication_lease",
+        reject_nested_publication_lease,
+    )
+
+    with ExecutionLease(
+        run_root / "execution.lock", run_root=run_root,
+    ) as lease:
+        request_path = build_component_agent_request(
+            page_session, repair_round=1, _lease=lease,
+        )
+
+    assert request_path.is_file()
+
+
+def test_direct_component_request_uses_publication_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered: list[Path] = []
+
+    class TrackingPublicationLease:
+        def __init__(self, reconstruction: Path) -> None:
+            self.reconstruction = reconstruction
+
+        def __enter__(self) -> None:
+            entered.append(self.reconstruction)
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        component_repair,
+        "_run_publication_lease",
+        TrackingPublicationLease,
+    )
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+
+    assert request_path.is_file()
+    assert entered == [Path(page_session["reconstruction_dir"])]
+
+
+def test_component_request_rejects_execution_lease_for_different_run(
+    page_session: dict, tmp_path: Path,
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    with ExecutionLease(
+        other / "execution.lock", run_root=other,
+    ) as lease:
+        with pytest.raises(RuntimeError, match="different Run"):
+            build_component_agent_request(
+                page_session, repair_round=1, _lease=lease,
+            )
+
+
+def test_component_request_rejects_released_execution_lease(
+    page_session: dict,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+    lease = ExecutionLease(run_root / "execution.lock", run_root=run_root)
+    with lease:
+        pass
+
+    with pytest.raises(RuntimeError, match="not held"):
+        build_component_agent_request(
+            page_session, repair_round=1, _lease=lease,
+        )
+
+
 def test_initialized_state_points_to_hash_bound_current_request(page_session: dict) -> None:
     from image2editable.store import RunStore
 
@@ -2349,6 +2433,52 @@ def _real_next_round_session(page_session: dict, store, quality_path: Path) -> d
     session = {**page_session, "provider": "local", "evidence": evidence}
     _refresh_test_presentation_manifest(session)
     return session
+
+
+def test_next_legacy_request_reuses_execution_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _ = _failed_diagnostic_round_one(page_session, monkeypatch)
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    quality_ref = state["current_round"]["quality_ref"]
+    quality_path = store.root / quality_ref["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    native_ref = quality["input_refs"]["native_check"]
+    native_path = store.root / native_ref["path"]
+    native_check = json.loads(native_path.read_text(encoding="utf-8"))
+    native_check["text_items"] = []
+    native_path.write_text(json.dumps(native_check), encoding="utf-8")
+    native_ref["sha256"] = hashlib.sha256(native_path.read_bytes()).hexdigest()
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    quality_ref["sha256"] = hashlib.sha256(quality_path.read_bytes()).hexdigest()
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json", state,
+    )
+    received_leases = []
+    real_build_request = legacy.build_component_agent_request
+
+    def build_request(
+        session: dict,
+        *,
+        repair_round: int,
+        _lease: ExecutionLease | None = None,
+    ) -> Path:
+        received_leases.append(_lease)
+        if _lease is None:
+            return real_build_request(session, repair_round=repair_round)
+        return real_build_request(
+            session, repair_round=repair_round, _lease=_lease,
+        )
+
+    monkeypatch.setattr(legacy, "build_component_agent_request", build_request)
+    with ExecutionLease(
+        store.root / "execution.lock", run_root=store.root,
+    ) as lease:
+        legacy._publish_next_legacy_request(store, "page_001", 2, lease)
+
+    assert received_leases == [lease]
 
 
 @pytest.mark.parametrize(
@@ -6265,6 +6395,36 @@ def _publish_round(session: dict, repair_round: int, started: object, result: ob
         result.put("published")
 
 
+def _publish_round_with_execution_lease(
+    session: dict,
+    repair_round: int,
+    ready: object,
+    release: object,
+    result: object,
+) -> None:
+    real_build = component_repair._build_component_agent_request_locked
+
+    def hold_build(*args: object, **kwargs: object) -> Path:
+        ready.set()
+        release.wait(10)
+        return real_build(*args, **kwargs)
+
+    component_repair._build_component_agent_request_locked = hold_build
+    reconstruction = Path(session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+    try:
+        with ExecutionLease(
+            run_root / "execution.lock", run_root=run_root,
+        ) as lease:
+            component_repair.build_component_agent_request(
+                session, repair_round=repair_round, _lease=lease,
+            )
+    except Exception as error:
+        result.put(("error", type(error).__name__, str(error)))
+    else:
+        result.put(("published",))
+
+
 def _hold_publication_lease(reconstruction: str, ready: object, release: object) -> None:
     with component_repair._run_publication_lease(Path(reconstruction)):
         component_repair._load_integrity_key(Path(reconstruction))
@@ -6890,6 +7050,52 @@ def test_run_publication_lease_blocks_key_rotation_during_inflight_publish(
     assert contender.exitcode == 0
     assert result.get(timeout=2) == "rejected"
     assert not anchor.exists()
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows execution and publication locks differ",
+)
+def test_windows_execution_lease_publication_blocks_direct_process(
+    page_session: dict,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder_result = context.Queue()
+    holder = context.Process(
+        target=_publish_round_with_execution_lease,
+        args=(page_session, 1, ready, release, holder_result),
+    )
+    started = context.Event()
+    contender_result = context.Queue()
+    contender = context.Process(
+        target=_publish_round,
+        args=(page_session, 2, started, contender_result),
+    )
+    started_processes = []
+    try:
+        holder.start()
+        started_processes.append(holder)
+        assert ready.wait(10)
+        contender.start()
+        started_processes.append(contender)
+        assert started.wait(10)
+        contender.join(0.5)
+        assert contender.is_alive()
+        with pytest.raises(queue.Empty):
+            contender_result.get_nowait()
+    finally:
+        release.set()
+        for process in started_processes:
+            process.join(10)
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+
+    assert holder.exitcode == 0
+    assert contender.exitcode == 0
+    assert holder_result.get(timeout=2) == ("published",)
+    assert contender_result.get(timeout=2) == "published"
 
 
 def test_build_detects_parent_replaced_between_check_and_open(

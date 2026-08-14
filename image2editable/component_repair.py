@@ -3317,11 +3317,20 @@ def build_component_agent_request(
     page_session: dict,
     *,
     repair_round: int,
+    _lease: ExecutionLease | None = None,
 ) -> Path:
     repair_round = validate_repair_round(repair_round)
     validated = _validate_page_session(page_session)
     reconstruction = validated[2]
-    with _run_publication_lease(reconstruction):
+    run_root = reconstruction.parent.parent.parent
+    if _lease is not None:
+        _lease.assert_authorizes(run_root)
+    lease = (
+        nullcontext()
+        if _lease is not None and os.name != "nt"
+        else _run_publication_lease(reconstruction)
+    )
+    with lease:
         try:
             return _build_component_agent_request_locked(
                 validated, repair_round, build_review=True,

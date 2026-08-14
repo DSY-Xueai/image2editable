@@ -522,7 +522,9 @@ def initialize_legacy_page(
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
     )
-    request_path = build_component_agent_request(session, repair_round=1)
+    request_path = build_component_agent_request(
+        session, repair_round=1, _lease=_lease,
+    )
     initialize_component_repair_state(
         store, page_id, request_path=request_path,
         initial_component_count=prepared["initial_component_count"],
@@ -2239,7 +2241,7 @@ def _publish_next_legacy_request(
         "reconstruction_dir": reconstruction, "evidence": evidence,
     }
     request_path = build_component_agent_request(
-        session, repair_round=repair_round
+        session, repair_round=repair_round, _lease=lease,
     )
     record_next_component_request(
         store, page_id, request_path=request_path, _lease=lease
