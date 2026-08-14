@@ -774,6 +774,165 @@ def test_component_repair_rejects_unheld_execution_lease(page_session: dict) -> 
         )
 
 
+def test_execution_lease_authorizes_only_its_held_run(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with pytest.raises(RuntimeError, match="not held"):
+        lease.assert_authorizes(run)
+
+    with lease:
+        lease.assert_authorizes(run)
+        with pytest.raises(RuntimeError, match="different Run"):
+            lease.assert_authorizes(other)
+
+    with pytest.raises(RuntimeError, match="not held"):
+        lease.assert_authorizes(run)
+
+
+@pytest.mark.parametrize(
+    ("lease_path", "run_root"),
+    [
+        ("execution.lock", None),
+        ("not-execution.lock", "run"),
+    ],
+)
+def test_execution_lease_rejects_unbound_or_nonstandard_run_lock(
+    tmp_path: Path, lease_path: str, run_root: str | None,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(
+        run / lease_path,
+        run_root=run if run_root is not None else None,
+    )
+
+    with lease:
+        with pytest.raises(RuntimeError, match="different Run"):
+            lease.assert_authorizes(run)
+
+
+def test_execution_lease_rejects_replaced_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        if os.name == "nt":
+            original_lstat = Path.lstat
+
+            class ReplacedPathStatus:
+                def __init__(self, status: os.stat_result) -> None:
+                    self._status = status
+
+                def __getattr__(self, name: str) -> object:
+                    if name == "st_ino":
+                        return self._status.st_ino + 1
+                    return getattr(self._status, name)
+
+            def replaced_lstat(path: Path) -> object:
+                result = original_lstat(path)
+                if path == lease.path:
+                    return ReplacedPathStatus(result)
+                return result
+
+            monkeypatch.setattr(Path, "lstat", replaced_lstat)
+        else:
+            replacement = run / "replacement.lock"
+            replacement.write_bytes(b"replacement")
+            os.replace(replacement, lease.path)
+
+        with pytest.raises(RuntimeError):
+            lease.assert_authorizes(run)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_missing_posix_parent_descriptor(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        descriptor = lease._parent_descriptor
+        assert descriptor is not None
+        lease._parent_descriptor = None
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_descriptor = descriptor
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_unlocked_posix_parent_descriptor(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        assert lease._parent_descriptor is not None
+        assert lease._parent_locked
+        lease._parent_locked = False
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_locked = True
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows parent validator delegation required",
+)
+def test_execution_lease_rejects_unlocked_parent_descriptor_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import image2editable.execution as execution
+
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        monkeypatch.setattr(execution, "_validate_open_parent", lambda *_: None)
+        lease._parent_descriptor = -1
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_descriptor = None
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_replaced_posix_parent_path(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    moved_run = tmp_path / "moved-run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        run.rename(moved_run)
+        run.mkdir()
+        with pytest.raises(RuntimeError, match="parent identity changed"):
+            lease.assert_authorizes(run)
+
+
 def test_initialized_state_points_to_hash_bound_current_request(page_session: dict) -> None:
     from image2editable.store import RunStore
 

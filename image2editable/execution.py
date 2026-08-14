@@ -64,6 +64,20 @@ class ExecutionLease:
     def __exit__(self, exc_type, exc, traceback) -> None:
         self._release(exc)
 
+    def assert_authorizes(self, run_root: str | Path) -> None:
+        root = Path(run_root).resolve()
+        if self._file is None or not self._file_locked:
+            raise RuntimeError("Execution lease is not held")
+        if self.run_root != root or self.path != root / "execution.lock":
+            raise RuntimeError("Execution lease authorizes a different Run")
+        if self._parent_descriptor is not None:
+            if not self._parent_locked:
+                raise RuntimeError("Execution lease parent is not held")
+            _validate_open_parent(root, self._parent_descriptor)
+        elif os.name != "nt":
+            raise RuntimeError("Execution lease parent is not held")
+        _validate_open_file(self.path, self._file)
+
     def _validated_path(self) -> Path:
         parent = self.path.parent.resolve()
         path = parent / self.path.name
