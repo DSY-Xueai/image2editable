@@ -209,85 +209,100 @@ def test_standalone_declares_accelerate_used_by_visual_segmentation(
     assert expected in STANDALONE_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
 
 
-def test_cross_platform_docs_prefer_the_verified_current_environment() -> None:
+def test_skill_docs_prefer_the_verified_current_environment() -> None:
     skill_text = SKILL.read_text(encoding="utf-8")
-    readme_text = README.read_text(encoding="utf-8")
-    readme_en_text = README_EN.read_text(encoding="utf-8")
 
     assert "优先使用 Linux/WSL" not in skill_text
     assert "优先使用当前平台" in skill_text
     assert "通过 `doctor`" in skill_text
-    assert "优先使用当前平台" in readme_text
-    assert "通过 `doctor`" in readme_text
-    assert "prefer Linux/WSL" not in readme_en_text
-    assert "current platform" in readme_en_text
-    assert "passes `doctor`" in readme_en_text
     assert "设备预检" in skill_text
-    assert "设备预检" in readme_text
-    assert "device preflight" in readme_en_text
     probe = (
         "python -c \"import sys, torch; print({'platform': sys.platform, "
         "'cuda': torch.cuda.is_available(), 'rocm': torch.version.hip})\""
     )
     assert probe in skill_text
-    assert probe in readme_text
-    assert probe in readme_en_text
-    assert "我这台机器" not in skill_text + readme_text
-    assert "this machine" not in readme_en_text.lower()
+    assert "我这台机器" not in skill_text
 
 
-def test_cross_platform_docs_define_supported_device_interfaces() -> None:
+def test_skill_docs_define_supported_device_interfaces() -> None:
     skill_text = SKILL.read_text(encoding="utf-8")
-    readme_text = README.read_text(encoding="utf-8")
-    readme_en_text = README_EN.read_text(encoding="utf-8")
 
-    for text in (skill_text, readme_text):
-        assert "Windows/Linux" in text
-        assert "PyTorch" in text
-        assert "CUDA" in text
-        assert "ROCm" in text
-        assert "真实 Apple Silicon 回归前" in text
-        assert "不把 MPS 自动设为新默认" in text
-
-    assert "Windows and Linux" in readme_en_text
-    assert "PyTorch" in readme_en_text
-    assert "CUDA" in readme_en_text
-    assert "ROCm" in readme_en_text
-    assert "real Apple Silicon regression testing" in readme_en_text
-    assert "MPS will not become a new automatic default" in readme_en_text
+    assert "Windows/Linux" in skill_text
+    assert "PyTorch" in skill_text
+    assert "CUDA" in skill_text
+    assert "ROCm" in skill_text
+    assert "真实 Apple Silicon 回归前" in skill_text
+    assert "不把 MPS 自动设为新默认" in skill_text
 
 
-def test_cross_platform_docs_keep_the_full_quality_model_on_cpu() -> None:
+def test_skill_docs_keep_the_full_quality_model_on_cpu() -> None:
     skill_text = SKILL.read_text(encoding="utf-8")
-    readme_text = README.read_text(encoding="utf-8")
-    readme_en_text = README_EN.read_text(encoding="utf-8")
 
     assert "SAM 2.1 large" in skill_text
     assert "CPU 仍运行完整模型" in skill_text
     assert "相同质量门禁" in skill_text
     assert "不替换为轻量分割模型" in skill_text
     assert "显著较慢" in skill_text
-    assert "SAM 2.1 Large" in readme_text
-    assert "CPU 仍运行完整模型" in readme_text
-    assert "相同质量门禁" in readme_text
-    assert "不替换为轻量分割模型" in readme_text
-    assert "显著慢" in readme_text
-    assert "SAM 2.1 Large" in readme_en_text
-    assert "CPU still runs the full model" in readme_en_text
-    assert "same quality gates" in readme_en_text
-    assert "does not switch to a lightweight segmentation model" in readme_en_text
-    assert "significantly slower" in readme_en_text
 
 
-def test_readmes_do_not_promise_hardware_specific_or_uniform_speedups() -> None:
+def test_readmes_keep_hardware_policy_out_of_quick_start() -> None:
     readme_text = README.read_text(encoding="utf-8")
     readme_en_text = README_EN.read_text(encoding="utf-8")
 
-    assert "不对特定 GPU 型号或统一加速倍数作承诺" in readme_text
-    assert (
-        "does not promise results for a specific GPU model or a uniform speedup factor"
-        in readme_en_text
+    assert "### 运行环境" not in readme_text
+    assert "### Runtime environment" not in readme_en_text
+    assert "python -c \"import sys, torch" not in readme_text
+    assert "python -c \"import sys, torch" not in readme_en_text
+
+
+def test_readmes_document_ocr_installation_after_local_cli_install() -> None:
+    readme_text = README.read_text(encoding="utf-8")
+    readme_en_text = README_EN.read_text(encoding="utf-8")
+    paddle_url = "https://www.paddlepaddle.org.cn/install/quick"
+    tesseract_url = "https://tesseract-ocr.github.io/tessdoc/Installation.html"
+    commands = (
+        "python -m pip install paddleocr paddlepaddle",
+        "tesseract --version",
+        "python -m pip install pytesseract",
+        "\nimage2editable doctor\n",
     )
+
+    for text in (readme_text, readme_en_text):
+        assert text.index("pip install .") < text.index(commands[0])
+        assert text.index(commands[0]) < text.index(commands[1])
+        assert text.index(commands[1]) < text.index(commands[2])
+        assert text.index(commands[2]) < text.index(commands[3])
+        assert paddle_url in text
+        assert tesseract_url in text
+        assert '"ready": true' in text
+    assert "Codex、Claude Code" in readme_text
+    assert "Codex or Claude Code" in readme_en_text
+    assert "#### 安装 OCR" in readme_text
+    assert "##### 方案一：PaddleOCR（推荐）" in readme_text
+    assert "##### 方案二：Tesseract" in readme_text
+    assert readme_text.index("#### 检查环境 ✅") < readme_text.index(
+        "#### 配置本地模型服务"
+    )
+    assert "#### Install OCR" in readme_en_text
+    assert "##### Option 1: PaddleOCR (recommended)" in readme_en_text
+    assert "##### Option 2: Tesseract" in readme_en_text
+    assert readme_en_text.index("#### Check the environment ✅") < readme_en_text.index(
+        "#### Configure the local model service"
+    )
+
+
+def test_readmes_describe_quality_completion_and_current_layout() -> None:
+    readme_text = README.read_text(encoding="utf-8")
+    readme_en_text = README_EN.read_text(encoding="utf-8")
+
+    assert "只有通过质量门禁的重建结果才标记为可编辑转换完成" in readme_text
+    assert "only reconstructed results that pass the quality gates are marked complete" in readme_en_text
+    assert "无法通过质量检查时保留原内容并明确标记 warning" not in readme_text
+    assert "retain their source content with a warning" not in readme_en_text
+    assert "├── .github/" in readme_text
+    assert "├── .github/" in readme_en_text
+    assert "旧版图片专用技术路线，非当前推荐入口" in readme_text
+    assert "Legacy image-only pipeline; not the recommended entry point" in readme_en_text
 
 
 def test_requirements_keeps_pillow_floor() -> None:

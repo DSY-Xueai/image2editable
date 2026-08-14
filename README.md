@@ -39,7 +39,7 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 | 混合 PPTX 保护 | 未参与重建的原生文字、形状、表格、图表、备注和层级顺序保持不变。 |
 | 多种输入 | 支持图片、图片目录、PDF、图片版 PPTX 和混合 PPTX。 |
 | 批量转换 | 多张图片或多页文档按顺序生成多页 PPTX。 |
-| 质量保护 | 每页最多进行五轮重修，质量无改善时提前停止；无法通过质量检查时保留原内容并明确标记 warning。 |
+| 质量门禁 | 每页最多进行五轮重修，质量无改善时提前停止；只有通过质量门禁的重建结果才标记为可编辑转换完成。 |
 
 ## 使用前了解
 
@@ -48,17 +48,6 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 - **🔒 Host Agent 模式可能把诊断图交由当前宿主服务处理**；处理敏感文件时，请选择 Local Agent。
 
 ## 快速上手
-
-### 运行环境
-
-优先使用当前平台已经正确安装、且通过 `doctor` 与设备预检的硬件加速环境；不要仅为 WSL 建议离开已经可用的环境。Windows/Linux 沿用 PyTorch 的设备接口：PyTorch 报告 CUDA 可用时使用 CUDA，ROCm 环境使用 PyTorch 提供的兼容设备接口。macOS 保持当前受支持的设备选择；在完成真实 Apple Silicon 回归前，不把 MPS 自动设为新默认。
-
-```bash
-image2editable doctor
-python -c "import sys, torch; print({'platform': sys.platform, 'cuda': torch.cuda.is_available(), 'rocm': torch.version.hip})"
-```
-
-CPU 仍运行完整模型和相同质量门禁，包括 SAM 2.1 Large，不替换为轻量分割模型，但会显著慢于可用的硬件加速环境。实际耗时取决于平台、运行环境和输入复杂度，项目不对特定 GPU 型号或统一加速倍数作承诺。
 
 ### 通过 **使用 skills CLI** 安装
 
@@ -85,7 +74,7 @@ $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 /image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 ```
 
-**💡 建议：** 有可用的 Codex、Claude Code 等宿主时优先使用 Skill；只想在本机离线处理图片或 PDF 时使用 Local CLI。
+**💡 建议：** 有可用的 Codex、Claude Code 等 AI 编程助手时优先使用 Skill；只想在本机离线处理图片或 PDF 时使用 Local CLI。
 
 ### Local CLI
 
@@ -96,6 +85,48 @@ git clone https://github.com/DSY-Xueai/image2editable.git
 cd image2editable
 pip install .
 ```
+
+#### 安装 OCR
+
+完整转换需要至少一种 OCR。中文和复杂版面推荐 PaddleOCR；也可以使用 Tesseract。安装完成后运行 `image2editable doctor`，检查通过后再开始转换。
+
+##### 方案一：PaddleOCR（推荐）
+
+```bash
+# 安装 CPU 版的 PaddlePaddle，不需要配置 CUDA，第一次使用建议选这个
+python -m pip install paddleocr paddlepaddle
+```
+
+💡 PaddlePaddle GPU 版的安装方式可以查看[官方安装说明](https://www.paddlepaddle.org.cn/install/quick)。当前默认使用的是 CPU 版，不确定时直接按上面的命令安装即可。
+
+##### 方案二：Tesseract
+
+Tesseract 在 Windows、Linux 和 macOS 上的安装方法不同，先按照[官方安装说明](https://tesseract-ocr.github.io/tessdoc/Installation.html)安装主程序。
+
+💡 也可以让 Codex、Claude Code 等编程助手检查操作系统和可用的包管理器，再根据 Tesseract 官方文档完成安装。
+
+```bash
+# 检查是否安装成功
+tesseract --version
+```
+
+能正常显示版本号，再安装 Python 调用包：
+
+```bash
+python -m pip install pytesseract
+```
+
+#### 检查环境 ✅
+
+OCR 安装完成后，检查转换需要的 Python、OCR、SAM 和 LaMa 等依赖：
+
+```bash
+image2editable doctor
+```
+
+输出中出现 `"ready": true`，就可以开始转换。
+
+#### 配置本地模型服务
 
 首次配置时，在项目根目录使用下面这个命令复制模板并**填写自己的服务信息**。
 
@@ -143,6 +174,7 @@ sources = ["input.pdf"]
 image2editable/
 ├── .claude-plugin/            # Claude Code 插件清单
 │   └── plugin.json
+├── .github/                   # CI、Issue 表单和 PR 模板
 ├── docs/
 │   └── images/                # README 图片资源
 ├── image2editable/            # 统一 CLI、运行时和转换模块
@@ -156,7 +188,7 @@ image2editable/
 ├── .env.example               # Local Agent 配置示例
 ├── .gitignore
 ├── CITATION.cff               # 引用信息
-├── image_to_ppt.py            # 兼容的图片转 PPTX 入口
+├── image_to_ppt.py            # 旧版图片专用技术路线，非当前推荐入口
 ├── image_to_psd.py            # 兼容的图片转 PSD 入口
 ├── LICENSE                    # MIT 许可证
 ├── pyproject.toml             # Python 包与 CLI 配置

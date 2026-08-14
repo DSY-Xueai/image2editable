@@ -39,7 +39,7 @@ After conversion, you can edit recovered text, move separated visual elements, a
 | Mixed PPTX preservation | Native text, shapes, tables, charts, notes, and z-order that are not rebuilt remain unchanged. |
 | Multiple inputs | Supports images, image directories, PDFs, image-based PPTX files, and mixed PPTX files. |
 | Batch conversion | Converts multiple images or document pages into a multi-slide PPTX in order. |
-| Quality protection | Makes up to five repair rounds per page; pages that do not pass checks retain their source content with a warning. |
+| Quality gates | Makes up to five repair rounds per page and stops early when quality does not improve; only reconstructed results that pass the quality gates are marked complete as editable conversions. |
 
 ## Before you start
 
@@ -48,17 +48,6 @@ After conversion, you can edit recovered text, move separated visual elements, a
 - **🔒 Host Agent mode may send diagnostic images to the current host service.** Choose Local Agent for sensitive files.
 
 ## Quick start
-
-### Runtime environment
-
-Prefer a correctly installed hardware-accelerated environment on the current platform that passes `doctor` and the device preflight; do not leave an already working environment solely because of a WSL recommendation. Windows and Linux use the existing PyTorch device interface: CUDA is used when PyTorch reports it as available, while ROCm uses PyTorch's compatible device interface. macOS keeps the current supported device selection; MPS will not become a new automatic default until real Apple Silicon regression testing is complete.
-
-```bash
-image2editable doctor
-python -c "import sys, torch; print({'platform': sys.platform, 'cuda': torch.cuda.is_available(), 'rocm': torch.version.hip})"
-```
-
-CPU still runs the full model and the same quality gates, including SAM 2.1 Large; it does not switch to a lightweight segmentation model, but it is significantly slower than a working hardware-accelerated environment. Runtime depends on the platform, environment, and input complexity, so the project does not promise results for a specific GPU model or a uniform speedup factor.
 
 ### Install with the **skills CLI**
 
@@ -86,7 +75,7 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 /image-to-ppt Convert <input.pdf> to an editable PPTX.
 ```
 
-> **💡 Tip:** Use the Skill when Codex, Claude Code, or a similar host is available. Use Local CLI when images or PDFs need to stay on your own machine.
+> **💡 Tip:** Use the Skill when an AI coding assistant such as Codex or Claude Code is available. Use Local CLI when images or PDFs need to stay on your own machine.
 
 ### Local CLI
 
@@ -97,6 +86,48 @@ git clone https://github.com/DSY-Xueai/image2editable.git
 cd image2editable
 pip install .
 ```
+
+#### Install OCR
+
+A complete conversion needs at least one OCR engine. PaddleOCR is recommended for Chinese and complex layouts; Tesseract is also supported. After installation, run `image2editable doctor` and start converting only after the check passes.
+
+##### Option 1: PaddleOCR (recommended)
+
+```bash
+# Install the CPU build of PaddlePaddle; no CUDA setup is needed for this option
+python -m pip install paddleocr paddlepaddle
+```
+
+💡 See the [official installation guide](https://www.paddlepaddle.org.cn/install/quick) for PaddlePaddle GPU packages. The CPU build is the current default; use the command above if you are unsure.
+
+##### Option 2: Tesseract
+
+Tesseract installation differs on Windows, Linux, and macOS. First install the main program by following the [official instructions](https://tesseract-ocr.github.io/tessdoc/Installation.html).
+
+💡 You can also ask Codex or Claude Code to check your operating system and available package manager, then complete the installation using the official Tesseract documentation.
+
+```bash
+# Check that Tesseract was installed successfully
+tesseract --version
+```
+
+If the command prints a version number, install the Python package:
+
+```bash
+python -m pip install pytesseract
+```
+
+#### Check the environment ✅
+
+After installing OCR, check the Python, OCR, SAM, LaMa, and other conversion dependencies:
+
+```bash
+image2editable doctor
+```
+
+You can start converting when the output contains `"ready": true`.
+
+#### Configure the local model service
 
 For first-time setup, copy the template in the project root and **fill in your own service settings**.
 
@@ -144,6 +175,7 @@ sources = ["input.pdf"]
 image2editable/
 ├── .claude-plugin/            # Claude Code plugin manifest
 │   └── plugin.json
+├── .github/                   # CI, issue forms, and PR template
 ├── docs/
 │   └── images/                # README image assets
 ├── image2editable/            # Unified CLI, runtime, and conversion modules
@@ -157,7 +189,7 @@ image2editable/
 ├── .env.example               # Local Agent configuration example
 ├── .gitignore
 ├── CITATION.cff               # Citation information
-├── image_to_ppt.py            # Compatible image-to-PPTX entry point
+├── image_to_ppt.py            # Legacy image-only pipeline; not the recommended entry point
 ├── image_to_psd.py            # Compatible image-to-PSD entry point
 ├── LICENSE                    # MIT license
 ├── pyproject.toml             # Python package and CLI configuration
