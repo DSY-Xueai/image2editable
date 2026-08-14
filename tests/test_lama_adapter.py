@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import traceback
 import types
 from pathlib import Path
 
@@ -479,6 +480,271 @@ def test_resolve_lama_checkpoint_does_not_delete_replaced_temporary_path(
 
     assert temporary is not None
     assert temporary.read_bytes() == attacker
+
+
+class _FakeBigLamaOutput:
+    def __init__(self, payload, events: list) -> None:
+        self.payload = payload
+        self.events = events
+
+    def __getitem__(self, index: int):
+        self.events.append(("output", index))
+        return self
+
+    def permute(self, *axes: int):
+        self.events.append(("permute", axes))
+        return self
+
+    def detach(self):
+        self.events.append("detach")
+        return self
+
+    def cpu(self):
+        self.events.append("cpu")
+        return self
+
+    def numpy(self):
+        self.events.append("numpy")
+        if isinstance(self.payload, Exception):
+            raise self.payload
+        return self.payload
+
+
+def _install_fake_big_lama_torch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    payload=None,
+    cuda_available: bool = False,
+    load_error: Exception | None = None,
+    inference_error: Exception | None = None,
+):
+    events = []
+    output = _FakeBigLamaOutput(
+        np.array([[[1.2, -0.1, 0.5]]], dtype=np.float32)
+        if payload is None
+        else payload,
+        events,
+    )
+
+    class Model:
+        def eval(self):
+            events.append("eval")
+            return self
+
+        def to(self, device):
+            events.append(("model-to", device))
+            return self
+
+        def __call__(self, image_tensor, mask_tensor):
+            events.append(("model", image_tensor, mask_tensor))
+            if inference_error is not None:
+                raise inference_error
+            return output
+
+    class InferenceMode:
+        def __enter__(self):
+            events.append("inference-enter")
+
+        def __exit__(self, *_args):
+            events.append("inference-exit")
+
+    def load(path: str, *, map_location):
+        events.append(("load", path, map_location))
+        if load_error is not None:
+            raise load_error
+        return Model()
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: events.append("cuda-available")
+            or cuda_available
+        ),
+        device=lambda name: events.append(("device", name)) or f"device:{name}",
+        jit=types.SimpleNamespace(load=load),
+        inference_mode=lambda: InferenceMode(),
+    )
+    monkeypatch.setattr(
+        lama_inpaint.importlib,
+        "import_module",
+        lambda name: events.append(("import", name)) or fake_torch,
+    )
+    return events
+
+
+def test_big_lama_matches_torchscript_adapter_call_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "private-model-name.pt"
+    events = _install_fake_big_lama_torch(monkeypatch)
+    image = object()
+    mask = object()
+    image_tensor = object()
+    mask_tensor = object()
+    monkeypatch.setattr(
+        lama_inpaint,
+        "_prepare_image_and_mask",
+        lambda actual_image, actual_mask, *, device: events.append(
+            ("prepare", actual_image, actual_mask, device)
+        )
+        or (image_tensor, mask_tensor),
+    )
+
+    model = lama_inpaint._BigLama(checkpoint, "device:cpu")
+    output = model(image, mask)
+
+    assert output.mode == "RGB"
+    np.testing.assert_array_equal(
+        np.asarray(output),
+        np.array([[[255, 0, 127]]], dtype=np.uint8),
+    )
+    assert events == [
+        ("import", "torch"),
+        ("load", str(checkpoint), "device:cpu"),
+        "eval",
+        ("model-to", "device:cpu"),
+        ("prepare", image, mask, "device:cpu"),
+        "inference-enter",
+        ("model", image_tensor, mask_tensor),
+        ("output", 0),
+        ("permute", (1, 2, 0)),
+        "detach",
+        "cpu",
+        "numpy",
+        "inference-exit",
+    ]
+
+
+def test_big_lama_maps_model_load_error_without_checkpoint_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "secret-checkpoint-name.pt"
+    failure = RuntimeError(f"cannot load {checkpoint}")
+    _install_fake_big_lama_torch(monkeypatch, load_error=failure)
+
+    with pytest.raises(lama_inpaint.LargeMaskInpaintError) as raised:
+        lama_inpaint._BigLama(checkpoint, "device:cpu")
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert str(checkpoint) not in str(raised.value)
+
+
+def test_big_lama_maps_inference_error_without_checkpoint_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "secret-checkpoint-name.pt"
+    failure = RuntimeError(f"inference failed for {checkpoint}")
+    _install_fake_big_lama_torch(monkeypatch, inference_error=failure)
+    monkeypatch.setattr(
+        lama_inpaint,
+        "_prepare_image_and_mask",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    model = lama_inpaint._BigLama(checkpoint, "device:cpu")
+
+    with pytest.raises(lama_inpaint.LargeMaskInpaintError) as raised:
+        model(object(), object())
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert str(checkpoint) not in str(raised.value)
+
+
+def test_big_lama_maps_output_error_without_checkpoint_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "secret-checkpoint-name.pt"
+    failure = RuntimeError(f"bad output for {checkpoint}")
+    _install_fake_big_lama_torch(monkeypatch, payload=failure)
+    monkeypatch.setattr(
+        lama_inpaint,
+        "_prepare_image_and_mask",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    model = lama_inpaint._BigLama(checkpoint, "device:cpu")
+
+    with pytest.raises(lama_inpaint.LargeMaskInpaintError) as raised:
+        model(object(), object())
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert str(checkpoint) not in rendered
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        np.zeros((4, 5), dtype=np.float32),
+        np.zeros((4, 5, 4), dtype=np.float32),
+        "not-an-array",
+    ],
+)
+def test_big_lama_rejects_invalid_output_type_or_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload,
+) -> None:
+    events = _install_fake_big_lama_torch(monkeypatch, payload=payload)
+    monkeypatch.setattr(
+        lama_inpaint,
+        "_prepare_image_and_mask",
+        lambda *_args, **_kwargs: (object(), object()),
+    )
+    model = lama_inpaint._BigLama(tmp_path / "model.pt", "device:cpu")
+
+    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="invalid output"):
+        model(object(), object())
+
+    assert "inference-enter" in events
+    assert "inference-exit" in events
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "expected_device"),
+    [(True, "cuda"), (False, "cpu")],
+)
+def test_create_model_selects_device_and_loads_resolved_checkpoint_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    expected_device: str,
+) -> None:
+    checkpoint = tmp_path / "bound-checkpoint.pt"
+    resolve_calls = []
+    monkeypatch.setattr(
+        lama_inpaint,
+        "resolve_lama_checkpoint",
+        lambda: resolve_calls.append("resolve") or checkpoint,
+    )
+    events = _install_fake_big_lama_torch(
+        monkeypatch,
+        cuda_available=cuda_available,
+    )
+
+    model = lama_inpaint._create_model()
+
+    assert isinstance(model, lama_inpaint._BigLama)
+    assert resolve_calls == ["resolve"]
+    assert events == [
+        ("import", "torch"),
+        "cuda-available",
+        ("device", expected_device),
+        ("import", "torch"),
+        ("load", str(checkpoint), f"device:{expected_device}"),
+        "eval",
+        ("model-to", f"device:{expected_device}"),
+    ]
 
 
 def test_lama_module_import_does_not_eagerly_import_torch() -> None:

@@ -43,7 +43,7 @@ _CHECKPOINT_CHUNK_SIZE = 1024 * 1024
 
 def _dependency_error(detail: str) -> LargeMaskInpaintError:
     return LargeMaskInpaintError(
-        f"{detail} Install simple-lama-inpainting==0.1.2."
+        f"{detail} Install torch."
     )
 
 
@@ -362,16 +362,54 @@ def _prepare_image_and_mask(image, mask, *, device):
     return image_tensor, mask_tensor
 
 
+class _BigLama:
+    def __init__(self, checkpoint: str | Path, device) -> None:
+        self._torch = importlib.import_module("torch")
+        self.device = device
+        try:
+            self.model = self._torch.jit.load(
+                str(checkpoint),
+                map_location=device,
+            )
+            self.model.eval()
+            self.model.to(device)
+        except Exception:
+            raise LargeMaskInpaintError(
+                "LaMa model initialization failed."
+            ) from None
+
+    def __call__(self, image, mask) -> Image.Image:
+        image_tensor, mask_tensor = _prepare_image_and_mask(
+            image,
+            mask,
+            device=self.device,
+        )
+        with self._torch.inference_mode():
+            try:
+                output = self.model(image_tensor, mask_tensor)
+            except Exception:
+                raise LargeMaskInpaintError("LaMa inference failed.") from None
+            try:
+                result = output[0].permute(1, 2, 0).detach().cpu().numpy()
+            except Exception:
+                raise LargeMaskInpaintError(
+                    "LaMa returned invalid output."
+                ) from None
+            if not isinstance(result, np.ndarray) or (
+                result.ndim != 3 or result.shape[2] != 3
+            ):
+                raise LargeMaskInpaintError("LaMa returned invalid output.")
+            result = np.clip(result * 255, 0, 255).astype(np.uint8)
+            return Image.fromarray(result, mode="RGB")
+
+
 def _create_model():
     try:
-        from simple_lama_inpainting import SimpleLama
+        torch = importlib.import_module("torch")
     except ModuleNotFoundError as exc:
         raise _dependency_error("LaMa dependency is unavailable.") from exc
-
-    try:
-        return SimpleLama()
-    except Exception as exc:
-        raise _dependency_error("LaMa model initialization failed.") from exc
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return _BigLama(resolve_lama_checkpoint(), device)
 
 
 def _get_model():
