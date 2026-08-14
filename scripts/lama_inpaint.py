@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -28,6 +29,45 @@ def _dependency_error(detail: str) -> LargeMaskInpaintError:
     return LargeMaskInpaintError(
         f"{detail} Install simple-lama-inpainting==0.1.2."
     )
+
+
+def _prepare_image_and_mask(image, mask, *, device):
+    if isinstance(image, Image.Image):
+        image_array = np.array(image, copy=True)
+    elif isinstance(image, np.ndarray):
+        image_array = image.copy()
+    else:
+        raise TypeError("image must be a NumPy array or PIL image")
+    if isinstance(mask, Image.Image):
+        mask_array = np.array(mask, copy=True)
+    elif isinstance(mask, np.ndarray):
+        mask_array = mask.copy()
+    else:
+        raise TypeError("mask must be a NumPy array or PIL image")
+
+    if image_array.ndim != 3 or image_array.shape[2] != 3:
+        raise ValueError("image must be an RGB array with shape (H, W, 3)")
+    if mask_array.ndim != 2:
+        raise ValueError("mask must be an L array with shape (H, W)")
+    if mask_array.shape != image_array.shape[:2]:
+        raise ValueError("mask must match the image height and width")
+
+    image_array = np.transpose(
+        image_array.astype(np.float32) / 255,
+        (2, 0, 1),
+    )
+    mask_array = (mask_array.astype(np.float32) / 255)[None, ...]
+    height, width = mask_array.shape[1:]
+    padding = ((0, 0), (0, (-height) % 8), (0, (-width) % 8))
+    if padding[1][1] or padding[2][1]:
+        image_array = np.pad(image_array, padding, mode="symmetric")
+        mask_array = np.pad(mask_array, padding, mode="symmetric")
+
+    torch = importlib.import_module("torch")
+    image_tensor = torch.from_numpy(image_array).unsqueeze(0).to(device)
+    mask_tensor = torch.from_numpy(mask_array).unsqueeze(0).to(device)
+    mask_tensor = (mask_tensor > 0) * 1
+    return image_tensor, mask_tensor
 
 
 def _create_model():
