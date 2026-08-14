@@ -27,6 +27,275 @@ from scripts import (
 )
 
 
+class _ChangedStat:
+    def __init__(self, status: os.stat_result) -> None:
+        self._status = status
+
+    def __getattr__(self, name: str) -> object:
+        if name == "st_ino":
+            return self._status.st_ino + 1
+        return getattr(self._status, name)
+
+
+class _FakeDarwinRename:
+    def __init__(self, result: int = 0, error_number: int = 0) -> None:
+        self.result = result
+        self.error_number = error_number
+        self.calls = []
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args: object) -> int:
+        self.calls.append(args)
+        visual_segment.ctypes.set_errno(self.error_number)
+        return self.result
+
+
+def _darwin_publish_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: int = 0,
+    error_number: int = 0,
+    symbol: bool = True,
+    parent_statuses: list[object] | None = None,
+) -> tuple[Path, Path, _FakeDarwinRename, dict[str, object]]:
+    staging = tmp_path / ".action.tmp"
+    staging.mkdir()
+    (staging / "staged.txt").write_text("staged", encoding="utf-8")
+    target = tmp_path / "action"
+    rename = _FakeDarwinRename(result, error_number)
+    library = types.SimpleNamespace()
+    if symbol:
+        library.renameatx_np = rename
+    events: dict[str, object] = {
+        "cdll": [], "open": [], "fstat": [], "close": [],
+    }
+    parent_status = tmp_path.lstat()
+    statuses = parent_statuses or [parent_status, parent_status]
+
+    def load_library(name: object, *, use_errno: bool = False) -> object:
+        events["cdll"].append((name, use_errno))
+        return library
+
+    def open_parent(path: object, flags: int) -> int:
+        events["open"].append((Path(path), flags))
+        return 37
+
+    def fstat_parent(descriptor: int) -> object:
+        calls = events["fstat"]
+        calls.append(descriptor)
+        return statuses[min(len(calls) - 1, len(statuses) - 1)]
+
+    monkeypatch.setattr(
+        visual_segment, "sys", types.SimpleNamespace(platform="darwin"),
+        raising=False,
+    )
+    monkeypatch.setattr(visual_segment.ctypes, "CDLL", load_library)
+    monkeypatch.setattr(visual_segment.os, "O_DIRECTORY", 0x100, raising=False)
+    monkeypatch.setattr(visual_segment.os, "O_NOFOLLOW", 0x200, raising=False)
+    monkeypatch.setattr(visual_segment.os, "O_CLOEXEC", 0x400, raising=False)
+    monkeypatch.setattr(visual_segment.os, "open", open_parent)
+    monkeypatch.setattr(visual_segment.os, "fstat", fstat_parent)
+    monkeypatch.setattr(
+        visual_segment.os, "close", lambda descriptor: events["close"].append(descriptor),
+    )
+    return staging, target, rename, events
+
+
+def test_publish_action_directory_uses_darwin_renameatx_np(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch,
+    )
+
+    visual_segment._publish_action_directory(staging, target)
+
+    assert events["cdll"] == [(None, True)]
+    assert events["open"] == [(tmp_path, os.O_RDONLY | 0x100 | 0x200 | 0x400)]
+    assert events["fstat"] == [37, 37]
+    assert events["close"] == [37]
+    assert rename.calls == [(37, b".action.tmp", 37, b"action", 4)]
+    assert rename.argtypes == [
+        visual_segment.ctypes.c_int,
+        visual_segment.ctypes.c_char_p,
+        visual_segment.ctypes.c_int,
+        visual_segment.ctypes.c_char_p,
+        visual_segment.ctypes.c_uint,
+    ]
+    assert rename.restype is visual_segment.ctypes.c_int
+
+
+@pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
+def test_publish_action_directory_maps_darwin_existing_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, result=-1, error_number=error_number,
+    )
+    target.mkdir()
+    (target / "existing.txt").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert (target / "existing.txt").read_text(encoding="utf-8") == "existing"
+    assert (staging / "staged.txt").read_text(encoding="utf-8") == "staged"
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_preserves_darwin_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, result=-1, error_number=errno.EACCES,
+    )
+
+    with pytest.raises(OSError) as raised:
+        visual_segment._publish_action_directory(staging, target)
+
+    assert raised.value.errno == errno.EACCES
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_rejects_missing_darwin_symbol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, symbol=False,
+    )
+
+    with pytest.raises(RuntimeError, match="renameatx_np"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert events["open"] == []
+    assert staging.is_dir()
+    assert not target.exists()
+
+
+def test_publish_action_directory_rejects_darwin_symlink_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    real_staging, _, rename, events = _darwin_publish_fixture(
+        real_parent, monkeypatch,
+    )
+    lexical_parent = tmp_path / "linked"
+    staging = lexical_parent / real_staging.name
+    target = lexical_parent / "action"
+    parent_status = real_parent.lstat()
+    symlink_status = types.SimpleNamespace(
+        st_mode=stat.S_IFLNK,
+        st_dev=parent_status.st_dev,
+        st_ino=parent_status.st_ino,
+        st_file_attributes=0,
+    )
+    real_resolve = Path.resolve
+    real_lstat = Path.lstat
+
+    def resolved_parent(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == lexical_parent:
+            return real_parent
+        return real_resolve(path, *args, **kwargs)
+
+    def linked_status(path: Path) -> object:
+        if path == lexical_parent:
+            return symlink_status
+        if path == staging:
+            return real_lstat(real_staging)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "resolve", resolved_parent)
+    monkeypatch.setattr(Path, "lstat", linked_status)
+
+    with pytest.raises(RuntimeError, match="parent is unsafe"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["open"] == []
+
+
+def test_publish_action_directory_rechecks_darwin_staging_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch,
+    )
+    real_lstat = Path.lstat
+    staging_checks = 0
+
+    def changed_staging(path: Path) -> object:
+        nonlocal staging_checks
+        status = real_lstat(path)
+        if path == staging:
+            staging_checks += 1
+            if staging_checks == 2:
+                return _ChangedStat(status)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", changed_staging)
+
+    with pytest.raises(RuntimeError, match="staging identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["close"] == [37]
+
+
+@pytest.mark.parametrize("changed_after_call", [False, True])
+def test_publish_action_directory_rechecks_darwin_parent_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_after_call: bool,
+) -> None:
+    parent_status = tmp_path.lstat()
+    statuses = (
+        [parent_status, _ChangedStat(parent_status)]
+        if changed_after_call
+        else [_ChangedStat(parent_status)]
+    )
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, parent_statuses=statuses,
+    )
+
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert len(rename.calls) == (1 if changed_after_call else 0)
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_binds_darwin_parent_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_status = tmp_path.lstat()
+    replaced_status = _ChangedStat(parent_status)
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path,
+        monkeypatch,
+        parent_statuses=[replaced_status, replaced_status],
+    )
+    real_lstat = Path.lstat
+
+    def replaced_parent(path: Path) -> object:
+        status = real_lstat(path)
+        if path == tmp_path and events["fstat"]:
+            return _ChangedStat(status)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", replaced_parent)
+
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["close"] == [37]
+
+
 def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
     tmp_path: Path,
     monkeypatch,

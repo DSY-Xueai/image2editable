@@ -10,6 +10,7 @@ import errno
 import hashlib
 import hmac
 import stat
+import sys
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -532,6 +533,9 @@ def execute_component_actions(
 def _publish_action_directory(staging: Path, target: Path) -> None:
     """Atomically publish a directory without replacing an existing target."""
 
+    if sys.platform == "darwin":
+        _publish_darwin_action_directory(staging, target)
+        return
     if os.name == "nt":
         try:
             staging.rename(target)
@@ -554,6 +558,93 @@ def _publish_action_directory(staging: Path, target: Path) -> None:
     if error_number == errno.EEXIST:
         raise FileExistsError(f"Component action output already exists: {target}")
     raise OSError(error_number, os.strerror(error_number), str(target))
+
+
+def _publish_darwin_action_directory(staging: Path, target: Path) -> None:
+    parent = Path(os.path.abspath(staging.parent))
+    if Path(os.path.abspath(target.parent)) != parent:
+        raise RuntimeError("Component action directories have different parents")
+    parent_status = _action_directory_status(parent, "parent")
+    staging_status = _action_directory_status(staging, "staging")
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameatx_np = getattr(libc, "renameatx_np", None)
+    if renameatx_np is None:
+        raise RuntimeError("Atomic renameatx_np directory publication is unavailable")
+    renameatx_np.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameatx_np.restype = ctypes.c_int
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+    if directory_flag is None or nofollow_flag is None:
+        raise RuntimeError("Component action parent cannot be opened safely")
+    flags = os.O_RDONLY | directory_flag | nofollow_flag
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    parent_descriptor = os.open(parent, flags)
+    try:
+        _validate_action_parent(parent, parent_descriptor, parent_status)
+        current_staging = _action_directory_status(staging, "staging")
+        if (
+            current_staging.st_dev,
+            current_staging.st_ino,
+        ) != (
+            staging_status.st_dev,
+            staging_status.st_ino,
+        ):
+            raise RuntimeError(
+                f"Component action staging identity changed: {staging}"
+            )
+        result = renameatx_np(
+            parent_descriptor,
+            os.fsencode(staging.name),
+            parent_descriptor,
+            os.fsencode(target.name),
+            4,
+        )
+        error_number = ctypes.get_errno()
+        _validate_action_parent(parent, parent_descriptor, parent_status)
+        if result == 0:
+            return
+        if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise FileExistsError(
+                f"Component action output already exists: {target}"
+            )
+        raise OSError(error_number, os.strerror(error_number), str(target))
+    finally:
+        os.close(parent_descriptor)
+
+
+def _action_directory_status(path: Path, label: str):
+    try:
+        status = path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            f"Component action {label} identity changed: {path}"
+        ) from error
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or bool(getattr(status, "st_file_attributes", 0) & reparse)
+        or not stat.S_ISDIR(status.st_mode)
+    ):
+        raise RuntimeError(f"Component action {label} is unsafe: {path}")
+    return status
+
+
+def _validate_action_parent(parent: Path, descriptor: int, expected) -> None:
+    opened = os.fstat(descriptor)
+    current = _action_directory_status(parent, "parent")
+    identity = (expected.st_dev, expected.st_ino)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or (opened.st_dev, opened.st_ino) != identity
+        or (current.st_dev, current.st_ino) != identity
+    ):
+        raise RuntimeError(f"Component action parent identity changed: {parent}")
 
 
 def _read_action_mask(path: Path, shape: tuple[int, int], digest: str) -> tuple[np.ndarray, bytes]:
