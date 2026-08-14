@@ -10,7 +10,7 @@
 # Background modeling, foreground extraction, PPTX assembly
 # 背景建模、前景提取、PPTX 组装
 python-pptx>=0.6.21
-opencv-python>=4.5.0
+opencv-python>=4.5.0,<5
 Pillow>=9.0.0
 numpy>=1.20.0
 torch>=2.5.1

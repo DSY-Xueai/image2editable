@@ -1,7 +1,6 @@
 {
   "name": "image2editable",
   "description": "Convert images, screenshots, and design drafts into editable PPTX presentations or layered PSD files.",
-  "version": "1.0.0",
   "author": {
     "name": "DSY-Xueai"
   },

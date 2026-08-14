@@ -1,3 +1,4 @@
+import json
 import re
 import types
 from pathlib import Path
@@ -17,6 +18,8 @@ STANDALONE_VISUAL_SEGMENT = (
     ROOT / "skills" / "image-to-ppt" / "scripts" / "visual_segment.py"
 )
 PYPROJECT = ROOT / "pyproject.toml"
+CLAUDE_PLUGIN = ROOT / ".claude-plugin" / "plugin.json"
+GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def test_host_pptx_routes_screenshot_decisions_before_execute() -> None:
@@ -143,6 +146,15 @@ def test_standalone_sam_dependency_does_not_follow_a_branch() -> None:
 
     assert sam_lines == [SAM_PIN]
     assert re.fullmatch(r"[0-9a-f]{40}", sam_lines[0].rsplit("@", 1)[1])
+
+
+def test_opencv_stays_within_the_verified_major_version() -> None:
+    expected = "opencv-python>=4.5.0,<5"
+
+    assert expected in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+    assert expected in STANDALONE_REQUIREMENTS.read_text(
+        encoding="utf-8"
+    ).splitlines()
 
 
 def test_standalone_declares_accelerate_used_by_visual_segmentation(
@@ -286,3 +298,21 @@ def test_pyproject_keeps_supported_python_range() -> None:
     assert 'requires-python = ">=3.10,<3.13"' in PYPROJECT.read_text(
         encoding="utf-8"
     ).splitlines()
+
+
+def test_claude_plugin_does_not_pin_a_version() -> None:
+    manifest = json.loads(CLAUDE_PLUGIN.read_text(encoding="utf-8"))
+
+    assert "version" not in manifest
+    assert manifest["skills"] == [
+        "./skills/image-to-ppt",
+        "./skills/image-to-psd",
+    ]
+
+
+def test_github_ci_covers_supported_desktop_platforms() -> None:
+    workflow = GITHUB_CI.read_text(encoding="utf-8")
+
+    assert "ubuntu-latest" in workflow
+    assert "windows-latest" in workflow
+    assert "macos-latest" in workflow

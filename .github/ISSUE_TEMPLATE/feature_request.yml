@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused improvement to image2editable
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What real conversion or editing problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: expected_value
+    attributes:
+      label: Expected value
+      description: What measurable quality, compatibility, or runtime improvement is expected?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What existing workflow or workaround have you tried?

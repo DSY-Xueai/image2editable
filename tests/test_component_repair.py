@@ -1632,7 +1632,9 @@ def test_record_suppress_text_preserves_linked_frozen_visual_assets(
     output_dir = request_path.parents[2] / "execution-01"
     next_graph = execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
-        sam_runner=None, input_dir=request_path.parent, output_dir=output_dir,
+        sam_runner=lambda **_: np.ones((2, 2), dtype=np.uint8),
+        input_dir=request_path.parent,
+        output_dir=output_dir,
     )
     next_graph_path = output_dir / "component-graph.json"
     refs = _quality_input_refs(output_dir, store, next_graph_path)

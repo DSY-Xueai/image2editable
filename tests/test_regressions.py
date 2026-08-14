@@ -4920,7 +4920,11 @@ def test_process_image_records_widescreen_canvas_without_mutating_components(
         "detect_text",
         lambda *args, **kwargs: ([], empty_mask.copy()),
     )
-    monkeypatch.setattr(image_to_ppt, "generate_object_proposals", lambda *args: [])
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_generate_filtered_object_proposals",
+        lambda *args, **kwargs: [],
+    )
     monkeypatch.setattr(
         image_to_ppt,
         "generate_prompted_mask_candidates",
@@ -7190,7 +7194,11 @@ def test_text_cleanup_preserves_non_glyph_background_pixels() -> None:
         [{"box": [4, 4, 228, 68], "text": "No ghost", "color": "#1e1e1e"}],
     )
 
-    repaired = image_to_ppt._repair_text_background(source, cleanup)
+    repaired = image_to_ppt._repair_text_background(
+        source,
+        cleanup,
+        large_inpainter=lambda image, mask: np.full_like(image, 247),
+    )
 
     assert np.array_equal(repaired[cleanup == 0], source[cleanup == 0])
     assert float(np.mean(np.abs(repaired.astype(float) - 247))) < 1.0

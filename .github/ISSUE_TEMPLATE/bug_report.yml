@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible conversion or runtime problem
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not upload confidential source files, API tokens, credentials, or
+        unredacted absolute paths. Use a minimal sanitized sample when possible.
+  - type: dropdown
+    id: input_type
+    attributes:
+      label: Input type
+      options:
+        - Image
+        - PDF
+        - Image-based PPTX
+        - Mixed/native PPTX
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what result did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and image2editable commit
+      placeholder: Windows 11, Python 3.12, commit abc1234
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: CPU and GPU model, or CPU-only
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Include the failing command and sanitized error output
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Sensitive data check
+      options:
+        - label: I removed confidential content, credentials, tokens, and private paths.
+          required: true
