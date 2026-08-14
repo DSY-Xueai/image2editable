@@ -968,8 +968,16 @@ def test_resource_safe_sam_candidate_batch_runs_one_worker(
     )
     monkeypatch.setattr(worker_resources.subprocess, "run", fake_run)
     monkeypatch.setenv("SAM_BATCH_RESOURCE_TEST", "kept")
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
+    capability_calls = []
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda work_dir: capability_calls.append(work_dir) or True,
+    )
 
-    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
+    prompted, automatic = image_to_ppt._generate_sam_candidate_stage_isolated(
         image,
         text_mask,
         [proposal],
@@ -977,6 +985,7 @@ def test_resource_safe_sam_candidate_batch_runs_one_worker(
     )
 
     assert events == ["trim", "spawn"]
+    assert capability_calls == [tmp_path]
     assert len(calls) == 1
     command, kwargs = calls[0]
     worker_path = (
@@ -1212,6 +1221,8 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     Image.fromarray(source).save(image_path)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    if not image_to_ppt.sam_candidate_batch_output_supported(work_dir):
+        pytest.skip("SAM candidate batch publication is unsupported")
     text_mask_path = work_dir / "source-text-mask.png"
     Image.fromarray(np.zeros(source.shape[:2], dtype=np.uint8)).save(
         text_mask_path

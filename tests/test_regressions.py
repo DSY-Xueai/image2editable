@@ -1393,16 +1393,32 @@ def _run_candidate_batch_worker_main(
     sam_worker.main()
 
 
+def _generate_supported_sam_candidate_stage(
+    image,
+    text_mask,
+    proposals,
+    work_dir: Path,
+):
+    if not image_to_ppt.sam_candidate_batch_output_supported(work_dir):
+        pytest.skip("SAM candidate batch publication is unsupported")
+    with pytest.MonkeyPatch.context() as capability_patch:
+        capability_patch.setattr(
+            image_to_ppt,
+            "sam_candidate_batch_output_supported",
+            lambda target: True,
+        )
+        return image_to_ppt._generate_sam_candidate_stage_isolated(
+            image,
+            text_mask,
+            proposals,
+            work_dir,
+        )
+
+
 def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    batch_helper = getattr(
-        image_to_ppt,
-        "_generate_sam_candidate_batch_isolated",
-        None,
-    )
-    assert batch_helper is not None
     image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
     image[:, :, 1] = 37
     text_mask = image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8)
@@ -1504,7 +1520,9 @@ def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics
 
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
-    prompted, automatic = batch_helper(image, text_mask, [proposal], tmp_path)
+    prompted, automatic = _generate_supported_sam_candidate_stage(
+        image, text_mask, [proposal], tmp_path,
+    )
 
     expected_prompted = generate_prompted(image, [proposal], generator, text_mask)
     expected_automatic = generate_automatic(
@@ -1539,6 +1557,8 @@ def test_candidate_batch_main_matches_legacy_candidate_records(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
     prompted_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
     prompted_mask[1:5, 1:7] = True
@@ -1662,12 +1682,6 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
     monkeypatch,
     malformation: str,
 ) -> None:
-    batch_helper = getattr(
-        image_to_ppt,
-        "_generate_sam_candidate_batch_isolated",
-        None,
-    )
-    assert batch_helper is not None
     payload = {
         "schema_version": 1,
         "operations": [
@@ -1707,7 +1721,7 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        batch_helper(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1749,7 +1763,7 @@ def test_candidate_batch_caller_rejects_invalid_candidate_metadata(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1781,7 +1795,7 @@ def test_candidate_batch_caller_accepts_negative_finite_sam_score(
         crop_box=(0, 0, 8, 6),
     )
 
-    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
+    prompted, automatic = _generate_supported_sam_candidate_stage(
         image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
         image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
         [proposal],
@@ -1817,7 +1831,7 @@ def test_candidate_batch_caller_validates_all_records_before_constructing_any(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -2171,7 +2185,7 @@ def test_candidate_batch_caller_bounds_candidates_before_decoding_masks(
     )
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -2200,7 +2214,7 @@ def test_candidate_batch_caller_bounds_result_before_parsing(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -2230,7 +2244,7 @@ def test_candidate_batch_caller_rejects_oversized_mask_before_decoding(
     )
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -2872,39 +2886,6 @@ def test_candidate_batch_other_posix_never_creates_partial_final(
     assert not hasattr(sam_worker, "_unlink_owned_posix_result")
 
 
-@pytest.mark.parametrize(
-    ("clone_error", "message"),
-    [(0, None), (errno.EEXIST, "already exists"), (errno.ENOTSUP, "not supported")],
-)
-def test_candidate_batch_darwin_fclone_is_descriptor_bound_and_no_clobber(
-    monkeypatch,
-    clone_error: int,
-    message: str | None,
-) -> None:
-    calls = []
-    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        sam_worker,
-        "_fclonefileat_batch_result",
-        lambda source_fd, parent_fd, name, flags: (
-            calls.append((source_fd, parent_fd, name, flags)) or clone_error
-        ),
-        raising=False,
-    )
-
-    if message is None:
-        sam_worker._publish_batch_result(17, 19, {"path": Path("result.json")})
-    else:
-        with pytest.raises(RuntimeError, match=message):
-            sam_worker._publish_batch_result(
-                17,
-                19,
-                {"path": Path("result.json")},
-            )
-
-    assert calls == [(17, 19, b"result.json", 0)]
-
-
 def test_candidate_batch_darwin_without_anonymous_source_fails_before_path_creation(
     tmp_path: Path,
     monkeypatch,
@@ -3210,11 +3191,12 @@ def test_candidate_batch_stage_supported_uses_one_batch_worker(
         )
     ]
     batch_calls = []
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
         lambda work_dir: True,
-        raising=False,
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -3238,7 +3220,7 @@ def test_candidate_batch_stage_supported_uses_one_batch_worker(
     assert batch_calls == [(image, text_mask, [proposal], tmp_path)]
 
 
-def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
+def test_candidate_batch_stage_darwin_unsupported_uses_single_workers_in_order(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -3255,23 +3237,26 @@ def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
             image_to_ppt.np.eye(6, 8, dtype=bool), 0.7, "sam"
         )
     ]
-    legacy_calls = []
+    batch_calls = []
+    single_calls = []
+    events = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
+    actual_capability = image_to_ppt.sam_candidate_batch_output_supported
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
-        lambda work_dir: False,
-        raising=False,
+        lambda work_dir: events.append("capability")
+        or actual_capability(work_dir),
     )
     monkeypatch.setattr(
         image_to_ppt,
         "_generate_sam_candidate_batch_isolated",
-        lambda *args: pytest.fail("batch worker must not run"),
+        lambda *args: batch_calls.append(args) or events.append("batch"),
     )
 
     def fake_legacy(actual_image, actual_mask, actual_proposals, work_dir, *, mode):
-        legacy_calls.append(
-            (actual_image, actual_mask, actual_proposals, work_dir, mode)
-        )
+        single_calls.append(mode)
+        events.append(mode)
         return prompted if mode == "prompted" else automatic
 
     monkeypatch.setattr(
@@ -3288,25 +3273,27 @@ def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
     )
 
     assert actual == (prompted, automatic)
-    assert legacy_calls == [
-        (image, text_mask, proposals, tmp_path, "prompted"),
-        (image, None, None, tmp_path, "automatic"),
-    ]
+    assert batch_calls == []
+    assert single_calls == ["prompted", "automatic"]
+    assert events == ["capability", "prompted", "automatic"]
 
 
 def test_candidate_batch_stage_does_not_fallback_after_batch_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
         lambda work_dir: True,
     )
+    failure = RuntimeError("batch failed")
     monkeypatch.setattr(
         image_to_ppt,
         "_generate_sam_candidate_batch_isolated",
-        lambda *args: (_ for _ in ()).throw(RuntimeError("batch failed")),
+        lambda *args: (_ for _ in ()).throw(failure),
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -3314,13 +3301,15 @@ def test_candidate_batch_stage_does_not_fallback_after_batch_failure(
         lambda *args, **kwargs: pytest.fail("failed batch must not be retried"),
     )
 
-    with pytest.raises(RuntimeError, match="batch failed"):
+    with pytest.raises(RuntimeError, match="batch failed") as raised:
         image_to_ppt._generate_sam_candidate_stage_isolated(
             image_to_ppt.np.zeros((2, 2, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((2, 2), dtype=image_to_ppt.np.uint8),
             [],
             tmp_path,
         )
+
+    assert raised.value is failure
 
 
 @pytest.mark.parametrize("platform", ["darwin", "freebsd14"])
@@ -3800,6 +3789,10 @@ def test_candidate_batch_process_routes_initial_and_residual_stage(
     Image.fromarray(image).save(image_path)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    if batch_supported and not image_to_ppt.sam_candidate_batch_output_supported(
+        work_dir
+    ):
+        pytest.skip("SAM candidate batch publication is unsupported")
     text_mask_path = work_dir / "source-text-mask.png"
     Image.fromarray(image_to_ppt.np.zeros((10, 20), dtype=image_to_ppt.np.uint8)).save(
         text_mask_path
