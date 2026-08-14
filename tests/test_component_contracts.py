@@ -383,6 +383,54 @@ def _plan(request: dict, action: str, object_ids: list[str]) -> dict:
                          "evidence": ["visible"]}]}
 
 
+def test_component_plan_allows_accept_then_absorb_residual_for_same_object() -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, "accept", ["visual"])
+    plan["actions"].append({
+        "action": "absorb_residual",
+        "object_ids": ["visual"],
+        "parameters": {},
+        "confidence": 0.9,
+        "evidence": ["bind the unexplained residual"],
+    })
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
+@pytest.mark.parametrize(
+    "action_names",
+    [
+        ["absorb_residual", "accept"],
+        ["accept", "accept"],
+        ["absorb_residual", "absorb_residual"],
+        ["accept", "absorb_residual", "absorb_residual"],
+        ["accept", "expand"],
+    ],
+)
+def test_component_plan_rejects_other_repeated_object_action_sequences(
+    action_names: list[str],
+) -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, action_names[0], ["visual"])
+    plan["actions"] = [
+        {
+            "action": action_name,
+            "object_ids": ["visual"],
+            "parameters": {"margin_ratio": 0.01} if action_name == "expand" else {},
+            "confidence": 0.9,
+            "evidence": ["visible"],
+        }
+        for action_name in action_names
+    ]
+
+    with pytest.raises(ValueError, match="conflicting object actions"):
+        component_contracts.validate_component_plan(
+            plan, request=request, graph=graph,
+        )
+
+
 def test_component_plan_accepts_multiple_background_rebuilds() -> None:
     request, graph = _plan_contract_fixture()
     plan = _plan(request, "rebuild_background", ["visual"])

@@ -573,6 +573,7 @@ def test_capability_success_exposes_bound_component_request(host_run: Path, tmp_
     assert item["request_path"] == str(request_path.resolve())
     assert all(Path(path).is_absolute() for path in item["evidence_paths"])
     assert "untrusted" in item["instructions"].lower()
+    assert "correction_context" not in item
 
 
 def test_record_plan_rejects_provider_round_hash_and_unknown_id(host_run: Path, tmp_path: Path) -> None:

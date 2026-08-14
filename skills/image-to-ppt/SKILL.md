@@ -83,8 +83,19 @@ image2editable run execute runs/pptx-job
 
 Host 运行先准备并推进到 `awaiting_agent`：
 
+对 PPTX，`prepare` 后循环调用 `run next`。每个非 `null` 的 `candidate` 都必须查看 `image_path`，按 `--page candidate.page_id --object candidate.source_shape_id` 执行 `decision record`，然后继续 `run next`。仅当返回对象的 `candidate` 字段为 `null` 时才退出路由循环，随后首次执行 `run execute`。进入 `awaiting_agent` 后，再循环执行 `agent next`、`agent record` 和 `run execute`。
+
 ```bash
 image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider host
+image2editable run next runs/pptx-job
+# candidate 非 null：查看 image_path；--page candidate.page_id --object candidate.source_shape_id
+image2editable decision record runs/pptx-job \
+  --page candidate.page_id --object candidate.source_shape_id \
+  --decision replace --confidence 0.96 \
+  --category full_slide_screenshot \
+  --evidence "complete slide layout"
+# 对每个后续非 null candidate，重复 decision record，然后继续 run next
+image2editable run next runs/pptx-job  # 响应对象的 candidate 字段为 null，退出路由循环
 image2editable run execute runs/pptx-job
 image2editable agent next runs/pptx-job
 image2editable agent record runs/pptx-job --plan response.json
@@ -123,7 +134,7 @@ image2editable decision record runs/pptx-job \
 
 每次先查看 `run next` 返回的绝对 `image_path`。只有图片覆盖大部分页面、包含标题/多个文字区/图表或卡片等完整页面结构，且明显不是照片、Logo、头像或装饰素材时，才记录 `replace + full_slide_screenshot`。证据冲突或不确定时记录 `preserve` 或 `ambiguous`；不要为了提高拆分数量抬高置信度。
 
-组件计划必须以可独立移动的最小完整视觉单元为单位。使用反事实标准：单独移动一个单元后，该单元及其余视觉单元是否仍各自完整；语义相关不构成合并理由。`component-isolation.png` 中沿 OCR 字形出现的透明孔洞，或本应连续的底色、填充、线条缺失，都属于残缺分割而不是成功去字；若失活父组件能恢复同一完整视觉单元，应使用 `collapse_to_parent`，同时保留可独立移动的高层组件且不得恢复源字形。质量报告出现 `contained_parent_review` 时，必须使用质量证据中的精确 `contained_parent_pairs` 对照两个隔离单元：若一个只是重复子集，选择唯一像素所有者并丢弃重复层；若两者确实都是可独立移动的视觉单元，双方必须分别使用 `accept`、置信度不低于 `0.92`，且每条 evidence 都把该 pair 的两个精确 ID 作为两个独立字符串列出，才允许共同保留，否则门禁继续硬失败。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`。`absorb_into_parent` 只允许合并同一物理实体的重复掩码、碎边、阴影或分割缺口证据，禁止把多个可独立移动对象烘焙为一张父图；语义父级只用于分组，不参与最终像素渲染。仅当外缘画布颜色一致且证据显示背景残影时使用 `rebuild_background`，`margin_ratio` 必须在 `(0, 0.1]`。OCR 文字以冻结的 `text_XXXX` 节点出现，可作为 `attach_text` 的第二对象；只有视觉证据足以明确证明 OCR 候选实际为非文字时，才可对该文字节点使用 `suppress_text`，不确定或真实文字不得抑制。被抑制文字会从后续可编辑文字、文字蒙版、质量检查和 PPTX 中移除，并恢复源图区域供视觉元素重建；文字区域不能挖透明文字框。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
+组件计划必须以可独立移动的最小完整视觉单元为单位。使用反事实标准：单独移动一个单元后，该单元及其余视觉单元是否仍各自完整；语义相关不构成合并理由。`component-isolation.png` 中沿 OCR 字形出现的透明孔洞，或本应连续的底色、填充、线条缺失，都属于残缺分割而不是成功去字；若失活父组件能恢复同一完整视觉单元，应使用 `collapse_to_parent`，同时保留可独立移动的高层组件且不得恢复源字形。质量报告出现 `contained_parent_review` 时，必须使用质量证据中的精确 `contained_parent_pairs` 对照两个隔离单元：若一个只是重复子集，选择唯一像素所有者并丢弃重复层；若两者确实都是可独立移动的视觉单元，双方必须分别使用 `accept`、置信度不低于 `0.92`，且每条 evidence 都把该 pair 的两个精确 ID 作为两个独立字符串列出，才允许共同保留，否则门禁继续硬失败。对被更完整组件覆盖、没有独立编辑价值的重复候选使用 `discard`。`absorb_into_parent` 只允许合并同一物理实体的重复掩码、碎边、阴影或分割缺口证据，禁止把多个可独立移动对象烘焙为一张父图；语义父级只用于分组，不参与最终像素渲染。仅当外缘画布颜色一致且证据显示背景残影时使用 `rebuild_background`，`margin_ratio` 必须在 `(0, 0.1]`。OCR 文字以冻结的 `text_XXXX` 节点出现，可作为 `attach_text` 的第二对象；只有视觉证据足以明确证明 OCR 候选实际为非文字时，才可对该文字节点使用 `suppress_text`，不确定或真实文字不得抑制。被抑制文字会从后续可编辑文字、文字蒙版、质量检查和 PPTX 中移除，并以该 OCR 边界框执行同质量 SAM，生成必须继续通过质量门禁的独立视觉候选；文字区域不能挖透明文字框，也不能只留在背景。任何动作仍需通过确定性重建、独占像素、残影/重影/缺损和 PPTX reopen 门禁；Agent 置信度不能放宽硬失败。
 
 Runtime 只有在 `confidence >= 0.92` 时才重建完整截图。通过门禁后只原位替换命中的截图对象；既有原生文字、形状、表格、图表、备注、z-order、其他页面和未命中图片保持原生。未通过页面保留原截图并给出 warning，不伪装成可编辑组件。
 

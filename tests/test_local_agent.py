@@ -268,6 +268,94 @@ def _plan(request_path: Path, *, action: str = "accept") -> dict[str, object]:
     }
 
 
+def _correction_context(request_path: Path) -> dict[str, object]:
+    return {
+        "instruction": (
+            "The previous plan was rejected because an absorb_residual target had "
+            "no containment or 3px adjacency with the signed residual. Modify or "
+            "remove the related absorb_residual action; do not change request_sha256."
+        ),
+        "rejected_plan": _plan(request_path, action="absorb_residual"),
+    }
+
+
+def test_local_correction_context_is_added_to_actual_messages(tmp_path: Path) -> None:
+    request_path = _request_path(tmp_path)
+    request = load_component_agent_request(request_path)
+    evidence = {
+        name: request_path.parent / record["path"]
+        for name, record in request["evidence"].items()
+    }
+    graph = json.loads(
+        evidence["component-graph.json"].read_text(encoding="utf-8")
+    )
+
+    messages = local_agent_worker._messages(
+        request,
+        graph,
+        evidence["quality-report.json"].read_text(encoding="utf-8"),
+        evidence,
+        hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        correction_context=_correction_context(request_path),
+    )
+
+    prompt = json.loads(messages[1]["content"][0]["text"].split("\n", 1)[1])
+    assert prompt["correction_context"] == _correction_context(request_path)
+
+
+def test_local_agent_passes_correction_context_to_offline_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    observed = {}
+
+    def invoke(command, **kwargs):
+        correction = Path(command[command.index("--correction-context") + 1])
+        observed["correction_context"] = json.loads(
+            correction.read_text(encoding="utf-8")
+        )
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(json.dumps(_plan(request_path)), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(local_agent, "_invoke_worker", invoke)
+
+    result = local_agent.run_local_agent(
+        request_path,
+        model_receipt=_receipt(tmp_path),
+        correction_context=_correction_context(request_path),
+    )
+
+    assert result == _plan(request_path)
+    assert observed["correction_context"] == _correction_context(request_path)
+
+
+def test_local_service_agent_passes_correction_context_to_messages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _request_path(tmp_path)
+    observed = {}
+
+    def complete(config, *, messages, timeout_seconds):
+        observed["messages"] = messages
+        return json.dumps(_plan(request_path))
+
+    monkeypatch.setattr("image2editable.local_service.complete", complete)
+
+    local_agent.run_local_service_agent(
+        request_path,
+        service_config=object(),
+        correction_context=_correction_context(request_path),
+    )
+
+    prompt = json.loads(
+        observed["messages"][1]["content"][0]["text"].split("\n", 1)[1]
+    )
+    assert prompt["correction_context"] == _correction_context(request_path)
+
+
 def test_local_agent_starts_one_worker_with_offline_bounded_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

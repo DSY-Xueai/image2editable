@@ -864,6 +864,96 @@ def test_local_provider_runs_complete_without_host_receipt(
     assert state["plan_count"] == 1
 
 
+def test_local_provider_corrects_rejected_plan_in_the_same_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.visual_segment import RecoverableComponentPlanError
+
+    source = tmp_path / "source.png"
+    _component_source(source)
+    _install_component_e2e_boundaries(monkeypatch)
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        slide_size="16:9",
+        agent_provider="local",
+    )
+    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
+    calls = []
+    bad_plan = None
+    correction_instruction = (
+        "The previous plan was rejected because an absorb_residual target had "
+        "no containment or 3px adjacency with the signed residual. Modify or "
+        "remove the related absorb_residual action; do not change request_sha256."
+    )
+
+    def fake_local_agent(
+        request_path,
+        *,
+        service_config,
+        performance_trace=None,
+        correction_context=None,
+    ):
+        nonlocal bad_plan
+        request_path = Path(request_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        common = {
+            "schema_version": 1,
+            "kind": "component_plan",
+            "page_id": request["page_id"],
+            "provider": "local",
+            "repair_round": request["repair_round"],
+            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        }
+        calls.append(correction_context)
+        if len(calls) == 1:
+            assert correction_context is None
+            bad_plan = {
+                **common,
+                "actions": [{
+                    "action": "absorb_residual",
+                    "object_ids": ["component_0001"],
+                    "parameters": {},
+                    "confidence": 0.95,
+                    "evidence": ["incorrect residual target"],
+                }],
+            }
+            return bad_plan
+        assert correction_context == {
+            "instruction": correction_instruction,
+            "rejected_plan": bad_plan,
+        }
+        return {**common, "actions": [_accept_action()]}
+
+    real_execute = legacy.execute_component_action_round
+
+    def reject_bad_plan(image, graph, actions, **kwargs):
+        if any(action["action"] == "absorb_residual" for action in actions):
+            raise RecoverableComponentPlanError(
+                "absorb_residual found an unrelated residual region"
+            )
+        return real_execute(image, graph, actions, **kwargs)
+
+    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
+    monkeypatch.setattr(legacy, "execute_component_action_round", reject_bad_plan)
+
+    completed = runtime.run_job(run_dir)
+
+    assert completed["status"] == "completed"
+    assert len(calls) == 2
+    state = RunStore.open(run_dir).read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert state["repair_round"] == 1
+    assert state["plan_count"] == 1
+    plans = list((run_dir / "pages/page_001/reconstruction").glob(
+        "local-component-plan-01-*.json"
+    ))
+    assert len(plans) == 2
+    assert any("-retry-" in path.name for path in plans)
+
+
 def test_local_provider_warning_fails_without_fake_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3984,8 +4074,13 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     )
     monkeypatch.setattr(legacy, "record_parent_fallback_execution", lambda *args, **kwargs: None)
 
+    stale_output = page_dir / "reconstruction/parent-fallback"
+    (stale_output / "masks").mkdir(parents=True)
+    (stale_output / "sentinel.txt").write_text("old retry", encoding="utf-8")
+
     legacy._execute_legacy_parent_fallback(store, "page_001", object())
 
+    assert (stale_output / "sentinel.txt").read_text(encoding="utf-8") == "old retry"
     assert captured["background_path_override"] == background
     assert captured["frozen_manifest_path"] == manifest
     assert captured["frozen_component_ids"] == {"component_0004"}

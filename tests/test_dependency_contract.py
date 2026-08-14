@@ -19,6 +19,92 @@ STANDALONE_VISUAL_SEGMENT = (
 PYPROJECT = ROOT / "pyproject.toml"
 
 
+def test_host_pptx_routes_screenshot_decisions_before_execute() -> None:
+    skill_text = SKILL.read_text(encoding="utf-8")
+    host_section_match = re.search(
+        r"Host 运行先准备并推进到 `awaiting_agent`："
+        r"(?P<section>.*?)第一次 `agent next`",
+        skill_text,
+        re.DOTALL,
+    )
+
+    assert host_section_match is not None
+    host_section = host_section_match.group("section")
+    host_example_match = re.search(
+        r"```bash\n(?P<commands>.*?)\n```",
+        host_section,
+        re.DOTALL,
+    )
+
+    assert host_example_match is not None
+    commands = host_example_match.group("commands")
+    host_prose = re.sub(r"```bash\n.*?\n```", "", host_section, flags=re.DOTALL)
+    command_lines = []
+    comment_lines = []
+    for line in commands.splitlines():
+        if line.lstrip().startswith("#"):
+            comment_lines.append(line.lstrip()[1:].strip())
+        command = line.split("#", 1)[0].strip()
+        if command:
+            command_lines.append(command)
+    prepare = (
+        "image2editable prepare input.pptx --run-dir runs/pptx-job "
+        "--agent-provider host"
+    )
+    run_next = "image2editable run next runs/pptx-job"
+    decision_record = "image2editable decision record runs/pptx-job \\"
+    run_execute = "image2editable run execute runs/pptx-job"
+    agent_next = "image2editable agent next runs/pptx-job"
+    agent_record = "image2editable agent record runs/pptx-job --plan response.json"
+    candidate_mapping = (
+        "--page candidate.page_id --object candidate.source_shape_id"
+    )
+
+    def command_indexes(expected: str) -> list[int]:
+        return [
+            index
+            for index, line in enumerate(command_lines)
+            if line == expected
+        ]
+
+    prepare_indexes = command_indexes(prepare)
+    run_next_indexes = command_indexes(run_next)
+    decision_record_indexes = command_indexes(decision_record)
+    run_execute_indexes = command_indexes(run_execute)
+    agent_next_indexes = command_indexes(agent_next)
+    agent_record_indexes = command_indexes(agent_record)
+
+    assert re.search(
+        r"每个非 `null` 的 `candidate`.*`decision record`.*`run next`",
+        host_prose,
+    )
+    assert re.search(
+        r"仅当返回对象的 `candidate` 字段为 `null` 时.*首次.*`run execute`",
+        host_prose,
+    )
+    assert f"`{candidate_mapping}`" in host_prose
+    assert any(candidate_mapping in comment for comment in comment_lines)
+    assert len(prepare_indexes) == 1
+    assert len(run_next_indexes) == 2
+    assert len(decision_record_indexes) == 1
+    assert command_lines[decision_record_indexes[0] + 1] == (
+        f"{candidate_mapping} \\"
+    )
+    assert len(run_execute_indexes) == 2
+    assert len(agent_next_indexes) == 1
+    assert len(agent_record_indexes) == 1
+    assert (
+        prepare_indexes[0]
+        < run_next_indexes[0]
+        < decision_record_indexes[0]
+        < run_next_indexes[-1]
+        < run_execute_indexes[0]
+        < agent_next_indexes[0]
+        < agent_record_indexes[0]
+        < run_execute_indexes[1]
+    )
+
+
 def test_sam_ref_is_full_commit_sha() -> None:
     sam_line = next(
         line

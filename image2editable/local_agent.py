@@ -39,6 +39,7 @@ def run_local_agent(
     resource_policy: dict | None = None,
     timeout_seconds: int = 600,
     performance_trace=None,
+    correction_context: dict[str, object] | None = None,
 ) -> dict:
     from image2editable.component_repair import (
         _ensure_owned_directory,
@@ -72,6 +73,18 @@ def run_local_agent(
             "--output",
             str(output_path),
         ]
+        if correction_context is not None:
+            correction_path = Path(temporary) / "correction-context.json"
+            with correction_path.open("x", encoding="utf-8") as stream:
+                json.dump(
+                    correction_context,
+                    stream,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                stream.write("\n")
+            command.extend(["--correction-context", str(correction_path)])
         started = time.perf_counter() if performance_trace is not None else None
         try:
             completed = _invoke_worker(
@@ -163,6 +176,7 @@ def run_local_service_agent(
     service_config: object,
     timeout_seconds: int = 600,
     performance_trace=None,
+    correction_context: dict[str, object] | None = None,
 ) -> dict:
     from image2editable.component_repair import (
         load_component_agent_graph,
@@ -186,7 +200,14 @@ def run_local_service_agent(
     )
     request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
     messages = _service_messages(
-        _messages(request, graph, quality_text, evidence, request_sha256)
+        _messages(
+            request,
+            graph,
+            quality_text,
+            evidence,
+            request_sha256,
+            correction_context=correction_context,
+        )
     )
     started = time.perf_counter() if performance_trace is not None else None
     try:

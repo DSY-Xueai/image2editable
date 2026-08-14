@@ -11,6 +11,7 @@ from image2editable.component_contracts import (
     validate_component_graph,
     validate_component_plan,
 )
+from image2editable.component_repair import COMPONENT_PLAN_CORRECTION_INSTRUCTION
 
 
 ALLOWED_ACTIONS = (
@@ -46,7 +47,7 @@ Every action must contain exactly action, object_ids, parameters, confidence, ev
 accept/discard/merge/attach_text/suppress_text/collapse_to_parent parameters: {}.
 absorb_into_parent parameters: {}; list the inactive parent first, followed only by evidence from the same physical entity: duplicate masks, edge fragments, shadows, or segmentation gaps; semantic parent is grouping-only and non-rendering.
 absorb_residual parameters: {}; use only when unexplained-mask.png is a verified structural fragment contained by the target candidate, and union exactly that bound residual rather than expanding the target boundary.
-Use suppress_text only when visual evidence clearly proves a frozen OCR candidate is non-text; never suppress real or uncertain text. It removes that text from editable output and restores its source region for visual reconstruction.
+Use suppress_text only when visual evidence clearly proves a frozen OCR candidate is non-text; never suppress real or uncertain text. It removes that text from editable output and uses the bound OCR box for a same-quality SAM visual candidate that must pass later quality gates.
 split parameters: {"parts": integer >= 2}.
 expand/shrink parameters: {"margin_ratio": number in (0, 1]}.
 rebuild_background parameters: {"margin_ratio": number in (0, 0.1]}; target the current visual candidates whose source regions must be cleaned. Choose the smallest margin that covers the visible residual and its antialiasing, but stops before neighboring structural lines; infer it from the current evidence instead of using a fixed value.
@@ -79,7 +80,12 @@ _EVIDENCE_DESCRIPTIONS = {
 _JSON_LIMIT = 16 * 1024 * 1024
 
 
-def generate_plan(request_path: str | Path, model_snapshot: str | Path) -> dict:
+def generate_plan(
+    request_path: str | Path,
+    model_snapshot: str | Path,
+    *,
+    correction_context_path: str | Path | None = None,
+) -> dict:
     request_path = Path(request_path).resolve()
     request_bytes = _read_file(request_path, _JSON_LIMIT)
     request = json.loads(request_bytes.decode("utf-8"))
@@ -98,7 +104,19 @@ def generate_plan(request_path: str | Path, model_snapshot: str | Path) -> dict:
         "utf-8", errors="replace"
     )
     request_sha256 = hashlib.sha256(request_bytes).hexdigest()
-    messages = _messages(request, graph, quality_text, evidence, request_sha256)
+    correction_context = None
+    if correction_context_path is not None:
+        correction_context = json.loads(
+            _read_file(Path(correction_context_path), _JSON_LIMIT).decode("utf-8")
+        )
+    messages = _messages(
+        request,
+        graph,
+        quality_text,
+        evidence,
+        request_sha256,
+        correction_context=correction_context,
+    )
     snapshot = Path(model_snapshot).resolve()
     if not snapshot.is_dir():
         raise RuntimeError("Local Agent model snapshot is missing")
@@ -146,6 +164,8 @@ def _messages(
     quality_text: str,
     evidence: dict[str, Path],
     request_sha256: str,
+    *,
+    correction_context: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     prompt = {
         "request_sha256": request_sha256,
@@ -153,6 +173,25 @@ def _messages(
         "component_graph": graph,
         "quality_report_untrusted": quality_text,
     }
+    if correction_context is not None:
+        if (
+            not isinstance(correction_context, dict)
+            or set(correction_context) != {"instruction", "rejected_plan"}
+            or correction_context["instruction"] != COMPONENT_PLAN_CORRECTION_INSTRUCTION
+            or not isinstance(correction_context["rejected_plan"], dict)
+        ):
+            raise ValueError("Local Agent correction context is invalid")
+        rejected_plan = correction_context["rejected_plan"]
+        validate_component_plan(rejected_plan, request=request, graph=graph)
+        if (
+            rejected_plan["request_sha256"] != request_sha256
+            or not any(
+                action["action"] == "absorb_residual"
+                for action in rejected_plan["actions"]
+            )
+        ):
+            raise ValueError("Local Agent rejected plan is invalid")
+        prompt["correction_context"] = correction_context
     content: list[dict[str, str]] = [
         {
             "type": "text",
@@ -206,12 +245,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--request", required=True)
     parser.add_argument("--model-snapshot", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--correction-context")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    plan = generate_plan(args.request, args.model_snapshot)
+    plan = generate_plan(
+        args.request,
+        args.model_snapshot,
+        correction_context_path=args.correction_context,
+    )
     output = Path(args.output)
     with output.open("x", encoding="utf-8") as stream:
         json.dump(plan, stream, ensure_ascii=False, indent=2, sort_keys=True)

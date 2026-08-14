@@ -31,6 +31,10 @@ class VisualSegmentationError(RuntimeError):
     pass
 
 
+class RecoverableComponentPlanError(VisualSegmentationError):
+    pass
+
+
 def _complete_opaque_mask_regions(
     mask: np.ndarray, image: np.ndarray | None = None
 ) -> np.ndarray:
@@ -178,7 +182,7 @@ def execute_component_actions(
     bound_residuals = _partition_bound_residual_mask(
         source, image.shape[:2], residual_targets, masks
     ) if residual_targets else {}
-    touched = set()
+    touched = {}
     suppressed_text_ids = set()
     text_backing = None
     reactivated_ids = set()
@@ -233,15 +237,28 @@ def execute_component_actions(
         if not valid_states:
             raise ValueError(f"{name} requires a pending component")
         if name != "rebuild_background":
-            if touched & set(object_ids):
+            if any(
+                value in touched
+                and not (touched[value] == "accept" and name == "absorb_residual")
+                for value in object_ids
+            ):
                 raise ValueError("component plan has conflicting object actions")
-            touched.update(object_ids)
+            touched.update({value: name for value in object_ids})
         if name in {"retry_with_box", "retry_with_points"}:
             planned_retry_ids.update(object_ids)
 
     height, width = image.shape[:2]
     retry_prompts = []
     for action in actions:
+        if action["action"] == "suppress_text":
+            left, top, right, bottom = nodes[action["object_ids"][0]]["bbox"]
+            retry_prompts.append({
+                "component_id": action["object_ids"][0],
+                "box": [float(left), float(top), float(right), float(bottom)],
+                "positive": [],
+                "negative": [],
+            })
+            continue
         if action["action"] not in {"retry_with_box", "retry_with_points"}:
             continue
         parameters = action["parameters"]
@@ -345,9 +362,23 @@ def execute_component_actions(
                     )
                 accepted["kind"] = "parent"
                 accepted["parent_id"] = None
-            masks[object_ids[0]] = _complete_opaque_mask_regions(
-                accepted_mask, image
-            )
+            completed_mask = _complete_opaque_mask_regions(accepted_mask, image)
+            active_visual_masks = [
+                masks[node["id"]]
+                for node in nodes.values()
+                if (
+                    node["id"] != accepted["id"]
+                    and node["kind"] != "text"
+                    and node["state"] in {"pending", "pending_gate", "frozen"}
+                )
+            ]
+            if active_visual_masks:
+                active_visual_mask = np.logical_or.reduce(active_visual_masks)
+                completion_delta = completed_mask & ~accepted_mask
+                completed_mask = accepted_mask | (
+                    completion_delta & ~active_visual_mask
+                )
+            masks[object_ids[0]] = completed_mask
             accepted["state"] = "pending_gate"
         elif name == "discard":
             nodes[object_ids[0]]["state"] = "inactive"
@@ -363,6 +394,21 @@ def execute_component_actions(
                 node["text_ids"] = [
                     value for value in node["text_ids"] if value != text_id
                 ]
+            promoted_id = _new_action_id(nodes, "component")
+            nodes[promoted_id] = {
+                "id": promoted_id,
+                "kind": "parent",
+                "parent_id": None,
+                "state": "pending",
+                "mask": f"masks/{promoted_id}.png",
+                "mask_sha256": "",
+                "bbox": [0, 0, 1, 1],
+                "z_index": nodes[text_id]["z_index"],
+                "text_ids": [],
+            }
+            masks[promoted_id] = _complete_opaque_mask_regions(
+                retry_masks[text_id], image
+            )
         elif name == "collapse_to_parent":
             parent = object_ids[0]
             if nodes[parent]["state"] == "inactive":
@@ -798,9 +844,7 @@ def _partition_bound_residual_mask(
             if contained or np.any(nearby_masks[component_id] & region):
                 eligible.append(component_id)
         if not eligible:
-            raise VisualSegmentationError(
-                "absorb_residual found an unrelated residual region"
-            )
+            continue
         owner = min(
             eligible,
             key=lambda component_id: (
@@ -810,6 +854,10 @@ def _partition_bound_residual_mask(
             ),
         )
         assignments[owner] |= region
+    if any(not np.any(assignments[component_id]) for component_id in target_ids):
+        raise RecoverableComponentPlanError(
+            "absorb_residual target has no related residual region"
+        )
     return assignments
 
 

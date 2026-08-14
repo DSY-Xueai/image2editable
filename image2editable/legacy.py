@@ -36,6 +36,7 @@ from image2editable.component_repair import (
     record_component_execution,
     record_component_quality,
     record_next_component_request,
+    reject_recoverable_component_plan,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
     _read_bound_file,
@@ -1337,9 +1338,15 @@ def advance_legacy_page(
     outcome = advance_component_repair(store, page_id, _lease=_lease)
     status = outcome["status"]
     if status == "needs_execution":
-        _execute_legacy_round(
+        rejected = _execute_legacy_round(
             store, page_id, _lease, performance_trace=performance_trace
         )
+        if rejected:
+            return {
+                "status": "awaiting_agent",
+                "page_id": page_id,
+                "repair_round": outcome["repair_round"],
+            }
         return {"status": "processing", "page_id": page_id}
     if status == "needs_quality":
         record_component_quality(store, page_id, _lease=_lease)
@@ -1966,9 +1973,10 @@ def _record_inference_performance(
 def _execute_legacy_round(
     store: RunStore, page_id: str, lease: ExecutionLease,
     *, performance_trace=None,
-) -> None:
+) -> bool:
     import numpy as np
     from scripts.sam_worker import run_component_prompt_batch_worker
+    from scripts.visual_segment import RecoverableComponentPlanError
 
     state = store.read_json(
         f"pages/{page_id}/reconstruction/component_state.json"
@@ -2049,10 +2057,21 @@ def _execute_legacy_round(
             for prompt, mask in zip(prompts, masks)
         ]
 
-    next_graph = execute_component_action_round(
-        pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,
-        input_dir=graph_path.parent, output_dir=output_dir,
-    )
+    try:
+        next_graph = execute_component_action_round(
+            pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,
+            input_dir=graph_path.parent, output_dir=output_dir,
+        )
+    except RecoverableComponentPlanError:
+        reject_recoverable_component_plan(
+            store,
+            page_id,
+            repair_round=state["repair_round"],
+            request_ref=state["current_round"]["request_ref"],
+            plan_ref=state["current_round"]["plan_ref"],
+            _lease=lease,
+        )
+        return True
     output_graph = output_dir / "component-graph.json"
     rebuild_actions = [
         action for action in plan["actions"]
@@ -2126,6 +2145,7 @@ def _execute_legacy_round(
         store, page_id, execution_path=execution_path,
         output_graph_path=output_graph, _lease=lease,
     )
+    return False
 
 
 def _publish_next_legacy_request(
@@ -2237,7 +2257,8 @@ def _execute_legacy_parent_fallback(
     graph_path = _state_artifact(store, state["graph_ref"])
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     source = _source_path(store, page_id)
-    output_dir = store.root / "pages" / page_id / "reconstruction/parent-fallback"
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    output_dir = reconstruction / f"pf-{uuid.uuid4().hex[:12]}"
     _ensure_component_disk_reserve(
         output_dir.parent,
         source,

@@ -32,8 +32,16 @@ from image2editable.component_repair import (
 )
 import image2editable.component_repair as component_repair
 import image2editable.component_quality as component_quality
+import image2editable.legacy as legacy
+import image2editable.runtime as runtime
+from image2editable.execution import ExecutionLease
 from scripts.fg_extract import _fill_component_underlay
-from scripts.visual_segment import VisualSegmentationError, _publish_action_directory, execute_component_actions
+from scripts.visual_segment import (
+    RecoverableComponentPlanError,
+    VisualSegmentationError,
+    _publish_action_directory,
+    execute_component_actions,
+)
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
 from PIL import Image
 import numpy as np
@@ -839,6 +847,319 @@ def test_local_plan_is_hash_bound_and_recorded_without_host_state(
     assert state["plan_count"] == 1
     assert state["current_round"]["plan_ref"] == recorded["plan_ref"]
     assert not (store.root / "host_capabilities.json").exists()
+
+
+def test_recoverable_plan_rejection_reopens_same_local_round_and_preserves_plans(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    rejected_plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": request_sha256,
+        "actions": [_action("absorb_residual", ["candidate_b"])],
+    }
+    first = record_local_component_plan(
+        store, "page_001", plan=rejected_plan,
+    )
+    rejected_path = store.root / first["plan_ref"]["path"]
+    rejected_payload = rejected_path.read_bytes()
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    first_rejection_name = (
+        f"component-plan-rejection-{recorded['revision'] + 1:08d}.json"
+    )
+    store.write_json(
+        f"pages/page_001/reconstruction/{first_rejection_name}",
+        {
+            "schema_version": 1,
+            "page_id": "page_001",
+            "repair_round": 1,
+            "request_ref": recorded["current_round"]["request_ref"],
+            "rejected_plan_ref": recorded["current_round"]["plan_ref"],
+            "reason": "unrelated_residual_target",
+        },
+    )
+    assert runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    ) is None
+
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=recorded["current_round"]["request_ref"],
+        plan_ref=recorded["current_round"]["plan_ref"],
+    )
+
+    reopened = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert reopened["phase"] == "awaiting_plan"
+    assert reopened["repair_round"] == 1
+    assert reopened["current_round"]["request_ref"] == (
+        recorded["current_round"]["request_ref"]
+    )
+    assert reopened["current_round"]["plan_ref"] is None
+    assert reopened["current_round"]["execution_ref"] is None
+    assert reopened["current_round"]["quality_ref"] is None
+    assert reopened["graph_ref"] == recorded["graph_ref"]
+    assert reopened["plan_count"] == recorded["plan_count"]
+    half_committed_plan = copy.deepcopy(rejected_plan)
+    half_committed_plan["actions"] = [_action("discard", ["candidate_b"])]
+    half_committed_payload = json.dumps(
+        half_committed_plan,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    half_committed_path = rejected_path.with_name(
+        f"{rejected_path.stem}-retry-"
+        f"{hashlib.sha256(half_committed_payload).hexdigest()[:12]}.json"
+    )
+    half_committed_path.write_bytes(half_committed_payload)
+    resumed = RunStore(store.root)
+    correction_context = runtime._local_plan_correction_context(
+        resumed, "page_001", request_path
+    )
+    assert correction_context["rejected_plan"] == rejected_plan
+    assert "do not change request_sha256" in correction_context["instruction"]
+
+    second_rejected_plan = copy.deepcopy(rejected_plan)
+    second_rejected_plan["actions"][0]["evidence"] = [
+        "second unrelated residual target"
+    ]
+    second = record_local_component_plan(
+        store, "page_001", plan=second_rejected_plan,
+    )
+    second_recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=second_recorded["current_round"]["request_ref"],
+        plan_ref=second_recorded["current_round"]["plan_ref"],
+    )
+    rejection_paths = sorted(
+        rejected_path.parent.glob("component-plan-rejection-*.json")
+    )
+    assert len(rejection_paths) == 2
+    assert rejection_paths[0].name == first_rejection_name
+    second_context = runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    )
+    assert second_context["rejected_plan"] == second_rejected_plan
+    assert (store.root / second["plan_ref"]["path"]).is_file()
+
+    corrected_plan = copy.deepcopy(rejected_plan)
+    corrected_plan["actions"] = [_action("discard", ["candidate_b"])]
+    corrected = record_local_component_plan(
+        store, "page_001", plan=corrected_plan,
+    )
+    repeated = record_local_component_plan(
+        store, "page_001", plan=corrected_plan,
+    )
+
+    assert corrected["plan_ref"] != first["plan_ref"]
+    assert "-retry-" in corrected["plan_ref"]["path"]
+    assert repeated["plan_ref"] == corrected["plan_ref"]
+    assert repeated["recovered"] is True
+    assert rejected_path.read_bytes() == rejected_payload
+    assert (store.root / corrected["plan_ref"]["path"]).is_file()
+
+
+def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
+    page_session: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.host_agent import record_host_plan
+    from image2editable.store import RunStore
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    manifest = {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "host"},
+    }
+    store.write_json("job_manifest.json", manifest)
+    store.write_json("run_state.json", {
+        "schema_version": 1, "status": "awaiting_agent", "updated_at": "now",
+    })
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {
+            "schema_version": 1, "status": "awaiting_agent", "updated_at": "now",
+        },
+    }})
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+    rejected_plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "host", "repair_round": 1,
+        "request_sha256": request_sha256,
+        "actions": [_action("absorb_residual", ["candidate_b"])],
+    }
+    rejected_source = tmp_path / "rejected-host-plan.json"
+    rejected_source.write_text(json.dumps(rejected_plan), encoding="utf-8")
+    first = record_host_plan(store.root, rejected_source)
+    rejected_path = Path(first["plan_path"])
+    rejected_payload = rejected_path.read_bytes()
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    store.transition_page("page_001", runtime.PageStatus.PROCESSING)
+    store.transition_run(runtime.RunStatus.RUNNING)
+
+    monkeypatch.setattr(
+        legacy,
+        "execute_component_action_round",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RecoverableComponentPlanError(
+                "absorb_residual found an unrelated residual region"
+            )
+        ),
+    )
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        summary = runtime._advance_legacy_pages(
+            store, manifest, ["page_001"], lease,
+        )
+
+    reopened = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    assert summary["status"] == "awaiting_agent"
+    assert store.read_json("run_state.json")["status"] == "awaiting_agent"
+    assert store.read_json("page_jobs.json")["pages"]["page_001"]["status"] == (
+        "awaiting_agent"
+    )
+    assert reopened["phase"] == "awaiting_plan"
+    assert reopened["repair_round"] == recorded["repair_round"]
+    assert reopened["current_round"]["request_ref"] == (
+        recorded["current_round"]["request_ref"]
+    )
+    assert reopened["current_round"]["plan_ref"] is None
+    assert reopened["current_round"]["execution_ref"] is None
+    assert reopened["current_round"]["quality_ref"] is None
+    assert reopened["graph_ref"] == recorded["graph_ref"]
+    assert not (
+        Path(page_session["reconstruction_dir"]) / "execution-01"
+    ).exists()
+    assert rejected_path.read_bytes() == rejected_payload
+
+    import image2editable.host_agent as host_agent
+
+    handshake = host_agent.next_host_agent_item(store.root)
+    challenge = host_agent._load_or_create_challenge(store)
+    capability_source = tmp_path / "capability-response.json"
+    capability_source.write_text(json.dumps({
+        "schema_version": 1,
+        "kind": "host_capability_response",
+        "challenge_id": handshake["challenge_id"],
+        "observed": challenge["expected"],
+    }), encoding="utf-8")
+    record_host_plan(store.root, capability_source)
+    retry_request = host_agent.next_host_agent_item(store.root)
+    assert retry_request["correction_context"] == {
+        "instruction": (
+            "The previous plan was rejected because an absorb_residual target had "
+            "no containment or 3px adjacency with the signed residual. Modify or "
+            "remove the related absorb_residual action; do not change request_sha256."
+        ),
+        "rejected_plan": rejected_plan,
+    }
+    assert retry_request["request_sha256"] == request_sha256
+    assert retry_request["repair_round"] == 1
+    assert rejected_path.read_bytes() == rejected_payload
+
+    corrected_plan = copy.deepcopy(rejected_plan)
+    corrected_plan["actions"] = [_action("discard", ["candidate_b"])]
+    corrected_source = tmp_path / "corrected-host-plan.json"
+    corrected_source.write_text(json.dumps(corrected_plan), encoding="utf-8")
+    real_transition = RunStore.transition_run
+    failed = False
+
+    def fail_corrected_transition(current_store, target):
+        nonlocal failed
+        if target is runtime.RunStatus.PREPARED and not failed:
+            failed = True
+            raise OSError("corrected transition failure")
+        return real_transition(current_store, target)
+
+    monkeypatch.setattr(RunStore, "transition_run", fail_corrected_transition)
+    with pytest.raises(OSError, match="corrected transition failure"):
+        record_host_plan(store.root, corrected_source)
+    retry_paths = list(store.root.glob("host-component-plan-*-retry-*.json"))
+    assert len(retry_paths) == 1
+
+    corrected = record_host_plan(store.root, corrected_source)
+
+    assert corrected["plan_path"] != first["plan_path"]
+    assert "-retry-" in Path(corrected["plan_path"]).name
+    assert corrected["recovered"] is True
+    assert Path(corrected["plan_path"]) == retry_paths[0]
+    assert rejected_path.read_bytes() == rejected_payload
+
+
+@pytest.mark.parametrize(
+    "error",
+    [VisualSegmentationError("ordinary visual failure"), RuntimeError("SAM failure")],
+)
+def test_nonrecoverable_execution_errors_remain_fatal(
+    page_session: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    record_local_component_plan(store, "page_001", plan={
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("accept", ["candidate_b"])],
+    })
+    monkeypatch.setattr(
+        legacy,
+        "execute_component_action_round",
+        lambda *args, **kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        with pytest.raises(type(error), match=str(error)):
+            legacy.advance_legacy_page(store, "page_001", _lease=lease)
+
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert state["phase"] == "plan_recorded"
+    assert state["current_round"]["plan_ref"] is not None
 
 
 def test_execution_refreshes_candidates_after_discard(
@@ -2732,6 +3053,67 @@ def test_execute_accept_is_pending_gate_and_preserves_frozen_hash(tmp_path: Path
     assert (output / "component-graph.json").is_file()
 
 
+def test_accept_completion_does_not_create_active_overlap(tmp_path: Path) -> None:
+    image = np.zeros((12, 16, 3), dtype=np.uint8)
+    accepted_before = np.zeros(image.shape[:2], dtype=bool)
+    accepted_before[1:11, 2:12] = True
+    active_visual = np.zeros_like(accepted_before)
+    inactive_visual = np.zeros_like(accepted_before)
+    frozen_text = np.zeros_like(accepted_before)
+    active_visual[4, 5] = True
+    inactive_visual[6, 7] = True
+    frozen_text[8, 9] = True
+    accepted_before[active_visual | inactive_visual | frozen_text] = False
+    assert not np.any(accepted_before & active_visual)
+
+    input_dir = tmp_path / "accept-overlap-input"
+    mask_dir = input_dir / "masks"
+    mask_dir.mkdir(parents=True)
+    specs = [
+        ("accepted", "parent", "pending", accepted_before),
+        ("active", "parent", "frozen", active_visual),
+        ("inactive", "parent", "inactive", inactive_visual),
+        ("text", "text", "frozen", frozen_text),
+    ]
+    nodes = []
+    for z_index, (component_id, kind, state, mask) in enumerate(specs):
+        path = mask_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(path)
+        ys, xs = np.where(mask)
+        nodes.append({
+            "id": component_id,
+            "kind": kind,
+            "parent_id": None,
+            "state": state,
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": [
+                int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1,
+            ],
+            "z_index": z_index,
+            "text_ids": [],
+        })
+
+    output_dir = tmp_path / "accept-overlap-output"
+    result = execute_component_actions(
+        image,
+        {"nodes": nodes},
+        [_action("accept", ["accepted"])],
+        sam_runner=None,
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
+
+    accepted = next(node for node in result["nodes"] if node["id"] == "accepted")
+    actual = np.asarray(Image.open(output_dir / accepted["mask"])) > 0
+    added = actual & ~accepted_before
+    assert accepted["state"] == "pending_gate"
+    assert np.all(actual[accepted_before])
+    assert not np.any(added & active_visual)
+    assert np.all(actual[inactive_visual])
+    assert np.all(actual[frozen_text])
+
+
 def test_execute_accept_can_detach_confirmed_independent_visual(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     left = next(node for node in graph["nodes"] if node["id"] == "left")
@@ -2781,7 +3163,7 @@ def test_independent_accept_restores_parent_backing_only_under_editable_text(
     assert np.array_equal(actual, expected)
 
 
-def test_execute_suppress_text_only_deactivates_selected_frozen_text(
+def test_execute_suppress_text_rebuilds_false_ocr_as_visual_component(
     tmp_path: Path,
 ) -> None:
     image, graph, input_dir = _action_case(tmp_path)
@@ -2792,20 +3174,42 @@ def test_execute_suppress_text_only_deactivates_selected_frozen_text(
         node["id"]: dict(node)
         for node in graph["nodes"]
     }
+    proposed = np.zeros(image.shape[:2], dtype=bool)
+    proposed[3:7, 4:8] = True
+    calls = []
+
+    def batch_runner(*, image: np.ndarray, prompts: list[dict]) -> list[dict]:
+        calls.append(prompts)
+        return [{"component_id": "text", "mask": proposed}]
 
     result = execute_component_actions(
         image,
         graph,
         [_action("suppress_text", ["text"])],
-        sam_runner=None,
+        sam_batch_runner=batch_runner,
         input_dir=input_dir,
         output_dir=tmp_path / "round-suppress-text",
     )
 
     by_id = {node["id"]: node for node in result["nodes"]}
+    promoted = next(node for node in result["nodes"] if node["id"] not in before)
+    assert calls == [[{
+        "component_id": "text",
+        "box": [0.0, 0.0, 1.0, 1.0],
+        "positive": [],
+        "negative": [],
+    }]]
     assert by_id["text"] == {**before["text"], "state": "inactive"}
     assert by_id["frozen"] == {**before["frozen"], "text_ids": []}
     assert by_id["left"] == before["left"]
+    assert promoted["kind"] == "parent"
+    assert promoted["parent_id"] is None
+    assert promoted["state"] == "pending"
+    assert promoted["text_ids"] == []
+    actual = np.asarray(Image.open(
+        tmp_path / "round-suppress-text" / promoted["mask"]
+    )) > 0
+    assert np.array_equal(actual, proposed)
 
 
 def test_execute_suppress_text_rejects_frozen_visual(tmp_path: Path) -> None:
@@ -3645,6 +4049,72 @@ def test_page_quality_progresses_when_candidate_topology_changes(
     assert component_repair._page_quality_progressed(store, state) is True
 
 
+def test_page_quality_progresses_when_repair_makes_new_component_acceptable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def report(*, repaired: bool, unexplained_pixels: int) -> dict:
+        return {
+            "component_reports": [
+                {
+                    "component_id": "component_0009",
+                    "accepted": repaired,
+                },
+                {
+                    "component_id": "component_0013",
+                    "accepted": not repaired,
+                },
+            ],
+            "violations": ["unexplained_visual_residual"],
+            "visual_metrics": {
+                "largest_unexplained_region_pixels": unexplained_pixels,
+                "unexplained_visual_pixels": unexplained_pixels,
+                "mae": float(unexplained_pixels),
+                "p95": float(unexplained_pixels),
+            },
+        }
+
+    previous_payload = json.dumps({
+        "report": report(repaired=False, unexplained_pixels=100),
+    }).encode("utf-8")
+    current_payload = json.dumps({
+        "report": report(repaired=True, unexplained_pixels=200),
+    }).encode("utf-8")
+    (tmp_path / "previous-quality.json").write_bytes(previous_payload)
+    (tmp_path / "current-quality.json").write_bytes(current_payload)
+    monkeypatch.setattr(
+        component_repair,
+        "load_component_agent_request",
+        lambda _: {
+            "candidate_ids": ["component_0009"],
+            "evidence": {
+                "quality-report.json": {
+                    "path": "previous-quality.json",
+                    "sha256": hashlib.sha256(previous_payload).hexdigest(),
+                },
+            },
+        },
+    )
+    state = {
+        "repair_round": 2,
+        "failed_ids": ["component_0009"],
+        "round_history": [
+            {"round": 1, "frozen_ids": []},
+            {"round": 2, "frozen_ids": []},
+        ],
+        "current_round": {
+            "request_ref": {"path": "current-request.json"},
+            "quality_ref": {
+                "path": "current-quality.json",
+                "sha256": hashlib.sha256(current_payload).hexdigest(),
+            },
+        },
+    }
+    store = type("Store", (), {"root": tmp_path})()
+
+    assert component_repair._page_quality_progressed(store, state) is True
+
+
 def test_execution_rejects_rewritten_retained_inactive_source_mask(
     page_session: dict,
 ) -> None:
@@ -3824,6 +4294,51 @@ def test_absorb_residual_unions_only_bound_unexplained_pixels(
     assert np.array_equal(actual, left_before | (residual > 0))
 
 
+def test_accept_then_absorb_residual_preserves_gate_and_pair_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[6:8, 2:4] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+        "path": "unexplained-mask.png",
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}}
+    (input_dir / "component_agent_request.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+    left_before = np.asarray(Image.open(
+        input_dir / next(node for node in graph["nodes"] if node["id"] == "left")["mask"]
+    )) > 0
+    actions = [
+        _action("accept", ["left"]),
+        _action("absorb_residual", ["left"]),
+        _action("accept", ["right"]),
+    ]
+    for action in (actions[0], actions[2]):
+        action["evidence"] = ["left", "right", "independent visual units"]
+
+    result = execute_component_actions(
+        image, graph, actions, sam_runner=None,
+        input_dir=input_dir, output_dir=tmp_path / "round-accept-residual",
+    )
+
+    left = next(node for node in result["nodes"] if node["id"] == "left")
+    actual = np.asarray(Image.open(
+        tmp_path / "round-accept-residual" / left["mask"]
+    )) > 0
+    assert left["state"] == "pending_gate"
+    assert np.array_equal(actual, left_before | (residual > 0))
+    assert component_repair._approved_contained_parent_pairs(
+        {"actions": actions}, {("left", "right")}
+    ) == {("left", "right")}
+
+
 def test_absorb_residual_partitions_disconnected_regions_by_nearest_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3894,15 +4409,67 @@ def test_absorb_residual_rejects_region_unrelated_to_every_target(
         component_repair, "load_component_agent_request", lambda _: request,
     )
 
-    with pytest.raises(VisualSegmentationError, match="unrelated residual"):
+    graph_before = copy.deepcopy(graph)
+    output_dir = tmp_path / "round-unrelated-residual"
+    with pytest.raises(VisualSegmentationError, match="no related residual") as error:
         execute_component_actions(
             image,
             graph,
             [_action("absorb_residual", ["left"])],
             sam_runner=None,
             input_dir=input_dir,
-            output_dir=tmp_path / "round-unrelated-residual",
+            output_dir=output_dir,
         )
+
+    assert type(error.value).__name__ == "RecoverableComponentPlanError"
+    assert graph == graph_before
+    assert not output_dir.exists()
+
+
+def test_absorb_residual_leaves_unmatched_region_for_same_round_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[3:5, 0:2] = 255
+    residual[3:5, 14:16] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+        "path": "unexplained-mask.png",
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}}
+    (input_dir / "component_agent_request.json").write_text(
+        json.dumps(request), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+    right = np.asarray(Image.open(input_dir / "masks/right.png")) > 0
+    output_dir = tmp_path / "round-absorb-and-retry"
+
+    result = execute_component_actions(
+        image,
+        graph,
+        [
+            _action("absorb_residual", ["left"]),
+            _action(
+                "retry_with_box", ["right"],
+                {"box": [0.6, 0.1, 1.0, 0.6]},
+            ),
+        ],
+        sam_batch_runner=lambda **_: [
+            {"component_id": "right", "mask": right}
+        ],
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
+
+    by_id = {node["id"]: node for node in result["nodes"]}
+    left = np.asarray(Image.open(output_dir / by_id["left"]["mask"])) > 0
+    assert np.all(left[3:5, 0:2])
+    assert not np.any(left[3:5, 14:16])
+    assert by_id["right"]["state"] == "pending"
 
 
 def test_skill_absorb_residual_validates_bound_request_without_product_import(

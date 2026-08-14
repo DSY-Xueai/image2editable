@@ -470,7 +470,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             node["id"] for node in graph["nodes"]
             if node.get("kind") != "text" and node.get("state") == "inactive"
         }
-    touched = set()
+    touched = {}
     retried_ids = set()
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
@@ -531,9 +531,13 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
         ):
             raise ValueError("component action object is frozen")
         if name != "rebuild_background":
-            if touched & set(object_ids):
+            if any(
+                value in touched
+                and not (touched[value] == "accept" and name == "absorb_residual")
+                for value in object_ids
+            ):
                 raise ValueError("component plan has conflicting object actions")
-            touched.update(object_ids)
+            touched.update({value: name for value in object_ids})
         parameters = action["parameters"]
         optional_parameters = _OPTIONAL_ACTION_PARAMETERS.get(name, frozenset())
         if (

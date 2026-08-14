@@ -6,6 +6,7 @@ import math
 
 AGENT_PROVIDERS = frozenset({"host", "local"})
 MAX_REPAIR_ROUNDS = 5
+MAX_COMPONENT_PROMPT_POINTS = 256
 COMPONENT_STATES = frozenset(
     {"pending", "pending_gate", "failed", "frozen", "inactive"}
 )
@@ -27,6 +28,26 @@ LEGACY_COMPONENT_EVIDENCE_NAMES = frozenset(
 COMPONENT_EVIDENCE_NAMES = LEGACY_COMPONENT_EVIDENCE_NAMES | {
     "unexplained-mask.png"
 }
+ROUND_REVIEW_EVIDENCE_NAME = "round-review.png"
+FULL_COMPONENT_REVIEW_EVIDENCE = (
+    "source.png",
+    "numbered-masks.png",
+    "ocr-overlay.png",
+    "component-isolation.png",
+    "ownership.png",
+    "reconstructed.png",
+    "difference.png",
+    "unexplained-mask.png",
+    "quality-report.json",
+)
+INCREMENTAL_COMPONENT_REVIEW_EVIDENCE = (
+    "source.png",
+    "reconstructed.png",
+    "difference.png",
+    "unexplained-mask.png",
+    "quality-report.json",
+    ROUND_REVIEW_EVIDENCE_NAME,
+)
 
 _COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
     {
@@ -39,6 +60,7 @@ _COMPONENT_AGENT_REQUEST_FIELDS = frozenset(
         "candidate_ids",
         "frozen_ids",
         "evidence",
+        "review_evidence",
     }
 )
 
@@ -394,6 +416,7 @@ def validate_component_action(action: object, *, graph: dict | None = None) -> d
             name: {"path": name, "sha256": "0" * 64}
             for name in COMPONENT_EVIDENCE_NAMES
         },
+        "review_evidence": list(FULL_COMPONENT_REVIEW_EVIDENCE),
     }
     validate_component_plan(
         {
@@ -447,7 +470,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             node["id"] for node in graph["nodes"]
             if node.get("kind") != "text" and node.get("state") == "inactive"
         }
-    touched = set()
+    touched = {}
     retried_ids = set()
     for action in actions:
         if not isinstance(action, dict) or set(action) != _COMPONENT_ACTION_FIELDS:
@@ -508,9 +531,13 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
         ):
             raise ValueError("component action object is frozen")
         if name != "rebuild_background":
-            if touched & set(object_ids):
+            if any(
+                value in touched
+                and not (touched[value] == "accept" and name == "absorb_residual")
+                for value in object_ids
+            ):
                 raise ValueError("component plan has conflicting object actions")
-            touched.update(object_ids)
+            touched.update({value: name for value in object_ids})
         parameters = action["parameters"]
         optional_parameters = _OPTIONAL_ACTION_PARAMETERS.get(name, frozenset())
         if (
@@ -556,6 +583,11 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     raise ValueError(f"component action {field} coordinates are invalid")
                 for point in points:
                     _validate_normalized_point(point, field)
+            if (
+                len(parameters["positive"]) + len(parameters["negative"])
+                > MAX_COMPONENT_PROMPT_POINTS
+            ):
+                raise ValueError("component action has too many prompt points")
             if not parameters["positive"]:
                 raise ValueError("component action positive coordinates are invalid")
         if name in {"retry_with_box", "retry_with_points"}:
@@ -632,9 +664,12 @@ def validate_component_agent_request(request: object) -> dict:
     if set(request["candidate_ids"]) & set(request["frozen_ids"]):
         raise ValueError("candidate_ids and frozen_ids must be disjoint")
     evidence = request["evidence"]
-    if not isinstance(evidence, dict) or frozenset(evidence) not in {
+    evidence_names = frozenset(evidence) if isinstance(evidence, dict) else frozenset()
+    if evidence_names not in {
         LEGACY_COMPONENT_EVIDENCE_NAMES,
         COMPONENT_EVIDENCE_NAMES,
+        LEGACY_COMPONENT_EVIDENCE_NAMES | {ROUND_REVIEW_EVIDENCE_NAME},
+        COMPONENT_EVIDENCE_NAMES | {ROUND_REVIEW_EVIDENCE_NAME},
     }:
         raise ValueError("component agent request evidence fields are invalid")
     for name, record in evidence.items():
@@ -651,6 +686,34 @@ def validate_component_agent_request(request: object) -> dict:
         ):
             raise ValueError(f"component evidence path is invalid: {name}")
         _validate_sha256(record["sha256"], f"component evidence sha256: {name}")
+    review_evidence = request["review_evidence"]
+    if (
+        not isinstance(review_evidence, list)
+        or any(type(name) is not str for name in review_evidence)
+        or len(review_evidence) != len(set(review_evidence))
+        or any(name not in evidence for name in review_evidence)
+    ):
+        raise ValueError("component agent request review_evidence is invalid")
+    canonical = [
+        name for name in (*FULL_COMPONENT_REVIEW_EVIDENCE, ROUND_REVIEW_EVIDENCE_NAME)
+        if name in review_evidence
+    ]
+    full = [name for name in FULL_COMPONENT_REVIEW_EVIDENCE if name in evidence]
+    if review_evidence != canonical:
+        raise ValueError("component agent request review_evidence order is invalid")
+    if request["repair_round"] == 1:
+        if review_evidence != full or ROUND_REVIEW_EVIDENCE_NAME in evidence:
+            raise ValueError("component agent request review_evidence is invalid")
+    elif ROUND_REVIEW_EVIDENCE_NAME not in evidence:
+        if review_evidence != full:
+            raise ValueError("component agent request review_evidence fallback is invalid")
+    else:
+        required = {
+            "source.png", "reconstructed.png", "difference.png",
+            "quality-report.json", ROUND_REVIEW_EVIDENCE_NAME,
+        }
+        if not required <= set(review_evidence):
+            raise ValueError("component agent request review_evidence is incomplete")
     return request
 
 

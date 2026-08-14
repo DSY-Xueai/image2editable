@@ -15,6 +15,7 @@ import uuid
 
 from image2editable.component_contracts import validate_component_plan
 from image2editable.component_repair import (
+    load_component_plan_correction_context,
     load_component_agent_request,
     load_component_agent_graph,
     load_or_create_run_integrity_key,
@@ -55,7 +56,13 @@ def next_host_agent_item(run_dir: str | Path) -> dict:
             }
         else:
             request_path, request = _current_request(store)
-            return _request_item(request_path, request)
+            item = _request_item(request_path, request)
+            correction_context = load_component_plan_correction_context(
+                store, request["page_id"], request_path
+            )
+            if correction_context is not None:
+                item["correction_context"] = correction_context
+            return item
 
 
 def _validate_host_awaiting(store: RunStore) -> None:
@@ -113,6 +120,15 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
                 raise
             request_path, request = _current_request(store, include_recorded=True)
         request_sha256 = _request_sha256(request)
+        from image2editable.component_contracts import validate_component_repair_state
+
+        component_state = validate_component_repair_state(store.read_json(
+            f"pages/{request['page_id']}/reconstruction/component_state.json"
+        ))
+        retry_allowed = (
+            component_state["phase"] == "awaiting_plan"
+            and component_state["plan_count"] == component_state["repair_round"]
+        )
         destination = store.root / (
             f"host-component-plan-{request['page_id']}-"
             f"{request['repair_round']:02d}-{request_sha256}.json"
@@ -120,6 +136,42 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
         if document.get("request_sha256") != request_sha256:
             raise ValueError("component plan request_sha256 does not match current request")
         graph = load_component_agent_graph(request_path)
+        validate_component_plan(document, request=request, graph=graph)
+        if component_state["phase"] == "plan_recorded":
+            current_reference = component_state["current_round"]["plan_ref"]
+            current_path = store.root / Path(
+                *PurePosixPath(current_reference["path"]).parts
+            )
+            existing = _read_json_file(current_path)
+            validate_component_plan(existing, request=request, graph=graph)
+            if existing != document:
+                raise RuntimeError("A different component plan is already recorded")
+            if store.read_json("run_state.json")["status"] != RunStatus.AWAITING_AGENT.value:
+                raise RuntimeError("Component plan is already recorded")
+            _record_plan_reference(store, request, current_path)
+            store.transition_run(RunStatus.PREPARED)
+            return {
+                "status": "recorded",
+                "plan_path": str(current_path.resolve()),
+                "recovered": True,
+            }
+        if destination.exists() or destination.is_symlink():
+            existing = _read_json_file(destination)
+            validate_component_plan(existing, request=request, graph=graph)
+            if existing != document:
+                if not retry_allowed:
+                    raise RuntimeError("A different component plan is already recorded")
+                payload = json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                ).encode("utf-8") + b"\n"
+                destination = destination.with_name(
+                    f"{destination.stem}-retry-"
+                    f"{hashlib.sha256(payload).hexdigest()[:12]}.json"
+                )
         if destination.exists() or destination.is_symlink():
             existing = _read_json_file(destination)
             validate_component_plan(existing, request=request, graph=graph)
@@ -137,7 +189,6 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
             }
         if store.read_json("run_state.json")["status"] != RunStatus.AWAITING_AGENT.value:
             raise RuntimeError("Run must be awaiting_agent")
-        validate_component_plan(document, request=request, graph=graph)
         _write_json_exclusive(destination, document)
         _record_plan_reference(store, request, destination)
         store.transition_run(RunStatus.PREPARED)
@@ -172,7 +223,8 @@ def _record_plan_reference(store: RunStore, request: dict, plan_path: Path) -> N
     updated["current_round"] = dict(state["current_round"])
     updated["current_round"]["plan_ref"] = reference
     updated["phase"] = "plan_recorded"
-    updated["plan_count"] += 1
+    if updated["plan_count"] < updated["repair_round"]:
+        updated["plan_count"] += 1
     updated["revision"] += 1
     from image2editable.contracts import utc_now
     updated["updated_at"] = utc_now()

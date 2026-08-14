@@ -20,6 +20,7 @@ from image2editable.component_contracts import (
 )
 from image2editable.component_repair import (
     _read_bound_file,
+    load_component_plan_correction_context,
     record_local_component_plan,
     resume_round_limited_component_repair,
 )
@@ -713,11 +714,16 @@ def _advance_legacy_pages(
             )
             if outcome["status"] == "awaiting_agent" and provider == "local":
                 request_path = _local_component_request_path(store, page_id)
-                plan = _run_local_service_agent(
-                    request_path,
-                    service_config=local_service,
-                    performance_trace=performance_trace,
+                agent_options = {
+                    "service_config": local_service,
+                    "performance_trace": performance_trace,
+                }
+                correction_context = _local_plan_correction_context(
+                    store, page_id, request_path
                 )
+                if correction_context is not None:
+                    agent_options["correction_context"] = correction_context
+                plan = _run_local_service_agent(request_path, **agent_options)
                 record_local_component_plan(
                     store,
                     page_id,
@@ -947,21 +953,30 @@ def _local_component_request_path(store: RunStore, page_id: str) -> Path:
     return request_path
 
 
+def _local_plan_correction_context(
+    store: RunStore, page_id: str, request_path: Path
+) -> dict[str, object] | None:
+    return load_component_plan_correction_context(store, page_id, request_path)
+
+
 def _run_local_agent(
     request_path: str | Path,
     *,
     model_receipt: dict,
     resource_policy: dict,
     performance_trace=None,
+    correction_context: dict[str, object] | None = None,
 ) -> dict:
     from image2editable.local_agent import run_local_agent
 
-    return run_local_agent(
-        request_path,
-        model_receipt=model_receipt,
-        resource_policy=resource_policy,
-        performance_trace=performance_trace,
-    )
+    options = {
+        "model_receipt": model_receipt,
+        "resource_policy": resource_policy,
+        "performance_trace": performance_trace,
+    }
+    if correction_context is not None:
+        options["correction_context"] = correction_context
+    return run_local_agent(request_path, **options)
 
 
 def _local_service_config() -> object:
@@ -975,14 +990,17 @@ def _run_local_service_agent(
     *,
     service_config: object,
     performance_trace=None,
+    correction_context: dict[str, object] | None = None,
 ) -> dict:
     from image2editable.local_agent import run_local_service_agent
 
-    return run_local_service_agent(
-        request_path,
-        service_config=service_config,
-        performance_trace=performance_trace,
-    )
+    options = {
+        "service_config": service_config,
+        "performance_trace": performance_trace,
+    }
+    if correction_context is not None:
+        options["correction_context"] = correction_context
+    return run_local_service_agent(request_path, **options)
 
 
 def _ensure_legacy_pages_processing(

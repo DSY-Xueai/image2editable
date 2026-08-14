@@ -52,6 +52,12 @@ ROUND_REVIEW_MAX_MASK_PIXELS = 256 * 1024 * 1024
 ROUND_REVIEW_MAX_WORKING_BYTES = 256 * 1024 * 1024
 ROUND_REVIEW_MAX_ENCODED_BYTES = 64 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
+UNRELATED_RESIDUAL_TARGET_REASON = "unrelated_residual_target"
+COMPONENT_PLAN_CORRECTION_INSTRUCTION = (
+    "The previous plan was rejected because an absorb_residual target had no "
+    "containment or 3px adjacency with the signed residual. Modify or remove "
+    "the related absorb_residual action; do not change request_sha256."
+)
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
     "unexplained_visual_residual",
@@ -325,11 +331,48 @@ def record_local_component_plan(
             indent=2,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
+        if state["phase"] == "plan_recorded":
+            if (
+                _load_state_artifact(
+                    store.root, state["current_round"]["plan_ref"]
+                )
+                != payload
+            ):
+                raise RuntimeError(
+                    "A different local component plan is already recorded"
+                )
+            return {
+                "status": "recorded",
+                "plan_ref": state["current_round"]["plan_ref"],
+                "recovered": True,
+            }
         reconstruction = store.root / "pages" / page_id / "reconstruction"
+        retry_allowed = (
+            state["phase"] == "awaiting_plan"
+            and state["plan_count"] == state["repair_round"]
+        )
         destination = reconstruction / (
             f"local-component-plan-{state['repair_round']:02d}-"
             f"{state['current_round']['request_ref']['sha256']}.json"
         )
+        payload_sha256 = hashlib.sha256(payload).hexdigest()
+        if destination.exists() or destination.is_symlink():
+            if (
+                _read_bound_file(
+                    destination,
+                    store.root,
+                    max_bytes=REQUEST_JSON_LIMIT,
+                    label="local component plan",
+                )
+                != payload
+            ):
+                if not retry_allowed:
+                    raise RuntimeError(
+                        "A different local component plan is already recorded"
+                    )
+                destination = destination.with_name(
+                    f"{destination.stem}-retry-{payload_sha256[:12]}.json"
+                )
         if destination.exists() or destination.is_symlink():
             if (
                 _read_bound_file(
@@ -349,23 +392,14 @@ def record_local_component_plan(
             "path": destination.resolve()
             .relative_to(store.root.resolve())
             .as_posix(),
-            "sha256": hashlib.sha256(payload).hexdigest(),
+            "sha256": payload_sha256,
         }
-        if state["phase"] == "plan_recorded":
-            if state["current_round"]["plan_ref"] != plan_ref:
-                raise RuntimeError(
-                    "A different local component plan is already recorded"
-                )
-            return {
-                "status": "recorded",
-                "plan_ref": plan_ref,
-                "recovered": True,
-            }
         updated = dict(state)
         updated["current_round"] = dict(state["current_round"])
         updated["current_round"]["plan_ref"] = plan_ref
         updated["phase"] = "plan_recorded"
-        updated["plan_count"] += 1
+        if updated["plan_count"] < updated["repair_round"]:
+            updated["plan_count"] += 1
         updated["revision"] += 1
         updated["updated_at"] = _utc_now()
         validate_component_repair_state(updated)
@@ -375,6 +409,177 @@ def record_local_component_plan(
             "plan_ref": plan_ref,
             "recovered": False,
         }
+
+
+def reject_recoverable_component_plan(
+    store,
+    page_id: str,
+    *,
+    repair_round: int,
+    request_ref: dict,
+    plan_ref: dict,
+    _lease: ExecutionLease | None = None,
+) -> dict:
+    if _lease is not None:
+        _require_held_execution_lease(store, _lease)
+    lease = nullcontext() if _lease is not None else ExecutionLease(
+        store.root / "execution.lock", run_root=store.root
+    )
+    with lease:
+        relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        state = validate_component_repair_state(store.read_json(relative))
+        _validate_repair_state_identity(store, state, page_id)
+        current = state["current_round"]
+        if (
+            state["phase"] != "plan_recorded"
+            or state["repair_round"] != repair_round
+            or current["round"] != repair_round
+            or current["request_ref"] != request_ref
+            or current["plan_ref"] != plan_ref
+            or current["execution_ref"] is not None
+            or current["quality_ref"] is not None
+            or state["plan_count"] < 1
+        ):
+            raise RuntimeError("Recoverable component plan rejection is stale")
+        _load_state_artifact(store.root, request_ref)
+        _load_state_artifact(store.root, plan_ref)
+        rejection = {
+            "schema_version": 1,
+            "page_id": page_id,
+            "repair_round": repair_round,
+            "request_ref": request_ref,
+            "rejected_plan_ref": plan_ref,
+            "reason": UNRELATED_RESIDUAL_TARGET_REASON,
+        }
+        rejection_payload = json.dumps(
+            rejection,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8") + b"\n"
+        rejection_revision = state["revision"] + 1
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        rejection_path = reconstruction / (
+            f"component-plan-rejection-{rejection_revision:08d}.json"
+        )
+        if rejection_path.exists() or rejection_path.is_symlink():
+            if _read_bound_file(
+                rejection_path,
+                store.root,
+                max_bytes=MARKER_JSON_LIMIT,
+                label="component plan rejection",
+            ) != rejection_payload:
+                raise RuntimeError(
+                    "A different component plan rejection is already recorded"
+                )
+        else:
+            _write_exclusive(rejection_path, rejection_payload, reconstruction)
+        updated = dict(state)
+        updated["current_round"] = dict(current)
+        updated["current_round"]["plan_ref"] = None
+        updated["phase"] = "awaiting_plan"
+        updated["revision"] = rejection_revision
+        updated["updated_at"] = _utc_now()
+        validate_component_repair_state(updated)
+        store.write_json(relative, updated)
+        return updated
+
+
+def load_component_plan_correction_context(
+    store, page_id: str, request_path: str | Path
+) -> dict[str, object] | None:
+    state = validate_component_repair_state(store.read_json(
+        f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+    ))
+    if not (
+        state["phase"] == "awaiting_plan"
+        and state["plan_count"] == state["repair_round"]
+    ):
+        return None
+    request_ref = state["current_round"]["request_ref"]
+    expected_request = (
+        store.root / Path(*PurePosixPath(request_ref["path"]).parts)
+    ).resolve()
+    request_path = Path(request_path).resolve()
+    if request_path != expected_request:
+        raise RuntimeError("Component plan correction request does not match repair state")
+    request_payload = _read_bound_file(
+        request_path,
+        store.root,
+        max_bytes=REQUEST_JSON_LIMIT,
+        label="component plan correction request",
+    )
+    if hashlib.sha256(request_payload).hexdigest() != request_ref["sha256"]:
+        raise RuntimeError("Component plan correction request hash mismatch")
+    request = load_component_agent_request(request_path)
+    graph = load_component_agent_graph(request_path)
+    rejection_payload = _read_bound_file(
+        store.root / "pages" / page_id / "reconstruction"
+        / f"component-plan-rejection-{state['revision']:08d}.json",
+        store.root,
+        max_bytes=MARKER_JSON_LIMIT,
+        label="component plan rejection",
+    )
+    try:
+        rejection = json.loads(rejection_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Component plan rejection JSON is invalid") from error
+    if (
+        not isinstance(rejection, dict)
+        or set(rejection) != {
+            "schema_version", "page_id", "repair_round", "request_ref",
+            "rejected_plan_ref", "reason",
+        }
+        or rejection["schema_version"] != 1
+        or rejection["page_id"] != page_id
+        or rejection["repair_round"] != state["repair_round"]
+        or rejection["request_ref"] != request_ref
+        or rejection["reason"] != UNRELATED_RESIDUAL_TARGET_REASON
+        or not isinstance(rejection["rejected_plan_ref"], dict)
+        or set(rejection["rejected_plan_ref"]) != {"path", "sha256"}
+    ):
+        raise RuntimeError("Component plan rejection binding is invalid")
+    plan_ref = rejection["rejected_plan_ref"]
+    request_sha256 = request_ref["sha256"]
+    if state["provider"] == "local":
+        base_path = (
+            f"pages/{page_id}/reconstruction/local-component-plan-"
+            f"{state['repair_round']:02d}-{request_sha256}"
+        )
+    else:
+        base_path = (
+            f"host-component-plan-{page_id}-"
+            f"{state['repair_round']:02d}-{request_sha256}"
+        )
+    plan_path = plan_ref["path"]
+    if plan_path == f"{base_path}.json":
+        retry_prefix = None
+    elif plan_path.startswith(f"{base_path}-retry-") and plan_path.endswith(".json"):
+        retry_prefix = plan_path[len(base_path) + len("-retry-"):-5]
+        if (
+            len(retry_prefix) != 12
+            or any(character not in "0123456789abcdef" for character in retry_prefix)
+        ):
+            raise RuntimeError("Rejected component plan path is invalid")
+    else:
+        raise RuntimeError("Rejected component plan path is invalid")
+    payload = _load_state_artifact(store.root, plan_ref)
+    if retry_prefix is not None and not plan_ref["sha256"].startswith(retry_prefix):
+        raise RuntimeError("Rejected component plan hash binding is invalid")
+    try:
+        rejected_plan = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Rejected component plan JSON is invalid") from error
+    validate_component_plan(rejected_plan, request=request, graph=graph)
+    if not any(
+        action["action"] == "absorb_residual"
+        for action in rejected_plan["actions"]
+    ):
+        raise RuntimeError("Rejected component plan has no absorb_residual action")
+    return {
+        "instruction": COMPONENT_PLAN_CORRECTION_INSTRUCTION,
+        "rejected_plan": rejected_plan,
+    }
 
 
 def _require_held_execution_lease(store, lease: ExecutionLease) -> None:
@@ -2131,6 +2336,27 @@ def _page_quality_progressed(store, state: dict) -> bool:
     current_report = current.get("report")
     if not isinstance(previous_report, dict) or not isinstance(current_report, dict):
         raise ValueError("component quality report is invalid for progress check")
+    previous_components = previous_report.get("component_reports")
+    current_components = current_report.get("component_reports")
+    if any(
+        not isinstance(items, list)
+        or any(
+            not isinstance(item, dict)
+            or type(item.get("component_id")) is not str
+            or type(item.get("accepted")) is not bool
+            for item in items
+        )
+        for items in (previous_components, current_components)
+    ):
+        raise ValueError("component quality report is invalid for progress check")
+    previous_accepted = {
+        item["component_id"] for item in previous_components if item["accepted"]
+    }
+    if any(
+        item["accepted"] and item["component_id"] not in previous_accepted
+        for item in current_components
+    ):
+        return True
     return _page_progress_key(current_report) < _page_progress_key(previous_report)
 
 
