@@ -3,6 +3,8 @@ import re
 import types
 from pathlib import Path
 
+import pytest
+
 from scripts import visual_segment
 
 
@@ -167,6 +169,39 @@ def test_lama_dependencies_use_torch_without_the_old_wrapper() -> None:
     assert "simple-lama-inpainting" not in PYPROJECT.read_text(
         encoding="utf-8"
     ).casefold()
+
+
+def _assert_standalone_skill_uses_the_local_lama_adapter(skill: str) -> None:
+    assert "simple-lama-inpainting" not in skill.casefold()
+    assert "上限来自 `simple-lama-inpainting" not in skill
+    assert "wrapper 首次运行" not in skill
+    assert "`torch>=2.5.1,<3`" in skill
+    assert "本地 TorchScript adapter" in skill
+
+
+def test_standalone_skill_uses_the_local_lama_adapter() -> None:
+    _assert_standalone_skill_uses_the_local_lama_adapter(
+        SKILL.read_text(encoding="utf-8")
+    )
+
+
+@pytest.mark.parametrize(
+    "old_requirement",
+    [
+        "simple-lama-inpainting",
+        "simple-lama-inpainting>=0.1.2",
+        "Simple-LaMa-InPainting >= 0.1.2",
+    ],
+)
+def test_standalone_skill_rejects_old_lama_dependency_variants(
+    old_requirement: str,
+) -> None:
+    skill = SKILL.read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_standalone_skill_uses_the_local_lama_adapter(
+            f"{skill}\n- 安装 `{old_requirement}`。\n"
+        )
 
 
 def test_lama_adapter_product_and_skill_mirrors_match() -> None:

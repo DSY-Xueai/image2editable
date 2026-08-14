@@ -19,6 +19,97 @@ from scripts import lama_inpaint
 
 
 _SMALL_CHECKPOINT = b"fixed-test-checkpoint"
+_REAL_EQUIVALENCE_MANIFEST_SHA256 = (
+    "dc93d38da73367705d32efe4f95ddf36a120d27a35c83bddc630b2788a12352e"
+)
+_REAL_EQUIVALENCE_CONTRACT = {
+    "checkpoint_sha256": (
+        "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c"
+    ),
+    "reference": {
+        "device": "cpu",
+        "implementation": "simple_lama_inpainting.SimpleLama",
+        "version": "0.1.2",
+    },
+    "cases": {
+        "rectangle": {
+            "input": {
+                "dtype": "uint8",
+                "sha256": "1563b9c9f1dabd7b4adebb655cfe1d0dae63fd625d2fc070d54a44cde5de004c",
+                "shape": [67, 65, 3],
+            },
+            "mask": {
+                "dtype": "uint8",
+                "sha256": "5130c37d5ffdc7ee4e337d907109d4394fcfc342e323dcbb77b28874c3f10034",
+                "shape": [67, 65],
+            },
+            "reference": {
+                "dtype": "uint8",
+                "file": "cpu-reference-rectangle.npy",
+                "file_sha256": "48bb8ad42dcab20924f7ca5cc5bb6dcdc9847d7cff6918e9993ec06ec6b3fc0e",
+                "sha256": "da85d8464e05d11055eab997943c6e89e01cac5eb7ae888fa52ca9e3a5933842",
+                "shape": [67, 65, 3],
+            },
+        },
+        "thin-line": {
+            "input": {
+                "dtype": "uint8",
+                "sha256": "1563b9c9f1dabd7b4adebb655cfe1d0dae63fd625d2fc070d54a44cde5de004c",
+                "shape": [67, 65, 3],
+            },
+            "mask": {
+                "dtype": "uint8",
+                "sha256": "f9099158a32d42c80ea7e8522e75a76d89c74b30a7d9c6526a12dc1da8b50adf",
+                "shape": [67, 65],
+            },
+            "reference": {
+                "dtype": "uint8",
+                "file": "cpu-reference-thin-line.npy",
+                "file_sha256": "20fe2fc3ad959edbc4208234d013eddc47889789b202b500cf1ff6c1aab23325",
+                "sha256": "635949d4aba34fc9f47cce6167792a6a751a4237d453265a7bf1c675f4e17ca2",
+                "shape": [67, 65, 3],
+            },
+        },
+        "non-modulo-boundary": {
+            "input": {
+                "dtype": "uint8",
+                "sha256": "1563b9c9f1dabd7b4adebb655cfe1d0dae63fd625d2fc070d54a44cde5de004c",
+                "shape": [67, 65, 3],
+            },
+            "mask": {
+                "dtype": "uint8",
+                "sha256": "0609b8ab7cb332665d3afdef176b5b06aa7113dbdc0838e74a42acfc1828c9f7",
+                "shape": [67, 65],
+            },
+            "reference": {
+                "dtype": "uint8",
+                "file": "cpu-reference-non-modulo-boundary.npy",
+                "file_sha256": "02b4f911bcf32f311dd668e0587768ce036a3f041cfa9072f525063936e5d7d9",
+                "sha256": "09c3b37f1b9cb082c94ff2f1809ebd2d0a5b97059b859689d6a3b76347354db3",
+                "shape": [67, 65, 3],
+            },
+        },
+        "full-rectangle": {
+            "input": {
+                "dtype": "uint8",
+                "sha256": "4ec67cf9c058dba2af19fbf36949efe3f9d3d1e546bee850db855fc698719a49",
+                "shape": [936, 1665, 3],
+            },
+            "mask": {
+                "dtype": "uint8",
+                "sha256": "a4bab30ee091b96ac586d11cdaa860417ae9304c2b690efbe9761b0f969dac9d",
+                "shape": [936, 1665],
+            },
+            "reference": {
+                "dtype": "uint8",
+                "file": "cpu-reference-full-rectangle.npy",
+                "file_sha256": "54dbcb7c34eac143d0fac197bde5515eb931230397d5abd6d9436045e01da319",
+                "sha256": "9e282f2f01addce51831db160165b07bcad11551eb9aad19e66bd69b39964677",
+                "shape": [936, 1665, 3],
+            },
+        },
+    },
+}
 
 
 @pytest.fixture
@@ -958,10 +1049,23 @@ def test_real_checkpoint_equivalence_against_simple_lama_baseline() -> None:
 
     root = Path(equivalence_dir)
     old = root / "old"
-    new = root / "new"
-    metadata = json.loads((old / "metadata.json").read_text(encoding="utf-8"))
+    references = root / "cpu-reference"
+    manifest = json.loads(
+        (references / "manifest.json").read_text(encoding="utf-8")
+    )
+    canonical_manifest = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert hashlib.sha256(canonical_manifest).hexdigest() == (
+        _REAL_EQUIVALENCE_MANIFEST_SHA256
+    )
+    assert manifest == _REAL_EQUIVALENCE_CONTRACT
     checkpoint = Path(checkpoint_value)
-    assert lama_inpaint.checkpoint_identity(checkpoint) == metadata["checkpoint"]
+    assert lama_inpaint.checkpoint_identity(checkpoint)["sha256"] == (
+        manifest["checkpoint_sha256"]
+    )
 
     height, width = 67, 65
     y, x = np.indices((height, width), dtype=np.uint16)
@@ -996,8 +1100,27 @@ def test_real_checkpoint_equivalence_against_simple_lama_baseline() -> None:
     )
     try:
         for name, (image, mask) in fixtures.items():
+            case = manifest["cases"][name]
+            for value, expected in ((image, case["input"]), (mask, case["mask"])):
+                assert list(value.shape) == expected["shape"]
+                assert str(value.dtype) == expected["dtype"]
+                assert hashlib.sha256(
+                    np.ascontiguousarray(value).tobytes()
+                ).hexdigest() == expected["sha256"]
+
+            reference = case["reference"]
+            reference_path = references / reference["file"]
+            assert hashlib.sha256(reference_path.read_bytes()).hexdigest() == (
+                reference["file_sha256"]
+            )
+            expected = np.load(reference_path)
+            assert list(expected.shape) == reference["shape"]
+            assert str(expected.dtype) == reference["dtype"]
+            assert hashlib.sha256(
+                np.ascontiguousarray(expected).tobytes()
+            ).hexdigest() == reference["sha256"]
+
             actual = lama_inpaint.inpaint_large_mask(image, mask)
-            expected = np.load(new / f"cpu-reference-{name}.npy")
             assert actual.shape == expected.shape
             delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
             assert int(delta.max(initial=0)) <= 1

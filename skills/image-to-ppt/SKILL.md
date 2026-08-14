@@ -9,9 +9,9 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 ## 环境
 
-- 使用 Python 3.10–3.12；上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束。
+- 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
 - 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
-- 安装 `simple-lama-inpainting==0.1.2`。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，wrapper 首次运行可把模型下载到本地 cache。
+- LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，adapter 首次运行可把固定 Big-LaMa checkpoint 下载到本地 cache。
 - 开始转换前运行 `image2editable doctor`。若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。** 我确认后安装所选项、再次运行 `doctor`，通过后继续转换。
 - 优先使用当前平台已正确安装、且通过 `doctor` 与下列设备预检的硬件加速环境，不要仅为 WSL 建议离开已经可用的环境：
 
