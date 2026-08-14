@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -945,3 +946,61 @@ def test_prepare_image_and_mask_rejects_mismatched_spatial_shape() -> None:
             np.zeros((9, 8), dtype=np.uint8),
             device="cpu",
         )
+
+
+def test_real_checkpoint_equivalence_against_simple_lama_baseline() -> None:
+    equivalence_dir = os.environ.get("IMAGE2EDITABLE_LAMA_EQUIVALENCE_DIR")
+    checkpoint_value = os.environ.get("LAMA_MODEL")
+    if not equivalence_dir or not checkpoint_value:
+        pytest.skip(
+            "requires IMAGE2EDITABLE_LAMA_EQUIVALENCE_DIR and LAMA_MODEL"
+        )
+
+    root = Path(equivalence_dir)
+    old = root / "old"
+    new = root / "new"
+    metadata = json.loads((old / "metadata.json").read_text(encoding="utf-8"))
+    checkpoint = Path(checkpoint_value)
+    assert lama_inpaint.checkpoint_identity(checkpoint) == metadata["checkpoint"]
+
+    height, width = 67, 65
+    y, x = np.indices((height, width), dtype=np.uint16)
+    small_image = np.stack(
+        (
+            (x * 7 + y * 3) % 256,
+            (x * 5 + 17) % 256,
+            (y * 11 + x) % 256,
+        ),
+        axis=2,
+    ).astype(np.uint8)
+    rectangle = np.zeros((height, width), dtype=np.uint8)
+    rectangle[18:47, 19:52] = 255
+    thin_line = np.zeros((height, width), dtype=np.uint8)
+    thin_line[5:62, 32] = 255
+    boundary = np.zeros((height, width), dtype=np.uint8)
+    boundary[63:67, 60:65] = 255
+    fixtures = {
+        "rectangle": (small_image, rectangle),
+        "thin-line": (small_image, thin_line),
+        "non-modulo-boundary": (small_image, boundary),
+        "full-rectangle": (
+            np.load(old / "input.npy"),
+            np.load(old / "mask-rectangle.npy"),
+        ),
+    }
+
+    previous_model = lama_inpaint._MODEL
+    lama_inpaint._MODEL = lama_inpaint._BigLama(
+        checkpoint,
+        torch.device("cpu"),
+    )
+    try:
+        for name, (image, mask) in fixtures.items():
+            actual = lama_inpaint.inpaint_large_mask(image, mask)
+            expected = np.load(new / f"cpu-reference-{name}.npy")
+            assert actual.shape == expected.shape
+            delta = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
+            assert int(delta.max(initial=0)) <= 1
+            assert int(delta[mask == 0].max(initial=0)) == 0
+    finally:
+        lama_inpaint._MODEL = previous_model
