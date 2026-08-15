@@ -7,8 +7,11 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from scripts.visual_segment import VisualSegmentationError
+
 
 MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+MODEL_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
 OBJECT_PROMPT = (
     "person. portrait. player. card. panel. flag. icon. information icon. logo. badge. trophy. "
     "medal. wreath. table. chart. frame. border. line. decoration."
@@ -45,16 +48,20 @@ class _LazyGroundingDino:
         self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
         try:
             self.processor = transformers.AutoProcessor.from_pretrained(
-                self.model_id, local_files_only=True
+                self.model_id,
+                revision=MODEL_REVISION,
+                local_files_only=True,
             )
             model = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(
-                self.model_id, local_files_only=True
+                self.model_id,
+                revision=MODEL_REVISION,
+                local_files_only=True,
             )
-        except OSError:
-            self.processor = transformers.AutoProcessor.from_pretrained(self.model_id)
-            model = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(
-                self.model_id
-            )
+        except OSError as exc:
+            raise VisualSegmentationError(
+                "Grounding DINO is missing from the local model cache; run "
+                "`image2editable models install runtime` before conversion"
+            ) from exc
         self.model = model.to(self.device).eval()
 
     def detect(

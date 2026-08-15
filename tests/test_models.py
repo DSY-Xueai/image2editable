@@ -12,13 +12,16 @@ from image2editable import models, runtime
 from image2editable.models import HardwareProfile
 
 
+QWEN_REVISION = "89644892e4d85e24eaac8bacfd4f463576704203"
+
+
 def _catalog() -> dict[str, object]:
     return {
         "catalog_version": 1,
         "models": [
             {
                 "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-                "revision": "main",
+                "revision": QWEN_REVISION,
                 "stability": "experimental",
                 "minimum_vram_gib": 8,
                 "minimum_available_vram_gib": 6.5,
@@ -62,7 +65,7 @@ def test_recommend_uses_hardware_and_catalog_without_network(
 
     assert result == {
         "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-        "revision": "main",
+        "revision": QWEN_REVISION,
         "stability": "experimental",
         "compatible": True,
         "reason": "CUDA、显存、内存、磁盘和本地依赖均满足目录要求",
@@ -284,12 +287,12 @@ def test_install_writes_resolved_revision_file_manifest_and_receipt(
     assert calls == [
         {
             "repo_id": "Qwen/Qwen3-VL-2B-Instruct",
-            "revision": "main",
+            "revision": QWEN_REVISION,
             "cache_dir": str(tmp_path.resolve()),
         }
     ]
     assert receipt["model_id"] == "Qwen/Qwen3-VL-2B-Instruct"
-    assert receipt["requested_revision"] == "main"
+    assert receipt["requested_revision"] == QWEN_REVISION
     assert receipt["resolved_revision"] == resolved_revision
     assert receipt["stability"] == "experimental"
     assert receipt["snapshot_path"] == str(snapshot.resolve())
@@ -350,13 +353,13 @@ def test_install_downloads_the_exact_model_and_revision_that_were_confirmed(
         free_disk_gib=20,
         confirmed=True,
         model_id="Qwen/Qwen3-VL-2B-Instruct",
-        revision="main",
+        revision=QWEN_REVISION,
     )
 
     assert calls == [
         {
             "repo_id": "Qwen/Qwen3-VL-2B-Instruct",
-            "revision": "main",
+            "revision": QWEN_REVISION,
             "cache_dir": str(tmp_path.resolve()),
         }
     ]

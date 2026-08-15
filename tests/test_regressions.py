@@ -20,11 +20,124 @@ from scripts import (
     bg_model,
     fg_extract,
     lama_inpaint,
+    object_detect,
     sam_worker,
     text_detect,
     visual_worker,
     visual_segment,
 )
+
+
+GROUNDING_DINO_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+
+
+def test_grounding_dino_loads_processor_and_model_from_exact_local_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class LoadedModel:
+        def to(self, device: str) -> "LoadedModel":
+            assert device == "cpu"
+            return self
+
+        def eval(self) -> "LoadedModel":
+            return self
+
+    class Loader:
+        def __init__(self, name: str, result: object) -> None:
+            self.name = name
+            self.result = result
+
+        def from_pretrained(self, model_id: str, **kwargs: object) -> object:
+            calls.append((self.name, model_id, kwargs))
+            return self.result
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader("processor", object()),
+        AutoModelForZeroShotObjectDetection=Loader("model", LoadedModel()),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+
+    object_detect._LazyGroundingDino(object_detect.MODEL_ID, None)._load()
+
+    expected = {
+        "revision": GROUNDING_DINO_REVISION,
+        "local_files_only": True,
+    }
+    assert calls == [
+        ("processor", object_detect.MODEL_ID, expected),
+        ("model", object_detect.MODEL_ID, expected),
+    ]
+
+
+@pytest.mark.parametrize("missing_component", ["processor", "model"])
+def test_grounding_dino_missing_cache_fails_without_network_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_component: str,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class LoadedModel:
+        def to(self, device: str) -> "LoadedModel":
+            return self
+
+        def eval(self) -> "LoadedModel":
+            return self
+
+    class Loader:
+        def __init__(self, name: str, result: object) -> None:
+            self.name = name
+            self.result = result
+
+        def from_pretrained(self, model_id: str, **kwargs: object) -> object:
+            assert model_id == object_detect.MODEL_ID
+            calls.append((self.name, kwargs))
+            if self.name == missing_component:
+                raise OSError(f"missing {self.name}")
+            return self.result
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader("processor", object()),
+        AutoModelForZeroShotObjectDetection=Loader("model", LoadedModel()),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+
+    with pytest.raises(
+        object_detect.VisualSegmentationError,
+        match=r"Grounding DINO.*image2editable models install runtime",
+    ):
+        object_detect._LazyGroundingDino(object_detect.MODEL_ID, None)._load()
+
+    expected = {
+        "revision": GROUNDING_DINO_REVISION,
+        "local_files_only": True,
+    }
+    expected_calls = [("processor", expected)]
+    if missing_component == "model":
+        expected_calls.append(("model", expected))
+    assert calls == expected_calls
+
+
+def test_grounding_dino_product_and_skill_mirrors_match() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "scripts" / "object_detect.py").read_bytes() == (
+        root / "skills" / "image-to-ppt" / "scripts" / "object_detect.py"
+    ).read_bytes()
 
 
 class _ChangedStat:
