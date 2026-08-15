@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-gate.yml"
 PYPROJECT = ROOT / "pyproject.toml"
 CONSTRAINTS = ROOT / "constraints" / "runtime.txt"
 EXPECTED_INSTALLED_MATRIX = {
@@ -30,6 +31,11 @@ EXPECTED_INSTALLED_MATRIX = {
     ("ubuntu-latest", "3.12"),
     ("windows-latest", "3.12"),
     ("macos-latest", "3.12"),
+}
+EXPECTED_RELEASE_MATRIX = {
+    (os_name, version)
+    for os_name in ("ubuntu-latest", "windows-latest", "macos-latest")
+    for version in ("3.10", "3.11", "3.12")
 }
 FAST_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt pytest PyYAML "
@@ -102,7 +108,15 @@ StrictSafeLoader.add_constructor(
 
 
 def _workflow() -> dict[str, object]:
-    document = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=StrictSafeLoader)
+    return _load_workflow(WORKFLOW)
+
+
+def _release_workflow() -> dict[str, object]:
+    return _load_workflow(RELEASE_WORKFLOW)
+
+
+def _load_workflow(path: Path) -> dict[str, object]:
+    document = yaml.load(path.read_text(encoding="utf-8"), Loader=StrictSafeLoader)
     assert isinstance(document, dict)
     return document
 
@@ -430,6 +444,238 @@ def test_ci_cannot_hide_failures_and_pins_every_action() -> None:
     ]
     assert uses
     assert all(re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action) for action in uses)
+
+
+def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
+    workflow = _release_workflow()
+    assert set(workflow) == {"name", "on", "permissions", "jobs"}
+    assert workflow["name"] == "Release Gate"
+    assert workflow["on"] == {
+        "workflow_dispatch": {
+            "inputs": {
+                "run_real_model_smoke": {
+                    "description": "Run protected real-model smoke",
+                    "required": True,
+                    "type": "boolean",
+                    "default": False,
+                }
+            }
+        }
+    }
+    assert workflow["permissions"] == {"contents": "read"}
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {
+        "build-distribution",
+        "installed-package",
+        "real-model-smoke",
+    }
+    installed = jobs["installed-package"]
+    assert installed["runs-on"] == "${{ matrix.os }}"
+    assert _needs(installed) == {"build-distribution"}
+    assert installed["strategy"] == {
+        "fail-fast": False,
+        "matrix": {
+            "include": [
+                {"os": os_name, "python-version": version}
+                for os_name, version in sorted(EXPECTED_RELEASE_MATRIX)
+            ]
+        },
+    }
+    assert _action_step(installed, "actions/setup-python")["with"] == {
+        "python-version": "${{ matrix.python-version }}"
+    }
+
+
+def test_release_gate_builds_once_and_tests_the_same_artifact() -> None:
+    jobs = _release_workflow()["jobs"]
+    build = jobs["build-distribution"]
+    installed = jobs["installed-package"]
+    assert build["runs-on"] == "ubuntu-latest"
+    assert [_step_id(step) for step in _steps(build)] == [
+        "actions/checkout",
+        "actions/setup-python",
+        "Install distribution tools",
+        "Build and check distributions",
+        "actions/upload-artifact",
+    ]
+    assert "with" not in _action_step(build, "actions/checkout")
+    assert _action_step(build, "actions/setup-python")["with"] == {
+        "python-version": "3.12"
+    }
+    assert _commands(_named_step(build, "Install distribution tools")) == [
+        BUILD_INSTALL_COMMAND
+    ]
+    assert _commands(_named_step(build, "Build and check distributions")) == [
+        "python -m build",
+        "python -m twine check dist/*",
+    ]
+    assert _action_step(build, "actions/upload-artifact")["with"] == {
+        "name": "distribution",
+        "path": "dist/*",
+        "if-no-files-found": "error",
+    }
+
+    assert [_step_id(step) for step in _steps(installed)] == [
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/download-artifact",
+        "Locate the built wheel",
+        "Install built wheel",
+        "Check installed dependencies",
+        "installed_package_smoke",
+        "Run tests against installed wheel",
+    ]
+    assert "with" not in _action_step(installed, "actions/checkout")
+    assert _action_step(installed, "actions/download-artifact")["with"] == {
+        "name": "distribution",
+        "path": "${{ runner.temp }}/distribution",
+    }
+    assert _commands(_named_step(installed, "Locate the built wheel")) == (
+        LOCATE_WHEEL_COMMANDS
+    )
+    assert _named_step(installed, "Locate the built wheel")["shell"] == "python"
+    assert _commands(_named_step(installed, "Install built wheel")) == [
+        INSTALL_WHEEL_COMMAND
+    ]
+    assert _commands(_named_step(installed, "Check installed dependencies")) == [
+        "python -m pip check"
+    ]
+    installed_smoke = _named_step(installed, "installed_package_smoke")
+    assert installed_smoke["working-directory"] == "${{ runner.temp }}"
+    assert _commands(installed_smoke) == [SMOKE_COMMAND]
+    installed_tests = _named_step(installed, "Run tests against installed wheel")
+    assert installed_tests["working-directory"] == "${{ runner.temp }}"
+    assert _commands(installed_tests) == [FAST_PYTEST_COMMAND]
+
+
+def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
+    job = _release_workflow()["jobs"]["real-model-smoke"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert _needs(job) == {"build-distribution"}
+    assert job["if"] == "${{ inputs.run_real_model_smoke }}"
+    assert job["environment"] == "real-model-smoke"
+    assert "strategy" not in job
+    assert [_step_id(step) for step in _steps(job)] == [
+        "Require protected model-smoke approval",
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/download-artifact",
+        "Locate the built wheel",
+        "Install built wheel",
+        "Verify installed model smoke",
+        "Install Tesseract OCR",
+        "Check installed dependencies",
+        "Install runtime models",
+        "Run doctor",
+        "Run real model smoke",
+    ]
+    approval = _named_step(job, "Require protected model-smoke approval")
+    assert approval["env"] == {
+        "IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED": (
+            "${{ secrets.IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED }}"
+        )
+    }
+    assert _commands(approval) == [
+        'test "${IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED}" = "approved"'
+    ]
+    assert _action_step(job, "actions/setup-python")["with"] == {
+        "python-version": "3.12"
+    }
+    assert "with" not in _action_step(job, "actions/checkout")
+    assert _action_step(job, "actions/download-artifact")["with"] == {
+        "name": "distribution",
+        "path": "${{ runner.temp }}/distribution",
+    }
+    assert _named_step(job, "Locate the built wheel")["shell"] == "python"
+    assert _commands(_named_step(job, "Locate the built wheel")) == (
+        LOCATE_WHEEL_COMMANDS
+    )
+    assert _commands(_named_step(job, "Install built wheel")) == [
+        INSTALL_WHEEL_COMMAND
+    ]
+    installed_smoke = _named_step(job, "Verify installed model smoke")
+    assert installed_smoke["shell"] == "python"
+    assert _commands(installed_smoke) == [
+        "from importlib.metadata import distribution",
+        "import os",
+        "from pathlib import Path, PurePosixPath",
+        'relative = PurePosixPath("scripts/runtime_model_smoke.py")',
+        'package = distribution("image2editable")',
+        "if relative not in (package.files or []):",
+        '    raise SystemExit("installed runtime model smoke is missing")',
+        "installed = Path(package.locate_file(relative))",
+        'checkout = Path(os.environ["GITHUB_WORKSPACE"], *relative.parts)',
+        "if installed.read_bytes() != checkout.read_bytes():",
+        '    raise SystemExit("installed runtime model smoke differs from checkout")',
+    ]
+    assert _commands(_named_step(job, "Install Tesseract OCR")) == [
+        "sudo apt-get update",
+        "sudo apt-get install --yes tesseract-ocr",
+        (
+            "python -m pip install --constraint constraints/runtime.txt "
+            "pytesseract==0.3.13"
+        ),
+    ]
+    assert _commands(_named_step(job, "Check installed dependencies")) == [
+        "python -m pip check"
+    ]
+    assert _commands(_named_step(job, "Install runtime models")) == [
+        "image2editable models install runtime --yes"
+    ]
+    assert _commands(_named_step(job, "Run doctor")) == ["image2editable doctor"]
+    real_smoke = _named_step(job, "Run real model smoke")
+    assert real_smoke["working-directory"] == "${{ runner.temp }}"
+    assert _commands(real_smoke) == [
+        'python "${{ github.workspace }}/scripts/runtime_model_smoke.py"'
+    ]
+
+
+def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
+    workflow = _release_workflow()
+    jobs = workflow["jobs"]
+    for mapping in _all_mappings(workflow):
+        assert "continue-on-error" not in mapping
+        if mapping is not jobs["real-model-smoke"]:
+            assert "if" not in mapping
+    for job in jobs.values():
+        assert "defaults" not in job
+        assert "env" not in job
+        for step in _steps(job):
+            env = step.get("env", {})
+            assert isinstance(env, dict)
+            assert not any(key.casefold() == "pythonpath" for key in env)
+            if step.get("name") in {
+                "Locate the built wheel",
+                "Verify installed model smoke",
+            }:
+                assert step.get("shell") == "python"
+            else:
+                assert "shell" not in step
+        for run in _runs(job):
+            assert not re.search(
+                r"(?:\|\|\s*(?:true|:|exit\s+0)\b|;\s*(?:true|exit\s+0)\b|\bset\s+\+e\b)",
+                run,
+            )
+
+    ci_action_shas = {
+        step["uses"]
+        for job in _workflow()["jobs"].values()
+        for step in _steps(job)
+        if isinstance(step.get("uses"), str)
+    }
+    release_actions = [
+        step["uses"]
+        for job in jobs.values()
+        for step in _steps(job)
+        if isinstance(step.get("uses"), str)
+    ]
+    assert release_actions
+    assert set(release_actions) <= ci_action_shas
+    assert all(
+        re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action)
+        for action in release_actions
+    )
 
 
 def test_ci_parser_is_declared_and_candidate_pinned() -> None:
