@@ -34,9 +34,9 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "optional-dependencies": {
             "agent-local": [
                 "huggingface-hub>=0.34.0",
-                "torch>=2.5.0",
-                "transformers>=4.57.0",
-                "accelerate>=1.8.0",
+                "torch>=2.5.1,<3",
+                "transformers>=4.57,<5",
+                "accelerate>=1.8,<2",
             ],
                 "psd": ["aspose-psd>=26.5.0"],
                 "render-qa": ["pywin32>=306; sys_platform == 'win32'"],
@@ -57,7 +57,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "scripts*",
     ]
     assert data["tool"]["setuptools"]["package-data"] == {
-        "image2editable": ["model_catalog.json"]
+        "image2editable": ["model_catalog.json", "runtime_model_catalog.json"]
     }
     assert data["tool"]["setuptools"]["dynamic"]["dependencies"] == {
         "file": ["requirements.txt"]
@@ -653,21 +653,117 @@ def test_cli_models_install_cancelled_before_installer(
     monkeypatch.setattr("builtins.input", lambda prompt: "no")
 
     assert cli.main(["models", "install", "agent"]) == 1
-    assert json.loads(capsys.readouterr().out) == {"status": "cancelled"}
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"status": "cancelled"}
+    assert "上述实验性模型" in captured.err
 
 
-def test_cli_models_status_prints_local_status(
+def test_cli_models_install_runtime_yes_prints_safe_plan_before_installing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from image2editable import runtime_models
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        runtime_models,
+        "install_runtime_models",
+        lambda **kwargs: calls.append(kwargs) or {"schema_version": 1},
+    )
+    secret_cache = "C:/Users/private-account/models"
+    monkeypatch.setenv("IMAGE2EDITABLE_MODEL_CACHE", secret_cache)
+
+    assert cli.main(["models", "install", "runtime", "--yes"]) == 0
+
+    captured = capsys.readouterr()
+    plan = json.loads(captured.err)
+    assert calls == [{"cache_dir": None, "confirmed": True}]
+    assert json.loads(captured.out) == {"schema_version": 1}
+    assert plan == {
+        "cache": "IMAGE2EDITABLE_MODEL_CACHE or the default user runtime cache",
+        "estimated_download": {
+            "additional": "Grounding DINO snapshot (size not declared in catalog)",
+            "minimum_bytes": 1103887281,
+        },
+        "models": {
+            "big_lama": {
+                "sha256": (
+                    "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c"
+                ),
+                "size": 205803670,
+            },
+            "grounding_dino": {
+                "model_id": "IDEA-Research/grounding-dino-tiny",
+                "revision": "a2bb814dd30d776dcf7e30523b00659f4f141c71",
+            },
+            "sam2_large": {
+                "sha256": (
+                    "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318"
+                ),
+                "size": 898083611,
+            },
+        },
+        "target": "runtime",
+    }
+    assert secret_cache not in captured.err
+
+
+@pytest.mark.parametrize("answer", ["no", "", None])
+def test_cli_models_install_runtime_cancelled_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    answer: str | None,
+) -> None:
+    from image2editable import runtime_models
+
+    def unexpected_call(*args: object, **kwargs: object) -> object:
+        raise AssertionError(
+            f"cancelled runtime install attempted network: {args} {kwargs}"
+        )
+
+    monkeypatch.setattr(runtime_models, "install_runtime_models", unexpected_call)
+    monkeypatch.setattr(runtime_models, "download_file", unexpected_call)
+    monkeypatch.setattr(runtime_models, "snapshot_download", unexpected_call)
+    def respond(_prompt: str) -> str:
+        if answer is None:
+            raise EOFError
+        return answer
+
+    monkeypatch.setattr("builtins.input", respond)
+
+    assert cli.main(["models", "install", "runtime"]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"status": "cancelled"}
+    assert "上述运行时模型" in captured.err
+    assert "上述实验性模型" not in captured.err
+
+
+def test_cli_models_status_prints_agent_and_runtime_status(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from image2editable import models
+    from image2editable import runtime_models
 
-    expected = {
+    agent = {
         "installed": False,
         "valid": False,
         "install_command": "image2editable models install agent",
     }
-    monkeypatch.setattr(models, "model_status", lambda cache_dir=None: expected)
+    runtime = {
+        "installed": False,
+        "valid": False,
+        "install_command": "image2editable models install runtime",
+    }
+    monkeypatch.setattr(models, "model_status", lambda cache_dir=None: agent)
+    monkeypatch.setattr(
+        runtime_models,
+        "runtime_model_status",
+        lambda cache_dir=None: runtime,
+    )
 
     assert cli.main(["models", "status"]) == 0
-    assert json.loads(capsys.readouterr().out) == expected
+    assert json.loads(capsys.readouterr().out) == {
+        "agent": agent,
+        "runtime": runtime,
+    }
