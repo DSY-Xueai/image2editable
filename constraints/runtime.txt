@@ -1,0 +1,61 @@
+# Candidate release constraints generated from Windows Python 3.11/3.12.
+# Not release-final until Task 7 CI matrix passes.
+
+# Direct runtime dependencies
+python-pptx==1.0.2
+opencv-python==4.10.0.84
+Pillow==10.4.0
+numpy==1.26.4
+pypdfium2==5.7.1
+torch==2.5.1
+torchvision==0.20.1
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4
+transformers==4.57.1
+accelerate==1.8.0
+
+# Necessary SAM transitive exception: iopath 0.1.10 has no PyPI wheel.
+iopath @ git+https://github.com/facebookresearch/iopath.git@b3ea6da153ab61b3b8687544c0708a4234a8fb58
+
+# Only non-VCS sdist exception: hydra-core requires antlr4 4.9.* without a wheel.
+# PyPI sdist SHA256: f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b
+antlr4-python3-runtime @ https://files.pythonhosted.org/packages/3e/38/7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/antlr4-python3-runtime-4.9.3.tar.gz#sha256=f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b
+
+# Common transitive resolution observed on Windows Python 3.11/3.12
+certifi==2026.7.22
+charset-normalizer==3.5.0
+filelock==3.32.3
+fsspec==2026.7.0
+huggingface_hub==0.36.2
+hydra-core==1.3.5
+idna==3.18
+iniconfig==2.3.0
+Jinja2==3.1.6
+lxml==6.1.1
+MarkupSafe==3.0.3
+mpmath==1.3.0
+networkx==3.4.2
+omegaconf==2.3.1
+packaging==26.3
+pluggy==1.6.0
+portalocker==4.1.0
+psutil==7.2.2
+Pygments==2.20.0
+pypdf==6.16.1
+pytest==9.1.1
+PyYAML==6.0.3
+regex==2026.7.19
+reportlab==5.0.0
+requests==2.34.2
+safetensors==0.8.0
+sympy==1.13.1
+tokenizers==0.22.2
+tqdm==4.70.0
+typing_extensions==4.16.0
+urllib3==2.7.0
+xlsxwriter==3.2.9
+
+# Windows-only transitive selected by tqdm
+colorama==0.4.6; sys_platform == "win32"
+
+# Python 3.12 transitive selected by torch
+setuptools==84.0.0; python_version >= "3.12"
