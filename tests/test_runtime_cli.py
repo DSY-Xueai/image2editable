@@ -67,6 +67,78 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
     assert requirements.count("pypdfium2>=5.7.1,<6") == 1
 
 
+def _doctor_probe_results(
+    names: list[str],
+    *,
+    missing: set[str] | None = None,
+) -> dict[str, dict[str, object]]:
+    missing = missing or set()
+    return {
+        name: (
+            {"module": name, "ok": False, "error_type": "ModuleNotFoundError"}
+            if name in missing
+            else {"module": name, "ok": True}
+        )
+        for name in names
+    }
+
+
+def _stub_ready_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    missing: set[str] | None = None,
+    tesseract_ok: bool = True,
+) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "_probe_modules",
+        lambda names: _doctor_probe_results(names, missing=missing),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_tesseract_status",
+        lambda: (
+            {"module": "tesseract", "ok": True}
+            if tesseract_ok
+            else {"module": "tesseract", "ok": False, "error_type": "ProcessExit"}
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "runtime_model_status",
+        lambda: {"installed": True, "valid": True},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "model_status",
+        lambda: {"installed": True, "valid": True},
+    )
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 12, 0))
+
+
+def _doctor_import_hook(body: str) -> str:
+    indented = "\n".join(f"        {line}" for line in body.splitlines())
+    return f"""
+import importlib.abc
+import importlib.util
+import sys
+
+class DoctorTestFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "doctor_test_probe":
+            return importlib.util.spec_from_loader(fullname, self)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+{indented}
+
+sys.meta_path.insert(0, DoctorTestFinder())
+""" + doctor._IMPORT_SCRIPT
+
+
 @pytest.mark.parametrize(
     ("missing_module", "expected_ready"),
     [
@@ -76,21 +148,33 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         ("aspose.psd", True),
     ],
 )
-def test_doctor_required_and_optional_checks_control_ready(
+def test_doctor_real_import_checks_control_ready(
     monkeypatch: pytest.MonkeyPatch,
     missing_module: str,
     expected_ready: bool,
 ) -> None:
     requested = []
 
-    def fake_find_spec(name: str) -> object | None:
-        requested.append(name)
-        return None if name == missing_module else object()
+    def fake_probe(names: list[str]) -> dict[str, dict[str, object]]:
+        requested.extend(names)
+        return _doctor_probe_results(names, missing={missing_module})
 
-    monkeypatch.setattr(doctor.importlib.util, "find_spec", fake_find_spec)
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor, "_probe_modules", fake_probe)
+    monkeypatch.setattr(
+        doctor,
+        "_tesseract_status",
+        lambda: {
+            "module": "tesseract",
+            "ok": False,
+            "error_type": "FileNotFoundError",
+        },
+    )
+    monkeypatch.setattr(
+        doctor,
+        "runtime_model_status",
+        lambda: {"installed": True, "valid": True},
+    )
     monkeypatch.setattr(doctor.sys, "version_info", (3, 12, 0))
-    monkeypatch.setattr(doctor.sys, "version", "3.12.0 test")
 
     report = doctor.check_environment()
 
@@ -100,10 +184,11 @@ def test_doctor_required_and_optional_checks_control_ready(
         "PIL",
         "numpy",
         "pypdfium2",
+        "torch",
+        "torchvision",
         "transformers",
         "accelerate",
         "sam2",
-        "simple_lama_inpainting",
         "paddleocr",
         "paddle",
         "pytesseract",
@@ -112,64 +197,182 @@ def test_doctor_required_and_optional_checks_control_ready(
     assert report["ready"] is expected_ready
     assert report["checks"]["aspose-psd"]["required"] is False
     assert report["checks"]["numpy"]["required"] is True
+    assert "lama" not in report["checks"]
+    if missing_module == "aspose.psd":
+        assert report["checks"]["aspose-psd"]["next_command"] == (
+            'python -m pip install ".[psd]"'
+        )
 
 
-def test_doctor_reports_broken_install_without_importing_it(
+def test_doctor_batch_probe_really_imports_modules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_find_spec(name: str) -> object:
-        if name == "sam2":
-            raise ValueError("broken package")
-        return object()
+    monkeypatch.delenv("PYTHONPATH", raising=False)
 
-    monkeypatch.setattr(doctor.importlib.util, "find_spec", fake_find_spec)
+    results = doctor._probe_modules(["json", "missing_doctor_probe_module"])
+
+    assert results == {
+        "json": {"module": "json", "ok": True},
+        "missing_doctor_probe_module": {
+            "module": "missing_doctor_probe_module",
+            "ok": False,
+            "error_type": "ModuleNotFoundError",
+        },
+    }
+
+
+def test_doctor_batch_probe_handles_no_newline_noise_and_redacts_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
-        doctor.shutil,
-        "which",
-        lambda name: "C:/Tesseract/tesseract.exe",
+        doctor,
+        "_IMPORT_SCRIPT",
+        _doctor_import_hook(
+            "print('third-party-noise', end='')\n"
+            "raise RuntimeError(r'C:\\\\private\\\\model-cache')"
+        ),
     )
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 12, 0))
-    monkeypatch.setattr(doctor.sys, "version", "3.12.0 test")
 
-    report = doctor.check_environment()
+    results = doctor._probe_modules(["json", "doctor_test_probe"])
 
-    assert report["ready"] is False
-    assert report["checks"]["sam2"] == {
-        "ok": False,
-        "required": True,
-        "detail": "sam2: broken package",
+    assert results == {
+        "json": {"module": "json", "ok": True},
+        "doctor_test_probe": {
+            "module": "doctor_test_probe",
+            "ok": False,
+            "error_type": "RuntimeError",
+        },
+    }
+    assert "private" not in json.dumps(results)
+
+
+def test_doctor_batch_probe_normalizes_unsafe_exception_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "_IMPORT_SCRIPT",
+        _doctor_import_hook(
+            "SecretError = type('C_Users_private_model_cache', (Exception,), {})\n"
+            "raise SecretError()"
+        ),
+    )
+
+    results = doctor._probe_modules(["doctor_test_probe"])
+
+    assert results == {
+        "doctor_test_probe": {
+            "module": "doctor_test_probe",
+            "ok": False,
+            "error_type": "ImportFailed",
+        }
+    }
+    assert "private" not in json.dumps(results)
+
+
+def test_doctor_batch_probe_timeout_marks_the_whole_batch_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def timeout(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        raise subprocess.TimeoutExpired("python", 1)
+
+    monkeypatch.setattr(doctor.subprocess, "run", timeout)
+
+    assert doctor._probe_modules(["torch", "transformers"]) == {
+        "torch": {"module": "torch", "ok": False, "error_type": "ProbeFailed"},
+        "transformers": {
+            "module": "transformers",
+            "ok": False,
+            "error_type": "ProbeFailed",
+        },
+    }
+    command = calls[0][0][0]
+    assert command[1:3] == ["-I", "-B"]
+    assert calls[0][1]["timeout"] > 0
+
+
+def test_doctor_batch_probe_process_failure_marks_the_whole_batch_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor,
+        "_IMPORT_SCRIPT",
+        "import os\nos._exit(7)\n" + doctor._IMPORT_SCRIPT,
+    )
+
+    results = doctor._probe_modules(["json", "doctor_test_probe"])
+
+    assert results == {
+        "json": {"module": "json", "ok": False, "error_type": "ProbeFailed"},
+        "doctor_test_probe": {
+            "module": "doctor_test_probe",
+            "ok": False,
+            "error_type": "ProbeFailed",
+        },
     }
 
 
 @pytest.mark.parametrize(
-    ("ocr_modules", "tesseract_binary", "expected_ok"),
+    ("return_code", "expected"),
     [
-        (set(), None, False),
-        ({"paddleocr", "paddle"}, None, True),
-        ({"pytesseract"}, "C:/Tesseract/tesseract.exe", True),
-        ({"paddleocr"}, None, False),
-        ({"paddle"}, None, False),
-        ({"pytesseract"}, None, False),
-        (set(), "C:/Tesseract/tesseract.exe", False),
+        (0, {"module": "tesseract", "ok": True}),
+        (
+            2,
+            {"module": "tesseract", "ok": False, "error_type": "ProcessExit"},
+        ),
+    ],
+)
+def test_doctor_tesseract_requires_version_exit_zero_without_output_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    return_code: int,
+    expected: dict[str, object],
+) -> None:
+    calls = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args[0], return_code, stdout=r"C:\private\tesseract", stderr="secret"
+        )
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+
+    assert doctor._tesseract_status() == expected
+    assert calls[0][0][0] == ["tesseract", "--version"]
+    assert calls[0][1]["timeout"] > 0
+
+
+@pytest.mark.parametrize(
+    ("ocr_modules", "tesseract_ok", "expected_ok"),
+    [
+        (set(), False, False),
+        ({"paddleocr", "paddle"}, False, True),
+        ({"pytesseract"}, True, True),
+        ({"paddleocr"}, False, False),
+        ({"paddle"}, False, False),
+        ({"pytesseract"}, False, False),
+        (set(), True, False),
     ],
 )
 def test_doctor_requires_one_complete_ocr_path(
     monkeypatch: pytest.MonkeyPatch,
     ocr_modules: set[str],
-    tesseract_binary: str | None,
+    tesseract_ok: bool,
     expected_ok: bool,
 ) -> None:
-    ocr_names = {"paddleocr", "paddle", "pytesseract"}
-
-    def fake_find_spec(name: str) -> object | None:
-        if name in ocr_names:
-            return object() if name in ocr_modules else None
-        return object()
-
-    monkeypatch.setattr(doctor.importlib.util, "find_spec", fake_find_spec)
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: tesseract_binary)
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 12, 0))
-    monkeypatch.setattr(doctor.sys, "version", "3.12.0 test")
+    missing = {
+        name
+        for name in {"paddleocr", "paddle", "pytesseract"}
+        if name not in ocr_modules
+    }
+    _stub_ready_doctor(
+        monkeypatch,
+        missing=missing,
+        tesseract_ok=tesseract_ok,
+    )
 
     report = doctor.check_environment()
     ocr = report["checks"]["ocr"]
@@ -181,7 +384,141 @@ def test_doctor_requires_one_complete_ocr_path(
         {"paddleocr", "paddle"} <= ocr_modules
     )
     assert ocr["detail"]["tesseract"]["ok"] is (
-        "pytesseract" in ocr_modules and tesseract_binary is not None
+        "pytesseract" in ocr_modules and tesseract_ok
+    )
+    if not expected_ok:
+        assert ocr["next_command"] == "python -m pip install paddleocr paddlepaddle"
+
+
+def test_doctor_requires_valid_runtime_models_without_installing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable import models, runtime_models
+
+    monkeypatch.setenv("IMAGE2EDITABLE_MODEL_CACHE", str(tmp_path))
+    monkeypatch.setattr(
+        doctor,
+        "_probe_modules",
+        lambda names: _doctor_probe_results(names),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_tesseract_status",
+        lambda: {"module": "tesseract", "ok": True},
+    )
+    monkeypatch.setattr(
+        runtime_models,
+        "install_runtime_models",
+        lambda **kwargs: pytest.fail("doctor must not install runtime models"),
+    )
+    monkeypatch.setattr(
+        runtime_models,
+        "download_file",
+        lambda **kwargs: pytest.fail("doctor must not download runtime models"),
+    )
+    monkeypatch.setattr(
+        runtime_models,
+        "snapshot_download",
+        lambda **kwargs: pytest.fail("doctor must not download snapshots"),
+    )
+    monkeypatch.setattr(
+        models,
+        "install_agent_model",
+        lambda **kwargs: pytest.fail("doctor must not install agent models"),
+    )
+    monkeypatch.setattr(
+        models,
+        "snapshot_download",
+        lambda **kwargs: pytest.fail("doctor must not download agent snapshots"),
+    )
+
+    report = doctor.check_environment()
+
+    assert report["ready"] is False
+    assert report["checks"]["runtime-models"] == {
+        "ok": False,
+        "required": True,
+        "detail": {
+            "module": "runtime-models",
+            "ok": False,
+            "error_type": "MissingOrInvalidReceipt",
+        },
+        "next_command": "image2editable models install runtime",
+    }
+    assert "agent-model" not in report["checks"]
+
+
+def test_doctor_agent_local_requires_imports_and_receipt_without_leaking_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_ready_doctor(monkeypatch, missing={"huggingface_hub"})
+    monkeypatch.setattr(
+        doctor,
+        "model_status",
+        lambda: {
+            "installed": True,
+            "valid": False,
+            "reason": r"invalid receipt at C:\private\qwen",
+        },
+    )
+
+    report = doctor.check_environment(agent_local=True)
+
+    assert report["ready"] is False
+    assert report["checks"]["huggingface-hub"]["next_command"] == (
+        'python -m pip install ".[agent-local]"'
+    )
+    assert report["checks"]["agent-model"]["next_command"] == (
+        "image2editable models install agent"
+    )
+    assert "private" not in json.dumps(report)
+
+
+def test_doctor_normalizes_unsafe_model_status_exception_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_error = type(r"C:\private\model-cache", (Exception,), {})
+
+    def broken_status() -> dict[str, object]:
+        raise secret_error()
+
+    _stub_ready_doctor(monkeypatch)
+    monkeypatch.setattr(doctor, "runtime_model_status", broken_status)
+
+    report = doctor.check_environment()
+
+    assert report["checks"]["runtime-models"]["detail"]["error_type"] == (
+        "StatusFailed"
+    )
+    assert "private" not in json.dumps(report)
+
+
+def test_doctor_uses_platform_appropriate_python_next_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_ready_doctor(monkeypatch)
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 13, 0))
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+
+    report = doctor.check_environment()
+
+    assert report["checks"]["python"]["next_command"] == (
+        "python3.12 -m image2editable doctor"
+    )
+
+
+def test_doctor_python_next_command_preserves_agent_local_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_ready_doctor(monkeypatch)
+    monkeypatch.setattr(doctor.sys, "version_info", (3, 13, 0))
+    monkeypatch.setattr(doctor.sys, "platform", "linux")
+
+    report = doctor.check_environment(agent_local=True)
+
+    assert report["checks"]["python"]["next_command"] == (
+        "python3.12 -m image2editable doctor --agent-local"
     )
 
 
@@ -441,10 +778,34 @@ def test_cli_doctor_exit_code_follows_ready(
     expected_exit: int,
 ) -> None:
     report = {"ready": ready, "checks": {"python": {"ok": ready}}}
-    monkeypatch.setattr(cli, "check_environment", lambda: report)
+    calls = []
+
+    def fake_check_environment(*, agent_local: bool = False) -> dict[str, object]:
+        calls.append(agent_local)
+        return report
+
+    monkeypatch.setattr(cli, "check_environment", fake_check_environment)
 
     assert cli.main(["doctor"]) == expected_exit
+    assert calls == [False]
     assert json.loads(capsys.readouterr().out) == report
+
+
+def test_cli_doctor_agent_local_forwards_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = []
+
+    def fake_check_environment(*, agent_local: bool = False) -> dict[str, object]:
+        calls.append(agent_local)
+        return {"ready": True, "checks": {}}
+
+    monkeypatch.setattr(cli, "check_environment", fake_check_environment)
+
+    assert cli.main(["doctor", "--agent-local"]) == 0
+    assert calls == [True]
+    assert json.loads(capsys.readouterr().out)["ready"] is True
 
 
 @pytest.mark.parametrize("provider", [None, "remote"])

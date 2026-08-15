@@ -122,7 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     models_install_parser.add_argument("--yes", action="store_true")
     models_subparsers.add_parser("status")
 
-    subparsers.add_parser("doctor")
+    doctor_parser = subparsers.add_parser("doctor")
+    doctor_parser.add_argument("--agent-local", action="store_true")
     return parser
 
 
@@ -152,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
         with redirect_stdout(sys.stderr):
-            report = check_environment()
+            report = check_environment(agent_local=args.agent_local)
         _print_json(report)
         return 0 if report["ready"] else 1
 
