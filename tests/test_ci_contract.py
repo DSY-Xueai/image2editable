@@ -33,7 +33,7 @@ EXPECTED_INSTALLED_MATRIX = {
 }
 FAST_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt pytest PyYAML "
-    "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2"
+    "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch"
 )
 BUILD_INSTALL_COMMAND = "python -m pip install build twine"
 FAST_PYTEST_COMMAND = (
