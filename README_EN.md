@@ -89,7 +89,7 @@ pip install .
 
 #### Install OCR
 
-A complete conversion needs at least one OCR engine. PaddleOCR is recommended for Chinese and complex layouts; Tesseract is also supported. After installation, run `image2editable doctor` and start converting only after the check passes.
+A complete conversion needs at least one OCR engine. PaddleOCR is recommended for Chinese and complex layouts; Tesseract is also supported. After installing OCR, install the runtime models below, then check the environment.
 
 ##### Option 1: PaddleOCR (recommended)
 
@@ -117,15 +117,37 @@ If the command prints a version number, install the Python package:
 python -m pip install pytesseract
 ```
 
+#### Install runtime models
+
+After installing OCR, run:
+
+```bash
+image2editable models install runtime
+```
+
+The command asks for confirmation before downloading pinned versions of SAM 2.1 Large, Big-LaMa, and Grounding DINO and validating the local runtime receipt. Cancelling does not download anything.
+
 #### Check the environment ✅
 
-After installing OCR, check the Python, OCR, SAM, LaMa, and other conversion dependencies:
+After installing OCR and the runtime models, check Python, OCR, model receipts, and the core dependencies:
 
 ```bash
 image2editable doctor
 ```
 
 You can start converting when the output contains `"ready": true`.
+
+#### Optional: install the Local Agent
+
+Run these commands only when you need the bundled Local Agent:
+
+```bash
+python -m pip install ".[agent-local]"
+image2editable models install agent
+image2editable doctor --agent-local
+```
+
+The model installation also asks for confirmation. The final command additionally validates the Local Agent dependencies and Qwen receipt.
 
 #### Configure the local model service
 

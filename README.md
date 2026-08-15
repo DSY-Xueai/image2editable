@@ -88,7 +88,7 @@ pip install .
 
 #### 安装 OCR
 
-完整转换需要至少一种 OCR。中文和复杂版面推荐 PaddleOCR；也可以使用 Tesseract。安装完成后运行 `image2editable doctor`，检查通过后再开始转换。
+完整转换需要至少一种 OCR。中文和复杂版面推荐 PaddleOCR；也可以使用 Tesseract。安装 OCR 后，继续安装下方运行时模型，再检查环境。
 
 ##### 方案一：PaddleOCR（推荐）
 
@@ -116,15 +116,37 @@ tesseract --version
 python -m pip install pytesseract
 ```
 
+#### 安装运行时模型
+
+OCR 安装完成后运行：
+
+```bash
+image2editable models install runtime
+```
+
+该命令需要确认后才会下载固定版本的 SAM 2.1 Large、Big-LaMa 和 Grounding DINO，并校验下载结果、记录模型完整性；取消不会下载。
+
 #### 检查环境 ✅
 
-OCR 安装完成后，检查转换需要的 Python、OCR、SAM 和 LaMa 等依赖：
+OCR 和运行时模型安装完成后，检查转换需要的 Python、OCR、模型文件、完整性记录和核心依赖：
 
 ```bash
 image2editable doctor
 ```
 
 输出中出现 `"ready": true`，就可以开始转换。
+
+#### 可选：安装 Local Agent
+
+需要使用随包 Local Agent 时，再执行：
+
+```bash
+python -m pip install ".[agent-local]"
+image2editable models install agent
+image2editable doctor --agent-local
+```
+
+模型安装命令同样需要确认；最后一条命令会额外验证 Local Agent 依赖和 Qwen 模型完整性记录。
 
 #### 配置本地模型服务
 

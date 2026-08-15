@@ -487,7 +487,7 @@ def test_readmes_keep_hardware_policy_out_of_quick_start() -> None:
     assert "python -c \"import sys, torch" not in readme_en_text
 
 
-def test_readmes_document_ocr_installation_after_local_cli_install() -> None:
+def test_readmes_document_offline_models_after_ocr_and_before_doctor() -> None:
     readme_text = README.read_text(encoding="utf-8")
     readme_en_text = README_EN.read_text(encoding="utf-8")
     paddle_url = "https://www.paddlepaddle.org.cn/install/quick"
@@ -496,17 +496,27 @@ def test_readmes_document_ocr_installation_after_local_cli_install() -> None:
         "python -m pip install paddleocr paddlepaddle",
         "tesseract --version",
         "python -m pip install pytesseract",
+        "image2editable models install runtime",
         "\nimage2editable doctor\n",
+        'python -m pip install ".[agent-local]"',
+        "image2editable models install agent",
+        "image2editable doctor --agent-local",
     )
 
     for text in (readme_text, readme_en_text):
         assert text.index("pip install .") < text.index(commands[0])
-        assert text.index(commands[0]) < text.index(commands[1])
-        assert text.index(commands[1]) < text.index(commands[2])
-        assert text.index(commands[2]) < text.index(commands[3])
+        for before, after in zip(commands, commands[1:]):
+            assert text.index(before) < text.index(after)
         assert paddle_url in text
         assert tesseract_url in text
         assert '"ready": true' in text
+    assert "需要确认" in readme_text
+    assert "SAM 2.1 Large、Big-LaMa 和 Grounding DINO" in readme_text
+    assert "校验下载结果、记录模型完整性" in readme_text
+    assert "模型文件、完整性记录" in readme_text
+    assert "asks for confirmation" in readme_en_text
+    assert "SAM 2.1 Large, Big-LaMa, and Grounding DINO" in readme_en_text
+    assert "receipt" in readme_en_text
     assert "Codex、Claude Code" in readme_text
     assert "Codex or Claude Code" in readme_en_text
     assert "#### 安装 OCR" in readme_text
@@ -521,6 +531,23 @@ def test_readmes_document_ocr_installation_after_local_cli_install() -> None:
     assert readme_en_text.index("#### Check the environment ✅") < readme_en_text.index(
         "#### Configure the local model service"
     )
+
+
+def test_model_setup_docs_never_claim_first_conversion_downloads_models() -> None:
+    documents = (
+        README.read_text(encoding="utf-8"),
+        README_EN.read_text(encoding="utf-8"),
+        SKILL.read_text(encoding="utf-8"),
+    )
+    forbidden = (
+        "首次转换自动下载",
+        "首次运行自动下载",
+        "first conversion automatically downloads",
+        "first run automatically downloads",
+    )
+
+    for document in documents:
+        assert all(text.casefold() not in document.casefold() for text in forbidden)
 
 
 def test_readmes_describe_quality_completion_and_current_layout() -> None:
