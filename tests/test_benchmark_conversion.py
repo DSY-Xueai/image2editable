@@ -1,12 +1,23 @@
 import hashlib
+import io
 import json
 import math
 import os
 import subprocess
 import sys
+import warnings
+import zipfile
+import zlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.oxml.xmlchemy import OxmlElement
+from pptx.util import Inches
 
 import scripts.benchmark_conversion as benchmark
 
@@ -633,7 +644,7 @@ def test_nonfinite_clock_duration_is_normalized(
     )
 
 
-def test_conversion_exception_propagates_without_retry(
+def test_conversion_exception_is_safely_recorded_and_later_routes_continue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest = _loaded_manifest(tmp_path)
@@ -645,14 +656,22 @@ def test_conversion_exception_propagates_without_retry(
         calls.append(command)
         if command[5] == "doctor":
             return _completed_process(command, stdout='{"ready":true,"checks":{}}')
-        raise OSError("conversion failed")
+        if len(calls) == 2:
+            raise OSError("sk-secret failed at C:\\private\\input")
+        return _completed_process(command, returncode=8, stdout="later failed")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(OSError, match="conversion failed"):
-        benchmark.execute_routes(manifest, tmp_path / "results")
+    executions = benchmark.execute_routes(manifest, tmp_path / "results")
 
-    assert [command[5] for command in calls] == ["doctor", "convert"]
+    assert [command[5] for command in calls] == [
+        "doctor",
+        "convert",
+        "convert",
+        "convert",
+    ]
+    assert [execution.returncode for execution in executions] == [-1, 8, 8]
+    assert executions[0].stdout == ""
 
 
 def test_existing_result_root_fails_before_subprocess(
@@ -726,3 +745,1343 @@ def test_dangling_result_entry_fails_before_subprocess(
         benchmark.execute_routes(manifest, result_root)
 
     assert str(raised.value) == "invalid_output"
+
+
+PERFORMANCE_FIELDS = {
+    "model_loads",
+    "stage_runs",
+    "stage_duration_ms",
+    "worker_runs",
+    "worker_duration_ms",
+    "inference_runs",
+    "inference_operations",
+    "inference_duration_ms",
+    "agent_runs",
+    "agent_image_count",
+    "agent_total_bytes",
+    "agent_duration_ms",
+}
+
+
+def _performance(pages: int) -> dict[str, object]:
+    values = {}
+    for index in range(1, pages + 1):
+        page = {field: {} for field in PERFORMANCE_FIELDS}
+        page.update(
+            agent_runs=1,
+            agent_image_count=1,
+            agent_total_bytes=10,
+            agent_duration_ms=2,
+        )
+        page["model_loads"] = {"layout-model": 1}
+        page["stage_runs"] = {"reconstruct": 1}
+        page["stage_duration_ms"] = {"reconstruct": 2}
+        page["worker_runs"] = {"layout-model": 1}
+        page["worker_duration_ms"] = {"layout-model": 2}
+        page["inference_runs"] = {"layout-model": 1}
+        page["inference_operations"] = {"layout-model": 1}
+        page["inference_duration_ms"] = {"layout-model": 2}
+        values[f"page_{index:03d}"] = page
+    return {"pages": values}
+
+
+def _reported_performance(pages: int) -> dict[str, object]:
+    performance = _performance(pages)
+    for page in performance["pages"].values():
+        for field in PERFORMANCE_FIELDS - {
+            "agent_runs",
+            "agent_image_count",
+            "agent_total_bytes",
+            "agent_duration_ms",
+        }:
+            page[field] = sum(page[field].values())
+    return performance
+
+
+def _write_editable_pptx(
+    path: Path,
+    pages: int,
+    *,
+    mode: str = "text",
+) -> bytes:
+    presentation = Presentation()
+    presentation.slide_height = Inches(7.5)
+    presentation.slide_width = (
+        Inches(10)
+        if mode == "aspect_4_3"
+        else Inches(15)
+        if mode == "aspect_2_1"
+        else presentation.slide_height * 16 // 9
+    )
+    image_path = path.with_suffix(".png")
+    transparent_path = path.with_name(f"{path.stem}-transparent.png")
+    sparse_path = path.with_name(f"{path.stem}-sparse.png")
+    Image.new("RGB", (40, 40), "navy").save(image_path)
+    Image.new("RGBA", (40, 40), (0, 0, 0, 0)).save(transparent_path)
+    sparse_image = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    sparse_image.putpixel((0, 0), (0, 0, 0, 255))
+    sparse_image.save(sparse_path)
+    for index in range(pages):
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        page_mode = mode
+        if mode in {"aspect_4_3", "aspect_2_1"}:
+            page_mode = "text"
+        if mode == "mixed_valid":
+            page_mode = "native" if index == 0 else "text"
+        if page_mode == "text":
+            textbox = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1))
+            textbox.text = "editable"
+        elif page_mode == "native":
+            slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(2), Inches(1)
+            )
+        elif page_mode == "partial_gradient_native":
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            native = slide.shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(2), Inches(2)
+            )
+            native.fill.solid()
+            native.line.fill.background()
+            solid_fill = next(
+                child
+                for child in native._element.spPr
+                if child.tag.endswith("}solidFill")
+            )
+            gradient_fill = OxmlElement("a:gradFill")
+            stops = OxmlElement("a:gsLst")
+            transparent_stop = OxmlElement("a:gs")
+            transparent_stop.set("pos", "0")
+            transparent_color = OxmlElement("a:srgbClr")
+            transparent_color.set("val", "FF0000")
+            alpha = OxmlElement("a:alpha")
+            alpha.set("val", "0")
+            transparent_color.append(alpha)
+            transparent_stop.append(transparent_color)
+            opaque_stop = OxmlElement("a:gs")
+            opaque_stop.set("pos", "100000")
+            opaque_color = OxmlElement("a:srgbClr")
+            opaque_color.set("val", "FF0000")
+            opaque_stop.append(opaque_color)
+            stops.extend((transparent_stop, opaque_stop))
+            gradient_fill.append(stops)
+            solid_fill.getparent().replace(solid_fill, gradient_fill)
+        elif page_mode == "full_picture":
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+        elif page_mode == "small_picture":
+            slide.shapes.add_picture(
+                str(image_path), Inches(1), Inches(1), Inches(2), Inches(2)
+            )
+        elif page_mode == "pictures":
+            slide.shapes.add_picture(
+                str(image_path), Inches(1), Inches(1), Inches(2), Inches(2)
+            )
+            slide.shapes.add_picture(
+                str(image_path), Inches(4), Inches(1), Inches(2), Inches(2)
+            )
+        elif page_mode in {"partial_picture_alpha", "partial_picture_alpha_repl"}:
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            picture = slide.shapes.add_picture(
+                str(image_path), Inches(1), Inches(1), Inches(2), Inches(2)
+            )
+            alpha = OxmlElement(
+                "a:alphaRepl"
+                if page_mode == "partial_picture_alpha_repl"
+                else "a:alphaModFix"
+            )
+            alpha.set("a" if page_mode == "partial_picture_alpha_repl" else "amt", "50000")
+            picture._element.blipFill.blip.append(alpha)
+        elif page_mode in {
+            "group_text",
+            "group_offslide",
+            "group_zero_width",
+            "group_zero_height",
+        }:
+            if page_mode != "group_text":
+                slide.shapes.add_picture(
+                    str(image_path),
+                    0,
+                    0,
+                    presentation.slide_width,
+                    presentation.slide_height,
+                )
+            group = slide.shapes.add_group_shape()
+            group.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1)).text = (
+                "nested editable"
+            )
+            if page_mode == "group_offslide":
+                group.left = presentation.slide_width + Inches(1)
+            elif page_mode == "group_zero_width":
+                group.width = 0
+            elif page_mode == "group_zero_height":
+                group.height = 0
+        elif page_mode in {
+            "group_flip_h_offslide",
+            "group_flip_v_offslide",
+            "group_flip_h_visible",
+            "nested_group_flip_h_offslide",
+        }:
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            group = slide.shapes.add_group_shape()
+            text_shapes = group.shapes
+            if page_mode == "nested_group_flip_h_offslide":
+                text_shapes = group.shapes.add_group_shape().shapes
+            text_shapes.add_textbox(0, 0, Inches(1), Inches(0.5)).text = "nested editable"
+            anchor = text_shapes.add_shape(
+                MSO_SHAPE.RECTANGLE, Inches(3), Inches(1.5), Inches(1), Inches(0.5)
+            )
+            next(
+                node
+                for node in anchor._element.iter()
+                if node.tag.endswith("}cNvPr")
+            ).set("hidden", "1")
+            group.width = Inches(4)
+            group.height = Inches(2)
+            if page_mode == "group_flip_v_offslide":
+                group.top = presentation.slide_height - Inches(0.5)
+                group._element.grpSpPr.xfrm.flipV = True
+            else:
+                group.left = (
+                    Inches(1)
+                    if page_mode == "group_flip_h_visible"
+                    else presentation.slide_width - Inches(1)
+                )
+                group._element.grpSpPr.xfrm.flipH = True
+        elif page_mode in {"empty_text", "group_empty_text", "invisible_shape"}:
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            shapes = slide.shapes
+            if page_mode == "group_empty_text":
+                shapes = slide.shapes.add_group_shape().shapes
+            shape = shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1))
+            if page_mode == "invisible_shape":
+                shape = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(2), Inches(1)
+                )
+                shape.fill.background()
+                shape.line.fill.background()
+        elif page_mode in {
+            "outside_text",
+            "zero_text",
+            "outside_picture",
+            "zero_picture",
+        }:
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            if page_mode.endswith("text"):
+                textbox = slide.shapes.add_textbox(
+                    presentation.slide_width + Inches(1)
+                    if page_mode == "outside_text"
+                    else Inches(1),
+                    Inches(1),
+                    Inches(2) if page_mode == "outside_text" else 0,
+                    Inches(1),
+                )
+                textbox.text = "editable but invisible"
+            else:
+                picture = slide.shapes.add_picture(
+                    str(image_path), Inches(1), Inches(1), Inches(2), Inches(2)
+                )
+                if page_mode == "outside_picture":
+                    picture.left = presentation.slide_width + Inches(1)
+                else:
+                    picture.width = 0
+        elif page_mode in {
+            "tiny_text",
+            "tiny_picture",
+            "tiny_native",
+            "hidden_text",
+            "hidden_picture",
+            "group_hidden_text",
+            "transparent_text",
+            "transparent_picture",
+            "shape_transparent_picture",
+            "shape_alpha_repl_transparent_picture",
+            "shape_unknown_alpha_picture",
+            "shape_invalid_alpha_picture",
+            "shape_extra_alpha_field_picture",
+            "sparse_picture",
+            "transparent_native",
+            "transparent_native_leading_zero",
+        }:
+            slide.shapes.add_picture(
+                str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
+            )
+            if page_mode.endswith("text"):
+                if page_mode == "group_hidden_text":
+                    group = slide.shapes.add_group_shape()
+                    textbox = group.shapes.add_textbox(
+                        Inches(1), Inches(1), Inches(2), Inches(1)
+                    )
+                    hidden_shape = group
+                else:
+                    textbox = slide.shapes.add_textbox(
+                        Inches(1),
+                        Inches(1),
+                        1 if page_mode == "tiny_text" else Inches(2),
+                        1 if page_mode == "tiny_text" else Inches(1),
+                    )
+                    hidden_shape = textbox
+                textbox.text = "editable"
+                if page_mode in {"hidden_text", "group_hidden_text"}:
+                    next(
+                        node
+                        for node in hidden_shape._element.iter()
+                        if node.tag.endswith("}cNvPr")
+                    ).set("hidden", "1")
+                elif page_mode == "transparent_text":
+                    run = textbox.text_frame.paragraphs[0].runs[0]
+                    properties = run._r.get_or_add_rPr()
+                    fill = OxmlElement("a:solidFill")
+                    color = OxmlElement("a:srgbClr")
+                    color.set("val", "000000")
+                    alpha = OxmlElement("a:alpha")
+                    alpha.set("val", "0")
+                    color.append(alpha)
+                    fill.append(color)
+                    properties.append(fill)
+            elif page_mode in {
+                "tiny_native",
+                "transparent_native",
+                "transparent_native_leading_zero",
+            }:
+                native = slide.shapes.add_shape(
+                    MSO_SHAPE.RECTANGLE,
+                    Inches(1),
+                    Inches(1),
+                    1 if page_mode == "tiny_native" else Inches(2),
+                    1 if page_mode == "tiny_native" else Inches(2),
+                )
+                if page_mode.startswith("transparent_native"):
+                    native.fill.solid()
+                    native.fill.fore_color.rgb = RGBColor(0, 0, 0)
+                    native.line.fill.solid()
+                    native.line.fill.fore_color.rgb = RGBColor(0, 0, 0)
+                    alpha_value = (
+                        "00000"
+                        if page_mode == "transparent_native_leading_zero"
+                        else "0"
+                    )
+                    for fill in (
+                        node
+                        for node in native._element.iter()
+                        if node.tag.endswith("}solidFill")
+                    ):
+                        color = next(iter(fill))
+                        alpha = OxmlElement("a:alpha")
+                        alpha.set("val", alpha_value)
+                        color.append(alpha)
+            else:
+                picture = slide.shapes.add_picture(
+                    str(
+                        transparent_path
+                        if page_mode == "transparent_picture"
+                        else sparse_path
+                        if page_mode == "sparse_picture"
+                        else image_path
+                    ),
+                    Inches(1),
+                    Inches(1),
+                    1 if page_mode == "tiny_picture" else Inches(2),
+                    1 if page_mode == "tiny_picture" else Inches(2),
+                )
+                if page_mode == "hidden_picture":
+                    next(
+                        node
+                        for node in picture._element.iter()
+                        if node.tag.endswith("}cNvPr")
+                    ).set("hidden", "1")
+                elif page_mode in {
+                    "shape_transparent_picture",
+                    "shape_alpha_repl_transparent_picture",
+                    "shape_unknown_alpha_picture",
+                    "shape_invalid_alpha_picture",
+                    "shape_extra_alpha_field_picture",
+                }:
+                    if page_mode == "shape_unknown_alpha_picture":
+                        alpha = OxmlElement("a:alphaBiLevel")
+                        alpha.set("thresh", "50000")
+                    elif page_mode == "shape_invalid_alpha_picture":
+                        alpha = OxmlElement("a:alphaModFix")
+                        alpha.set("amt", "NaN")
+                    elif page_mode == "shape_extra_alpha_field_picture":
+                        alpha = OxmlElement("a:alphaModFix")
+                        alpha.set("amt", "50000")
+                        alpha.set("unexpected", "1")
+                    else:
+                        alpha = OxmlElement(
+                            "a:alphaRepl"
+                            if page_mode == "shape_alpha_repl_transparent_picture"
+                            else "a:alphaModFix"
+                        )
+                        alpha.set(
+                            "a"
+                            if page_mode == "shape_alpha_repl_transparent_picture"
+                            else "amt",
+                            "00000",
+                        )
+                    picture._element.blipFill.blip.append(alpha)
+        else:
+            raise AssertionError(page_mode)
+    stream = io.BytesIO()
+    presentation.save(stream)
+    payload = stream.getvalue()
+    path.write_bytes(payload)
+    return payload
+
+
+def _zip_bytes(names: list[str], payload: bytes = b"content") -> bytes:
+    stream = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in names:
+                archive.writestr(name, payload)
+    return stream.getvalue()
+
+
+def _patch_zip_central_sizes(
+    payload: bytes, *, compressed: list[int], uncompressed: list[int]
+) -> bytes:
+    patched = bytearray(payload)
+    position = 0
+    for compressed_size, uncompressed_size in zip(compressed, uncompressed):
+        position = patched.find(b"PK\x01\x02", position)
+        assert position >= 0
+        patched[position + 20 : position + 24] = compressed_size.to_bytes(4, "little")
+        patched[position + 24 : position + 28] = uncompressed_size.to_bytes(4, "little")
+        position += 4
+    return bytes(patched)
+
+
+def _patch_zip_central_encrypted(payload: bytes) -> bytes:
+    patched = bytearray(payload)
+    position = patched.find(b"PK\x01\x02")
+    assert position >= 0
+    flags = int.from_bytes(patched[position + 8 : position + 10], "little") | 1
+    patched[position + 8 : position + 10] = flags.to_bytes(2, "little")
+    return bytes(patched)
+
+
+def _png_with_dimensions(width: int, height: int) -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGBA", (1, 1), (0, 0, 0, 0)).save(stream, format="PNG")
+    payload = bytearray(stream.getvalue())
+    payload[16:20] = width.to_bytes(4, "big")
+    payload[20:24] = height.to_bytes(4, "big")
+    payload[29:33] = zlib.crc32(payload[12:29]).to_bytes(4, "big")
+    return bytes(payload)
+
+
+def _replace_first_pptx_media(path: Path, payload: bytes) -> None:
+    with zipfile.ZipFile(io.BytesIO(path.read_bytes())) as source:
+        members = [(member, source.read(member)) for member in source.infolist()]
+    output = io.BytesIO()
+    replaced = False
+    with zipfile.ZipFile(output, "w") as target:
+        for member, content in members:
+            if not replaced and member.filename.startswith("ppt/media/"):
+                content = payload
+                replaced = True
+            target.writestr(member, content)
+    assert replaced
+    path.write_bytes(output.getvalue())
+
+
+def _execution(
+    root: Path,
+    route_id: str,
+    pages: int,
+    *,
+    mode: str = "text",
+    returncode: int = 0,
+    stdout: str | None = None,
+    statuses: list[str] | None = None,
+) -> benchmark.RouteExecution:
+    base = root / route_id
+    run_root = base / "run"
+    output_path = base / "output.pptx"
+    run_root.mkdir(parents=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _write_editable_pptx(output_path, pages, mode=mode)
+    digest = hashlib.sha256(payload).hexdigest()
+    page_ids = [f"page_{index:03d}" for index in range(1, pages + 1)]
+    summary: dict[str, object] = {
+        "schema_version": 1,
+        "status": "completed",
+        "pages": pages,
+        "outputs": {
+            "pptx" if route_id == "mixed_pptx" else "16:9": str(output_path)
+        },
+        "performance": _performance(pages),
+    }
+    if route_id == "mixed_pptx":
+        statuses = statuses or ["preserved", "replaced", "replaced"]
+        summary.update(
+            page_results=[
+                {"schema_version": 1, "page_id": page_id, "status": status}
+                for page_id, status in zip(page_ids, statuses)
+            ],
+            preserved_with_warning_pages=statuses.count("preserved_with_warning"),
+            warnings=[],
+            output_sha256=digest,
+        )
+    else:
+        for page_id in page_ids:
+            page_root = run_root / "pages" / page_id
+            page_root.mkdir(parents=True)
+            (page_root / "page_result.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "page_id": page_id,
+                        "status": "validated",
+                    }
+                ),
+                encoding="utf-8",
+            )
+    return benchmark.RouteExecution(
+        route=benchmark.Route(route_id, (), pages),
+        run_root=run_root,
+        output_path=output_path,
+        returncode=returncode,
+        stdout=json.dumps(summary) if stdout is None else stdout,
+        duration_seconds=0.125,
+    )
+
+
+def test_build_report_has_fixed_safe_exact_schema_and_totals(tmp_path: Path) -> None:
+    executions = (
+        _execution(tmp_path, "images", 8),
+        _execution(tmp_path, "pdf", 3, mode="group_text"),
+        _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid"),
+    )
+    manifest = benchmark.CorpusManifest(
+        tmp_path, "a" * 64, (), tuple(execution.route for execution in executions)
+    )
+
+    report = benchmark.build_report(manifest, executions)
+    report_path = tmp_path / "benchmark-report.json"
+    benchmark.write_report(report_path, report)
+    payload = report_path.read_bytes()
+    stored = json.loads(payload)
+
+    assert set(stored) == {
+        "schema_version",
+        "status",
+        "corpus_sha256",
+        "environment",
+        "routes",
+        "totals",
+    }
+    assert set(stored["environment"]) == {
+        "python",
+        "platform",
+        "device_interface",
+    }
+    assert [set(route) for route in stored["routes"]] == [
+        {
+            "id",
+            "kind",
+            "input_count",
+            "pages",
+            "duration_ms",
+            "status",
+            "error_type",
+            "warning_pages",
+            "output_sha256",
+            "performance",
+        }
+    ] * 3
+    assert stored["status"] == "passed"
+    assert [route["kind"] for route in stored["routes"]] == ["image", "pdf", "pptx"]
+    assert [route["input_count"] for route in stored["routes"]] == [8, 1, 1]
+    assert stored["routes"][0]["performance"] == _reported_performance(8)
+    assert stored["totals"] == {
+        "routes": 3,
+        "inputs": 10,
+        "pages": 14,
+        "duration_ms": 375,
+        "failed_routes": 0,
+        "warning_pages": 0,
+    }
+    assert payload.endswith(b"\n")
+    assert b"\r\n" not in payload
+    assert str(tmp_path).encode() not in payload
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "not-json",
+        "{}\n{}",
+        '{"status":"completed","status":"completed"}',
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        " " * (4 * 1024 * 1024 + 1),
+    ],
+    ids=["syntax", "multiple", "duplicate", "nan", "infinity", "oversize"],
+)
+def test_zero_exit_rejects_noncanonical_summary_json(
+    tmp_path: Path, stdout: str
+) -> None:
+    execution = _execution(tmp_path, "images", 8, stdout=stdout)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["status"] == "failed"
+    assert result["error_type"] == "invalid_summary"
+
+
+def test_nonzero_exit_precedes_invalid_summary_and_does_not_leak(tmp_path: Path) -> None:
+    secret = "sk-secret conversion failed at C:\\private\\asset and https://secret"
+    execution = _execution(
+        tmp_path, "images", 8, returncode=9, stdout=secret
+    )
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "conversion_failed"
+    assert secret not in json.dumps(result)
+
+
+@pytest.mark.parametrize("problem", ["missing", "corrupt", "hash", "pages"])
+def test_output_integrity_failures_are_output_invalid(
+    tmp_path: Path, problem: str
+) -> None:
+    execution = _execution(tmp_path, "images", 8)
+    summary = json.loads(execution.stdout)
+    if problem == "missing":
+        execution.output_path.unlink()
+    elif problem == "corrupt":
+        execution.output_path.write_bytes(b"not a pptx")
+        summary.pop("output_sha256", None)
+    elif problem == "hash":
+        summary["output_sha256"] = "0" * 64
+    else:
+        _write_editable_pptx(execution.output_path, 7)
+        summary.pop("output_sha256", None)
+    execution = replace(execution, stdout=json.dumps(summary))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "output_invalid"
+
+
+def test_pptx_archive_preflight_accepts_real_corpus_and_normal_output(
+    tmp_path: Path,
+) -> None:
+    corpus = (
+        Path(__file__).resolve().parents[1] / "benchmark" / "corpus" / "10-mixed.pptx"
+    )
+    generated = tmp_path / "normal.pptx"
+    _write_editable_pptx(generated, 3)
+
+    benchmark._validate_pptx_archive(corpus.read_bytes())
+    benchmark._validate_pptx_archive(generated.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"not-a-zip",
+        _zip_bytes([f"member-{index}.xml" for index in range(2049)]),
+        _patch_zip_central_sizes(
+            _zip_bytes(["large.xml"]),
+            compressed=[64 * 1024 * 1024 + 1],
+            uncompressed=[64 * 1024 * 1024 + 1],
+        ),
+        _patch_zip_central_sizes(
+            _zip_bytes([f"part-{index}.xml" for index in range(5)]),
+            compressed=[60 * 1024 * 1024] * 5,
+            uncompressed=[60 * 1024 * 1024] * 5,
+        ),
+        _zip_bytes(["ratio.xml"], b"0" * (2 * 1024 * 1024)),
+        _zip_bytes(["duplicate.xml", "duplicate.xml"]),
+        _patch_zip_central_encrypted(_zip_bytes(["encrypted.xml"])),
+    ],
+    ids=[
+        "bad-zip",
+        "member-count",
+        "single-size",
+        "total-size",
+        "compression-ratio",
+        "duplicate",
+        "encrypted",
+    ],
+)
+def test_pptx_archive_preflight_rejects_unsafe_metadata(payload: bytes) -> None:
+    with pytest.raises(ValueError):
+        benchmark._validate_pptx_archive(payload)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "/absolute.xml",
+        "C:/drive.xml",
+        ".",
+        "..",
+        "a/./part.xml",
+        "a/../part.xml",
+        "a\\part.xml",
+    ],
+)
+def test_pptx_archive_preflight_rejects_dangerous_member_name(name: str) -> None:
+    payload = _zip_bytes([name])
+    if "\\" in name:
+        payload = payload.replace(b"a/part.xml", b"a\\part.xml")
+    with pytest.raises(ValueError):
+        benchmark._validate_pptx_archive(payload)
+
+
+def test_unsafe_archive_is_rejected_before_python_pptx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    execution = _execution(tmp_path, "images", 8)
+    execution.output_path.write_bytes(
+        _zip_bytes(["ratio.xml"], b"0" * (2 * 1024 * 1024))
+    )
+    presentation_called = False
+
+    def unexpected_presentation(stream: object) -> object:
+        nonlocal presentation_called
+        presentation_called = True
+        raise RuntimeError
+
+    monkeypatch.setattr("pptx.Presentation", unexpected_presentation)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "output_invalid"
+    assert presentation_called is False
+
+
+@pytest.mark.parametrize(("route_id", "pages"), [("images", 8), ("pdf", 3)])
+def test_legacy_product_summary_without_output_sha256_uses_bound_digest(
+    tmp_path: Path, route_id: str, pages: int
+) -> None:
+    execution = _execution(tmp_path, route_id, pages)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["status"] == "passed"
+    assert result["output_sha256"] == hashlib.sha256(
+        execution.output_path.read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(("route_id", "pages"), [("images", 8), ("pdf", 3)])
+def test_legacy_product_summary_rejects_null_output_sha256(
+    tmp_path: Path, route_id: str, pages: int
+) -> None:
+    execution = _execution(tmp_path, route_id, pages)
+    summary = json.loads(execution.stdout)
+    summary["output_sha256"] = None
+
+    result = benchmark.evaluate_execution(
+        replace(execution, stdout=json.dumps(summary))
+    )
+
+    assert result["error_type"] == "output_invalid"
+
+
+def test_mixed_product_summary_requires_output_sha256(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid")
+    summary = json.loads(execution.stdout)
+    summary.pop("output_sha256")
+
+    result = benchmark.evaluate_execution(
+        replace(execution, stdout=json.dumps(summary))
+    )
+
+    assert result["error_type"] == "output_invalid"
+
+
+@pytest.mark.parametrize(
+    ("route_id", "pages", "wrong_key"),
+    [("images", 8, "pptx"), ("pdf", 3, "pptx"), ("mixed_pptx", 3, "16:9")],
+)
+def test_route_rejects_wrong_product_output_key(
+    tmp_path: Path, route_id: str, pages: int, wrong_key: str
+) -> None:
+    execution = _execution(
+        tmp_path,
+        route_id,
+        pages,
+        mode="mixed_valid" if route_id == "mixed_pptx" else "text",
+    )
+    summary = json.loads(execution.stdout)
+    summary["outputs"] = {wrong_key: str(execution.output_path)}
+
+    result = benchmark.evaluate_execution(
+        replace(execution, stdout=json.dumps(summary))
+    )
+
+    assert result["error_type"] == "invalid_summary"
+
+
+@pytest.mark.parametrize(("route_id", "pages"), [("images", 8), ("pdf", 3)])
+@pytest.mark.parametrize("mode", ["aspect_4_3", "aspect_2_1"])
+def test_legacy_route_rejects_non_widescreen_output(
+    tmp_path: Path, route_id: str, pages: int, mode: str
+) -> None:
+    execution = _execution(tmp_path, route_id, pages, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "output_invalid"
+
+
+def test_mixed_route_does_not_require_widescreen_output(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "mixed_pptx", 3, mode="aspect_4_3")
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["status"] == "passed"
+
+
+def test_missing_page_result_is_invalid_summary(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "pdf", 3)
+    (execution.run_root / "pages" / "page_002" / "page_result.json").unlink()
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "invalid_summary"
+
+
+@pytest.mark.parametrize("payload", ['{"schema_version":1,"page_id":"page_001","page_id":"page_001","status":"validated"}', '{"schema_version":1,"page_id":"page_001","status":"validated","score":NaN}'])
+def test_page_result_rejects_duplicate_or_nonfinite_json(
+    tmp_path: Path, payload: str
+) -> None:
+    execution = _execution(tmp_path, "images", 8)
+    path = execution.run_root / "pages" / "page_001" / "page_result.json"
+    path.write_text(payload, encoding="utf-8")
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "invalid_summary"
+
+
+def test_runtime_warning_fallback_precedes_editability(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "images", 8, mode="full_picture")
+    path = execution.run_root / "pages" / "page_001" / "page_result.json"
+    page = json.loads(path.read_text(encoding="utf-8"))
+    page["warnings"] = ["secret warning"]
+    path.write_text(json.dumps(page), encoding="utf-8")
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "warning_fallback"
+    assert "secret warning" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("mode", ["full_picture", "small_picture"])
+def test_single_picture_reconstructed_page_is_flattened_output(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+@pytest.mark.parametrize("mode", ["empty_text", "group_empty_text", "invisible_shape"])
+def test_nonvisual_native_shape_cannot_hide_flattened_output(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+@pytest.mark.parametrize(
+    "mode", ["group_offslide", "group_zero_width", "group_zero_height"]
+)
+def test_group_transform_cannot_make_local_child_look_visible(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "group_flip_h_offslide",
+        "group_flip_v_offslide",
+        "nested_group_flip_h_offslide",
+    ],
+)
+def test_group_flip_cannot_make_local_child_look_visible(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+def test_group_flip_keeps_page_local_text_editable(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode="group_flip_h_visible")
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    "mode", ["outside_text", "zero_text", "outside_picture", "zero_picture"]
+)
+def test_off_slide_or_zero_size_content_cannot_hide_flattened_output(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "tiny_text",
+        "tiny_picture",
+        "tiny_native",
+        "hidden_text",
+        "hidden_picture",
+        "group_hidden_text",
+        "transparent_text",
+        "transparent_picture",
+        "shape_transparent_picture",
+        "shape_alpha_repl_transparent_picture",
+        "shape_unknown_alpha_picture",
+        "shape_invalid_alpha_picture",
+        "shape_extra_alpha_field_picture",
+        "sparse_picture",
+        "transparent_native",
+        "transparent_native_leading_zero",
+    ],
+)
+def test_tiny_hidden_or_transparent_content_cannot_hide_flattened_output(
+    tmp_path: Path, mode: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "flattened_output"
+
+
+@pytest.mark.parametrize("dimensions", [(10_000, 10_000), (20_000, 10_000)])
+def test_picture_pixel_bomb_is_output_invalid_without_warning_escape(
+    tmp_path: Path, dimensions: tuple[int, int]
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode="pictures")
+    _replace_first_pptx_media(
+        execution.output_path, _png_with_dimensions(*dimensions)
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "output_invalid"
+    assert not any(
+        issubclass(warning.category, Image.DecompressionBombWarning)
+        for warning in caught
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "text",
+        "native",
+        "pictures",
+        "group_text",
+        "partial_gradient_native",
+        "partial_picture_alpha",
+        "partial_picture_alpha_repl",
+    ],
+)
+def test_real_editable_shapes_pass_structure_gate(tmp_path: Path, mode: str) -> None:
+    execution = _execution(tmp_path, "pdf", 3, mode=mode)
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["status"] == "passed"
+    assert result["error_type"] is None
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (["preserved", "replaced", "replaced"], None),
+        (["replaced", "replaced", "replaced"], None),
+        (["preserved", "preserved", "replaced"], "warning_fallback"),
+        (["preserved", "replaced", "preserved"], "warning_fallback"),
+        (["preserved_with_warning", "replaced", "replaced"], "warning_fallback"),
+    ],
+)
+def test_mixed_route_requires_replacement_of_pages_two_and_three(
+    tmp_path: Path, statuses: list[str], expected: str | None
+) -> None:
+    execution = _execution(
+        tmp_path, "mixed_pptx", 3, mode="mixed_valid", statuses=statuses
+    )
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == expected
+
+
+@pytest.mark.parametrize("problem", ["missing", "bool", "negative", "huge", "identifier", "page"])
+def test_performance_contract_is_required_and_strict(
+    tmp_path: Path, problem: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3)
+    summary = json.loads(execution.stdout)
+    if problem == "missing":
+        summary.pop("performance")
+    elif problem == "page":
+        summary["performance"]["pages"].pop("page_003")
+    else:
+        page = summary["performance"]["pages"]["page_001"]
+        if problem == "bool":
+            page["agent_runs"] = True
+        elif problem == "negative":
+            page["agent_runs"] = -1
+        elif problem == "huge":
+            page["agent_runs"] = 1_000_000_000_001
+        else:
+            page["model_loads"] = {"bad identifier!": 1}
+    execution = replace(execution, stdout=json.dumps(summary))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "invalid_summary"
+
+
+def test_write_report_is_exclusive(tmp_path: Path) -> None:
+    path = tmp_path / "benchmark-report.json"
+    path.write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        benchmark.write_report(path, {"status": "passed"})
+
+    assert path.read_text(encoding="utf-8") == "existing"
+
+
+def test_multiply_linked_output_is_output_invalid(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "pdf", 3)
+    os.link(execution.output_path, execution.output_path.with_name("alias.pptx"))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "output_invalid"
+
+
+@pytest.mark.parametrize("problem", ["map_bool", "map_negative", "map_huge", "extra_field"])
+def test_performance_maps_and_exact_page_fields_are_strict(
+    tmp_path: Path, problem: str
+) -> None:
+    execution = _execution(tmp_path, "pdf", 3)
+    summary = json.loads(execution.stdout)
+    page = summary["performance"]["pages"]["page_001"]
+    if problem == "extra_field":
+        page["invented"] = 0
+    else:
+        page["model_loads"]["layout-model"] = {
+            "map_bool": True,
+            "map_negative": -1,
+            "map_huge": 1_000_000_000_001,
+        }[problem]
+    execution = replace(execution, stdout=json.dumps(summary))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "invalid_summary"
+
+
+@pytest.mark.parametrize("location", ["summary", "page"])
+def test_mixed_warning_fields_are_warning_fallback(
+    tmp_path: Path, location: str
+) -> None:
+    execution = _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid")
+    summary = json.loads(execution.stdout)
+    if location == "summary":
+        summary["warnings"] = ["private warning"]
+        summary["preserved_with_warning_pages"] = 1
+        summary["page_results"][0]["status"] = "preserved_with_warning"
+    else:
+        summary["page_results"][1]["warning"] = "private warning"
+    execution = replace(execution, stdout=json.dumps(summary))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "warning_fallback"
+    assert "private warning" not in json.dumps(result)
+
+
+def test_mixed_structured_page_warning_is_warning_fallback(tmp_path: Path) -> None:
+    execution = _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid")
+    summary = json.loads(execution.stdout)
+    summary["page_results"][1]["warning"] = ["structured warning"]
+    execution = replace(execution, stdout=json.dumps(summary))
+
+    result = benchmark.evaluate_execution(execution)
+
+    assert result["error_type"] == "warning_fallback"
+
+
+def test_untrusted_summary_fields_never_reach_report(tmp_path: Path) -> None:
+    executions = [
+        _execution(tmp_path, "images", 8),
+        _execution(tmp_path, "pdf", 3),
+        _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid"),
+    ]
+    injected = json.loads(executions[0].stdout)
+    injected.update(
+        error="sk-secret",
+        diagnostics="C:\\private\\asset",
+        url="https://private.example/token",
+    )
+    executions[0] = replace(executions[0], stdout=json.dumps(injected))
+    manifest = benchmark.CorpusManifest(
+        tmp_path, "b" * 64, (), tuple(item.route for item in executions)
+    )
+
+    report = benchmark.build_report(manifest, tuple(executions))
+    encoded = json.dumps(report)
+
+    assert "sk-secret" not in encoded
+    assert "C:\\\\private" not in encoded
+    assert "https://" not in encoded
+
+
+def test_performance_identifier_secret_is_aggregated_without_copying_key(
+    tmp_path: Path,
+) -> None:
+    executions = [
+        _execution(tmp_path, "images", 8),
+        _execution(tmp_path, "pdf", 3),
+        _execution(tmp_path, "mixed_pptx", 3, mode="mixed_valid"),
+    ]
+    summary = json.loads(executions[0].stdout)
+    metrics = summary["performance"]["pages"]["page_001"]["model_loads"]
+    metrics["sk-proj-secret-token"] = 4
+    executions[0] = replace(executions[0], stdout=json.dumps(summary))
+    manifest = benchmark.CorpusManifest(
+        tmp_path, "d" * 64, (), tuple(item.route for item in executions)
+    )
+
+    report = benchmark.build_report(manifest, tuple(executions))
+    encoded = json.dumps(report)
+
+    assert report["routes"][0]["performance"]["pages"]["page_001"][
+        "model_loads"
+    ] == 5
+    assert "sk-proj-secret-token" not in encoded
+
+
+@pytest.mark.parametrize(
+    ("warning_count", "statuses", "expected_error"),
+    [
+        (-1, ["preserved", "replaced", "replaced"], "invalid_summary"),
+        (4, ["preserved", "replaced", "replaced"], "invalid_summary"),
+        (1, ["preserved", "replaced", "replaced"], "invalid_summary"),
+        (0, ["preserved_with_warning", "replaced", "replaced"], "invalid_summary"),
+    ],
+)
+def test_mixed_warning_count_is_bounded_and_matches_page_results(
+    tmp_path: Path,
+    warning_count: int,
+    statuses: list[str],
+    expected_error: str,
+) -> None:
+    execution = _execution(
+        tmp_path, "mixed_pptx", 3, mode="mixed_valid", statuses=statuses
+    )
+    summary = json.loads(execution.stdout)
+    summary["preserved_with_warning_pages"] = warning_count
+
+    result = benchmark.evaluate_execution(
+        replace(execution, stdout=json.dumps(summary))
+    )
+
+    assert result["error_type"] == expected_error
+
+
+def test_mixed_warning_pages_are_deduplicated_and_bounded(tmp_path: Path) -> None:
+    execution = _execution(
+        tmp_path,
+        "mixed_pptx",
+        3,
+        mode="mixed_valid",
+        statuses=["preserved", "preserved_with_warning", "replaced"],
+    )
+    summary = json.loads(execution.stdout)
+    summary["preserved_with_warning_pages"] = 1
+    summary["warnings"] = [f"warning {index}" for index in range(10)]
+
+    result = benchmark.evaluate_execution(
+        replace(execution, stdout=json.dumps(summary))
+    )
+
+    assert result["error_type"] == "warning_fallback"
+    assert result["warning_pages"] == 3
+
+
+def _manifest_for_executions(
+    tmp_path: Path, executions: tuple[benchmark.RouteExecution, ...]
+) -> benchmark.CorpusManifest:
+    return benchmark.CorpusManifest(
+        tmp_path, "c" * 64, (), tuple(item.route for item in executions)
+    )
+
+
+@pytest.mark.parametrize(("returncode", "expected_exit"), [(7, 1), (0, 0)])
+def test_main_writes_report_with_matching_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    expected_exit: int,
+) -> None:
+    data_root = tmp_path / "data"
+    executions = (
+        _execution(
+            data_root,
+            "images",
+            8,
+            returncode=returncode,
+            stdout="sk-secret" if returncode else None,
+        ),
+        _execution(data_root, "pdf", 3),
+        _execution(data_root, "mixed_pptx", 3, mode="mixed_valid"),
+    )
+    manifest = _manifest_for_executions(tmp_path, executions)
+    output_root = tmp_path / "result"
+    monkeypatch.setattr(benchmark, "load_manifest", lambda path: manifest)
+
+    def fake_execute(
+        received: benchmark.CorpusManifest, result: Path
+    ) -> tuple[benchmark.RouteExecution, ...]:
+        assert received is manifest
+        result.mkdir()
+        return executions
+
+    monkeypatch.setattr(benchmark, "execute_routes", fake_execute)
+
+    exit_code = benchmark.main(
+        ["--corpus", str(tmp_path / "manifest.json"), "--output-dir", str(output_root)]
+    )
+    report = json.loads((output_root / "benchmark-report.json").read_text("utf-8"))
+
+    assert exit_code == expected_exit
+    assert report["status"] == ("failed" if returncode else "passed")
+    assert report["routes"][0]["error_type"] == (
+        "conversion_failed" if returncode else None
+    )
+    assert report["routes"][1]["status"] == "passed"
+    assert "sk-secret" not in json.dumps(report)
+
+
+def test_main_doctor_failure_reports_all_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executions = (
+        _execution(tmp_path / "data", "images", 8),
+        _execution(tmp_path / "data", "pdf", 3),
+        _execution(tmp_path / "data", "mixed_pptx", 3, mode="mixed_valid"),
+    )
+    manifest = _manifest_for_executions(tmp_path, executions)
+    output_root = tmp_path / "result"
+    monkeypatch.setattr(benchmark, "load_manifest", lambda path: manifest)
+
+    def failed_doctor(received: benchmark.CorpusManifest, result: Path) -> object:
+        result.mkdir()
+        raise benchmark.BenchmarkError("doctor_not_ready")
+
+    monkeypatch.setattr(benchmark, "execute_routes", failed_doctor)
+
+    exit_code = benchmark.main(
+        ["--corpus", str(tmp_path / "manifest.json"), "--output-dir", str(output_root)]
+    )
+    report = json.loads((output_root / "benchmark-report.json").read_text("utf-8"))
+
+    assert exit_code == 1
+    assert [route["error_type"] for route in report["routes"]] == [
+        "doctor_not_ready"
+    ] * 3
+    assert report["totals"]["failed_routes"] == 3
+
+
+def test_main_report_exclusive_failure_cannot_return_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data_root = tmp_path / "data"
+    executions = (
+        _execution(data_root, "images", 8),
+        _execution(data_root, "pdf", 3),
+        _execution(data_root, "mixed_pptx", 3, mode="mixed_valid"),
+    )
+    manifest = _manifest_for_executions(tmp_path, executions)
+    output_root = tmp_path / "result"
+    monkeypatch.setattr(benchmark, "load_manifest", lambda path: manifest)
+
+    def fake_execute(
+        received: benchmark.CorpusManifest, result: Path
+    ) -> tuple[benchmark.RouteExecution, ...]:
+        result.mkdir()
+        (result / "benchmark-report.json").write_text("existing", encoding="utf-8")
+        return executions
+
+    monkeypatch.setattr(benchmark, "execute_routes", fake_execute)
+
+    exit_code = benchmark.main(
+        ["--corpus", str(tmp_path / "manifest.json"), "--output-dir", str(output_root)]
+    )
+
+    assert exit_code == 1
+    assert capsys.readouterr().err == "benchmark_failed\n"
+    assert (output_root / "benchmark-report.json").read_text("utf-8") == "existing"
+
+
+def test_cli_invalid_corpus_has_fixed_exit_code_and_stderr(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/benchmark_conversion.py",
+            "--corpus",
+            str(tmp_path / "missing.json"),
+            "--output-dir",
+            str(tmp_path / "result"),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    assert completed.stderr == "invalid_corpus\n"
+    assert not (tmp_path / "result").exists()
