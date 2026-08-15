@@ -42,6 +42,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
                 "render-qa": ["pywin32>=306; sys_platform == 'win32'"],
                 "test": [
                 "pytest",
+                "PyYAML>=6,<7",
                 "pypdf>=5",
                 "reportlab>=4",
                 "tomli>=2; python_version < '3.11'",

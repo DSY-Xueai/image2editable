@@ -44,7 +44,6 @@ LAMA_LICENSE = ROOT / "third_party" / "licenses" / "LAMA-APACHE-2.0.txt"
 PYPROJECT = ROOT / "pyproject.toml"
 RUNTIME_CONSTRAINTS = ROOT / "constraints" / "runtime.txt"
 CLAUDE_PLUGIN = ROOT / ".claude-plugin" / "plugin.json"
-GITHUB_CI = ROOT / ".github" / "workflows" / "ci.yml"
 RUNTIME_REQUIREMENTS = [
     "python-pptx>=1.0.2,<2",
     "opencv-python>=4.10.0.84,<5",
@@ -584,11 +583,3 @@ def test_claude_plugin_does_not_pin_a_version() -> None:
         "./skills/image-to-ppt",
         "./skills/image-to-psd",
     ]
-
-
-def test_github_ci_covers_supported_desktop_platforms() -> None:
-    workflow = GITHUB_CI.read_text(encoding="utf-8")
-
-    assert "ubuntu-latest" in workflow
-    assert "windows-latest" in workflow
-    assert "macos-latest" in workflow
