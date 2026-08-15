@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import ctypes
-import hashlib
 import importlib
 import importlib.util
 from importlib import metadata
@@ -12,6 +11,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+
+from image2editable.model_receipts import manifest_files, validate_manifest
 
 
 CATALOG_PATH = Path(__file__).with_name("model_catalog.json")
@@ -338,33 +339,6 @@ def recommend_agent_model(
     }
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _snapshot_files(snapshot: Path, cache: Path) -> list[dict[str, object]]:
-    files = []
-    for path in sorted(snapshot.rglob("*"), key=lambda value: value.as_posix()):
-        if not path.is_file():
-            continue
-        if not path.resolve().is_relative_to(cache):
-            raise RuntimeError("model snapshot contains a file outside the cache")
-        files.append(
-            {
-                "path": path.relative_to(snapshot).as_posix(),
-                "size": path.stat().st_size,
-                "sha256": _sha256(path),
-            }
-        )
-    if not files:
-        raise RuntimeError("downloaded model snapshot is empty")
-    return files
-
-
 def install_agent_model(
     *,
     cache_dir: str | Path | None = None,
@@ -423,7 +397,7 @@ def install_agent_model(
         "resolved_revision": snapshot.name.lower(),
         "stability": entry["stability"],
         "snapshot_path": str(snapshot),
-        "files": _snapshot_files(snapshot, cache),
+        "files": manifest_files(snapshot, cache),
         "installed_at": datetime.now(timezone.utc).isoformat(),
     }
     receipt_path = cache / RECEIPT_NAME
@@ -481,40 +455,7 @@ def model_status(*, cache_dir: str | Path | None = None) -> dict[str, object]:
             raise RuntimeError("snapshot path is missing or outside the model cache")
         if receipt["resolved_revision"] != snapshot.name.lower():
             raise RuntimeError("receipt commit does not match snapshot path")
-        files = receipt["files"]
-        if not isinstance(files, list) or not files:
-            raise RuntimeError("receipt file manifest is empty")
-        expected = {}
-        for item in files:
-            if not isinstance(item, dict) or set(item) != {"path", "size", "sha256"}:
-                raise RuntimeError("receipt file entry is invalid")
-            relative = Path(item["path"])
-            if (
-                not isinstance(item["path"], str)
-                or not item["path"]
-                or relative.is_absolute()
-                or ".." in relative.parts
-                or item["path"] in expected
-            ):
-                raise RuntimeError(f"snapshot file path is invalid: {item['path']}")
-            if (
-                isinstance(item["size"], bool)
-                or not isinstance(item["size"], int)
-                or item["size"] < 0
-                or not isinstance(item["sha256"], str)
-                or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
-            ):
-                raise RuntimeError(f"receipt file entry is invalid: {item['path']}")
-            expected[item["path"]] = item
-        actual = {item["path"]: item for item in _snapshot_files(snapshot, cache)}
-        if set(actual) != set(expected):
-            raise RuntimeError("snapshot file set does not match receipt")
-        for relative_path, item in expected.items():
-            if (
-                actual[relative_path]["size"] != item["size"]
-                or actual[relative_path]["sha256"] != item["sha256"]
-            ):
-                raise RuntimeError(f"snapshot file checksum mismatch: {relative_path}")
+        validate_manifest(snapshot, cache, receipt["files"])
     except (
         KeyError,
         OSError,

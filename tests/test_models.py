@@ -474,6 +474,52 @@ def test_model_status_rejects_files_added_after_receipt(
     assert status["reason"] == "snapshot file set does not match receipt"
 
 
+def test_model_status_rejects_duplicate_manifest_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshots" / ("2" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("config", encoding="utf-8")
+    monkeypatch.setattr(models, "snapshot_download", lambda **kwargs: str(snapshot))
+    models.install_agent_model(
+        cache_dir=tmp_path,
+        free_disk_gib=20,
+        confirmed=True,
+    )
+    receipt_path = tmp_path / "agent-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["files"].append(receipt["files"][0])
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    status = models.model_status(cache_dir=tmp_path)
+
+    assert status["valid"] is False
+    assert status["reason"] == "snapshot file path is invalid: config.json"
+
+
+def test_model_status_keeps_accepting_an_unsorted_local_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "snapshots" / ("3" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("config", encoding="utf-8")
+    (snapshot / "weights.bin").write_bytes(b"weights")
+    monkeypatch.setattr(models, "snapshot_download", lambda **kwargs: str(snapshot))
+    models.install_agent_model(
+        cache_dir=tmp_path,
+        free_disk_gib=20,
+        confirmed=True,
+    )
+    receipt_path = tmp_path / "agent-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["files"].reverse()
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert models.model_status(cache_dir=tmp_path)["valid"] is True
+
+
 def test_model_status_accepts_hugging_face_blob_symlink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

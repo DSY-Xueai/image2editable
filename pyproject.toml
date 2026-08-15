@@ -37,7 +37,7 @@ py-modules = ["image_to_ppt", "image_to_psd"]
 include = ["image2editable*", "scripts*"]
 
 [tool.setuptools.package-data]
-image2editable = ["model_catalog.json"]
+image2editable = ["model_catalog.json", "runtime_model_catalog.json"]
 
 [tool.pytest.ini_options]
 markers = [
