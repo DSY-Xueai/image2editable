@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 import subprocess
 import sys
 import traceback
@@ -18,7 +17,6 @@ from PIL import Image
 from scripts import lama_inpaint
 
 
-_SMALL_CHECKPOINT = b"fixed-test-checkpoint"
 _REAL_EQUIVALENCE_MANIFEST_SHA256 = (
     "dc93d38da73367705d32efe4f95ddf36a120d27a35c83bddc630b2788a12352e"
 )
@@ -112,467 +110,41 @@ _REAL_EQUIVALENCE_CONTRACT = {
 }
 
 
-@pytest.fixture
-def small_checkpoint(monkeypatch: pytest.MonkeyPatch) -> bytes:
-    monkeypatch.setattr(
-        lama_inpaint,
-        "BIG_LAMA_MODEL_SIZE",
-        len(_SMALL_CHECKPOINT),
-    )
-    monkeypatch.setattr(
-        lama_inpaint,
-        "BIG_LAMA_MODEL_SHA256",
-        hashlib.sha256(_SMALL_CHECKPOINT).hexdigest(),
-    )
-    return _SMALL_CHECKPOINT
-
-
-def _write_download(url: str, destination: str | Path) -> None:
-    assert url == lama_inpaint.BIG_LAMA_MODEL_URL
-    destination = Path(destination)
-    assert destination.exists()
-    destination.write_bytes(_SMALL_CHECKPOINT)
-
-
-def test_big_lama_checkpoint_constants_are_immutable_release_identity() -> None:
-    assert lama_inpaint.BIG_LAMA_MODEL_URL == (
-        "https://github.com/enesmsahin/simple-lama-inpainting/releases/"
-        "download/v0.1.0/big-lama.pt"
-    )
-    assert lama_inpaint.BIG_LAMA_MODEL_SIZE == 205803670
-    assert lama_inpaint.BIG_LAMA_MODEL_SHA256 == (
-        "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c"
-    )
-
-
-def test_resolve_lama_checkpoint_downloads_to_private_preallocated_file(
+def test_resolve_lama_checkpoint_uses_runtime_model_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    small_checkpoint: bytes,
-) -> None:
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    downloads = []
-    fsynced = []
-    actual_fsync = os.fsync
-    monkeypatch.setattr(
-        lama_inpaint.os,
-        "fsync",
-        lambda descriptor: fsynced.append(descriptor) or actual_fsync(descriptor),
-    )
-
-    def downloader(url: str, destination: str | Path) -> None:
-        destination = Path(destination)
-        status = destination.lstat()
-        downloads.append((url, destination, stat.S_IMODE(status.st_mode)))
-        assert destination.parent == cache
-        assert destination.name != "big-lama.pt"
-        destination.write_bytes(small_checkpoint)
-
-    resolved = lama_inpaint.resolve_lama_checkpoint(
-        cache_dir=cache,
-        downloader=downloader,
-    )
-
-    assert resolved == cache / "big-lama.pt"
-    assert resolved.read_bytes() == small_checkpoint
-    assert downloads[0][:2] == (
-        lama_inpaint.BIG_LAMA_MODEL_URL,
-        downloads[0][1],
-    )
-    if os.name != "nt":
-        assert downloads[0][2] == 0o600
-    assert len(fsynced) == 1
-    assert list(cache.iterdir()) == [resolved]
-
-
-def test_resolve_lama_checkpoint_uses_environment_cache_and_reuses_valid_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    small_checkpoint: bytes,
-) -> None:
-    cache = tmp_path / "models"
-    cache.mkdir()
-    checkpoint = cache / "big-lama.pt"
-    checkpoint.write_bytes(small_checkpoint)
-    monkeypatch.setenv("IMAGE2EDITABLE_MODEL_CACHE", str(cache))
-    monkeypatch.delenv("LAMA_MODEL", raising=False)
-
-    resolved = lama_inpaint.resolve_lama_checkpoint(
-        downloader=lambda *_: pytest.fail("valid cache must not be downloaded")
-    )
-
-    assert resolved == checkpoint
-
-
-def test_resolve_lama_checkpoint_uses_default_user_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    small_checkpoint: bytes,
-) -> None:
-    monkeypatch.delenv("IMAGE2EDITABLE_MODEL_CACHE", raising=False)
-    monkeypatch.delenv("LAMA_MODEL", raising=False)
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-
-    resolved = lama_inpaint.resolve_lama_checkpoint(downloader=_write_download)
-
-    assert resolved == (
-        tmp_path
-        / ".cache"
-        / "image2editable"
-        / "models"
-        / "runtime"
-        / "big-lama.pt"
-    )
-    assert resolved.read_bytes() == small_checkpoint
-
-
-@pytest.mark.parametrize("payload", [b"short", b"wrong-checkpoint-data"])
-def test_resolve_lama_checkpoint_rejects_invalid_existing_default_cache(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-    payload: bytes,
 ) -> None:
     checkpoint = tmp_path / "big-lama.pt"
-    checkpoint.write_bytes(payload)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="integrity"):
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=lambda *_: pytest.fail("bad cache must not be overwritten"),
-        )
-
-    assert checkpoint.read_bytes() == payload
-
-
-def test_resolve_lama_checkpoint_accepts_custom_model_with_distinct_hash(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    custom = tmp_path / "custom-lama.pt"
-    custom.write_bytes(b"custom model payload")
-    monkeypatch.setenv("LAMA_MODEL", str(custom))
-
-    resolved = lama_inpaint.resolve_lama_checkpoint(
-        cache_dir=tmp_path / "unused",
-        downloader=lambda *_: pytest.fail("custom model must not be downloaded"),
-    )
-
-    assert resolved == custom
-
-
-def test_checkpoint_identity_contains_no_absolute_path(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "custom-lama.pt"
-    payload = b"custom model payload"
-    checkpoint.write_bytes(payload)
-
-    identity = lama_inpaint.checkpoint_identity(checkpoint)
-
-    assert identity == {
-        "basename": checkpoint.name,
-        "size": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-    }
-    assert str(tmp_path) not in repr(identity)
-
-
-def test_checkpoint_identity_rejects_missing_and_nonregular_paths(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="missing"):
-        lama_inpaint.checkpoint_identity(tmp_path / "missing.pt")
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="regular"):
-        lama_inpaint.checkpoint_identity(tmp_path)
-
-
-def test_checkpoint_identity_rejects_symlink_and_hardlink(tmp_path: Path) -> None:
-    source = tmp_path / "source.pt"
-    source.write_bytes(b"model")
-    hardlink = tmp_path / "hardlink.pt"
-    os.link(source, hardlink)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="hard link"):
-        lama_inpaint.checkpoint_identity(source)
-
-    symlink = tmp_path / "symlink.pt"
-    try:
-        symlink.symlink_to(source)
-    except OSError:
-        pytest.skip("symlink creation is unavailable")
-    with pytest.raises(
-        lama_inpaint.LargeMaskInpaintError,
-        match="link or reparse",
-    ):
-        lama_inpaint.checkpoint_identity(symlink)
-
-
-def test_checkpoint_identity_rejects_reparse_point(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkpoint = tmp_path / "model.pt"
-    checkpoint.write_bytes(b"model")
-    actual_lstat = Path.lstat
-
-    def fake_lstat(path: Path):
-        status = actual_lstat(path)
-        if path == checkpoint:
-            values = {
-                name: getattr(status, name)
-                for name in (
-                    "st_mode",
-                    "st_dev",
-                    "st_ino",
-                    "st_nlink",
-                    "st_size",
-                    "st_mtime_ns",
-                )
-            }
-            values["st_file_attributes"] = getattr(
-                stat,
-                "FILE_ATTRIBUTE_REPARSE_POINT",
-                0x400,
-            )
-            return types.SimpleNamespace(**values)
-        return status
-
-    monkeypatch.setattr(Path, "lstat", fake_lstat)
-
-    with pytest.raises(
-        lama_inpaint.LargeMaskInpaintError,
-        match="link or reparse",
-    ):
-        lama_inpaint.checkpoint_identity(checkpoint)
-
-
-def test_checkpoint_identity_rejects_file_identity_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkpoint = tmp_path / "model.pt"
-    checkpoint.write_bytes(b"model")
-    actual_fstat = os.fstat
-    calls = 0
-
-    def changed_fstat(descriptor: int):
-        nonlocal calls
-        status = actual_fstat(descriptor)
-        calls += 1
-        if calls == 2:
-            values = {
-                name: getattr(status, name)
-                for name in (
-                    "st_mode",
-                    "st_dev",
-                    "st_ino",
-                    "st_nlink",
-                    "st_size",
-                    "st_mtime_ns",
-                )
-            }
-            values["st_ino"] += 1
-            return types.SimpleNamespace(**values)
-        return status
-
-    monkeypatch.setattr(lama_inpaint.os, "fstat", changed_fstat)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="changed"):
-        lama_inpaint.checkpoint_identity(checkpoint)
-
-
-def test_checkpoint_identity_rejects_parent_chain_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    parent = tmp_path / "models"
-    parent.mkdir()
-    checkpoint = parent / "model.pt"
-    checkpoint.write_bytes(b"model")
-    actual_lstat = Path.lstat
-    parent_calls = 0
-
-    def changed_parent_lstat(path: Path):
-        nonlocal parent_calls
-        status = actual_lstat(path)
-        if path == parent:
-            parent_calls += 1
-            if parent_calls > 1:
-                values = {
-                    name: getattr(status, name)
-                    for name in (
-                        "st_mode",
-                        "st_dev",
-                        "st_ino",
-                        "st_nlink",
-                        "st_size",
-                        "st_mtime_ns",
-                    )
-                }
-                values["st_ino"] += 1
-                values["st_file_attributes"] = getattr(
-                    status,
-                    "st_file_attributes",
-                    0,
-                )
-                return types.SimpleNamespace(**values)
-        return status
-
-    monkeypatch.setattr(Path, "lstat", changed_parent_lstat)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="parent.*changed"):
-        lama_inpaint.checkpoint_identity(checkpoint)
-
-
-def test_resolve_lama_checkpoint_cleans_own_temporary_after_download_error(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-) -> None:
-    failure = RuntimeError("download failed")
-
-    def downloader(_url: str, _destination: str | Path) -> None:
-        raise failure
-
-    with pytest.raises(RuntimeError) as raised:
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=downloader,
-        )
-
-    assert raised.value is failure
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.parametrize("payload", [b"short", b"wrong-checkpoint-data"])
-def test_resolve_lama_checkpoint_cleans_invalid_download(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-    payload: bytes,
-) -> None:
-    def downloader(_url: str, destination: str | Path) -> None:
-        Path(destination).write_bytes(payload)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="integrity"):
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=downloader,
-        )
-
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_resolve_lama_checkpoint_never_overwrites_racing_target(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-) -> None:
-    target = tmp_path / "big-lama.pt"
-    attacker = b"racing target"
-
-    def downloader(_url: str, destination: str | Path) -> None:
-        Path(destination).write_bytes(small_checkpoint)
-        target.write_bytes(attacker)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="integrity"):
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=downloader,
-        )
-
-    assert target.read_bytes() == attacker
-    assert list(tmp_path.iterdir()) == [target]
-
-
-def test_resolve_lama_checkpoint_rejects_parent_replacement_after_publish(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    actual_link = os.link
-    actual_lstat = Path.lstat
-    published = False
-
-    def publish_then_replace_identity(*args, **kwargs) -> None:
-        nonlocal published
-        actual_link(*args, **kwargs)
-        published = True
-
-    def changed_parent_lstat(path: Path):
-        status = actual_lstat(path)
-        if path == tmp_path and published:
-            values = {
-                name: getattr(status, name)
-                for name in (
-                    "st_mode",
-                    "st_dev",
-                    "st_ino",
-                    "st_nlink",
-                    "st_size",
-                    "st_mtime_ns",
-                )
-            }
-            values["st_ino"] += 1
-            values["st_file_attributes"] = getattr(
-                status,
-                "st_file_attributes",
-                0,
-            )
-            return types.SimpleNamespace(**values)
-        return status
-
-    monkeypatch.setattr(lama_inpaint.os, "link", publish_then_replace_identity)
-    monkeypatch.setattr(Path, "lstat", changed_parent_lstat)
-
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="parent.*changed"):
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=_write_download,
-        )
-
-
-def test_resolve_lama_checkpoint_does_not_delete_replaced_temporary_path(
-    tmp_path: Path,
-    small_checkpoint: bytes,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    attacker = b"attacker replacement"
-    temporary = None
-    actual_lstat = Path.lstat
-
-    def downloader(_url: str, destination: str | Path) -> None:
-        nonlocal temporary
-        temporary = Path(destination)
-        temporary.write_bytes(small_checkpoint)
-
-    replaced = False
-    temporary_lstats = 0
-
-    def replace_before_cleanup(path: Path):
-        nonlocal replaced, temporary_lstats
-        status = actual_lstat(path)
-        if temporary is not None and path == temporary:
-            temporary_lstats += 1
-        if temporary_lstats >= 3 and not replaced:
-            replaced = True
-            path.unlink()
-            path.write_bytes(attacker)
-            status = actual_lstat(path)
-        return status
-
-    monkeypatch.setattr(Path, "lstat", replace_before_cleanup)
+    calls: list[str] = []
     monkeypatch.setattr(
         lama_inpaint,
-        "BIG_LAMA_MODEL_SHA256",
-        hashlib.sha256(b"different expected payload").hexdigest(),
+        "resolve_runtime_model_path",
+        lambda name: calls.append(name) or checkpoint,
     )
 
-    with pytest.raises(lama_inpaint.LargeMaskInpaintError, match="integrity"):
-        lama_inpaint.resolve_lama_checkpoint(
-            cache_dir=tmp_path,
-            downloader=downloader,
-        )
+    assert lama_inpaint.resolve_lama_checkpoint() == checkpoint
+    assert calls == ["big_lama"]
 
-    assert temporary is not None
-    assert temporary.read_bytes() == attacker
 
+def test_resolve_lama_checkpoint_maps_bridge_error_without_path_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = lama_inpaint.RuntimeModelPathError(
+        "LAMA_MODEL model file failed integrity verification"
+    )
+    monkeypatch.setattr(
+        lama_inpaint,
+        "resolve_runtime_model_path",
+        lambda _name: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(
+        lama_inpaint.LargeMaskInpaintError,
+        match="failed integrity verification",
+    ) as caught:
+        lama_inpaint.resolve_lama_checkpoint()
+
+    assert caught.value.__cause__ is None
 
 class _FakeBigLamaOutput:
     def __init__(self, payload, events: list) -> None:
@@ -1063,9 +635,7 @@ def test_real_checkpoint_equivalence_against_simple_lama_baseline() -> None:
     )
     assert manifest == _REAL_EQUIVALENCE_CONTRACT
     checkpoint = Path(checkpoint_value)
-    assert lama_inpaint.checkpoint_identity(checkpoint)["sha256"] == (
-        manifest["checkpoint_sha256"]
-    )
+    assert lama_inpaint.resolve_lama_checkpoint() == checkpoint.resolve()
 
     height, width = 67, 65
     y, x = np.indices((height, width), dtype=np.uint16)

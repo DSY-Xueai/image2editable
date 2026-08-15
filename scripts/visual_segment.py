@@ -15,16 +15,16 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import urlretrieve
 
 import cv2
 import numpy as np
 from PIL import Image
 
-SAM21_LARGE_URL = (
-    "https://dl.fbaipublicfiles.com/segment_anything_2/092824/"
-    "sam2.1_hiera_large.pt"
+from scripts.runtime_model_paths import (
+    RuntimeModelPathError,
+    resolve_runtime_model_path,
 )
+
 SAM21_LARGE_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 
@@ -1973,34 +1973,11 @@ def generate_geometry_candidates(
     return candidates
 
 
-def resolve_sam_checkpoint(cache_dir=None, downloader=urlretrieve) -> Path:
-    cache_root = Path(
-        cache_dir
-        or os.environ.get("IMAGE2EDITABLE_MODEL_CACHE")
-        or Path.home() / ".cache" / "image2editable"
-    )
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    checkpoint_path = cache_root / "sam2.1_hiera_large.pt"
-    if checkpoint_path.exists() and checkpoint_path.stat().st_size:
-        return checkpoint_path
-
-    partial_path = checkpoint_path.with_suffix(".pt.part")
+def resolve_sam_checkpoint() -> Path:
     try:
-        downloader(SAM21_LARGE_URL, str(partial_path))
-        if not partial_path.exists() or not partial_path.stat().st_size:
-            raise VisualSegmentationError("SAM 2.1 checkpoint download was empty")
-        partial_path.replace(checkpoint_path)
-    except VisualSegmentationError:
-        partial_path.unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        partial_path.unlink(missing_ok=True)
-        raise VisualSegmentationError(
-            f"Unable to download SAM 2.1 checkpoint: {exc}"
-        ) from exc
-
-    return checkpoint_path
+        return resolve_runtime_model_path("sam2_large")
+    except RuntimeModelPathError as exc:
+        raise VisualSegmentationError(str(exc)) from None
 
 
 def _build_resource_safe_sam_model(

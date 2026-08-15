@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import traceback
 import types
 import weakref
 from pathlib import Path
@@ -32,6 +33,7 @@ GROUNDING_DINO_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
 
 
 def test_grounding_dino_loads_processor_and_model_from_exact_local_revision(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, dict[str, object]]] = []
@@ -65,21 +67,28 @@ def test_grounding_dino_loads_processor_and_model_from_exact_local_revision(
         "import_module",
         lambda name: fake_torch if name == "torch" else fake_transformers,
     )
+    snapshot = tmp_path / "grounding-dino"
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda name: snapshot if name == "grounding_dino" else None,
+    )
 
-    object_detect._LazyGroundingDino(object_detect.MODEL_ID, None)._load()
+    object_detect._LazyGroundingDino(None)._load()
 
     expected = {
         "revision": GROUNDING_DINO_REVISION,
         "local_files_only": True,
     }
     assert calls == [
-        ("processor", object_detect.MODEL_ID, expected),
-        ("model", object_detect.MODEL_ID, expected),
+        ("processor", str(snapshot), expected),
+        ("model", str(snapshot), expected),
     ]
 
 
 @pytest.mark.parametrize("missing_component", ["processor", "model"])
 def test_grounding_dino_missing_cache_fails_without_network_fallback(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     missing_component: str,
 ) -> None:
@@ -98,7 +107,7 @@ def test_grounding_dino_missing_cache_fails_without_network_fallback(
             self.result = result
 
         def from_pretrained(self, model_id: str, **kwargs: object) -> object:
-            assert model_id == object_detect.MODEL_ID
+            assert model_id == str(tmp_path / "grounding-dino")
             calls.append((self.name, kwargs))
             if self.name == missing_component:
                 raise OSError(f"missing {self.name}")
@@ -116,12 +125,17 @@ def test_grounding_dino_missing_cache_fails_without_network_fallback(
         "import_module",
         lambda name: fake_torch if name == "torch" else fake_transformers,
     )
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda name: tmp_path / "grounding-dino",
+    )
 
     with pytest.raises(
         object_detect.VisualSegmentationError,
         match=r"Grounding DINO.*image2editable models install runtime",
     ):
-        object_detect._LazyGroundingDino(object_detect.MODEL_ID, None)._load()
+        object_detect._LazyGroundingDino(None)._load()
 
     expected = {
         "revision": GROUNDING_DINO_REVISION,
@@ -131,6 +145,42 @@ def test_grounding_dino_missing_cache_fails_without_network_fallback(
     if missing_component == "model":
         expected_calls.append(("model", expected))
     assert calls == expected_calls
+
+
+def test_grounding_dino_invalid_local_snapshot_error_is_path_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "secret-grounding-dino-snapshot"
+
+    class Loader:
+        def from_pretrained(self, model_path: str, **_kwargs: object) -> object:
+            raise ValueError(f"invalid config at {model_path}")
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader(),
+        AutoModelForZeroShotObjectDetection=Loader(),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda _name: snapshot,
+    )
+
+    with pytest.raises(object_detect.VisualSegmentationError) as caught:
+        object_detect._LazyGroundingDino(None)._load()
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert str(snapshot) not in rendered
+    assert caught.value.__suppress_context__ is True
 
 
 def test_grounding_dino_product_and_skill_mirrors_match() -> None:
