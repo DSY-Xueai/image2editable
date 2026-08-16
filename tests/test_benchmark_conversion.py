@@ -3,6 +3,7 @@ import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import warnings
@@ -97,6 +98,114 @@ def _assert_invalid(path: Path) -> None:
 
 def test_module_exposes_benchmark_error() -> None:
     assert issubclass(benchmark.BenchmarkError, RuntimeError)
+
+
+def _assert_benchmark_readme_contract(readme: str) -> None:
+    visible = re.sub(r"<!--.*?-->", "", readme, flags=re.DOTALL)
+    expected_headings = [
+        "# 转换基准",
+        "## 公开语料",
+        "## 环境前置",
+        "## 运行",
+        "## 通过标准",
+        "## 安全报告",
+        "## 私有语料",
+        "## 结果解释",
+    ]
+    headings = [line for line in visible.splitlines() if line.startswith("#")]
+    assert headings == expected_headings
+    parts = re.split(r"(?m)^## ([^\n]+)\n", visible)
+    assert parts[0].strip() == "# 转换基准"
+    assert parts[1::2] == [heading.removeprefix("## ") for heading in expected_headings[1:]]
+    sections = dict(zip(parts[1::2], parts[2::2]))
+
+    doctor = "image2editable doctor --agent-local"
+    runner = (
+        "python scripts/benchmark_conversion.py --corpus benchmark/corpus "
+        "--output-dir benchmark-results"
+    )
+    environment_commands = [
+        block.strip()
+        for block in re.findall(
+            r"(?ms)^```bash\n(.*?)^```$", sections["环境前置"]
+        )
+    ]
+    run_commands = [
+        block.strip()
+        for block in re.findall(r"(?ms)^```bash\n(.*?)^```$", sections["运行"])
+    ]
+    assert environment_commands == [doctor]
+    assert run_commands == [runner]
+    assert visible.index(doctor) < visible.index(runner)
+
+    assert "10 个输入、14 页、3 条 routes" in sections["公开语料"]
+    assert "8 张图片、3 页 PDF、3 页 mixed PPTX" in sections["公开语料"]
+    assert "只有 `ready=true` 才运行真实 benchmark" in sections["环境前置"]
+    assert "runner 不会自动下载模型" in sections["环境前置"]
+    assert "输出目录必须尚不存在" in sections["运行"]
+
+    assert (
+        "`passed` 必须同时满足：3 routes、14 pages、0 failed_routes、"
+        "0 warning_pages" in sections["通过标准"]
+    )
+    assert "所有必须重建页都通过可编辑结构门禁" in sections["通过标准"]
+    assert (
+        "`preserved_with_warning`、缺页、损坏输出、整页单图或不可见组件绕过"
+        "均判定失败" in sections["通过标准"]
+    )
+
+    assert (
+        "不包含任何绝对路径、URL、密钥、stderr 或异常正文"
+        in sections["安全报告"]
+    )
+    assert "benchmark/private/" in sections["私有语料"]
+    assert "不提交" in sections["私有语料"]
+    assert "相同的严格 manifest schema" in sections["私有语料"]
+    assert "固定的三 route 语义" in sections["私有语料"]
+    assert (
+        "重算每个 case 的 bytes 和 SHA-256，以及 corpus_sha256"
+        in sections["私有语料"]
+    )
+    assert "当前没有私有 manifest 生成器" in sections["私有语料"]
+    assert "耗时只是本机事实，不代表其他机器或输入" in sections["结果解释"]
+
+
+def test_benchmark_readme_documents_strict_safe_execution_contract() -> None:
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "benchmark" / "README.md").read_text(encoding="utf-8")
+    _assert_benchmark_readme_contract(readme)
+
+
+def test_benchmark_readme_contract_rejects_html_comment_content() -> None:
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "benchmark" / "README.md").read_text(encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _assert_benchmark_readme_contract(f"<!--\n{readme}\n-->")
+
+
+def test_benchmark_readme_contract_rejects_misplaced_commands() -> None:
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "benchmark" / "README.md").read_text(encoding="utf-8")
+
+    doctor_block = "```bash\nimage2editable doctor --agent-local\n```"
+    runner_block = (
+        "```bash\npython scripts/benchmark_conversion.py --corpus benchmark/corpus "
+        "--output-dir benchmark-results\n```"
+    )
+    misplaced_commands = readme.replace(doctor_block, "").replace(runner_block, "")
+    misplaced_commands = misplaced_commands.replace(
+        "## 公开语料\n",
+        "## 公开语料\n\n"
+        "```bash\n"
+        "image2editable doctor --agent-local\n"
+        "python scripts/benchmark_conversion.py --corpus benchmark/corpus "
+        "--output-dir benchmark-results\n"
+        "```\n",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        _assert_benchmark_readme_contract(misplaced_commands)
 
 
 def test_loads_tracked_manifest_into_three_ordered_routes() -> None:

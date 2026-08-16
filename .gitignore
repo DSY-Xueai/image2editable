@@ -68,3 +68,6 @@ docs/*
 !docs/images/
 docs/images/*
 !docs/images/*.png
+
+/benchmark-results/
+/benchmark/private/

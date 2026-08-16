@@ -146,6 +146,48 @@ def test_corpus_git_attributes_disable_text_conversion() -> None:
     assert values == {"text": "set", "eol": "lf"}
 
 
+def test_benchmark_outputs_and_private_corpus_are_ignored_but_public_corpus_is_not() -> None:
+    root = Path(__file__).resolve().parents[1]
+    ignore_lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ignore_lines[-2:] == ["/benchmark-results/", "/benchmark/private/"]
+
+    ignored = subprocess.run(
+        [
+            "git",
+            "check-ignore",
+            "--no-index",
+            "--",
+            "benchmark-results/report.json",
+            "benchmark/private/manifest.json",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ignored.returncode == 0, ignored.stderr
+    assert ignored.stdout.splitlines() == [
+        "benchmark-results/report.json",
+        "benchmark/private/manifest.json",
+    ]
+
+    public = subprocess.run(
+        [
+            "git",
+            "check-ignore",
+            "--no-index",
+            "--",
+            "benchmark/corpus/manifest.json",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert public.returncode == 1, public.stderr
+    assert public.stdout == ""
+
+
 def test_generate_corpus_rejects_unapproved_encoder_before_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
