@@ -1227,6 +1227,73 @@ def test_recoverable_plan_rejection_reopens_same_local_round_and_preserves_plans
     assert (store.root / corrected["plan_ref"]["path"]).is_file()
 
 
+def test_recoverable_split_rejection_exposes_bound_correction_context(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    first_plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("absorb_residual", ["candidate_b"])],
+    }
+    record_local_component_plan(store, "page_001", plan=first_plan)
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=recorded["current_round"]["request_ref"],
+        plan_ref=recorded["current_round"]["plan_ref"],
+    )
+    first_context = runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    )
+    assert first_context["forbidden_action_pairs"] == [
+        ["absorb_residual", "candidate_b"]
+    ]
+
+    split_plan = {**first_plan, "actions": [
+        _action("split", ["candidate_b"], {"parts": 2})
+    ]}
+    record_local_component_plan(store, "page_001", plan=split_plan)
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=recorded["current_round"]["request_ref"],
+        plan_ref=recorded["current_round"]["plan_ref"],
+        reason="invalid_split_target",
+    )
+
+    context = runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    )
+    assert context["rejected_plan"] == split_plan
+    assert context["forbidden_action_pairs"] == [
+        ["absorb_residual", "candidate_b"],
+        ["split", "candidate_b"],
+    ]
+    assert "exact requested number of connected proposals" in context["instruction"]
+
+
 def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
     page_session: dict,
     tmp_path: Path,
@@ -1326,9 +1393,10 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
             "The previous plan was rejected because an absorb_residual target had "
             "no containment or 3px adjacency with the signed residual. Modify or "
             "remove the related absorb_residual action; do not change request_sha256."
-        ),
-        "rejected_plan": rejected_plan,
-    }
+            ),
+            "rejected_plan": rejected_plan,
+            "forbidden_action_pairs": [["absorb_residual", "candidate_b"]],
+        }
     assert retry_request["request_sha256"] == request_sha256
     assert retry_request["repair_round"] == 1
     assert rejected_path.read_bytes() == rejected_payload
@@ -1551,7 +1619,7 @@ def test_page_only_background_residual_enters_next_round(
     }
     record_local_component_plan(store, "page_001", plan=plan)
     execution_dir = request_path.parents[2] / "execution-01"
-    next_graph = execute_component_actions(
+    execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
         sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
     )
@@ -1639,7 +1707,7 @@ def test_page_residual_owner_selects_adjacent_pending_component(
     Image.fromarray(residual, mode="L").save(residual_path)
     nodes = []
     for component_id, box in (
-        ("adjacent", (5, 10, 7, 13)),
+        ("adjacent", (5, 10, 8, 13)),
         ("separate", (25, 25, 30, 30)),
     ):
         mask = np.zeros_like(residual)
@@ -1663,6 +1731,47 @@ def test_page_residual_owner_selects_adjacent_pending_component(
     )
 
     assert owners == {"adjacent"}
+
+
+def test_page_residual_owner_selects_one_actionable_component_per_region(
+    tmp_path: Path,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    graph_root = store.root / "evidence"
+    masks_root = graph_root / "masks"
+    masks_root.mkdir(parents=True)
+    residual = np.zeros((40, 40), dtype=np.uint8)
+    residual[18:22, 18:22] = 255
+    residual_path = graph_root / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    nodes = []
+    for component_id, box in (
+        ("near_small", (14, 18, 17, 22)),
+        ("near_large", (12, 16, 17, 24)),
+    ):
+        mask = np.zeros_like(residual)
+        x1, y1, x2, y2 = box
+        mask[y1:y2, x1:x2] = 255
+        mask_path = masks_root / f"{component_id}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": list(box), "z_index": len(nodes), "text_ids": [],
+        })
+    quality = {"unexplained_mask_ref": {
+        "path": residual_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}
+
+    owners = component_repair._page_residual_owner_ids(
+        store, quality=quality, graph={"nodes": nodes}, graph_root=graph_root,
+    )
+
+    assert owners == {"near_small"}
 
 
 def test_page_residual_owner_selects_smallest_containing_visual_component(
@@ -2847,7 +2956,6 @@ def test_intact_parent_gate_controls_fallback_result(
         store, "page_001", graph_path=graph_path,
         quality_input_refs=quality_input_refs,
     )
-    state = store.read_json("pages/page_001/reconstruction/component_state.json")
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
         lambda *args, **kwargs: _quality_report_with_unexplained(
@@ -4811,11 +4919,14 @@ assert mask.shape == (2, 2)
 def test_split_without_connected_proposals_fails_without_output(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     output = tmp_path / "round-02"
-    with pytest.raises(VisualSegmentationError, match="connected proposals"):
+    with pytest.raises(
+        RecoverableComponentPlanError, match="connected proposals"
+    ) as error:
         execute_component_actions(
             image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
             input_dir=input_dir, output_dir=output,
         )
+    assert error.value.reason == "invalid_split_target"
     assert not output.exists()
 
 
@@ -4829,11 +4940,14 @@ def test_split_rejects_extra_connected_proposals_instead_of_losing_pixels(tmp_pa
     left["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     left["bbox"] = [1, 1, 11, 11]
     output = tmp_path / "round-extra-parts"
-    with pytest.raises(VisualSegmentationError, match="exact connected proposals"):
+    with pytest.raises(
+        RecoverableComponentPlanError, match="exact connected proposals"
+    ) as error:
         execute_component_actions(
             image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
             input_dir=input_dir, output_dir=output,
         )
+    assert error.value.reason == "invalid_split_target"
     assert not output.exists()
 
 

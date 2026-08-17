@@ -575,6 +575,14 @@ def test_cli_convert_forwards_all_image_options(
     assert "conversion progress" in captured.err
 
 
+def test_cli_accepts_explicit_local_service_provider() -> None:
+    args = cli.build_parser().parse_args(
+        ["convert", "source.png", "--agent-provider", "local-service"]
+    )
+
+    assert args.agent_provider == "local-service"
+
+
 @pytest.mark.parametrize("command", ["prepare", "convert"])
 def test_cli_forwards_psd_output_format(
     monkeypatch: pytest.MonkeyPatch,
@@ -826,6 +834,21 @@ def test_cli_status_rejects_missing_or_invalid_manifest_agent_provider(
 
     with pytest.raises(RuntimeError, match="manifest.*agent_provider"):
         cli.main(["run", "status", str(run_dir)])
+
+
+def test_cli_status_accepts_local_service_manifest_provider(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "source.png"
+    source.write_bytes(b"image")
+    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
+    manifest_path = run_dir / "job_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["options"]["agent_provider"] = "local-service"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert cli.main(["run", "status", str(run_dir)]) == 0
+    assert json.loads(capsys.readouterr().out)["run"]["status"] == "prepared"
 
 
 def test_module_help_starts() -> None:

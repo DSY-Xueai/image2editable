@@ -814,7 +814,7 @@ def test_image_component_retry_passes_source_image_once_to_sam_worker(
     }]
 
 
-def test_local_provider_runs_complete_without_host_receipt(
+def test_local_provider_runs_builtin_model_without_service_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -827,11 +827,31 @@ def test_local_provider_runs_complete_without_host_receipt(
         slide_size="16:9",
         agent_provider="local",
     )
-    expected_service = object()
+    expected_receipt = {"snapshot_path": str(tmp_path / "model")}
+    bound_receipts = []
     plans = []
-    monkeypatch.setattr(runtime, "_local_service_config", lambda: expected_service)
+    monkeypatch.setattr(
+        runtime, "_local_model_receipt", lambda store: expected_receipt
+    )
 
-    def fake_local_agent(request_path, *, service_config, performance_trace=None):
+    def bind_receipt(store, receipt):
+        bound_receipts.append((store.root, receipt))
+        return receipt
+
+    monkeypatch.setattr(runtime, "_bind_local_model_receipt", bind_receipt)
+    monkeypatch.setattr(
+        runtime,
+        "_local_service_config",
+        lambda: pytest.fail("built-in local provider must not read service config"),
+    )
+
+    def fake_local_agent(
+        request_path,
+        *,
+        model_receipt,
+        resource_policy,
+        performance_trace=None,
+    ):
         request_path = Path(request_path)
         request = json.loads(request_path.read_text(encoding="utf-8"))
         plan = {
@@ -844,10 +864,11 @@ def test_local_provider_runs_complete_without_host_receipt(
             "actions": [_accept_action()],
         }
         plans.append(plan)
-        assert service_config is expected_service
+        assert model_receipt is expected_receipt
+        assert resource_policy["name"] == "safe-default"
         return plan
 
-    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
+    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
 
     completed = runtime.run_job(run_dir)
 
@@ -855,6 +876,7 @@ def test_local_provider_runs_complete_without_host_receipt(
     assert initial_calls == ["page_001"]
     assert assembly_calls == ["single"]
     assert [plan["provider"] for plan in plans] == ["local"]
+    assert bound_receipts == [(run_dir.resolve(), expected_receipt)]
     assert not (run_dir / "host_capabilities.json").exists()
     assert not (run_dir / "host-challenge").exists()
     state = RunStore.open(run_dir).read_json(
@@ -864,9 +886,109 @@ def test_local_provider_runs_complete_without_host_receipt(
     assert state["plan_count"] == 1
 
 
-def test_local_provider_corrects_rejected_plan_in_the_same_round(
+def test_local_model_preflight_allows_low_available_ram_after_capacity_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    receipt = _local_receipt(tmp_path)
+    recommendation = {
+        "compatible": False,
+        "reason": "available RAM is below the recommendation",
+        "model_id": receipt["model_id"],
+        "revision": receipt["requested_revision"],
+        "minimum_vram_gib": 8,
+        "minimum_available_vram_gib": 6.5,
+        "minimum_ram_gib": 15,
+        "required_free_disk_gib": 8,
+        "hardware": {
+            "cuda": True,
+            "vram_gib": 8.0,
+            "available_vram_gib": 6.9,
+            "ram_gib": 15.22,
+            "available_ram_gib": 2.7,
+            "free_disk_gib": 67.0,
+        },
+        "dependencies": {
+            "torch": {"compatible": True},
+            "transformers": {"compatible": True},
+        },
+    }
+    monkeypatch.setattr(
+        runtime,
+        "_local_hardware_recommendation",
+        lambda store: recommendation,
+    )
+    monkeypatch.setattr(
+        "image2editable.models.model_status",
+        lambda: {"valid": True, "receipt": receipt},
+    )
+
+    assert runtime._local_model_receipt(RunStore.open(run_dir)) is receipt
+
+
+def test_local_model_preflight_keeps_available_vram_as_hard_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    _component_source(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    monkeypatch.setattr(
+        runtime,
+        "_local_hardware_recommendation",
+        lambda store: {
+            "compatible": False,
+            "reason": "available VRAM is below the requirement",
+            "model_id": "test/model",
+            "revision": "test",
+            "minimum_vram_gib": 8,
+            "minimum_available_vram_gib": 6.5,
+            "minimum_ram_gib": 15,
+            "required_free_disk_gib": 8,
+            "hardware": {
+                "cuda": True,
+                "vram_gib": 8.0,
+                "available_vram_gib": 5.0,
+                "ram_gib": 15.22,
+                "available_ram_gib": 8.0,
+                "free_disk_gib": 67.0,
+            },
+            "dependencies": {"torch": {"compatible": True}},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="preflight failed"):
+        runtime._local_model_receipt(RunStore.open(run_dir))
+
+
+@pytest.mark.parametrize(
+    ("bad_action", "rejection_reason", "correction_instruction"),
+    [
+        (
+            "absorb_residual",
+            "unrelated_residual_target",
+            "The previous plan was rejected because an absorb_residual target had "
+            "no containment or 3px adjacency with the signed residual. Modify or "
+            "remove the related absorb_residual action; do not change request_sha256.",
+        ),
+        (
+            "split",
+            "invalid_split_target",
+            "The previous plan was rejected because a split target did not contain "
+            "the exact requested number of connected proposals. Modify or remove "
+            "the related split action; do not change request_sha256.",
+        ),
+    ],
+)
+def test_local_service_provider_corrects_rejected_plan_in_the_same_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_action: str,
+    rejection_reason: str,
+    correction_instruction: str,
 ) -> None:
     from scripts.visual_segment import RecoverableComponentPlanError
 
@@ -877,16 +999,11 @@ def test_local_provider_corrects_rejected_plan_in_the_same_round(
         source,
         run_dir=tmp_path / "run",
         slide_size="16:9",
-        agent_provider="local",
+        agent_provider="local-service",
     )
     monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
     calls = []
     bad_plan = None
-    correction_instruction = (
-        "The previous plan was rejected because an absorb_residual target had "
-        "no containment or 3px adjacency with the signed residual. Modify or "
-        "remove the related absorb_residual action; do not change request_sha256."
-    )
 
     def fake_local_agent(
         request_path,
@@ -902,7 +1019,7 @@ def test_local_provider_corrects_rejected_plan_in_the_same_round(
             "schema_version": 1,
             "kind": "component_plan",
             "page_id": request["page_id"],
-            "provider": "local",
+            "provider": request["provider"],
             "repair_round": request["repair_round"],
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         }
@@ -912,26 +1029,28 @@ def test_local_provider_corrects_rejected_plan_in_the_same_round(
             bad_plan = {
                 **common,
                 "actions": [{
-                    "action": "absorb_residual",
+                    "action": bad_action,
                     "object_ids": ["component_0001"],
-                    "parameters": {},
+                    "parameters": {"parts": 2} if bad_action == "split" else {},
                     "confidence": 0.95,
                     "evidence": ["incorrect residual target"],
                 }],
             }
             return bad_plan
-        assert correction_context == {
-            "instruction": correction_instruction,
-            "rejected_plan": bad_plan,
-        }
+            assert correction_context == {
+                "instruction": correction_instruction,
+                "rejected_plan": bad_plan,
+                "forbidden_action_pairs": [[bad_action, "component_0001"]],
+            }
         return {**common, "actions": [_accept_action()]}
 
     real_execute = legacy.execute_component_action_round
 
     def reject_bad_plan(image, graph, actions, **kwargs):
-        if any(action["action"] == "absorb_residual" for action in actions):
+        if any(action["action"] == bad_action for action in actions):
             raise RecoverableComponentPlanError(
-                "absorb_residual found an unrelated residual region"
+                "component plan action is not executable",
+                reason=rejection_reason,
             )
         return real_execute(image, graph, actions, **kwargs)
 
@@ -954,7 +1073,7 @@ def test_local_provider_corrects_rejected_plan_in_the_same_round(
     assert any("-retry-" in path.name for path in plans)
 
 
-def test_local_provider_warning_fails_without_fake_output(
+def test_local_service_provider_warning_fails_without_fake_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -968,7 +1087,7 @@ def test_local_provider_warning_fails_without_fake_output(
         source,
         run_dir=tmp_path / "run",
         slide_size="16:9",
-        agent_provider="local",
+        agent_provider="local-service",
     )
     monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
     rounds = []
@@ -982,7 +1101,7 @@ def test_local_provider_warning_fails_without_fake_output(
             "schema_version": 1,
             "kind": "component_plan",
             "page_id": request["page_id"],
-            "provider": "local",
+            "provider": request["provider"],
             "repair_round": request["repair_round"],
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
             "actions": [_accept_action()] if request["repair_round"] == 1 else [],
@@ -1069,7 +1188,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
         source,
         run_dir=tmp_path / "run",
         slide_size="16:9",
-        agent_provider="local",
+        agent_provider="local-service",
     )
     monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
 
@@ -1080,7 +1199,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
             "schema_version": 1,
             "kind": "component_plan",
             "page_id": request["page_id"],
-            "provider": "local",
+            "provider": request["provider"],
             "repair_round": request["repair_round"],
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
             "actions": [_accept_action()],
@@ -1111,7 +1230,7 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
     assert not (reconstruction / "evidence-round-02").exists()
 
 
-def test_local_provider_stops_when_page_quality_does_not_improve(
+def test_local_service_provider_stops_when_page_quality_does_not_improve(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1125,7 +1244,7 @@ def test_local_provider_stops_when_page_quality_does_not_improve(
         source,
         run_dir=tmp_path / "run",
         slide_size="16:9",
-        agent_provider="local",
+        agent_provider="local-service",
     )
     monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
     rounds = []
@@ -1139,7 +1258,7 @@ def test_local_provider_stops_when_page_quality_does_not_improve(
             "schema_version": 1,
             "kind": "component_plan",
             "page_id": request["page_id"],
-            "provider": "local",
+            "provider": request["provider"],
             "repair_round": request["repair_round"],
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
             "actions": [
@@ -1169,7 +1288,7 @@ def test_local_provider_stops_when_page_quality_does_not_improve(
     assert not (run_dir / "final/output.pptx").exists()
 
 
-def test_local_missing_service_configuration_stops_before_heavy_page_initialization(
+def test_local_service_missing_configuration_stops_before_heavy_page_initialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1178,7 +1297,7 @@ def test_local_missing_service_configuration_stops_before_heavy_page_initializat
     run_dir = runtime.prepare_job(
         source,
         run_dir=tmp_path / "run",
-        agent_provider="local",
+        agent_provider="local-service",
     )
     initialized = False
 
@@ -4763,6 +4882,59 @@ def test_run_job_executes_agent_approved_shadow_plan(
         == "awaiting_agent"
     )
     assert not (run_dir / "final" / "output.pptx").exists()
+
+
+def test_local_provider_decides_pptx_candidate_with_builtin_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = tmp_path / "slide.png"
+    _image(image)
+    source = tmp_path / "source.pptx"
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_picture(
+        str(image), 0, 0, presentation.slide_width, presentation.slide_height
+    )
+    presentation.save(source)
+    run_dir = runtime.prepare_job(
+        source,
+        run_dir=tmp_path / "run",
+        agent_provider="local",
+    )
+    store = RunStore.open(run_dir)
+    manifest, _ = runtime._manifest_input(store)
+    receipt = _local_receipt(tmp_path)
+    observed = []
+    monkeypatch.setattr(runtime, "_local_model_receipt", lambda current: receipt)
+    monkeypatch.setattr(
+        runtime,
+        "_bind_local_model_receipt",
+        lambda current, value: value,
+    )
+
+    def decide(candidate, *, model_receipt, resource_policy):
+        observed.append((candidate, model_receipt, resource_policy))
+        return {
+            "decision": "replace",
+            "confidence": 0.99,
+            "category": "full_slide_screenshot",
+            "evidence": ["complete slide screenshot"],
+        }
+
+    monkeypatch.setattr(runtime, "_run_local_candidate_agent", decide)
+    with ExecutionLease(run_dir / "execution.lock", run_root=run_dir) as lease:
+        context = runtime._resolve_pptx_candidates(store, manifest, lease)
+
+    assert context == {"model_receipt": receipt}
+    assert len(observed) == 1
+    candidate = observed[0][0]
+    assert Path(candidate["image_path"]).is_file()
+    assert observed[0][1] is receipt
+    assert observed[0][2]["name"] == "safe-default"
+    decision = store.read_json("pages/page_001/decision.json")["decisions"][0]
+    assert decision["runtime_action"] == "shadow_run"
+    assert (run_dir / "pages/page_001/page_request.json").is_file()
 
 
 def test_mixed_pptx_warning_output_is_recovery_not_reconstruction_success(

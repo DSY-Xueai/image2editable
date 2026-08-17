@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal, Sequence
 
-from PIL import Image
 import pypdfium2 as pdfium
 
 from image2editable.component_contracts import validate_agent_provider
@@ -27,6 +26,7 @@ from image2editable.store import RunStore
 STANDARD_DPI = 200.0
 DETAIL_DPI = 300.0
 SHORT_EDGE_FLOOR = 1200
+STANDARD_LONG_EDGE_CEILING = 2560
 LONG_EDGE_CEILING = 6000
 PIXEL_COUNT_CEILING = 24_000_000
 
@@ -533,6 +533,10 @@ def plan_pdf_render(width_pt: float, height_pt: float, profile: RenderProfile) -
     if profile == "standard" and min(width_pt, height_pt) * scale < SHORT_EDGE_FLOOR:
         scale = min(SHORT_EDGE_FLOOR / min(width_pt, height_pt), DETAIL_DPI / 72.0)
         reasons.append("short_edge_floor")
+
+    if profile == "standard" and max(width_pt, height_pt) * scale > STANDARD_LONG_EDGE_CEILING:
+        scale = STANDARD_LONG_EDGE_CEILING / max(width_pt, height_pt)
+        reasons.append("standard_long_edge_ceiling")
 
     if max(width_pt, height_pt) * scale > LONG_EDGE_CEILING:
         scale = LONG_EDGE_CEILING / max(width_pt, height_pt)

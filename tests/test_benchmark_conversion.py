@@ -234,6 +234,19 @@ def test_loads_tracked_manifest_into_three_ordered_routes() -> None:
     ]
 
 
+def test_loads_tracked_manifest_from_documented_corpus_directory() -> None:
+    root = Path(__file__).resolve().parents[1] / "benchmark" / "corpus"
+
+    manifest = benchmark.load_manifest(root)
+
+    assert manifest.root == root.resolve()
+    assert [route.identifier for route in manifest.routes] == [
+        "images",
+        "pdf",
+        "mixed_pptx",
+    ]
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

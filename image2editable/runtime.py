@@ -560,6 +560,81 @@ def record_decision(
     return record(run_dir, **kwargs)
 
 
+def _run_local_candidate_agent(
+    candidate: dict[str, object],
+    *,
+    model_receipt: dict[str, object],
+    resource_policy: dict[str, object],
+) -> dict[str, object]:
+    from image2editable.local_agent import run_local_candidate_agent
+
+    return run_local_candidate_agent(
+        candidate,
+        model_receipt=model_receipt,
+        resource_policy=resource_policy,
+    )
+
+
+def _run_local_service_candidate_agent(
+    candidate: dict[str, object],
+    *,
+    service_config: object,
+) -> dict[str, object]:
+    from image2editable.local_agent import run_local_service_candidate_agent
+
+    return run_local_service_candidate_agent(
+        candidate,
+        service_config=service_config,
+    )
+
+
+def _resolve_pptx_candidates(
+    store: RunStore,
+    manifest: dict[str, Any],
+    _lease: ExecutionLease,
+) -> dict[str, object] | None:
+    provider = _manifest_agent_provider(manifest)
+    if provider == "host":
+        return None
+    from image2editable.agent import _record_decision, next_candidate as find_next
+
+    candidate = find_next(store.root)["candidate"]
+    if candidate is None:
+        return None
+    if provider == "local":
+        receipt = _bind_local_model_receipt(store, _local_model_receipt(store))
+        context = {"model_receipt": receipt}
+        run_candidate_agent = _run_local_candidate_agent
+    else:
+        service_config = _local_service_config()
+        context = {"service_config": service_config}
+        run_candidate_agent = _run_local_service_candidate_agent
+    while candidate is not None:
+        if provider == "local":
+            decision = run_candidate_agent(
+                candidate,
+                model_receipt=context["model_receipt"],
+                resource_policy=_manifest_resource_policy(manifest),
+            )
+        else:
+            decision = run_candidate_agent(
+                candidate,
+                service_config=context["service_config"],
+            )
+        if not isinstance(decision, dict) or set(decision) != {
+            "decision", "confidence", "category", "evidence",
+        }:
+            raise RuntimeError("Local candidate decision fields are invalid")
+        _record_decision(
+            store.root,
+            page_id=candidate["page_id"],
+            object_id=candidate["source_shape_id"],
+            **decision,
+        )
+        candidate = find_next(store.root)["candidate"]
+    return context
+
+
 def next_host_agent_item(run_dir: str | Path) -> dict[str, object]:
     from image2editable.host_agent import next_host_agent_item as find_next
 
@@ -684,6 +759,8 @@ def _legacy_component_status(store: RunStore, page_id: str) -> dict[str, Any]:
 def _advance_legacy_pages(
     store: RunStore, manifest: dict[str, Any], page_ids: list[str],
     lease: ExecutionLease,
+    *,
+    agent_context: dict[str, object] | None = None,
 ) -> dict[str, Any] | None:
     completed = {
         PageStatus.VALIDATED.value,
@@ -691,12 +768,23 @@ def _advance_legacy_pages(
     }
     provider = _manifest_agent_provider(manifest)
     pages = store.read_json("page_jobs.json")["pages"]
-    local_service = (
-        _local_service_config()
-        if provider == "local"
-        and any(pages[page_id]["status"] not in completed for page_id in page_ids)
-        else None
+    needs_agent = any(
+        pages[page_id]["status"] not in completed for page_id in page_ids
     )
+    local_receipt = None
+    local_service = None
+    if provider == "local" and needs_agent:
+        local_receipt = (
+            agent_context["model_receipt"]
+            if agent_context is not None
+            else _bind_local_model_receipt(store, _local_model_receipt(store))
+        )
+    elif provider == "local-service" and needs_agent:
+        local_service = (
+            agent_context["service_config"]
+            if agent_context is not None
+            else _local_service_config()
+        )
     for page_id in page_ids:
         performance_trace = _page_performance_trace(store, page_id)
         if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
@@ -712,18 +800,29 @@ def _advance_legacy_pages(
                 store, page_id, _lease=lease,
                 performance_trace=performance_trace,
             )
-            if outcome["status"] == "awaiting_agent" and provider == "local":
+            if outcome["status"] == "awaiting_agent" and provider in {
+                "local", "local-service",
+            }:
                 request_path = _local_component_request_path(store, page_id)
-                agent_options = {
-                    "service_config": local_service,
-                    "performance_trace": performance_trace,
-                }
+                if provider == "local":
+                    agent_options = {
+                        "model_receipt": local_receipt,
+                        "resource_policy": _manifest_resource_policy(manifest),
+                        "performance_trace": performance_trace,
+                    }
+                    run_agent = _run_local_agent
+                else:
+                    agent_options = {
+                        "service_config": local_service,
+                        "performance_trace": performance_trace,
+                    }
+                    run_agent = _run_local_service_agent
                 correction_context = _local_plan_correction_context(
                     store, page_id, request_path
                 )
                 if correction_context is not None:
                     agent_options["correction_context"] = correction_context
-                plan = _run_local_service_agent(request_path, **agent_options)
+                plan = run_agent(request_path, **agent_options)
                 record_local_component_plan(
                     store,
                     page_id,
@@ -755,7 +854,9 @@ def _advance_legacy_pages(
 
 def _local_model_receipt(store: RunStore) -> dict[str, object]:
     recommendation = _local_hardware_recommendation(store)
-    if not recommendation["compatible"]:
+    if not recommendation["compatible"] and not _local_capacity_is_runnable(
+        recommendation
+    ):
         raise RuntimeError(
             "Local Agent resource/dependency preflight failed: "
             f"{recommendation['reason']}"
@@ -779,6 +880,31 @@ def _local_model_receipt(store: RunStore) -> dict[str, object]:
             f"run: {status['install_command']}"
         )
     return receipt
+
+
+def _local_capacity_is_runnable(recommendation: dict[str, object]) -> bool:
+    try:
+        hardware = recommendation["hardware"]
+        dependencies = recommendation["dependencies"]
+        return (
+            isinstance(hardware, dict)
+            and hardware.get("cuda") is True
+            and float(hardware["vram_gib"])
+            >= float(recommendation["minimum_vram_gib"])
+            and float(hardware["available_vram_gib"])
+            >= float(recommendation["minimum_available_vram_gib"])
+            and float(hardware["ram_gib"])
+            >= float(recommendation["minimum_ram_gib"])
+            and float(hardware["free_disk_gib"])
+            >= float(recommendation["required_free_disk_gib"])
+            and isinstance(dependencies, dict)
+            and all(
+                isinstance(record, dict) and record.get("compatible") is True
+                for record in dependencies.values()
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _local_hardware_recommendation(store: RunStore) -> dict[str, object]:
@@ -942,7 +1068,9 @@ def _local_component_request_path(store: RunStore, page_id: str) -> Path:
             f"pages/{page_id}/reconstruction/component_state.json"
         )
     )
-    if state["provider"] != "local" or state["phase"] != "awaiting_plan":
+    if state["provider"] not in {"local", "local-service"} or state[
+        "phase"
+    ] != "awaiting_plan":
         raise RuntimeError("Local Agent request does not match repair state")
     relative = Path(*state["current_round"]["request_ref"]["path"].split("/"))
     request_path = (store.root / relative).resolve()
@@ -1932,6 +2060,9 @@ def _run_job(
             pptx_input_sha256,
         ) = _pptx_manifest_expectations(manifest, page_jobs)
         validate_pptx_inventories(store, manifest)
+        pptx_agent_context = _resolve_pptx_candidates(
+            store, manifest, _lease
+        )
         # Component repair may pause at the Agent boundary.  Enter RUNNING
         # only after all immutable PPTX input/inventory checks pass so a
         # rejected prepare remains recoverable in PREPARED.
@@ -1969,7 +2100,11 @@ def _run_job(
             if existing_component_pages:
                 _ensure_legacy_pages_processing(store, existing_component_pages)
                 waiting = _advance_legacy_pages(
-                    store, manifest, existing_component_pages, _lease
+                    store,
+                    manifest,
+                    existing_component_pages,
+                    _lease,
+                    agent_context=pptx_agent_context,
                 )
                 if waiting is not None:
                     return waiting

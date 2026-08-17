@@ -74,9 +74,11 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
 
-Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。两种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
+Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。三种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
 
-只有我已经部署本地视觉模型服务时才选择 `local`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口；项目不下载、推荐或默认绑定模型。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Host。
+`local` 由内置 Qwen 完成候选判断和组件计划，必须先安装 agent-local 依赖、固定模型和完整性凭据；任一预检或推理失败都停止，不回退到其他 Provider。
+
+只有我已经部署本地视觉模型服务时才选择 `local-service`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Local 或 Host。
 
 每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分决策。
 
@@ -87,6 +89,8 @@ image2editable convert input.pdf -o output.pptx --agent-provider local
 image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider local
 image2editable run execute runs/pptx-job
 ```
+
+使用已部署的 OpenAI 兼容服务时，把上述命令中的 Provider 改为 `--agent-provider local-service`。
 
 Host 运行先准备并推进到 `awaiting_agent`：
 

@@ -53,11 +53,27 @@ ROUND_REVIEW_MAX_WORKING_BYTES = 256 * 1024 * 1024
 ROUND_REVIEW_MAX_ENCODED_BYTES = 64 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 UNRELATED_RESIDUAL_TARGET_REASON = "unrelated_residual_target"
+INVALID_SPLIT_TARGET_REASON = "invalid_split_target"
 COMPONENT_PLAN_CORRECTION_INSTRUCTION = (
     "The previous plan was rejected because an absorb_residual target had no "
     "containment or 3px adjacency with the signed residual. Modify or remove "
     "the related absorb_residual action; do not change request_sha256."
 )
+SPLIT_PLAN_CORRECTION_INSTRUCTION = (
+    "The previous plan was rejected because a split target did not contain "
+    "the exact requested number of connected proposals. Modify or remove "
+    "the related split action; do not change request_sha256."
+)
+COMPONENT_PLAN_CORRECTIONS = {
+    UNRELATED_RESIDUAL_TARGET_REASON: (
+        "absorb_residual", COMPONENT_PLAN_CORRECTION_INSTRUCTION,
+    ),
+    INVALID_SPLIT_TARGET_REASON: ("split", SPLIT_PLAN_CORRECTION_INSTRUCTION),
+}
+COMPONENT_PLAN_CORRECTION_ACTIONS = {
+    instruction: action
+    for action, instruction in COMPONENT_PLAN_CORRECTIONS.values()
+}
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
     "unexplained_visual_residual",
@@ -301,7 +317,9 @@ def record_local_component_plan(
         )
         state = validate_component_repair_state(store.read_json(relative_state))
         _validate_repair_state_identity(store, state, page_id)
-        if state["provider"] != "local" or state["phase"] not in {
+        if state["provider"] not in {"local", "local-service"} or state[
+            "phase"
+        ] not in {
             "awaiting_plan",
             "plan_recorded",
         }:
@@ -418,8 +436,11 @@ def reject_recoverable_component_plan(
     repair_round: int,
     request_ref: dict,
     plan_ref: dict,
+    reason: str = UNRELATED_RESIDUAL_TARGET_REASON,
     _lease: ExecutionLease | None = None,
 ) -> dict:
+    if reason not in COMPONENT_PLAN_CORRECTIONS:
+        raise ValueError("Recoverable component plan rejection reason is invalid")
     if _lease is not None:
         _require_held_execution_lease(store, _lease)
     lease = nullcontext() if _lease is not None else ExecutionLease(
@@ -442,14 +463,50 @@ def reject_recoverable_component_plan(
         ):
             raise RuntimeError("Recoverable component plan rejection is stale")
         _load_state_artifact(store.root, request_ref)
-        _load_state_artifact(store.root, plan_ref)
+        plan_payload = _load_state_artifact(store.root, plan_ref)
+        rejected_action = COMPONENT_PLAN_CORRECTIONS[reason][0]
+        forbidden_action_pairs = _plan_action_pairs(
+            plan_payload, rejected_action
+        )
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        if "-retry-" in PurePosixPath(plan_ref["path"]).name:
+            prior_payload = _read_bound_file(
+                reconstruction / (
+                    f"component-plan-rejection-{state['revision'] - 1:08d}.json"
+                ),
+                store.root,
+                max_bytes=MARKER_JSON_LIMIT,
+                label="prior component plan rejection",
+            )
+            prior = _load_rejection_json(prior_payload)
+            if (
+                set(prior) not in ({
+                    "schema_version", "page_id", "repair_round", "request_ref",
+                    "rejected_plan_ref", "reason",
+                }, {
+                    "schema_version", "page_id", "repair_round", "request_ref",
+                    "rejected_plan_ref", "reason", "forbidden_action_pairs",
+                })
+                or prior.get("schema_version") != 1
+                or prior.get("page_id") != page_id
+                or prior.get("repair_round") != repair_round
+                or prior.get("request_ref") != request_ref
+                or prior.get("reason") not in COMPONENT_PLAN_CORRECTIONS
+                or not isinstance(prior.get("rejected_plan_ref"), dict)
+                or set(prior["rejected_plan_ref"]) != {"path", "sha256"}
+            ):
+                raise RuntimeError("Prior component plan rejection binding is invalid")
+            forbidden_action_pairs = _merge_action_pairs(
+                _rejection_action_pairs(store, prior), forbidden_action_pairs
+            )
         rejection = {
             "schema_version": 1,
             "page_id": page_id,
             "repair_round": repair_round,
             "request_ref": request_ref,
             "rejected_plan_ref": plan_ref,
-            "reason": UNRELATED_RESIDUAL_TARGET_REASON,
+            "reason": reason,
+            "forbidden_action_pairs": forbidden_action_pairs,
         }
         rejection_payload = json.dumps(
             rejection,
@@ -458,17 +515,24 @@ def reject_recoverable_component_plan(
             sort_keys=True,
         ).encode("utf-8") + b"\n"
         rejection_revision = state["revision"] + 1
-        reconstruction = store.root / "pages" / page_id / "reconstruction"
         rejection_path = reconstruction / (
             f"component-plan-rejection-{rejection_revision:08d}.json"
         )
         if rejection_path.exists() or rejection_path.is_symlink():
-            if _read_bound_file(
+            existing = _read_bound_file(
                 rejection_path,
                 store.root,
                 max_bytes=MARKER_JSON_LIMIT,
                 label="component plan rejection",
-            ) != rejection_payload:
+            )
+            legacy_payload = json.dumps(
+                {key: value for key, value in rejection.items()
+                 if key != "forbidden_action_pairs"},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8") + b"\n"
+            if existing not in {rejection_payload, legacy_payload}:
                 raise RuntimeError(
                     "A different component plan rejection is already recorded"
                 )
@@ -526,22 +590,25 @@ def load_component_plan_correction_context(
         raise RuntimeError("Component plan rejection JSON is invalid") from error
     if (
         not isinstance(rejection, dict)
-        or set(rejection) != {
+        or set(rejection) not in ({
             "schema_version", "page_id", "repair_round", "request_ref",
             "rejected_plan_ref", "reason",
-        }
+        }, {
+            "schema_version", "page_id", "repair_round", "request_ref",
+            "rejected_plan_ref", "reason", "forbidden_action_pairs",
+        })
         or rejection["schema_version"] != 1
         or rejection["page_id"] != page_id
         or rejection["repair_round"] != state["repair_round"]
         or rejection["request_ref"] != request_ref
-        or rejection["reason"] != UNRELATED_RESIDUAL_TARGET_REASON
+        or rejection["reason"] not in COMPONENT_PLAN_CORRECTIONS
         or not isinstance(rejection["rejected_plan_ref"], dict)
         or set(rejection["rejected_plan_ref"]) != {"path", "sha256"}
     ):
         raise RuntimeError("Component plan rejection binding is invalid")
     plan_ref = rejection["rejected_plan_ref"]
     request_sha256 = request_ref["sha256"]
-    if state["provider"] == "local":
+    if state["provider"] in {"local", "local-service"}:
         base_path = (
             f"pages/{page_id}/reconstruction/local-component-plan-"
             f"{state['repair_round']:02d}-{request_sha256}"
@@ -571,15 +638,92 @@ def load_component_plan_correction_context(
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("Rejected component plan JSON is invalid") from error
     validate_component_plan(rejected_plan, request=request, graph=graph)
+    rejected_action, instruction = COMPONENT_PLAN_CORRECTIONS[rejection["reason"]]
     if not any(
-        action["action"] == "absorb_residual"
+        action["action"] == rejected_action
         for action in rejected_plan["actions"]
     ):
-        raise RuntimeError("Rejected component plan has no absorb_residual action")
+        raise RuntimeError("Rejected component plan lacks its rejected action")
     return {
-        "instruction": COMPONENT_PLAN_CORRECTION_INSTRUCTION,
+        "instruction": instruction,
         "rejected_plan": rejected_plan,
+        "forbidden_action_pairs": _rejection_action_pairs(store, rejection),
     }
+
+
+def _load_rejection_json(payload: bytes) -> dict:
+    try:
+        rejection = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Component plan rejection JSON is invalid") from error
+    if not isinstance(rejection, dict):
+        raise RuntimeError("Component plan rejection JSON is invalid")
+    return rejection
+
+
+def _plan_action_pairs(payload: bytes, action_name: str) -> list[list[str]]:
+    try:
+        plan = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Rejected component plan JSON is invalid") from error
+    if not isinstance(plan, dict) or not isinstance(plan.get("actions"), list):
+        raise RuntimeError("Rejected component plan JSON is invalid")
+    pairs = [
+        [action_name, object_id]
+        for action in plan["actions"]
+        if isinstance(action, dict) and action.get("action") == action_name
+        for object_id in action.get("object_ids", [])
+        if isinstance(object_id, str)
+    ]
+    if not pairs:
+        raise RuntimeError("Rejected component plan lacks its rejected action")
+    return pairs
+
+
+def _validated_action_pairs(value: object) -> list[list[str]]:
+    if (
+        not isinstance(value, list)
+        or any(
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or pair[0] not in {item[0] for item in COMPONENT_PLAN_CORRECTIONS.values()}
+            or not isinstance(pair[1], str)
+            or not pair[1]
+            for pair in value
+        )
+    ):
+        raise RuntimeError("Component plan rejection pairs are invalid")
+    pairs = [list(pair) for pair in value]
+    if len({tuple(pair) for pair in pairs}) != len(pairs):
+        raise RuntimeError("Component plan rejection pairs are duplicated")
+    return pairs
+
+
+def _rejection_action_pairs(store, rejection: dict) -> list[list[str]]:
+    reason = rejection.get("reason")
+    plan_ref = rejection.get("rejected_plan_ref")
+    if reason not in COMPONENT_PLAN_CORRECTIONS or not isinstance(plan_ref, dict):
+        raise RuntimeError("Component plan rejection binding is invalid")
+    expected = _plan_action_pairs(
+        _load_state_artifact(store.root, plan_ref),
+        COMPONENT_PLAN_CORRECTIONS[reason][0],
+    )
+    if "forbidden_action_pairs" not in rejection:
+        return expected
+    pairs = _validated_action_pairs(rejection["forbidden_action_pairs"])
+    if not {tuple(pair) for pair in expected} <= {tuple(pair) for pair in pairs}:
+        raise RuntimeError("Component plan rejection pairs are incomplete")
+    return pairs
+
+
+def _merge_action_pairs(
+    previous: list[list[str]], current: list[list[str]]
+) -> list[list[str]]:
+    merged = []
+    for pair in [*previous, *current]:
+        if pair not in merged:
+            merged.append(pair)
+    return merged
 
 
 def _require_held_execution_lease(store, lease: ExecutionLease) -> None:
@@ -2220,46 +2364,45 @@ def _page_residual_owner_ids(
             trusted_chain=trusted_chain,
             shape=residual.shape,
         )
-        active_nodes.append((node, mask))
+        active_nodes.append((
+            node,
+            mask,
+            cv2.dilate(mask.astype(np.uint8), np.ones((7, 7), dtype=np.uint8))
+            > 0,
+            cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3),
+            int(np.count_nonzero(mask)),
+        ))
     region_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         residual.astype(np.uint8), 8
     )
     for label in range(1, region_count):
         region = labels == label
-        nearby = cv2.dilate(
-            region.astype(np.uint8), np.ones((9, 9), dtype=np.uint8)
-        ) > 0
-        adjacent = []
-        for node, mask in active_nodes:
-            overlap = int(np.count_nonzero(mask & nearby))
-            minimum_overlap = max(1, round(np.count_nonzero(mask) * 0.0002))
-            if overlap >= minimum_overlap:
-                adjacent.append(node["id"])
-        if adjacent:
-            owners.update(adjacent)
-            continue
         x = int(stats[label, cv2.CC_STAT_LEFT])
         y = int(stats[label, cv2.CC_STAT_TOP])
         width = int(stats[label, cv2.CC_STAT_WIDTH])
         height = int(stats[label, cv2.CC_STAT_HEIGHT])
-        containing = [
-            node for node, _ in active_nodes
-            if node["bbox"][0] <= x
-            and node["bbox"][1] <= y
-            and node["bbox"][2] >= x + width
-            and node["bbox"][3] >= y + height
+        eligible = [
+            (node, distance, area)
+            for node, _, nearby, distance, area in active_nodes
+            if (
+                node["bbox"][0] <= x
+                and node["bbox"][1] <= y
+                and node["bbox"][2] >= x + width
+                and node["bbox"][3] >= y + height
+            )
+            or np.any(nearby & region)
         ]
-        if containing:
+        if eligible:
             owner = min(
-                containing,
-                key=lambda node: (
-                    (node["bbox"][2] - node["bbox"][0])
-                    * (node["bbox"][3] - node["bbox"][1]),
-                    -node["z_index"],
-                    node["id"],
+                eligible,
+                key=lambda item: (
+                    float(np.min(item[1][region])),
+                    item[2],
+                    -item[0]["z_index"],
+                    item[0]["id"],
                 ),
             )
-            owners.add(owner["id"])
+            owners.add(owner[0]["id"])
     return owners
 
 

@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import math
 
 
-AGENT_PROVIDERS = frozenset({"host", "local"})
+AGENT_PROVIDERS = frozenset({"host", "local", "local-service"})
 MAX_REPAIR_ROUNDS = 5
 MAX_COMPONENT_PROMPT_POINTS = 256
 COMPONENT_STATES = frozenset(
@@ -312,7 +312,7 @@ def _validate_artifact_ref(value: object, field: str) -> dict:
 def validate_agent_provider(value: object) -> str:
     if type(value) is not str or value not in AGENT_PROVIDERS:
         raise ValueError(
-            "Invalid agent_provider; expected one of: host, local"
+            "Invalid agent_provider; expected one of: host, local, local-service"
         )
     return value
 

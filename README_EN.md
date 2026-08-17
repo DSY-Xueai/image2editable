@@ -79,7 +79,7 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 
 ### Local CLI
 
-Deploy and start a local service with **vision capability** first. The service must expose an **OpenAI-compatible `/v1/chat/completions` API**, accept image input, and return JSON. vLLM, LM Studio, or Ollama with its OpenAI-compatible interface enabled can be used.
+Install the Local CLI first. For fully offline execution, install the bundled Qwen as described below. If you already run a vision-model service, you can instead use its OpenAI-compatible API.
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
@@ -149,7 +149,13 @@ image2editable doctor --agent-local
 
 The model installation also asks for confirmation. The final command additionally validates the Local Agent dependencies and Qwen receipt.
 
-#### Configure the local model service
+After the check passes, convert with the bundled Qwen:
+
+```bash
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+```
+
+#### Optional: configure a local model service
 
 For first-time setup, copy the template in the project root and **fill in your own service settings**.
 
@@ -159,14 +165,14 @@ Copy-Item .env.example .env
 
 Edit `.env`: set `IMAGE2EDITABLE_LOCAL_BASE_URL` to the **service address** and `IMAGE2EDITABLE_LOCAL_MODEL` to the **model name exposed by the service**. Leave `IMAGE2EDITABLE_LOCAL_API_KEY` empty when the service does not require a key.
 
-After configuration, use `--agent-provider local` to call the local service:
+After configuration, use `--agent-provider local-service` to call the local service:
 
 ```bash
 # Image → editable PPTX
-image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local-service
 
 # PDF → editable PPTX
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local-service
 ```
 
 | Option | Default | Purpose |
@@ -174,7 +180,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provid
 | `sources` | Required | Input to convert: image(s), an image directory, one PDF, or one PPTX. Document inputs cannot be mixed with other sources. |
 | `-o, --output` | Derived from input name | Sets the output file. With `--slide-size both`, it is used as the output base name. |
 | `--lang` | `ch` | OCR language; common values are `ch` and `en`. |
-| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, while `local` uses the configured local vision service. |
+| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, `local` uses the installed Qwen, and `local-service` uses an OpenAI-compatible local service. |
 | `--slide-size` | `both` | Selects output layout: `original` keeps the input ratio, `16:9` makes widescreen slides, and `both` creates both. |
 | `--run-dir` | Generated automatically | Sets a run directory so you can inspect progress, resume an unfinished task, or troubleshoot. |
 
@@ -189,7 +195,8 @@ sources = ["input.pdf"]
 | Mode | Best for | How it works |
 |------|----------|--------------|
 | Host Agent | Users already working in Codex, Claude Code, or a similar host and who want Agent assistance with page-structure decisions. | The Skill gives diagnostic material to the current host Agent; **the CLI does not call a fixed cloud AI API directly**. |
-| Local Agent | Users who have deployed their own local vision-model service and want to process images or PDFs on their own device. | Uses the configured OpenAI-compatible local service. |
+| Local Agent | Users who installed the bundled Qwen and want fully local processing. | Uses the pinned, receipt-bound Qwen and never falls back to an external service. |
+| Local Service | Users who already run their own vision-model service. | Uses `local-service` with the configured OpenAI-compatible API and never falls back to Qwen or Host. |
 
 ## Project layout
 
@@ -208,7 +215,7 @@ image2editable/
 ├── tests/                     # Automated tests
 ├── third_party/
 │   └── licenses/              # Third-party license materials
-├── .env.example               # Local Agent configuration example
+├── .env.example               # Local Service configuration example
 ├── .gitignore
 ├── CITATION.cff               # Citation information
 ├── image_to_ppt.py            # Legacy image-only pipeline; not the recommended entry point

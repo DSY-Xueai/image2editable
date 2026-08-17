@@ -2064,13 +2064,14 @@ def _execute_legacy_round(
             pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,
             input_dir=graph_path.parent, output_dir=output_dir,
         )
-    except RecoverableComponentPlanError:
+    except RecoverableComponentPlanError as error:
         reject_recoverable_component_plan(
             store,
             page_id,
             repair_round=state["repair_round"],
             request_ref=state["current_round"]["request_ref"],
             plan_ref=state["current_round"]["plan_ref"],
+            reason=error.reason,
             _lease=lease,
         )
         return True

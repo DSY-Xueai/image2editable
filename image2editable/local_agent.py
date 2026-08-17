@@ -170,6 +170,87 @@ def run_local_agent(
         return plan
 
 
+def run_local_candidate_agent(
+    candidate: dict[str, object],
+    *,
+    model_receipt: dict,
+    resource_policy: dict | None = None,
+    timeout_seconds: int = 600,
+) -> dict[str, object]:
+    from image2editable.local_agent_worker import (
+        _validate_candidate_decision,
+        candidate_request,
+    )
+
+    request = candidate_request(candidate)
+    snapshot = _model_snapshot(model_receipt)
+    environment = _worker_environment(resource_policy)
+    image_path = Path(request["candidate"]["image_path"])
+    with tempfile.TemporaryDirectory(
+        prefix=".local-candidate-worker-",
+        dir=image_path.parent,
+    ) as temporary:
+        request_path = Path(temporary) / "candidate-request.json"
+        output_path = Path(temporary) / "candidate-decision.json"
+        with request_path.open("x", encoding="utf-8") as stream:
+            json.dump(request, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+        command = [
+            sys.executable,
+            "-m",
+            "image2editable.local_agent_worker",
+            "--candidate-request",
+            str(request_path),
+            "--model-snapshot",
+            str(snapshot),
+            "--output",
+            str(output_path),
+        ]
+        try:
+            completed = _invoke_worker(
+                command,
+                environment=environment,
+                timeout_seconds=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"Local candidate worker timed out after {timeout_seconds} seconds"
+            ) from error
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "Local candidate worker exited with exit code "
+                f"{completed.returncode}"
+            )
+        return _validate_candidate_decision(
+            _read_plan(output_path),
+            request["candidate"],
+        )
+
+
+def run_local_service_candidate_agent(
+    candidate: dict[str, object],
+    *,
+    service_config: object,
+    timeout_seconds: int = 600,
+) -> dict[str, object]:
+    from image2editable.local_agent_worker import (
+        _candidate_messages,
+        _validate_candidate_decision,
+        candidate_request,
+    )
+    from image2editable.local_service import complete
+
+    request = candidate_request(candidate)
+    decision = json.loads(
+        complete(
+            service_config,
+            messages=_service_messages(_candidate_messages(request["candidate"])),
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    return _validate_candidate_decision(decision, request["candidate"])
+
+
 def run_local_service_agent(
     request_path: str | Path,
     *,
@@ -187,8 +268,8 @@ def run_local_service_agent(
 
     request_path = Path(request_path).resolve()
     request = load_component_agent_request(request_path)
-    if request["provider"] != "local":
-        raise RuntimeError("Local Agent requires provider local")
+    if request["provider"] != "local-service":
+        raise RuntimeError("Local Service Agent requires provider local-service")
     graph = load_component_agent_graph(request_path)
     _ensure_page_disk_budget(request_path, request, graph)
     evidence = {

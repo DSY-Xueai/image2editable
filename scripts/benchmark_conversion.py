@@ -299,6 +299,8 @@ def _load_manifest(path: Path) -> CorpusManifest:
 
 def load_manifest(path: Path) -> CorpusManifest:
     try:
+        if path.is_dir():
+            path = path / "manifest.json"
         return _load_manifest(path)
     except (KeyboardInterrupt, SystemExit):
         raise

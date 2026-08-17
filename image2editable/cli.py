@@ -28,7 +28,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--agent-provider",
-        choices=("host", "local"),
+        choices=("host", "local", "local-service"),
         default="host",
     )
     parser.add_argument(

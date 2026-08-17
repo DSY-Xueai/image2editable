@@ -33,7 +33,14 @@ class VisualSegmentationError(RuntimeError):
 
 
 class RecoverableComponentPlanError(VisualSegmentationError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "unrelated_residual_target",
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _complete_opaque_mask_regions(
@@ -296,13 +303,14 @@ def execute_component_actions(
             if runner is None:
                 from scripts.sam_worker import run_component_prompt_worker
 
-                runner = lambda **values: run_component_prompt_worker(
-                    values["image"],
-                    box=values["box"],
-                    positive=values["positive"],
-                    negative=values["negative"],
-                    work_dir=target.parent,
-                )
+                def runner(**values):
+                    return run_component_prompt_worker(
+                        values["image"],
+                        box=values["box"],
+                        positive=values["positive"],
+                        negative=values["negative"],
+                        work_dir=target.parent,
+                    )
             proposed_results = [
                 {
                     "component_id": prompt["component_id"],
@@ -964,7 +972,10 @@ def _connected_action_parts(mask: np.ndarray, expected: int) -> list[np.ndarray]
 
     parts = connected_mask_proposals(mask, expected)
     if len(parts) != expected:
-        raise VisualSegmentationError("split did not find exact connected proposals")
+        raise RecoverableComponentPlanError(
+            "split did not find exact connected proposals",
+            reason="invalid_split_target",
+        )
     return parts
 
 
