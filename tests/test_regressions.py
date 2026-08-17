@@ -3197,6 +3197,21 @@ def test_candidate_batch_windows_temp_denies_external_writers(tmp_path: Path) ->
     assert not list(tmp_path.glob(".result.json.*.tmp"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows long-path contract")
+def test_candidate_batch_windows_supports_extended_length_temp_path(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / ("deep-" + "x" * 120)
+    work_dir.mkdir()
+    result = work_dir / f".sam-batch-capability-{'a' * 32}.json"
+    temporary = result.with_name(f".{result.name}.{'b' * 32}.tmp")
+    assert len(str(temporary.resolve())) > 260
+
+    assert sam_worker.sam_candidate_batch_output_supported(work_dir) is True
+
+    assert list(work_dir.iterdir()) == []
+
+
 def test_candidate_batch_cleanup_failure_preserves_primary_error_and_closes_handles(
     tmp_path: Path,
     monkeypatch,
