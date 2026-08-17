@@ -3,3 +3,8 @@ benchmark/corpus/*.jpg binary
 benchmark/corpus/*.pdf binary
 benchmark/corpus/*.pptx binary
 benchmark/corpus/manifest.json text eol=lf
+benchmarks/release/inputs/*.png binary
+benchmarks/release/inputs/*.pdf binary
+benchmarks/release/inputs/*.pptx binary
+benchmarks/release/fonts/*.ttf binary
+benchmarks/release/fonts/OFL.txt text eol=lf whitespace=-trailing-space
