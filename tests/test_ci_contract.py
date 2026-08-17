@@ -56,8 +56,14 @@ LOCATE_WHEEL_COMMANDS = [
     '    print(f"WHEEL_PATH={wheels[0]}", file=env_file)',
 ]
 INSTALL_WHEEL_COMMAND = (
-    "python -m pip install --constraint constraints/runtime.txt "
+    "python -m pip install --constraint constraints/runtime.txt --no-build-isolation "
+    "--no-binary antlr4-python3-runtime "
     '"${{ env.WHEEL_PATH }}[test]"'
+)
+BOOTSTRAP_BUILD_RUNTIME_COMMAND = (
+    "python -m pip install --constraint constraints/runtime.txt "
+    "--extra-index-url https://download.pytorch.org/whl/cpu "
+    "torch torchvision setuptools==84.0.0"
 )
 SMOKE_COMMAND = (
     'python "${{ github.workspace }}/scripts/installed_package_smoke.py" '
@@ -358,6 +364,7 @@ def test_installed_package_uses_the_built_wheel_outside_checkout() -> None:
         "actions/setup-python",
         "actions/download-artifact",
         "Locate the built wheel",
+        "Bootstrap pinned build runtime",
         "Install built wheel",
         "Check installed dependencies",
         "installed_package_smoke",
@@ -391,6 +398,8 @@ def test_installed_package_uses_the_built_wheel_outside_checkout() -> None:
 
     install = _named_step(installed, "Install built wheel")
     assert _commands(install) == [INSTALL_WHEEL_COMMAND]
+    bootstrap = _named_step(installed, "Bootstrap pinned build runtime")
+    assert _commands(bootstrap) == [BOOTSTRAP_BUILD_RUNTIME_COMMAND]
     pip_installs = [
         command
         for step in _steps(installed)
@@ -398,7 +407,7 @@ def test_installed_package_uses_the_built_wheel_outside_checkout() -> None:
         for command in _commands(step)
         if re.search(r"\bpip install\b", command)
     ]
-    assert pip_installs == [INSTALL_WHEEL_COMMAND]
+    assert pip_installs == [BOOTSTRAP_BUILD_RUNTIME_COMMAND, INSTALL_WHEEL_COMMAND]
 
     pip_check = _named_step(installed, "Check installed dependencies")
     assert _commands(pip_check) == ["python -m pip check"]
@@ -521,6 +530,7 @@ def test_release_gate_builds_once_and_tests_the_same_artifact() -> None:
         "actions/setup-python",
         "actions/download-artifact",
         "Locate the built wheel",
+        "Bootstrap pinned build runtime",
         "Install built wheel",
         "Check installed dependencies",
         "installed_package_smoke",
@@ -535,6 +545,9 @@ def test_release_gate_builds_once_and_tests_the_same_artifact() -> None:
         LOCATE_WHEEL_COMMANDS
     )
     assert _named_step(installed, "Locate the built wheel")["shell"] == "python"
+    assert _commands(_named_step(installed, "Bootstrap pinned build runtime")) == [
+        BOOTSTRAP_BUILD_RUNTIME_COMMAND
+    ]
     assert _commands(_named_step(installed, "Install built wheel")) == [
         INSTALL_WHEEL_COMMAND
     ]
@@ -562,6 +575,7 @@ def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
         "actions/setup-python",
         "actions/download-artifact",
         "Locate the built wheel",
+        "Bootstrap pinned build runtime",
         "Install built wheel",
         "Verify installed model smoke",
         "Install Tesseract OCR",
@@ -591,6 +605,9 @@ def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
     assert _commands(_named_step(job, "Locate the built wheel")) == (
         LOCATE_WHEEL_COMMANDS
     )
+    assert _commands(_named_step(job, "Bootstrap pinned build runtime")) == [
+        BOOTSTRAP_BUILD_RUNTIME_COMMAND
+    ]
     assert _commands(_named_step(job, "Install built wheel")) == [
         INSTALL_WHEEL_COMMAND
     ]

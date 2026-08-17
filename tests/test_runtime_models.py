@@ -255,11 +255,11 @@ def test_install_downloads_exact_assets_and_writes_bound_receipt(
         "cache_dir": str(cache / ".huggingface"),
     }
     assert staging != snapshot
-    assert staging.name == f".grounding-dino-{'a' * 40}.installing"
     if os.name == "nt":
+        assert staging.name == f".grounding-dino-{'a' * 40}.installing"
         assert staging.parent == snapshot.parent
     else:
-        assert staging.parent.parent in {Path("/proc/self/fd"), Path("/dev/fd")}
+        assert staging.parent in {Path("/proc/self/fd"), Path("/dev/fd")}
     receipt = {
         "schema_version": 1,
         "catalog_sha256": _catalog_sha256(catalog),
@@ -824,28 +824,27 @@ def test_snapshot_download_path_uses_a_verified_descriptor_anchor(
     staging = tmp_path / ".grounding-dino-test.installing"
     staging.mkdir()
     identity = (staging.stat().st_dev, staging.stat().st_ino)
-    anchor = root / "38"
+    descriptor = 38
+    anchor = root / str(descriptor)
     real_resolve = runtime_models.Path.resolve
-    real_status = runtime_models._directory_status
 
     def resolve(path: Path, strict: bool = False) -> Path:
         if path == anchor:
             return real_resolve(staging, strict=True)
         return real_resolve(path, strict=strict)
 
-    def directory_status(path: Path, label: str) -> os.stat_result:
-        if path == anchor:
-            return staging.lstat()
-        return real_status(path, label)
-
     monkeypatch.setattr(runtime_models.sys, "platform", platform)
     monkeypatch.setattr(runtime_models.Path, "resolve", resolve)
-    monkeypatch.setattr(runtime_models, "_directory_status", directory_status)
+    def fstat(descriptor: int):
+        assert descriptor == 38
+        return staging.stat()
+
+    monkeypatch.setattr(runtime_models.os, "fstat", fstat)
 
     assert runtime_models._snapshot_download_path(
         staging,
         identity,
-        (38, None),
+        (descriptor, None),
     ) == anchor
 
 

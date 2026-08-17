@@ -124,6 +124,7 @@ def test_windows_priority_uses_pointer_sized_process_handle(
         resources.ctypes,
         "windll",
         types.SimpleNamespace(kernel32=kernel32),
+        raising=False,
     )
 
     resources._lower_process_priority()

@@ -2926,8 +2926,59 @@ def test_candidate_batch_worker_rejects_parent_replacement_during_publish(
         sam_worker._write_batch_result(result_binding, payload, operations)
 
     assert not result_path.exists()
-    assert not (moved_parent / "result.json").exists()
+    assert json.loads((moved_parent / "result.json").read_text(encoding="utf-8")) == payload
     assert next(owned_parent.glob(".result.json.*.tmp")).read_bytes() == attack
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux hard-link publication preserves the source inode",
+)
+def test_candidate_batch_worker_does_not_delete_replaced_published_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owned_parent = tmp_path / "owned"
+    owned_parent.mkdir()
+    moved_parent = tmp_path / "moved"
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = owned_parent / "result.json"
+    root_status = owned_parent.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": owned_parent,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    attack = b"replacement result must survive cleanup"
+    actual_verify = sam_worker._verify_batch_result_parent
+    verify_calls = 0
+
+    def replace_published_entry_and_parent(binding):
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 3:
+            result_path.unlink()
+            result_path.write_bytes(attack)
+            owned_parent.replace(moved_parent)
+            owned_parent.mkdir()
+        actual_verify(binding)
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_verify_batch_result_parent",
+        replace_published_entry_and_parent,
+    )
+
+    with pytest.raises(RuntimeError, match="directory changed"):
+        sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert (moved_parent / "result.json").read_bytes() == attack
+    assert not result_path.exists()
 
 
 def test_candidate_batch_worker_cleans_partial_stream_when_limit_is_exceeded(

@@ -1532,6 +1532,7 @@ def _write_bound_json_result(
             raise RuntimeError("SAM batch result temp identity changed")
         _verify_batch_result_binding(result_binding)
         _publish_batch_result(file_descriptor, parent_handle, result_binding)
+        _verify_batch_result_parent(result_binding)
         published = True
     except BaseException as exc:
         primary_error = exc

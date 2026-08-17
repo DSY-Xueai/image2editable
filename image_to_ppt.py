@@ -33,7 +33,7 @@ import tempfile
 import traceback
 import unicodedata
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import cv2
 import numpy as np
@@ -2602,7 +2602,9 @@ def _prepared_owned_file(
     relative_only: bool = False,
 ) -> Path:
     supplied = Path(value)
-    if relative_only and supplied.is_absolute():
+    if relative_only and (
+        supplied.is_absolute() or PureWindowsPath(str(value)).is_absolute()
+    ):
         raise ValueError(f"{label} asset path must be relative")
     if ".." in supplied.parts:
         raise ValueError(f"{label} asset path must not contain '..'")

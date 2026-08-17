@@ -66,6 +66,17 @@ GOLDEN_SHA256 = {
     "manifest.json": "139e7031b40afbfda7f257e22fbcd47051db20a9bd6c77c49d73d83155bc7ca3",
 }
 
+REQUIRES_APPROVED_GENERATOR = pytest.mark.skipif(
+    (
+        PIL.__version__,
+        features.version_feature("libjpeg_turbo"),
+        features.version_codec("zlib"),
+        features.version_module("freetype2"),
+    )
+    != ("10.4.0", "3.0.3", "1.3.1", "2.13.2"),
+    reason="benchmark golden generation requires the approved encoder build",
+)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -260,6 +271,7 @@ def test_generate_corpus_rejects_unapproved_document_environment_before_writing(
         "ReportLab 5.0.0, python-pptx 1.0.2, stdlib zlib 1.3.1, lxml 6.1.1"
     )
 
+    monkeypatch.setattr(corpus_module, "_require_deterministic_encoder", lambda: None)
     monkeypatch.setattr(patch_target, wrong_version)
     with pytest.raises(RuntimeError, match=f"^{re.escape(message)}$"):
         generate_corpus(output)
@@ -267,6 +279,7 @@ def test_generate_corpus_rejects_unapproved_document_environment_before_writing(
     assert not output.exists()
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_generate_corpus_writes_fixed_manifest_and_nonblank_images(
     tmp_path: Path,
 ) -> None:
@@ -324,6 +337,7 @@ def test_generate_corpus_writes_fixed_manifest_and_nonblank_images(
         assert generated.convert("RGB").tobytes() == expected.tobytes()
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_generate_corpus_writes_valid_three_page_pdf(tmp_path: Path) -> None:
     output = tmp_path / "corpus"
     generate_corpus(output)
@@ -337,6 +351,7 @@ def test_generate_corpus_writes_valid_three_page_pdf(tmp_path: Path) -> None:
     ] == [(1600.0, 900.0)] * 3
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_pdf_pages_preserve_source_pixels_and_centered_placement(
     tmp_path: Path,
 ) -> None:
@@ -381,6 +396,7 @@ def test_pdf_pages_preserve_source_pixels_and_centered_placement(
         assert str(drawing_operations[2][0][0]).lstrip("/") == image_name
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_generate_corpus_writes_expected_mixed_pptx_structure(tmp_path: Path) -> None:
     output = tmp_path / "corpus"
     generate_corpus(output)
@@ -460,6 +476,7 @@ def test_normalize_pptx_canonicalizes_cross_platform_zip_metadata() -> None:
             assert info.external_attr == 0o600 << 16
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_generated_pptx_has_canonical_zip_and_fixed_format_metadata(
     tmp_path: Path,
 ) -> None:
@@ -497,11 +514,19 @@ def test_generated_pptx_has_canonical_zip_and_fixed_format_metadata(
 
 def test_generate_corpus_refuses_nonempty_output_before_writing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = tmp_path / "corpus"
     output.mkdir()
     conflict = output / "01-zh-courseware.png"
     conflict.write_bytes(b"keep me")
+
+    monkeypatch.setattr(corpus_module, "_require_deterministic_encoder", lambda: None)
+    monkeypatch.setattr(
+        corpus_module,
+        "_require_deterministic_document_environment",
+        lambda: None,
+    )
 
     with pytest.raises(FileExistsError):
         generate_corpus(output)
@@ -510,6 +535,7 @@ def test_generate_corpus_refuses_nonempty_output_before_writing(
     assert conflict.read_bytes() == b"keep me"
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_generate_corpus_is_byte_reproducible_in_two_empty_directories(
     tmp_path: Path,
 ) -> None:
@@ -532,6 +558,7 @@ def test_generate_corpus_is_byte_reproducible_in_two_empty_directories(
     assert sum((first / name).stat().st_size for name in expected_names) <= 12 * 1024 * 1024
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_tracked_corpus_matches_fresh_generation(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     tracked = root / "benchmark/corpus"
@@ -547,6 +574,7 @@ def test_tracked_corpus_matches_fresh_generation(tmp_path: Path) -> None:
     } == {path.name: path.read_bytes() for path in generated.iterdir()}
 
 
+@REQUIRES_APPROVED_GENERATOR
 def test_cli_generates_manifest_from_checkout(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     output = tmp_path / "cli-corpus"

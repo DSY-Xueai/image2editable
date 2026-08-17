@@ -142,7 +142,10 @@ def install_runtime_models(
     return receipt
 
 
-def _private_file(parent: Path, label: str) -> tuple[Path, int, tuple[int, int]]:
+def _private_file(
+    parent: Path,
+    label: str,
+) -> tuple[Path, int, tuple[int, int, int]]:
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
     for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
         flags |= getattr(os, name, 0)
@@ -153,11 +156,18 @@ def _private_file(parent: Path, label: str) -> tuple[Path, int, tuple[int, int]]
         except FileExistsError:
             continue
         status = os.fstat(descriptor)
-        return path, descriptor, (status.st_dev, status.st_ino)
+        return path, descriptor, _private_file_identity(status)
     raise RuntimeError(f"cannot allocate a private model file for {label}")
 
 
-def _cleanup_private(path: Path, identity: tuple[int, int]) -> None:
+def _private_file_identity(status: os.stat_result) -> tuple[int, int, int]:
+    return status.st_dev, status.st_ino, status.st_size
+
+
+def _cleanup_private(
+    path: Path,
+    identity: tuple[int, int, int],
+) -> None:
     try:
         status = path.lstat()
     except OSError:
@@ -167,7 +177,7 @@ def _cleanup_private(path: Path, identity: tuple[int, int]) -> None:
         stat.S_ISLNK(status.st_mode)
         or getattr(status, "st_file_attributes", 0) & reparse
         or not stat.S_ISREG(status.st_mode)
-        or (status.st_dev, status.st_ino) != identity
+        or _private_file_identity(status) != identity
     ):
         return
     path.unlink()
@@ -192,6 +202,7 @@ def _install_file(cache: Path, entry: dict[str, object]) -> dict[str, object]:
             _require_file_identity(existing, entry)
         return _file_receipt(entry)
     finally:
+        identity = _private_file_identity(os.fstat(descriptor))
         os.close(descriptor)
         _cleanup_private(temporary, identity)
 
@@ -416,9 +427,12 @@ def _snapshot_download_path(
         resolved = anchor.resolve(strict=True)
     except OSError as error:
         raise RuntimeError("runtime snapshot descriptor anchor is unavailable") from error
-    if resolved != staging.resolve() or _directory_identity(
-        _directory_status(anchor, "snapshot anchor")
-    ) != expected:
+    opened = os.fstat(staging_binding[0])
+    if (
+        resolved != staging.resolve()
+        or not stat.S_ISDIR(opened.st_mode)
+        or _directory_identity(opened) != expected
+    ):
         raise RuntimeError("runtime snapshot descriptor anchor identity mismatch")
     return anchor
 
@@ -555,7 +569,11 @@ def _validate_parent(
     expected: os.stat_result,
 ) -> None:
     identity = _directory_identity(expected)
-    if _directory_identity(_directory_status(parent, "snapshot parent")) != identity:
+    try:
+        current = _directory_status(parent, "snapshot parent")
+    except RuntimeError as error:
+        raise RuntimeError(f"runtime snapshot parent identity changed: {parent}") from error
+    if _directory_identity(current) != identity:
         raise RuntimeError(f"runtime snapshot parent identity changed: {parent}")
     if binding[1] is None:
         opened = os.fstat(binding[0])
@@ -692,6 +710,7 @@ def _publish_json(path: Path, document: dict[str, object]) -> None:
         except FileExistsError as exc:
             raise RuntimeError(f"runtime model receipt already exists: {path}") from exc
     finally:
+        identity = _private_file_identity(os.fstat(descriptor))
         os.close(descriptor)
         _cleanup_private(temporary, identity)
 

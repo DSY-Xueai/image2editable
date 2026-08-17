@@ -83,8 +83,10 @@ jobs:
               raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
           with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
               print(f"WHEEL_PATH={wheels[0]}", file=env_file)
+      - name: Bootstrap pinned build runtime
+        run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
       - name: Install built wheel
-        run: python -m pip install --constraint constraints/runtime.txt "${{ env.WHEEL_PATH }}[test]"
+        run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
       - name: Check installed dependencies
         run: python -m pip check
       - name: installed_package_smoke

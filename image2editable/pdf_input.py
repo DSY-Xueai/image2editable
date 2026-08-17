@@ -41,7 +41,16 @@ def pdf_page_count(path: str | Path) -> int:
         finally:
             document.close()
     except pdfium.PdfiumError as error:
+        source = Path(path)
+        encrypted = False
         if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
+            try:
+                with source.open("rb") as stream:
+                    stream.seek(max(0, source.stat().st_size - 65536))
+                    encrypted = b"/Encrypt" in stream.read()
+            except OSError:
+                pass
+        if encrypted:
             raise ValueError(f"Cannot open encrypted PDF: {path}") from error
         raise ValueError(f"Cannot open PDF: {path}") from error
     except Exception as error:

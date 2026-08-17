@@ -4146,7 +4146,10 @@ def _copy_bound_file(
     for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
         read_flags |= getattr(os, name, 0)
         write_flags |= getattr(os, name, 0)
-    source_descriptor = os.open(source_path, read_flags)
+    try:
+        source_descriptor = os.open(source_path, read_flags)
+    except OSError:
+        raise RuntimeError("Evidence file cannot be opened safely") from None
     try:
         target_descriptor = os.open(target_path, write_flags, 0o600)
     except BaseException:

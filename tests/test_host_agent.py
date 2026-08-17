@@ -467,6 +467,7 @@ def test_missing_or_changed_integrity_key_rejects_published_challenge(host_run: 
     with pytest.raises(RuntimeError, match="integrity key"):
         next_host_agent_item(host_run)
     key.write_bytes(original)
+    key.chmod(0o600)
     key.write_bytes(b"x" * 32)
     with pytest.raises(RuntimeError, match="challenge"):
         next_host_agent_item(host_run)
