@@ -1,0 +1,517 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "image-bilingual-dashboard",
+      "kind": "image",
+      "path": "inputs/01-bilingual-dashboard.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["bilingual_dashboard"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-bilingual-dashboard-page-001",
+          "expected_status": "validated",
+          "min_components": 12,
+          "min_text_boxes": 8,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-dense-parameter-comparison",
+      "kind": "image",
+      "path": "inputs/02-dense-parameter-comparison.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["dense_parameter_comparison"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-dense-parameter-comparison-page-001",
+          "expected_status": "validated",
+          "min_components": 15,
+          "min_text_boxes": 12,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-profile-cards",
+      "kind": "image",
+      "path": "inputs/03-profile-cards.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["profile_cards"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-profile-cards-page-001",
+          "expected_status": "validated",
+          "min_components": 10,
+          "min_text_boxes": 8,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-four-stage-timeline",
+      "kind": "image",
+      "path": "inputs/04-four-stage-timeline.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["four_stage_timeline"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-four-stage-timeline-page-001",
+          "expected_status": "validated",
+          "min_components": 10,
+          "min_text_boxes": 6,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-combo-chart",
+      "kind": "image",
+      "path": "inputs/05-combo-chart.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["combo_chart"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-combo-chart-page-001",
+          "expected_status": "validated",
+          "min_components": 8,
+          "min_text_boxes": 5,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-flowchart",
+      "kind": "image",
+      "path": "inputs/06-flowchart.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["flowchart"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-flowchart-page-001",
+          "expected_status": "validated",
+          "min_components": 10,
+          "min_text_boxes": 6,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-icon-matrix",
+      "kind": "image",
+      "path": "inputs/07-icon-matrix.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["icon_matrix"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-icon-matrix-page-001",
+          "expected_status": "validated",
+          "min_components": 12,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-light-text-gradient",
+      "kind": "image",
+      "path": "inputs/08-light-text-gradient.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["light_text_gradient"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-light-text-gradient-page-001",
+          "expected_status": "validated",
+          "min_components": 4,
+          "min_text_boxes": 3,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-thin-line-network",
+      "kind": "image",
+      "path": "inputs/09-thin-line-network.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["thin_line_network"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-thin-line-network-page-001",
+          "expected_status": "validated",
+          "min_components": 12,
+          "min_text_boxes": 3,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-tiny-element-table",
+      "kind": "image",
+      "path": "inputs/10-tiny-element-table.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["tiny_element_table"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-tiny-element-table-page-001",
+          "expected_status": "validated",
+          "min_components": 15,
+          "min_text_boxes": 10,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-dark-poster",
+      "kind": "image",
+      "path": "inputs/11-dark-poster.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["dark_poster"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-dark-poster-page-001",
+          "expected_status": "validated",
+          "min_components": 5,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "image-non-16-9-infographic",
+      "kind": "image",
+      "path": "inputs/12-non-16-9-infographic.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 1,
+      "categories": ["non_16_9_infographic"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "image-non-16-9-infographic-page-001",
+          "expected_status": "validated",
+          "min_components": 12,
+          "min_text_boxes": 8,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pdf-mixed-page-sizes",
+      "kind": "pdf",
+      "path": "inputs/13-mixed-page-sizes.pdf",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 2,
+      "categories": ["pdf_mixed_page_sizes"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "pdf-mixed-page-sizes-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pdf-mixed-page-sizes-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pdf-rotated-page",
+      "kind": "pdf",
+      "path": "inputs/14-rotated-page.pdf",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 2,
+      "categories": ["pdf_rotated_page"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "pdf-rotated-page-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pdf-rotated-page-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pdf-high-dpi",
+      "kind": "pdf",
+      "path": "inputs/15-high-dpi.pdf",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 2,
+      "categories": ["pdf_high_dpi"],
+      "agent_provider": "host",
+      "pptx_mode": null,
+      "expected_pages": [
+        {
+          "page_id": "pdf-high-dpi-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pdf-high-dpi-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pptx-image-only",
+      "kind": "pptx",
+      "path": "inputs/16-image-only.pptx",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 4,
+      "categories": ["pptx_image_only"],
+      "agent_provider": "host",
+      "pptx_mode": "image_only",
+      "expected_pages": [
+        {
+          "page_id": "pptx-image-only-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-image-only-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-image-only-page-003",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-image-only-page-004",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pptx-mixed-native",
+      "kind": "pptx",
+      "path": "inputs/17-mixed-native.pptx",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 4,
+      "categories": ["pptx_mixed_native"],
+      "agent_provider": "host",
+      "pptx_mode": "mixed_native",
+      "expected_pages": [
+        {
+          "page_id": "pptx-mixed-native-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-native-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-native-page-003",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-native-page-004",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    },
+    {
+      "id": "pptx-mixed-screenshot-candidates",
+      "kind": "pptx",
+      "path": "inputs/18-mixed-screenshot-candidates.pptx",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source": "project-generated",
+      "license": "CC0-1.0",
+      "page_count": 4,
+      "categories": ["pptx_mixed_screenshot_candidates"],
+      "agent_provider": "host",
+      "pptx_mode": "mixed_screenshot_candidates",
+      "expected_pages": [
+        {
+          "page_id": "pptx-mixed-screenshot-candidates-page-001",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-screenshot-candidates-page-002",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-screenshot-candidates-page-003",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        },
+        {
+          "page_id": "pptx-mixed-screenshot-candidates-page-004",
+          "expected_status": "validated",
+          "min_components": 6,
+          "min_text_boxes": 4,
+          "max_unexplained_pixels": 0,
+          "max_quality_violations": 0
+        }
+      ]
+    }
+  ],
+  "categories": [
+    "bilingual_dashboard",
+    "dense_parameter_comparison",
+    "profile_cards",
+    "four_stage_timeline",
+    "combo_chart",
+    "flowchart",
+    "icon_matrix",
+    "light_text_gradient",
+    "thin_line_network",
+    "tiny_element_table",
+    "dark_poster",
+    "non_16_9_infographic",
+    "pdf_mixed_page_sizes",
+    "pdf_rotated_page",
+    "pdf_high_dpi",
+    "pptx_image_only",
+    "pptx_mixed_native",
+    "pptx_mixed_screenshot_candidates"
+  ]
+}
