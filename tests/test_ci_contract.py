@@ -703,7 +703,7 @@ def test_ci_parser_is_declared_and_candidate_pinned() -> None:
         for line in CONSTRAINTS.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    assert constraint_lines.count("PyYAML==6.0.3") == 1
+    assert constraint_lines.count("PyYAML==6.0.2") == 1
 
 
 def test_smoke_verifies_modules_and_catalogs_from_the_installed_distribution(

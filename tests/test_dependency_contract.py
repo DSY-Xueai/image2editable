@@ -91,7 +91,7 @@ WINDOWS_COMMON_TRANSITIVE_PINS = [
     "Pygments==2.20.0",
     "pypdf==6.16.1",
     "pytest==9.1.1",
-    "PyYAML==6.0.3",
+    "PyYAML==6.0.2",
     "regex==2026.7.19",
     "reportlab==5.0.0",
     "requests==2.34.2",
