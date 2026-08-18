@@ -1972,6 +1972,39 @@ def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> 
     assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
 
 
+def test_background_rebuild_does_not_authorize_flattened_retained_raster(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    retained_raster = np.zeros(case["component_mask"].shape, dtype=bool)
+    retained_raster[:10, :] = True
+    retained_raster[38:, :] = True
+    case["source"][retained_raster] = 40
+    case["background"][retained_raster] = 40
+    case["reconstructed"][retained_raster] = 40
+    material = case["component_mask"] | retained_raster
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+    )
+
+    assert report["checks"]["visual_ownership"] == "fail"
+
+
 def test_repair_quality_round_rejects_reliable_text_without_editable_object(tmp_path) -> None:
     case = _synthetic_quality_case()
     graph_dir = tmp_path / "round"
