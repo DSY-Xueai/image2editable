@@ -41,7 +41,9 @@ from image2editable.component_repair import (
     record_parent_fallback_quality,
     _decode_binary_grayscale_png,
     _read_bound_file,
+    _snapshot_directory_chain,
     _validate_presentation_manifest,
+    _write_exclusive,
 )
 from image2editable.inputs import sha256_file
 from image2editable.store import RunStore
@@ -104,6 +106,33 @@ def _validate_directory(
         raise RuntimeError(f"Cleanup path is not a directory: {path}")
 
 
+def _windows_handle_information(
+    kernel32: Any, handle: Any
+) -> tuple[int, int, tuple[int, int]]:
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD), ("creation", wintypes.FILETIME),
+            ("access", wintypes.FILETIME), ("write", wintypes.FILETIME),
+            ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD),
+        ]
+
+    information = FileInformation()
+    query = kernel32.GetFileInformationByHandle
+    query.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
+    query.restype = wintypes.BOOL
+    if not query(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    identity = (
+        information.volume,
+        (information.index_high << 32) | information.index_low,
+    )
+    return information.attributes, information.links, identity
+
+
 def _windows_open_bound(
     path: Path,
     expected_identity: tuple[int, int],
@@ -111,20 +140,6 @@ def _windows_open_bound(
     directory: bool,
 ) -> tuple[Any, Any, Any]:
     from ctypes import wintypes
-
-    class FileInformation(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", wintypes.FILETIME),
-            ("ftLastAccessTime", wintypes.FILETIME),
-            ("ftLastWriteTime", wintypes.FILETIME),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
 
     status = path.lstat()
     if _directory_identity(status) != expected_identity:
@@ -145,19 +160,13 @@ def _windows_open_bound(
         wintypes.HANDLE,
     ]
     create_file.restype = wintypes.HANDLE
-    get_information = kernel32.GetFileInformationByHandle
-    get_information.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(FileInformation),
-    ]
-    get_information.restype = wintypes.BOOL
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
 
     handle = create_file(
         str(path),
-        0x1 if directory else 0x00010080,
+        0xA1 if directory else 0x00010080,
         0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
         None,
         3,  # OPEN_EXISTING
@@ -168,18 +177,13 @@ def _windows_open_bound(
         raise ctypes.WinError(ctypes.get_last_error())
 
     try:
-        information = FileInformation()
-        if not get_information(handle, ctypes.byref(information)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        attributes = information.dwFileAttributes
+        attributes, _, handle_identity = _windows_handle_information(
+            kernel32, handle
+        )
         if bool(attributes & 0x10) != directory or attributes & 0x400:
             raise RuntimeError(
                 f"Cleanup handle has unexpected attributes: {path}"
             )
-        handle_identity = (
-            information.dwVolumeSerialNumber,
-            (information.nFileIndexHigh << 32) | information.nFileIndexLow,
-        )
         path_identity = (status.st_dev & 0xFFFFFFFF, status.st_ino)
         if handle_identity != path_identity:
             raise RuntimeError(f"Directory changed while opening cleanup handle: {path}")
@@ -390,6 +394,74 @@ def _rename_directory_exclusive(
     if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
         raise RuntimeError("presentation assets already published")
     raise OSError(error_number, os.strerror(error_number), str(staging), str(final))
+
+
+def _rename_file_exclusive_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    if os.name == "nt":
+        raise RuntimeError("exclusive publication is unavailable")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        symbol, exclusive_flag = "renameat2", 1
+    elif sys.platform == "darwin":
+        symbol, exclusive_flag = "renameatx_np", 4
+    else:
+        raise RuntimeError("exclusive publication is unavailable")
+    rename = getattr(libc, symbol, None)
+    if rename is None:
+        raise RuntimeError("exclusive publication is unavailable")
+    rename.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    )
+    result = rename(
+        source_fd, os.fsencode(source_name), destination_fd,
+        os.fsencode(destination_name), exclusive_flag,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise RuntimeError("publication destination already exists")
+    raise OSError(error_number, os.strerror(error_number))
+
+
+def _rename_windows_staging(source_handle: Any, parent_handle: Any, final_name: str) -> None:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if _windows_handle_information(kernel32, source_handle)[1] != 1:
+        raise RuntimeError("background responsibility staging has unsafe links")
+
+    class RenameInformation(ctypes.Structure):
+        _fields_ = [
+            ("replace", wintypes.BOOL),
+            ("root", wintypes.HANDLE),
+            ("name_length", wintypes.DWORD),
+            ("name", wintypes.WCHAR * (len(final_name) + 1)),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", wintypes.LPVOID), ("information", ctypes.c_size_t)]
+
+    information = RenameInformation()
+    information.root = parent_handle
+    information.name_length = len(final_name.encode("utf-16-le"))
+    information.name = final_name
+    rename = ctypes.WinDLL("ntdll").NtSetInformationFile
+    rename.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.LPVOID, wintypes.ULONG, ctypes.c_int]
+    rename.restype = ctypes.c_long
+    status = rename(
+        wintypes.HANDLE(source_handle), ctypes.byref(IoStatusBlock()), ctypes.byref(information),
+        ctypes.sizeof(information), 10,
+    )
+    if status:
+        if status & 0xFFFFFFFF == 0xC0000035:
+            raise RuntimeError("publication destination already exists")
+        raise OSError(f"background responsibility rename failed: {status:#x}")
 
 
 def _prepare_work_root(
@@ -1372,20 +1444,6 @@ def _state_artifact(store: RunStore, reference: dict) -> Path:
     return _load_legacy_ref(store, reference)[0]
 
 
-def _legacy_background_responsibility(
-    store: RunStore,
-    reference: dict,
-    expected_shape: tuple[int, int],
-) -> tuple[Path, dict]:
-    path, payload = _load_legacy_ref(store, reference)
-    _decode_binary_grayscale_png(
-        payload,
-        expected_shape,
-        label="legacy background responsibility",
-    )
-    return path, dict(reference)
-
-
 def _rebuild_canvas_background(
     *,
     source_path: Path,
@@ -1397,8 +1455,6 @@ def _rebuild_canvas_background(
     text_mask_path: Path,
     output_path: Path,
     repair_all_active: bool = True,
-    foreground_evidence_path: Path | None = None,
-    responsibility_output_path: Path | None = None,
 ) -> Path:
     import cv2
     import numpy as np
@@ -1413,22 +1469,10 @@ def _rebuild_canvas_background(
             restored = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_repair = np.asarray(image.convert("L")) > 0
-    foreground_evidence = None
-    if (foreground_evidence_path is None) != (
-        responsibility_output_path is None
-    ):
-        raise ValueError("background responsibility paths are incomplete")
-    if foreground_evidence_path is not None:
-        with Image.open(foreground_evidence_path) as image:
-            foreground_evidence = np.asarray(image.convert("L")) > 0
     if (
         source.shape != current.shape
         or (restored is not None and restored.shape != source.shape)
         or text_repair.shape != source.shape[:2]
-        or (
-            foreground_evidence is not None
-            and foreground_evidence.shape != source.shape[:2]
-        )
     ):
         raise ValueError("background rebuild input dimensions differ")
 
@@ -1531,32 +1575,6 @@ def _rebuild_canvas_background(
             allow_original=False,
         )
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
-    if responsibility_output_path is not None:
-        from image2editable.component_quality import (
-            _background_responsibility_geometry,
-            calibrate_page,
-            refine_material_foreground,
-        )
-
-        material_foreground = refine_material_foreground(
-            foreground_evidence,
-            source,
-            rebuilt,
-            calibrate_page(source, text_repair),
-        )
-        candidate = (
-            material_foreground
-            & ~text_repair
-            & ~repairable_visual
-            & np.all(rebuilt == source, axis=2)
-        )
-        responsibility = _background_responsibility_geometry(candidate)
-        if float(responsibility.mean()) > 0.05:
-            responsibility = None
-        if responsibility is not None:
-            Image.fromarray(
-                responsibility.astype(np.uint8) * 255, mode="L"
-            ).save(responsibility_output_path)
     return output_path
 
 
@@ -1890,6 +1908,184 @@ def _effective_text_context(
     return effective_items, effective_mask, effective_clean
 
 
+def _decode_bound_legacy_image(
+    payload: bytes,
+    *,
+    mode: str,
+    expected_size: tuple[int, int] | None = None,
+):
+    import numpy as np
+
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            if expected_size is not None and image.size != expected_size:
+                raise ValueError("legacy image dimensions differ")
+            return np.asarray(image.convert(mode)).copy()
+    except (OSError, ValueError):
+        raise ValueError("legacy image is invalid") from None
+
+
+def _verify_regular_at(
+    parent_fd: int,
+    name: str,
+    identity: tuple[int, int],
+) -> None:
+    status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        raise RuntimeError("background responsibility artifact changed")
+
+
+def _publish_staging_at(
+    parent_fd: int, staging_name: str, final_name: str, identity: tuple[int, int]
+) -> None:
+    _verify_regular_at(parent_fd, staging_name, identity)
+    _rename_file_exclusive_at(parent_fd, staging_name, parent_fd, final_name)
+
+
+def _publish_background_responsibility_file(
+    target: Path,
+    payload: bytes,
+    root: Path,
+) -> bytes:
+    chain = _snapshot_directory_chain(target.parent, root)
+    staging_name = f".background-responsibility-staging-{uuid.uuid4().hex}.png"
+    if os.name == "nt":
+        kernel32, parent_handle, parent_status = _windows_open_bound(
+            target.parent, chain[-1][1][:2], directory=True
+        )
+        staging = target.with_name(staging_name)
+        source_kernel32 = source_handle = None
+        try:
+            identity = _write_exclusive(staging, payload, root)
+            read_back = _read_bound_file(
+                staging,
+                root,
+                max_bytes=len(payload) + 1,
+                label="background responsibility staging",
+            )
+            source_kernel32, source_handle, _ = _windows_open_bound(
+                staging, identity, directory=False
+            )
+            _rename_windows_staging(source_handle, parent_handle, target.name)
+            entries = _windows_entries(
+                kernel32, parent_handle, target.parent, parent_status
+            )
+            published = [entry for entry in entries if entry[0] == target.name]
+            if (
+                read_back != payload
+                or len(published) != 1
+                or published[0][2] != identity
+            ):
+                raise RuntimeError("background responsibility publication changed")
+            return read_back
+        finally:
+            if source_handle is not None:
+                _windows_close(source_kernel32, source_handle)
+            _windows_close(kernel32, parent_handle)
+
+    parent_fd = os.open(
+        target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (
+            opened_parent.st_dev,
+            opened_parent.st_ino,
+            opened_parent.st_mode,
+            getattr(opened_parent, "st_file_attributes", 0),
+        ) != chain[-1][1]:
+            raise RuntimeError("background responsibility parent changed")
+        descriptor = os.open(
+            staging_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            identity = opened.st_dev, opened.st_ino
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise RuntimeError("background responsibility staging is unsafe")
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(descriptor, view):]
+            os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            read_back = bytearray()
+            while chunk := os.read(descriptor, len(payload) + 1 - len(read_back)):
+                read_back.extend(chunk)
+                if len(read_back) > len(payload):
+                    break
+            stable = os.fstat(descriptor)
+            if (
+                bytes(read_back) != payload
+                or stable.st_nlink != 1
+                or (stable.st_dev, stable.st_ino, stable.st_size)
+                != (*identity, len(payload))
+            ):
+                raise RuntimeError("background responsibility staging changed")
+            _publish_staging_at(parent_fd, staging_name, target.name, identity)
+            _verify_regular_at(parent_fd, target.name, identity)
+            return bytes(read_back)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_fd)
+
+
+def _publish_background_responsibility(
+    store: RunStore,
+    output_dir: Path,
+    *,
+    allowed,
+    previous_ref: dict | None,
+    background_rebuilt: bool,
+) -> dict | None:
+    import numpy as np
+
+    if allowed is None:
+        return None
+    next_mask = allowed
+    previous_mask = None
+    if not background_rebuilt:
+        if previous_ref is None:
+            return None
+        _, payload = _load_legacy_ref(store, previous_ref)
+        previous_mask = _decode_binary_grayscale_png(
+            payload,
+            allowed.shape,
+            label="legacy background responsibility",
+        )
+        next_mask = previous_mask & allowed
+    if not np.any(next_mask):
+        return None
+    if float(np.asarray(next_mask, dtype=bool).mean()) > 0.05:
+        return None
+    if previous_mask is not None and np.array_equal(next_mask, previous_mask):
+        return dict(previous_ref)
+    encoded = io.BytesIO()
+    Image.fromarray(next_mask.astype(np.uint8) * 255, mode="L").save(
+        encoded, format="PNG"
+    )
+    payload = encoded.getvalue()
+    target = output_dir / "background-responsibility.png"
+    try:
+        read_back = _publish_background_responsibility_file(
+            target, payload, store.root
+        )
+    except (OSError, RuntimeError):
+        raise ValueError("background responsibility could not be published") from None
+    return {
+        "path": target.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(read_back).hexdigest(),
+    }
+
+
 def _quality_assets(
     store: RunStore,
     page_id: str,
@@ -1898,8 +2094,8 @@ def _quality_assets(
     output_dir: Path,
     *,
     background_path_override: Path | None = None,
-    background_responsibility_path: Path | None = None,
-    background_responsibility_ref: dict | None = None,
+    previous_quality_refs: dict | None = None,
+    background_rebuilt: bool = False,
     frozen_manifest_path: Path | None = None,
     frozen_component_ids: set[str] | None = None,
 ) -> dict:
@@ -1913,18 +2109,56 @@ def _quality_assets(
     prepared = module.load_component_layers(
         store.root / "pages" / page_id / "reconstruction/initial/prepared_page.json"
     )
+    previous_refs = (
+        previous_quality_refs
+        if isinstance(previous_quality_refs, dict)
+        else {}
+    )
+    previous_responsibility_ref = (
+        previous_refs.get("background_responsibility")
+        if isinstance(previous_refs.get("background_responsibility"), dict)
+        else None
+    )
+    source_ref = previous_refs.get("source")
     source_path = Path(prepared["original_image_path"])
+    source_payload = None
+    if isinstance(source_ref, dict):
+        source_path, source_payload = _load_legacy_ref(store, source_ref)
     text_clean_path = Path(prepared.get("_text_clean_path", source_path))
-    background_path = (
-        Path(prepared["background_original_path"])
-        if background_path_override is None
-        else background_path_override
+    background_payload = None
+    if background_rebuilt:
+        background_path = output_dir / "background-rebuilt.png"
+        background_payload = _read_bound_legacy_file(
+            store,
+            background_path,
+            max_bytes=256 * 1024 * 1024,
+            label="rebuilt background",
+        )
+    elif isinstance(previous_refs.get("background"), dict):
+        background_path, background_payload = _load_legacy_ref(
+            store, previous_refs["background"]
+        )
+    else:
+        background_path = (
+            Path(prepared["background_original_path"])
+            if background_path_override is None
+            else background_path_override
+        )
+    foreground_ref = previous_refs.get("foreground_evidence")
+    compute_responsibility_allowed = (
+        (background_rebuilt or previous_responsibility_ref is not None)
+        and source_payload is not None
+        and background_payload is not None
+        and isinstance(foreground_ref, dict)
     )
     text_mask_path = Path(prepared.get(
         "_text_cleanup_mask_path", prepared["_text_mask_path"]
     ))
-    with Image.open(source_path) as image:
-        source = np.asarray(image.convert("RGB")).copy()
+    if source_payload is None:
+        with Image.open(source_path) as image:
+            source = np.asarray(image.convert("RGB")).copy()
+    else:
+        source = _decode_bound_legacy_image(source_payload, mode="RGB")
     with Image.open(text_clean_path) as image:
         text_clean = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
@@ -1945,8 +2179,23 @@ def _quality_assets(
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
         text_mask_output
     )
+    text_mask = _decode_binary_grayscale_png(
+        _read_bound_legacy_file(
+            store,
+            text_mask_output,
+            max_bytes=max(1024 * 1024, source.shape[0] * source.shape[1] * 2),
+            label="effective text mask",
+        ),
+        source.shape[:2],
+        label="effective text mask",
+    )
     component_nodes = []
     component_masks = []
+    semantic_ownership = (
+        np.zeros(source.shape[:2], dtype=bool)
+        if compute_responsibility_allowed
+        else None
+    )
     for node in graph["nodes"]:
         if node["kind"] == "text" or node["state"] not in {
             "pending", "pending_gate", "frozen"
@@ -1954,11 +2203,22 @@ def _quality_assets(
             continue
         component_nodes.append(node)
         mask_path = graph_dir / Path(node["mask"])
-        if sha256_file(mask_path) != node["mask_sha256"]:
+        mask_payload = _read_bound_legacy_file(
+            store,
+            mask_path,
+            max_bytes=max(1024 * 1024, source.shape[0] * source.shape[1] * 2),
+            label="execution graph mask",
+        )
+        if hashlib.sha256(mask_payload).hexdigest() != node["mask_sha256"]:
             raise ValueError("execution graph mask sha256 mismatch")
-        with Image.open(mask_path) as image:
-            mask = np.asarray(image.convert("L")) > 0
+        mask = _decode_bound_legacy_image(
+            mask_payload,
+            mode="L",
+            expected_size=(source.shape[1], source.shape[0]),
+        ) > 0
         component_masks.append(mask)
+        if semantic_ownership is not None:
+            semantic_ownership |= mask
     contained_parent_pairs = contained_active_parent_pairs(
         component_nodes, component_masks
     )
@@ -1993,8 +2253,18 @@ def _quality_assets(
             ) + "\n",
             encoding="utf-8",
         )
-    with Image.open(background_path) as image:
-        background_image = image.convert("RGB")
+    if background_payload is None:
+        with Image.open(background_path) as image:
+            background_image = image.convert("RGB")
+    else:
+        background_image = Image.fromarray(
+            _decode_bound_legacy_image(
+                background_payload,
+                mode="RGB",
+                expected_size=(source.shape[1], source.shape[0]),
+            ),
+            mode="RGB",
+        )
     try:
         active_nodes = _active_visual_nodes(graph)
         indexed = {node["id"]: index for index, node in enumerate(active_nodes)}
@@ -2006,10 +2276,14 @@ def _quality_assets(
                 ),
             )
         ]
-        reconstructed_image = _composite_presentation_layers(
-            background_image,
-            graph,
-            _load_presentation_assets(
+        presentation_ownership = (
+            np.zeros(source.shape[:2], dtype=bool)
+            if compute_responsibility_allowed
+            else None
+        )
+
+        def presentation_layers():
+            for layer in _load_presentation_assets(
                 run_root=store.root,
                 reconstruction=(
                     store.root / "pages" / page_id / "reconstruction"
@@ -2020,12 +2294,59 @@ def _quality_assets(
                 graph=graph,
                 page_size=background_image.size,
                 component_ids=component_ids,
-            ),
+            ):
+                if presentation_ownership is not None:
+                    presentation_ownership[:] |= layer["ownership_mask"] > 0
+                yield layer
+
+        reconstructed_image = _composite_presentation_layers(
+            background_image,
+            graph,
+            presentation_layers(),
         )
     finally:
         background_image.close()
     reconstructed = np.asarray(reconstructed_image).copy()
     reconstructed_image.close()
+    allowed = None
+    if compute_responsibility_allowed:
+        _, foreground_payload = _load_legacy_ref(store, foreground_ref)
+        foreground = _decode_bound_legacy_image(
+            foreground_payload,
+            mode="L",
+            expected_size=(source.shape[1], source.shape[0]),
+        ) > 0
+        background_pixels = _decode_bound_legacy_image(
+            background_payload,
+            mode="RGB",
+            expected_size=(source.shape[1], source.shape[0]),
+        )
+        from image2editable.component_quality import (
+            _background_responsibility_geometry,
+            calibrate_page,
+            refine_material_foreground,
+        )
+
+        material_foreground = refine_material_foreground(
+            foreground,
+            source,
+            background_pixels,
+            calibrate_page(source, text_mask),
+        )
+        candidate = (
+            material_foreground
+            & ~text_mask
+            & ~(semantic_ownership | presentation_ownership)
+            & np.all(source == background_pixels, axis=2)
+        )
+        allowed = _background_responsibility_geometry(candidate)
+    responsibility_ref = _publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=previous_responsibility_ref,
+        background_rebuilt=background_rebuilt,
+    )
     assets = {
         "background": output_dir / "background.png",
         "reconstructed": output_dir / "reconstructed.png",
@@ -2033,13 +2354,13 @@ def _quality_assets(
         "native_check": output_dir / "native-check.json",
         "presentation_manifest": presentation_manifest,
     }
-    if prepared.get("_prepared_schema_version", 1) >= 5:
-        assets["foreground_evidence"] = Path(
-            prepared["_foreground_evidence_mask_path"]
-        )
-    if background_responsibility_path is not None:
-        assets["background_responsibility"] = background_responsibility_path
-    shutil.copyfile(background_path, assets["background"])
+    if background_payload is None:
+        shutil.copyfile(background_path, assets["background"])
+    else:
+        try:
+            _write_exclusive(assets["background"], background_payload, store.root)
+        except (OSError, RuntimeError):
+            raise ValueError("legacy background could not be published") from None
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
         assets["text_mask"]
@@ -2056,15 +2377,14 @@ def _quality_assets(
     }, ensure_ascii=False), encoding="utf-8")
     refs = {}
     for name, path in assets.items():
-        if name == "background_responsibility" and (
-            background_responsibility_ref is not None
-        ):
-            refs[name] = dict(background_responsibility_ref)
-        else:
-            refs[name] = {
-                "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
-                "sha256": sha256_file(path),
-            }
+        refs[name] = {
+            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+            "sha256": sha256_file(path),
+        }
+    if isinstance(foreground_ref, dict) and source_payload is not None:
+        refs["foreground_evidence"] = dict(foreground_ref)
+    if responsibility_ref is not None:
+        refs["background_responsibility"] = responsibility_ref
     return refs
 
 
@@ -2088,6 +2408,22 @@ def _record_inference_performance(
         _LOGGER.warning("Performance trace recording failed")
 
 
+def _request_evidence_ref(
+    store: RunStore,
+    request_path: Path,
+    record: dict,
+) -> tuple[dict, bytes]:
+    request_dir = request_path.parent.relative_to(store.root).as_posix()
+    if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+        raise ValueError("legacy request evidence reference is invalid")
+    reference = {
+        "path": f"{request_dir}/{record.get('path', '')}",
+        "sha256": record.get("sha256"),
+    }
+    _, payload = _load_legacy_ref(store, reference)
+    return reference, payload
+
+
 def _execute_legacy_round(
     store: RunStore, page_id: str, lease: ExecutionLease,
     *, performance_trace=None,
@@ -2107,7 +2443,10 @@ def _execute_legacy_round(
     request = json.loads(request_payload.decode("utf-8"))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    source = request_path.parent / Path(request["evidence"]["source.png"]["path"])
+    source_ref, _ = _request_evidence_ref(
+        store, request_path, request["evidence"]["source.png"]
+    )
+    source = _legacy_ref_path(store, source_ref)
     quality_record = request["evidence"]["quality-report.json"]
     if (
         not isinstance(quality_record, dict)
@@ -2141,23 +2480,31 @@ def _execute_legacy_round(
     if hashlib.sha256(quality_payload).hexdigest() != quality_record["sha256"]:
         raise ValueError("previous component quality sha256 mismatch")
     previous_quality = json.loads(quality_payload.decode("utf-8"))
-    current_background = None
-    current_background_responsibility = None
-    current_background_responsibility_ref = None
-    responsibility_ref = None
-    previous_presentation_manifest = request_path.parent / Path(
-        request["evidence"]["presentation-manifest.json"]["path"]
-    )
+    previous_refs = {}
     if isinstance(previous_quality.get("input_refs"), dict):
-        current_background = _state_artifact(
-            store, previous_quality["input_refs"]["background"]
-        )
-        previous_presentation_manifest = _state_artifact(
-            store, previous_quality["input_refs"]["presentation_manifest"]
-        )
-        responsibility_ref = previous_quality["input_refs"].get(
-            "background_responsibility"
-        )
+        previous_refs = dict(previous_quality["input_refs"])
+    else:
+        for evidence_name, ref_name in (
+            ("background.png", "background"),
+            ("unexplained-mask.png", "foreground_evidence"),
+            ("presentation-manifest.json", "presentation_manifest"),
+        ):
+            record = request["evidence"].get(evidence_name)
+            if isinstance(record, dict):
+                previous_refs[ref_name] = _request_evidence_ref(
+                    store, request_path, record
+                )[0]
+    previous_refs["source"] = source_ref
+    current_background = (
+        _state_artifact(store, previous_refs["background"])
+        if isinstance(previous_refs.get("background"), dict)
+        else None
+    )
+    previous_presentation_manifest = (
+        _state_artifact(store, previous_refs["presentation_manifest"])
+        if isinstance(previous_refs.get("presentation_manifest"), dict)
+        else None
+    )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
         if action["action"] == "split":
@@ -2172,15 +2519,6 @@ def _execute_legacy_round(
     )
     with Image.open(source) as image:
         pixels = np.asarray(image.convert("RGB")).copy()
-    if isinstance(responsibility_ref, dict):
-        (
-            current_background_responsibility,
-            current_background_responsibility_ref,
-        ) = _legacy_background_responsibility(
-            store,
-            responsibility_ref,
-            pixels.shape[:2],
-        )
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
@@ -2275,12 +2613,7 @@ def _execute_legacy_round(
         Image.fromarray(effective_text_clean, mode="RGB").save(
             effective_text_clean_path
         )
-        responsibility_output = (
-            output_dir / "background-responsibility.png"
-            if prepared.get("_prepared_schema_version", 1) >= 5
-            else None
-        )
-        current_background = _rebuild_canvas_background(
+        _rebuild_canvas_background(
             source_path=source,
             current_background_path=(
                 current_background
@@ -2292,12 +2625,6 @@ def _execute_legacy_round(
             graph=next_graph,
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
-            foreground_evidence_path=(
-                Path(prepared["_foreground_evidence_mask_path"])
-                if responsibility_output is not None
-                else None
-            ),
-            responsibility_output_path=responsibility_output,
             output_path=output_dir / "background-rebuilt.png",
             repair_all_active=(
                 current_background is None
@@ -2305,18 +2632,10 @@ def _execute_legacy_round(
                 == sha256_file(Path(prepared["background_original_path"]))
             ),
         )
-        current_background_responsibility = (
-            responsibility_output
-            if responsibility_output is not None
-            and responsibility_output.exists()
-            else None
-        )
-        current_background_responsibility_ref = None
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
-        background_path_override=current_background,
-        background_responsibility_path=current_background_responsibility,
-        background_responsibility_ref=current_background_responsibility_ref,
+        previous_quality_refs=previous_refs,
+        background_rebuilt=bool(rebuild_actions),
         frozen_manifest_path=previous_presentation_manifest,
         frozen_component_ids=set(state["frozen"]),
     )
@@ -2491,7 +2810,7 @@ def _execute_legacy_parent_fallback(
         json.dumps(next_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    quality_options = {}
+    quality_options = {"background_rebuilt": False}
     quality_ref = state["current_round"].get("quality_ref")
     trusted_quality = isinstance(quality_ref, dict)
     if trusted_quality:
@@ -2510,32 +2829,33 @@ def _execute_legacy_parent_fallback(
             if previous_quality_path.is_file()
             else None
         )
-    if previous_quality_payload is not None:
+    trusted_refs = {}
+    if trusted_quality and previous_quality_payload is not None:
         previous_quality = json.loads(previous_quality_payload.decode("utf-8"))
-        previous_refs = previous_quality["input_refs"]
-        if isinstance(previous_refs.get("background"), dict):
-            quality_options["background_path_override"] = _state_artifact(
-                store, previous_refs["background"]
-            )
-        if trusted_quality and isinstance(
-            previous_refs.get("background_responsibility"), dict
+        trusted_refs.update(previous_quality["input_refs"])
+    request_ref = state["current_round"].get("request_ref")
+    if isinstance(request_ref, dict):
+        request_path, request_payload = _load_legacy_ref(store, request_ref)
+        request = json.loads(request_payload.decode("utf-8"))
+        for evidence_name, ref_name in (
+            ("source.png", "source"),
+            ("unexplained-mask.png", "foreground_evidence"),
+            ("background.png", "background"),
+            ("presentation-manifest.json", "presentation_manifest"),
         ):
-            (
-                quality_options["background_responsibility_path"],
-                quality_options["background_responsibility_ref"],
-            ) = _legacy_background_responsibility(
-                store,
-                previous_refs["background_responsibility"],
-                pixels.shape[:2],
-            )
-        frozen_ids = set(state["frozen"])
-        if frozen_ids and isinstance(
-            previous_refs.get("presentation_manifest"), dict
-        ):
-            quality_options["frozen_manifest_path"] = _state_artifact(
-                store, previous_refs["presentation_manifest"]
-            )
-            quality_options["frozen_component_ids"] = frozen_ids
+            record = request["evidence"].get(evidence_name)
+            if ref_name not in trusted_refs and isinstance(record, dict):
+                trusted_refs[ref_name] = _request_evidence_ref(
+                    store, request_path, record
+                )[0]
+    if trusted_refs:
+        quality_options["previous_quality_refs"] = trusted_refs
+    frozen_ids = set(state["frozen"])
+    if frozen_ids and isinstance(trusted_refs.get("presentation_manifest"), dict):
+        quality_options["frozen_manifest_path"] = _state_artifact(
+            store, trusted_refs["presentation_manifest"]
+        )
+        quality_options["frozen_component_ids"] = frozen_ids
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
         **quality_options,

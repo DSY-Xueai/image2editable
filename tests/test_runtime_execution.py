@@ -2739,21 +2739,23 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     mask.close()
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     store = RunStore.open(run_dir)
+    bound_source = run_dir / "input/quality-source.png"
+    bound_background = run_dir / "input/quality-background.png"
+    shutil.copyfile(source, bound_source)
+    shutil.copyfile(background, bound_background)
+    bound_mask_dir = run_dir / "pages/page_001/reconstruction/test-graph/masks"
+    bound_mask_dir.mkdir(parents=True)
+    shutil.copyfile(component_mask, bound_mask_dir / component_mask.name)
+    shutil.copyfile(nested_mask, bound_mask_dir / nested_mask.name)
+    mask_dir = bound_mask_dir
+    component_mask = mask_dir / component_mask.name
+    nested_mask = mask_dir / nested_mask.name
     foreground_evidence = run_dir / "input/foreground-evidence-mask.png"
     Image.new("L", (4, 4), 255).save(foreground_evidence)
-    responsibility = run_dir / "input/background-responsibility.png"
-    Image.new("L", (4, 4), 0).save(responsibility)
-    responsibility_ref = {
-        "path": responsibility.relative_to(run_dir).as_posix(),
-        "sha256": hashlib.sha256(responsibility.read_bytes()).hexdigest(),
-    }
-    changed_responsibility = np.zeros((4, 4), dtype=np.uint8)
-    changed_responsibility[0, 0] = 255
-    Image.fromarray(changed_responsibility, mode="L").save(responsibility)
     prepared = {
         "_prepared_schema_version": 5,
-        "original_image_path": str(source),
-        "background_original_path": str(background),
+        "original_image_path": str(bound_source),
+        "background_original_path": str(bound_background),
         "_text_mask_path": str(text_mask),
         "_foreground_evidence_mask_path": str(foreground_evidence),
         "text_items": [{"text": "editable"}],
@@ -2791,15 +2793,23 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
 
     refs = legacy._quality_assets(
         store, "page_001", graph, mask_dir.parent, output_dir,
-        background_responsibility_path=responsibility,
-        background_responsibility_ref=responsibility_ref,
+        previous_quality_refs={
+            name: {
+                "path": path.relative_to(run_dir).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for name, path in {
+                "source": bound_source,
+                "background": bound_background,
+                "foreground_evidence": foreground_evidence,
+            }.items()
+        },
     )
 
     assert refs["foreground_evidence"] == {
         "path": "input/foreground-evidence-mask.png",
         "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
     }
-    assert refs["background_responsibility"] == responsibility_ref
     with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
         assert reconstructed.getpixel((1, 1)) == (255, 0, 0)
@@ -2849,6 +2859,12 @@ def test_quality_assets_remove_suppressed_ocr_and_restore_source_visual(
     )
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     store = RunStore.open(run_dir)
+    bound_graph_dir = run_dir / "pages/page_001/reconstruction/test-graph"
+    shutil.copytree(graph_dir, bound_graph_dir)
+    graph_dir = bound_graph_dir
+    mask_dir = graph_dir / "masks"
+    visual_mask = mask_dir / "visual.png"
+    frozen_text_mask = mask_dir / "text_0001.png"
     prepared = {
         "original_image_path": str(source),
         "background_original_path": str(background),
@@ -3297,16 +3313,7 @@ def test_execute_legacy_round_aggregates_background_actions(
             if "repair_requests" in kwargs
             else [(kwargs["component_ids"], kwargs["margin_ratio"])]
         )
-        captured["foreground_evidence_path"] = kwargs.get(
-            "foreground_evidence_path"
-        )
-        captured["responsibility_output_path"] = kwargs.get(
-            "responsibility_output_path"
-        )
-        if captured["responsibility_output_path"] is not None:
-            Image.new("L", (12, 8), 0).save(
-                captured["responsibility_output_path"]
-            )
+        captured["rebuild_kwargs"] = kwargs
         return kwargs["current_background_path"]
 
     fake_image_module = types.SimpleNamespace(
@@ -3335,9 +3342,7 @@ def test_execute_legacy_round_aggregates_background_actions(
     ))
     monkeypatch.setattr(legacy, "_rebuild_canvas_background", rebuild_background)
     def quality_assets(*args, **kwargs):
-        captured["quality_responsibility_path"] = kwargs.get(
-            "background_responsibility_path"
-        )
+        captured["quality_options"] = kwargs
         return {}
 
     monkeypatch.setattr(legacy, "_quality_assets", quality_assets)
@@ -3363,13 +3368,201 @@ def test_execute_legacy_round_aggregates_background_actions(
         ({"text_left"}, 0.01),
         ({"component_right"}, 0.02),
     ]
-    expected_responsibility = (
-        reconstruction / "execution-01/background-responsibility.png"
+    assert "foreground_evidence_path" not in captured["rebuild_kwargs"]
+    assert "responsibility_output_path" not in captured["rebuild_kwargs"]
+    assert captured["quality_options"]["background_rebuilt"] is True
+    assert captured["quality_options"]["previous_quality_refs"]["source"] == (
+        reference(source)
     )
-    assert captured["foreground_evidence_path"] == foreground_evidence
-    assert captured["responsibility_output_path"] == expected_responsibility
-    assert captured["quality_responsibility_path"] == expected_responsibility
     assert [fields["status"] for _, fields in trace.events] == ["failed"]
+
+
+def test_first_rebuild_publishes_bound_background_responsibility_for_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.component_quality import (
+        _background_responsibility_geometry,
+        calibrate_page,
+        refine_material_foreground,
+    )
+
+    store, graph, _, prepared_refs, foreground = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=None
+        )
+    )
+    reconstruction = store.root / "pages/page_001/reconstruction"
+    graph_dir = reconstruction / "graph"
+    round_dir = reconstruction / "round-01"
+    round_dir.mkdir()
+    repair_mask_path = graph_dir / "masks/repair-target.png"
+    repair_mask_path.parent.mkdir(exist_ok=True)
+    repair_mask = np.zeros((180, 180), dtype=np.uint8)
+    repair_mask[150:155, 150:155] = 255
+    Image.fromarray(repair_mask, mode="L").save(repair_mask_path)
+    graph["nodes"] = [{
+        "id": "repair_target",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "inactive",
+        "mask": "masks/repair-target.png",
+        "mask_sha256": hashlib.sha256(repair_mask_path.read_bytes()).hexdigest(),
+        "bbox": [150, 150, 155, 155],
+        "z_index": 0,
+        "text_ids": [],
+    }]
+    (graph_dir / "component-graph.json").write_text(
+        json.dumps(graph), encoding="utf-8"
+    )
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    evidence_paths = {}
+    for evidence_name, ref_name in (
+        ("source.png", "source"),
+        ("background.png", "background"),
+        ("unexplained-mask.png", "foreground_evidence"),
+    ):
+        path = round_dir / evidence_name
+        shutil.copyfile(store.root / prepared_refs[ref_name]["path"], path)
+        evidence_paths[evidence_name] = path
+    quality_path = round_dir / "quality-report.json"
+    quality_path.write_text(
+        json.dumps({"initial_diagnostics": []}), encoding="utf-8"
+    )
+    presentation_path = round_dir / "presentation-manifest.json"
+    presentation_path.write_text("{}", encoding="utf-8")
+    evidence_paths.update({
+        "quality-report.json": quality_path,
+        "presentation-manifest.json": presentation_path,
+    })
+    request_path = round_dir / "request.json"
+    request = {"evidence": {
+        name: {
+            "path": path.name,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for name, path in evidence_paths.items()
+    }}
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    plan_path = round_dir / "plan.json"
+    plan_path.write_text(json.dumps({"actions": [{
+        "action": "rebuild_background",
+        "object_ids": ["repair_target"],
+        "parameters": {"margin_ratio": 0.01},
+    }]}), encoding="utf-8")
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "repair_round": 1,
+        "provider": "host",
+        "graph_ref": reference(graph_dir / "component-graph.json"),
+        "current_round": {
+            "request_ref": reference(request_path),
+            "plan_ref": reference(plan_path),
+        },
+        "frozen": {},
+    })
+
+    def execute_round(pixels, current_graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir()
+        (output_dir / "masks").mkdir()
+        shutil.copyfile(
+            repair_mask_path, output_dir / "masks/repair-target.png"
+        )
+        (output_dir / "component-graph.json").write_text(
+            json.dumps(current_graph), encoding="utf-8"
+        )
+        return current_graph
+
+    recorded = {}
+
+    def record_execution(*args, **kwargs):
+        execution = json.loads(
+            kwargs["execution_path"].read_text(encoding="utf-8")
+        )
+        recorded.update(execution["quality_input_refs"])
+
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
+    monkeypatch.setattr(
+        legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(legacy, "record_component_execution", record_execution)
+    from scripts import component_underlay
+
+    monkeypatch.setattr(
+        component_underlay,
+        "_choose_visual_fill",
+        lambda **kwargs: (kwargs["rgb"], "test"),
+    )
+
+    Image.new("RGB", (180, 180), "white").save(
+        store.root / prepared_refs["source"]["path"]
+    )
+    Image.new("RGB", (180, 180), "white").save(
+        store.root / prepared_refs["background"]["path"]
+    )
+
+    assert legacy._execute_legacy_round(store, "page_001", object()) is False
+
+    foreground_ref = {
+        "path": evidence_paths["unexplained-mask.png"].relative_to(
+            store.root
+        ).as_posix(),
+        "sha256": hashlib.sha256(
+            evidence_paths["unexplained-mask.png"].read_bytes()
+        ).hexdigest(),
+    }
+    assert recorded["foreground_evidence"] == foreground_ref
+    rebuilt_path = reconstruction / "execution-01/background-rebuilt.png"
+    with Image.open(evidence_paths["source.png"]) as image:
+        bound_source = np.asarray(image.convert("RGB")).copy()
+    with Image.open(rebuilt_path) as image:
+        rebuilt = np.asarray(image.convert("RGB")).copy()
+    assert np.array_equal(rebuilt, bound_source)
+    responsibility_payload = legacy._load_legacy_ref(
+        store, recorded["background_responsibility"]
+    )[1]
+    responsibility = component_repair._decode_binary_grayscale_png(
+        responsibility_payload,
+        bound_source.shape[:2],
+        label="test responsibility",
+    )
+    expected = _background_responsibility_geometry(refine_material_foreground(
+        foreground,
+        bound_source,
+        rebuilt,
+        calibrate_page(
+            bound_source, np.zeros(bound_source.shape[:2], dtype=bool)
+        ),
+    ))
+    assert np.array_equal(responsibility, expected)
+
+    output_graph = reconstruction / "execution-01/component-graph.json"
+    consumer_state = {
+        "page_id": "page_001",
+        "quality_gate_version": 2,
+        "source_sha256": hashlib.sha256(
+            evidence_paths["source.png"].read_bytes()
+        ).hexdigest(),
+        "graph_ref": reference(output_graph),
+    }
+    verified, bound_payloads, _, _ = component_repair._verify_quality_input_refs(
+        store,
+        consumer_state,
+        recorded,
+        request=request,
+        request_path=request_path,
+        expected_graph_sha256=consumer_state["graph_ref"]["sha256"],
+        expected_component_ids=[],
+        return_bound_inputs=True,
+    )
+    assert verified == recorded
+    assert bound_payloads["background_responsibility"] == responsibility_payload
 
 
 def _carried_background_responsibility_round(
@@ -3382,10 +3575,42 @@ def _carried_background_responsibility_round(
     store = RunStore(run_dir)
     source = round_dir / "source.png"
     background = reconstruction / "background.png"
+    foreground = reconstruction / "foreground-evidence.png"
     responsibility = reconstruction / "background-responsibility.png"
-    Image.new("RGB", (12, 8), "white").save(source)
-    Image.new("RGB", (12, 8), "white").save(background)
-    Image.new("L", responsibility_size, 0).save(responsibility)
+    canvas_size = (
+        (180, 180) if responsibility_size == (180, 180) else (12, 8)
+    )
+    source_pixels = np.full((canvas_size[1], canvas_size[0], 3), 255, np.uint8)
+    foreground_pixels = np.zeros(source_pixels.shape[:2], dtype=bool)
+    if canvas_size == (180, 180):
+        foreground_pixels[20:23, 10:150] = True
+        foreground_pixels[60:63, 10:150] = True
+        source_pixels[foreground_pixels] = 40
+    Image.fromarray(source_pixels, mode="RGB").save(source)
+    Image.fromarray(source_pixels, mode="RGB").save(background)
+    Image.fromarray(foreground_pixels.astype(np.uint8) * 255, mode="L").save(
+        foreground
+    )
+    if responsibility_size == canvas_size:
+        from image2editable.component_quality import (
+            _background_responsibility_geometry,
+            calibrate_page,
+            refine_material_foreground,
+        )
+
+        responsibility_pixels = _background_responsibility_geometry(
+            refine_material_foreground(
+                foreground_pixels,
+                source_pixels,
+                source_pixels,
+                calibrate_page(source_pixels, np.zeros(source_pixels.shape[:2], bool)),
+            )
+        )
+        Image.fromarray(
+            responsibility_pixels.astype(np.uint8) * 255, mode="L"
+        ).save(responsibility)
+    else:
+        Image.new("L", responsibility_size, 0).save(responsibility)
     presentation_manifest = round_dir / "presentation-manifest.json"
     presentation_manifest.write_text("{}", encoding="utf-8")
     graph_path = round_dir / "component-graph.json"
@@ -3401,6 +3626,7 @@ def _carried_background_responsibility_round(
     quality.write_text(json.dumps({
         "input_refs": {
             "background": reference(background),
+            "foreground_evidence": reference(foreground),
             "presentation_manifest": reference(presentation_manifest),
             "background_responsibility": reference(responsibility),
         }
@@ -3447,12 +3673,35 @@ def test_execute_legacy_round_strictly_decodes_carried_background_responsibility
     monkeypatch.setattr(
         legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
     )
+    reconstruction = store.root / "pages/page_001/reconstruction"
+    text_mask = reconstruction / "text-mask.png"
+    Image.new("L", (12, 8), 0).save(text_mask)
+
+    def execute_round(pixels, graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True)
+        (output_dir / "component-graph.json").write_text(
+            json.dumps(graph), encoding="utf-8"
+        )
+        return graph
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {
+                "_prepared_schema_version": 5,
+                "original_image_path": str(reconstruction / "round-02/source.png"),
+                "background_original_path": str(reconstruction / "background.png"),
+                "_text_mask_path": str(text_mask),
+                "_foreground_evidence_mask_path": str(
+                    reconstruction / "foreground-evidence.png"
+                ),
+                "text_items": [],
+            }
+
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
     monkeypatch.setattr(
-        legacy,
-        "execute_component_action_round",
-        lambda *args, **kwargs: pytest.fail(
-            "invalid carried responsibility reached action execution"
-        ),
+        legacy.importlib, "import_module", lambda name: FakeImageModule
     )
 
     with pytest.raises(
@@ -3461,12 +3710,12 @@ def test_execute_legacy_round_strictly_decodes_carried_background_responsibility
         legacy._execute_legacy_round(store, "page_001", object())
 
 
-def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
+def test_execute_legacy_round_migrates_bound_responsibility_for_new_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, responsibility, responsibility_ref = (
-        _carried_background_responsibility_round(tmp_path, (12, 8))
+        _carried_background_responsibility_round(tmp_path, (180, 180))
     )
     monkeypatch.setattr(
         legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
@@ -3476,11 +3725,27 @@ def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
     background = reconstruction / "background.png"
     text_mask = reconstruction / "text-mask.png"
     foreground = reconstruction / "foreground-evidence.png"
-    Image.new("L", (12, 8), 0).save(text_mask)
-    Image.new("L", (12, 8), 0).save(foreground)
+    Image.new("L", (180, 180), 0).save(text_mask)
     alternate_responsibility = reconstruction / "alternate-responsibility.png"
-    Image.new("L", (12, 8), 255).save(alternate_responsibility)
+    Image.new("L", (180, 180), 255).save(alternate_responsibility)
     round_dir = reconstruction / "round-02"
+    owner_mask = round_dir / "owner.png"
+    owner = np.zeros((180, 180), dtype=np.uint8)
+    owner[20:23, 10:80] = 255
+    Image.fromarray(owner, mode="L").save(owner_mask)
+    graph_path = round_dir / "component-graph.json"
+    graph_payload = {"nodes": [{
+        "id": "owner",
+        "kind": "parent",
+        "parent_id": None,
+        "state": "frozen",
+        "mask": "owner.png",
+        "mask_sha256": hashlib.sha256(owner_mask.read_bytes()).hexdigest(),
+        "bbox": [10, 20, 80, 23],
+        "z_index": 0,
+        "text_ids": [],
+    }]}
+    graph_path.write_text(json.dumps(graph_payload), encoding="utf-8")
     request_path = round_dir / "request.json"
     alternate_quality = round_dir / "alternate-quality.json"
 
@@ -3489,6 +3754,14 @@ def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
             "path": path.relative_to(store.root).as_posix(),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         }
+
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    state["graph_ref"] = reference(graph_path)
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json", state
+    )
 
     quality_payload = json.loads(
         (round_dir / "quality-report.json").read_text(encoding="utf-8")
@@ -3533,20 +3806,13 @@ def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
     def execute_round(pixels, graph, actions, **kwargs):
         output_dir = kwargs["output_dir"]
         output_dir.mkdir(parents=True)
+        shutil.copyfile(owner_mask, output_dir / "owner.png")
         (output_dir / "component-graph.json").write_text(
             json.dumps(graph), encoding="utf-8"
         )
         return graph
 
     captured: dict[str, object] = {}
-    real_quality_assets = legacy._quality_assets
-
-    def replace_then_build_quality_assets(*args, **kwargs):
-        replacement = np.zeros((8, 12), dtype=np.uint8)
-        replacement[0, 0] = 255
-        Image.fromarray(replacement, mode="L").save(responsibility)
-        return real_quality_assets(*args, **kwargs)
-
     def record_execution(*args, **kwargs) -> None:
         execution = json.loads(
             kwargs["execution_path"].read_text(encoding="utf-8")
@@ -3554,18 +3820,21 @@ def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
         captured["recorded_refs"] = execution["quality_input_refs"]
 
     monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
-    monkeypatch.setattr(
-        legacy, "_quality_assets", replace_then_build_quality_assets
-    )
     monkeypatch.setattr(legacy, "record_component_execution", record_execution)
     monkeypatch.setattr(
         legacy.importlib, "import_module", lambda name: FakeImageModule
     )
 
     assert legacy._execute_legacy_round(store, "page_001", object()) is False
-    assert captured["recorded_refs"]["background_responsibility"] == (
-        responsibility_ref
-    )
+    migrated_ref = captured["recorded_refs"]["background_responsibility"]
+    assert migrated_ref != responsibility_ref
+    with Image.open(responsibility) as image:
+        old = np.asarray(image.convert("L")) > 0
+    with Image.open(store.root / migrated_ref["path"]) as image:
+        migrated = np.asarray(image.convert("L")) > 0
+    assert np.any(migrated)
+    assert np.all(~migrated | old)
+    assert np.count_nonzero(migrated) < np.count_nonzero(old)
 
 
 def test_execute_legacy_round_rejects_tampered_previous_quality(
@@ -3767,15 +4036,10 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
     assert allow_original_values == [False]
 
 
-def test_background_responsibility_matches_constrained_geometry(
+def test_background_rebuild_no_longer_publishes_responsibility(
     tmp_path: Path,
 ) -> None:
     import cv2
-    from image2editable.component_quality import (
-        _background_responsibility_geometry,
-        calibrate_page,
-        refine_material_foreground,
-    )
 
     shape = (180, 180)
     source = np.full((*shape, 3), 255, dtype=np.uint8)
@@ -3846,77 +4110,191 @@ def test_background_responsibility_matches_constrained_geometry(
         graph=graph,
         graph_dir=graph_dir,
         text_mask_path=text_path,
-        foreground_evidence_path=foreground_path,
-        responsibility_output_path=responsibility_path,
         output_path=output_path,
         repair_all_active=False,
     )
 
-    with Image.open(responsibility_path) as image:
-        responsibility = np.asarray(image.convert("L")) > 0
     with Image.open(output_path) as image:
         rebuilt = np.asarray(image.convert("RGB"))
-    refined = refine_material_foreground(
-        foreground,
-        source,
-        rebuilt,
-        calibrate_page(source, text),
-    )
-    candidate = (
-        refined & ~text & ~active & ~frozen
-        & np.all(source == rebuilt, axis=2)
-    )
-    expected = _background_responsibility_geometry(candidate)
-    assert np.array_equal(responsibility, expected)
-    assert not np.any(responsibility & text)
-    assert not np.any(responsibility & (active | frozen))
-    grid_core = cv2.erode(
-        (horizontal | vertical).astype(np.uint8),
-        np.ones((3, 3), dtype=np.uint8),
-    ) > 0
-    assert np.any(responsibility & grid_core)
-
-
-def test_background_responsibility_rejects_page_over_budget(
-    tmp_path: Path,
-) -> None:
-    shape = (100, 100)
-    source = np.full((*shape, 3), 255, dtype=np.uint8)
-    foreground = np.zeros(shape, dtype=bool)
-    foreground[5:35:3, :] = True
-    source[foreground] = 40
-    source_path = tmp_path / "source.png"
-    current_path = tmp_path / "current.png"
-    foreground_path = tmp_path / "foreground.png"
-    text_path = tmp_path / "text.png"
-    responsibility_path = tmp_path / "background-responsibility.png"
-    Image.fromarray(source, mode="RGB").save(source_path)
-    Image.fromarray(source, mode="RGB").save(current_path)
-    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
-        foreground_path
-    )
-    Image.new("L", shape[::-1], 0).save(text_path)
-    graph_dir = tmp_path / "graph"
-    graph_dir.mkdir()
-
-    legacy._rebuild_canvas_background(
-        source_path=source_path,
-        current_background_path=current_path,
-        repair_requests=[],
-        graph={"nodes": []},
-        graph_dir=graph_dir,
-        text_mask_path=text_path,
-        foreground_evidence_path=foreground_path,
-        responsibility_output_path=responsibility_path,
-        output_path=tmp_path / "background.png",
-        repair_all_active=False,
-    )
-
+    assert rebuilt.shape == source.shape
     assert not responsibility_path.exists()
 
 
-def test_background_responsibility_uses_constrained_geometry_after_refinement(
+def _background_responsibility_quality_case(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    occupied_by: str | None,
+) -> tuple[RunStore, dict, Path, dict[str, dict], np.ndarray]:
+    shape = (180, 180)
+    run_dir = tmp_path / "run"
+    input_dir = run_dir / "input"
+    graph_dir = run_dir / "pages/page_001/reconstruction/graph"
+    output_dir = run_dir / "pages/page_001/reconstruction/quality"
+    masks = graph_dir / "masks"
+    input_dir.mkdir(parents=True)
+    masks.mkdir(parents=True)
+    output_dir.mkdir(parents=True)
+    source = np.full((*shape, 3), 255, dtype=np.uint8)
+    foreground = np.zeros(shape, dtype=bool)
+    foreground[20:23, 10:150] = True
+    foreground[60:63, 10:150] = True
+    source[foreground] = 40
+    text = np.zeros(shape, dtype=bool)
+    occupied = np.zeros(shape, dtype=bool)
+    if occupied_by == "semantic_all":
+        occupied |= foreground
+    else:
+        occupied[20:23, 10:80] = True
+    if occupied_by == "text":
+        text |= occupied
+    source_path = input_dir / "source.png"
+    background_path = input_dir / "background.png"
+    foreground_path = input_dir / "foreground.png"
+    text_path = input_dir / "text.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+    Image.fromarray(source, mode="RGB").save(background_path)
+    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
+        foreground_path
+    )
+    Image.fromarray(text.astype(np.uint8) * 255, mode="L").save(text_path)
+    graph = {"nodes": []}
+    text_items = []
+    if occupied_by in {"semantic", "semantic_all", "text"}:
+        component_id = "text_0001" if occupied_by == "text" else "owner"
+        mask_path = masks / f"{component_id}.png"
+        Image.fromarray(occupied.astype(np.uint8) * 255, mode="L").save(mask_path)
+        graph["nodes"].append({
+            "id": component_id,
+            "kind": "text" if occupied_by == "text" else "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [10, 20, 80, 23],
+            "z_index": 0,
+            "text_ids": [],
+        })
+        if occupied_by == "text":
+            text_items = [{
+                "text": "occupied",
+                "box": [10, 20, 70, 3],
+                "_component_id": component_id,
+            }]
+    elif occupied_by == "presentation":
+        mask_path = masks / "owner.png"
+        Image.new("L", shape[::-1], 0).save(mask_path)
+        graph["nodes"].append({
+            "id": "owner", "kind": "parent", "parent_id": None,
+            "state": "frozen", "mask": "masks/owner.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [10, 20, 80, 23], "z_index": 0, "text_ids": [],
+        })
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    prepared = {
+        "_prepared_schema_version": 5,
+        "original_image_path": str(source_path),
+        "background_original_path": str(background_path),
+        "_text_mask_path": str(text_path),
+        "_foreground_evidence_mask_path": str(input_dir / "untrusted.png"),
+        "text_items": text_items,
+    }
+    Image.new("L", shape[::-1], 0).save(prepared["_foreground_evidence_mask_path"])
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return prepared
+
+        @staticmethod
+        def _repair_text_with_local_planes(image, mask, items):
+            return image.copy()
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule,
+    )
+    if occupied_by == "presentation":
+        def build_presentation_assets(
+            store_arg, *, source_path, graph_path, output_dir, **kwargs
+        ):
+            assets = output_dir / "presentation-assets"
+            assets.mkdir()
+            rgba = np.zeros((*shape, 4), dtype=np.uint8)
+            rgba[occupied, :3] = source[occupied]
+            rgba[occupied, 3] = 255
+            arrays = {
+                "rgba": rgba,
+                "ownership_mask": occupied.astype(np.uint8) * 255,
+                "presentation_alpha_mask": occupied.astype(np.uint8) * 255,
+                "generated_underlay_mask": np.zeros(shape, dtype=np.uint8),
+            }
+            records = {}
+            for name, pixels in arrays.items():
+                path = assets / f"0001-{name}.png"
+                Image.fromarray(
+                    pixels, mode="RGBA" if name == "rgba" else "L"
+                ).save(path)
+                records[name] = {
+                    "path": path.relative_to(store_arg.root).as_posix(),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            manifest = assets / "presentation-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": 1,
+                "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                "graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+                "components": [{
+                    "component_id": "owner",
+                    **records,
+                    "metrics": {
+                        "boundary_color_mae": 0.0,
+                        "gradient_jump_p95": 0.0,
+                        "added_high_frequency_pixels": 0.0,
+                    },
+                }],
+            }), encoding="utf-8")
+            return manifest
+
+        monkeypatch.setattr(
+            legacy, "_build_presentation_assets", build_presentation_assets
+        )
+
+    def reference(path: Path) -> dict:
+        return {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    refs = {
+        "source": reference(source_path),
+        "background": reference(background_path),
+        "foreground_evidence": reference(foreground_path),
+    }
+    return RunStore(run_dir), graph, output_dir, refs, foreground
+
+
+@pytest.mark.parametrize(
+    ("background_rebuilt", "with_old", "occupied_by", "expected"),
+    [
+        (True, True, None, "replaced"),
+        (False, False, None, "omitted"),
+        (False, True, None, "reused"),
+        (False, True, "semantic", "reduced"),
+        (False, True, "text", "reduced"),
+        (False, True, "presentation", "reduced"),
+        (False, True, "semantic_all", "omitted"),
+        (True, True, "missing_foreground", "omitted"),
+        (False, True, "missing_background", "omitted"),
+    ],
+)
+def test_quality_assets_migrates_background_responsibility_decision_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    background_rebuilt: bool,
+    with_old: bool,
+    occupied_by: str | None,
+    expected: str,
 ) -> None:
     from image2editable.component_quality import (
         _background_responsibility_geometry,
@@ -3924,57 +4302,911 @@ def test_background_responsibility_uses_constrained_geometry_after_refinement(
         refine_material_foreground,
     )
 
-    shape = (100, 100)
-    source = np.full((*shape, 3), 255, dtype=np.uint8)
-    foreground = np.zeros(shape, dtype=bool)
-    foreground[10:12, 5:80] = True
-    foreground[9:12, 40:43] = True
-    unsupported = np.zeros(shape, dtype=bool)
-    unsupported[70:72, 5:80] = True
-    foreground |= unsupported
-    source[foreground] = 40
-    source[unsupported] = 255
-    source_path = tmp_path / "source.png"
-    current_path = tmp_path / "current.png"
-    foreground_path = tmp_path / "foreground.png"
-    text_path = tmp_path / "text.png"
-    responsibility_path = tmp_path / "background-responsibility.png"
-    Image.fromarray(source, mode="RGB").save(source_path)
-    Image.fromarray(source, mode="RGB").save(current_path)
-    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
-        foreground_path
+    store, graph, output_dir, previous_refs, foreground = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=occupied_by
+        )
     )
-    Image.new("L", shape[::-1], 0).save(text_path)
-    graph_dir = tmp_path / "graph"
-    graph_dir.mkdir()
-
-    legacy._rebuild_canvas_background(
-        source_path=source_path,
-        current_background_path=current_path,
-        repair_requests=[],
-        graph={"nodes": []},
-        graph_dir=graph_dir,
-        text_mask_path=text_path,
-        foreground_evidence_path=foreground_path,
-        responsibility_output_path=responsibility_path,
-        output_path=tmp_path / "background.png",
-        repair_all_active=False,
-    )
-
-    with Image.open(responsibility_path) as image:
-        responsibility = np.asarray(image.convert("L")) > 0
-    with Image.open(tmp_path / "background.png") as image:
-        rebuilt = np.asarray(image.convert("RGB"))
-    refined = refine_material_foreground(
+    with Image.open(store.root / previous_refs["source"]["path"]) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    old = _background_responsibility_geometry(refine_material_foreground(
         foreground,
         source,
-        rebuilt,
+        source,
+        calibrate_page(source, np.zeros(source.shape[:2], dtype=bool)),
+    ))
+    old_path = store.root / "input/old-background-responsibility.png"
+    Image.fromarray(old.astype(np.uint8) * 255, mode="L").save(old_path)
+    old_payload = old_path.read_bytes()
+    old_ref = {
+        "path": old_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(old_payload).hexdigest(),
+    }
+    if with_old:
+        previous_refs["background_responsibility"] = old_ref
+    if occupied_by == "missing_foreground":
+        previous_refs.pop("foreground_evidence")
+    if background_rebuilt:
+        shutil.copyfile(
+            store.root / previous_refs["background"]["path"],
+            output_dir / "background-rebuilt.png",
+        )
+    if occupied_by == "missing_background":
+        previous_refs.pop("background")
+
+    refs = legacy._quality_assets(
+        store,
+        "page_001",
+        graph,
+        output_dir.parent / "graph",
+        output_dir,
+        previous_quality_refs=previous_refs,
+        background_rebuilt=background_rebuilt,
+    )
+
+    assert old_path.read_bytes() == old_payload
+    result_ref = refs.get("background_responsibility")
+    if expected == "omitted":
+        assert result_ref is None
+        return
+    assert result_ref is not None
+    if expected == "reused":
+        assert result_ref == old_ref
+        assert not (output_dir / "background-responsibility.png").exists()
+        return
+    assert result_ref != old_ref
+    with Image.open(store.root / result_ref["path"]) as image:
+        result = np.asarray(image.convert("L")) > 0
+    if background_rebuilt:
+        assert np.array_equal(result, old)
+    else:
+        assert np.all(~result | old)
+        assert np.count_nonzero(result) < np.count_nonzero(old)
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_background_responsibility_migration_budgets_the_intersection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    partial: bool,
+) -> None:
+    import image2editable.component_quality as component_quality
+
+    store, graph, output_dir, previous_refs, _ = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=None
+        )
+    )
+    shape = (180, 180)
+    allowed = np.zeros(shape, dtype=bool)
+    allowed.reshape(-1)[:1944] = True
+    old = np.zeros(shape, dtype=bool)
+    old.reshape(-1)[:324] = True
+    if partial:
+        old.reshape(-1)[-324:] = True
+    old_path = store.root / "input/budgeted-old-responsibility.png"
+    Image.fromarray(old.astype(np.uint8) * 255, mode="L").save(old_path)
+    old_ref = {
+        "path": old_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(old_path.read_bytes()).hexdigest(),
+    }
+    previous_refs["background_responsibility"] = old_ref
+    monkeypatch.setattr(
+        component_quality,
+        "_background_responsibility_geometry",
+        lambda candidate: allowed,
+    )
+
+    refs = legacy._quality_assets(
+        store,
+        "page_001",
+        graph,
+        output_dir.parent / "graph",
+        output_dir,
+        previous_quality_refs=previous_refs,
+        background_rebuilt=False,
+    )
+
+    result_ref = refs["background_responsibility"]
+    if not partial:
+        assert result_ref == old_ref
+        assert not (output_dir / "background-responsibility.png").exists()
+        return
+    assert result_ref != old_ref
+    with Image.open(store.root / result_ref["path"]) as image:
+        result = np.asarray(image.convert("L")) > 0
+    assert np.array_equal(result, old & allowed)
+    assert float(result.mean()) == pytest.approx(0.01)
+
+
+@pytest.mark.parametrize("mode", ["no_old", "missing_foreground", "old"])
+def test_quality_assets_does_not_rescan_ownership_for_responsibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    from image2editable.component_quality import (
+        _background_responsibility_geometry,
+        calibrate_page,
+        refine_material_foreground,
+    )
+
+    store, graph, output_dir, previous_refs, foreground = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=None
+        )
+    )
+    graph_dir = output_dir.parent / "graph"
+    mask_paths = []
+    shape = foreground.shape
+    for index, box in enumerate(((150, 150, 155, 155), (160, 160, 165, 165)), 1):
+        x1, y1, x2, y2 = box
+        mask = np.zeros(shape, dtype=np.uint8)
+        mask[y1:y2, x1:x2] = 255
+        mask_path = graph_dir / f"masks/owner-{index}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        mask_paths.append(mask_path)
+        graph["nodes"].append({
+            "id": f"owner_{index}",
+            "kind": "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/owner-{index}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [x1, y1, x2, y2],
+            "z_index": index - 1,
+            "text_ids": [],
+        })
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    presentation_paths = []
+
+    def build_presentation_assets(
+        store_arg, *, source_path, graph_path, output_dir, **kwargs
+    ):
+        assets = output_dir / "presentation-assets"
+        assets.mkdir()
+        components = []
+        for index, node in enumerate(graph["nodes"], 1):
+            arrays = {
+                "rgba": np.zeros((*shape, 4), dtype=np.uint8),
+                "ownership_mask": np.zeros(shape, dtype=np.uint8),
+                "presentation_alpha_mask": np.zeros(shape, dtype=np.uint8),
+                "generated_underlay_mask": np.zeros(shape, dtype=np.uint8),
+            }
+            records = {}
+            for name, pixels in arrays.items():
+                path = assets / f"{index:04d}-{name}.png"
+                Image.fromarray(
+                    pixels, mode="RGBA" if name == "rgba" else "L"
+                ).save(path)
+                presentation_paths.append(path)
+                records[name] = {
+                    "path": path.relative_to(store_arg.root).as_posix(),
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            components.append({
+                "component_id": node["id"],
+                **records,
+                "metrics": {
+                    "boundary_color_mae": 0.0,
+                    "gradient_jump_p95": 0.0,
+                    "added_high_frequency_pixels": 0.0,
+                },
+            })
+        manifest = assets / "presentation-manifest.json"
+        manifest.write_text(json.dumps({
+            "schema_version": 1,
+            "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            "graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+            "components": components,
+        }), encoding="utf-8")
+        return manifest
+
+    monkeypatch.setattr(
+        legacy, "_build_presentation_assets", build_presentation_assets
+    )
+    with Image.open(store.root / previous_refs["source"]["path"]) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    old = _background_responsibility_geometry(refine_material_foreground(
+        foreground,
+        source,
+        source,
         calibrate_page(source, np.zeros(shape, dtype=bool)),
+    ))
+    old_path = store.root / "input/scanned-old-responsibility.png"
+    Image.fromarray(old.astype(np.uint8) * 255, mode="L").save(old_path)
+    old_ref = {
+        "path": old_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(old_path.read_bytes()).hexdigest(),
+    }
+    if mode != "no_old":
+        previous_refs["background_responsibility"] = old_ref
+    if mode == "missing_foreground":
+        previous_refs.pop("foreground_evidence")
+    foreground_path = store.root / "input/foreground.png"
+    reads = {}
+    real_read = legacy._read_bound_file
+
+    def count_read(path: Path, *args, **kwargs) -> bytes:
+        reads[path] = reads.get(path, 0) + 1
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_read_bound_file", count_read)
+
+    refs = legacy._quality_assets(
+        store,
+        "page_001",
+        graph,
+        graph_dir,
+        output_dir,
+        previous_quality_refs=previous_refs,
+        background_rebuilt=False,
     )
-    assert np.array_equal(
-        responsibility,
-        _background_responsibility_geometry(refined),
+
+    assert {path.name: reads.get(path, 0) for path in mask_paths} == {
+        path.name: 1 for path in mask_paths
+    }
+    assert {path.name: reads.get(path, 0) for path in presentation_paths} == {
+        path.name: 1 for path in presentation_paths
+    }
+    assert reads.get(foreground_path, 0) == (1 if mode == "old" else 0)
+    if mode == "old":
+        assert refs["background_responsibility"] == old_ref
+    else:
+        assert "background_responsibility" not in refs
+
+
+def test_quality_assets_hides_bound_background_publication_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, graph, output_dir, previous_refs, _ = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=None
+        )
     )
+
+    def fail_write(path: Path, *args, **kwargs):
+        raise RuntimeError(f"Evidence file cannot be created safely: {path}")
+
+    monkeypatch.setattr(legacy, "_write_exclusive", fail_write)
+
+    with pytest.raises(
+        ValueError, match="^legacy background could not be published$"
+    ) as error:
+        legacy._quality_assets(
+            store,
+            "page_001",
+            graph,
+            output_dir.parent / "graph",
+            output_dir,
+            previous_quality_refs=previous_refs,
+            background_rebuilt=False,
+        )
+
+    assert str(store.root) not in str(error.value)
+    assert error.value.__cause__ is None
+
+
+def test_parent_fallback_uses_common_background_responsibility_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from image2editable.component_quality import (
+        _background_responsibility_geometry,
+        calibrate_page,
+        refine_material_foreground,
+    )
+
+    store, graph, _, previous_refs, foreground = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by="semantic"
+        )
+    )
+    graph_dir = store.root / "pages/page_001/reconstruction/graph"
+    source_path = store.root / previous_refs["source"]["path"]
+    with Image.open(source_path) as image:
+        source = np.asarray(image.convert("RGB")).copy()
+    old = _background_responsibility_geometry(refine_material_foreground(
+        foreground,
+        source,
+        source,
+        calibrate_page(source, np.zeros(source.shape[:2], dtype=bool)),
+    ))
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    old_path = store.root / "input/parent-old-responsibility.png"
+    Image.fromarray(old.astype(np.uint8) * 255, mode="L").save(old_path)
+    previous_refs["background_responsibility"] = reference(old_path)
+    quality_path = graph_dir / "quality-report.json"
+    quality_path.write_text(
+        json.dumps({"input_refs": previous_refs}), encoding="utf-8"
+    )
+    request_source = graph_dir / "request-source.png"
+    shutil.copyfile(source_path, request_source)
+    request_path = graph_dir / "request.json"
+    request_path.write_text(json.dumps({"evidence": {"source.png": {
+        "path": request_source.name,
+        "sha256": hashlib.sha256(request_source.read_bytes()).hexdigest(),
+    }}}), encoding="utf-8")
+    store.write_json("pages/page_001/page_request.json", {
+        "schema_version": 1,
+        "source": previous_refs["source"]["path"],
+        "sha256": previous_refs["source"]["sha256"],
+    })
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json",
+        {
+            "repair_round": 3,
+            "graph_ref": reference(graph_dir / "component-graph.json"),
+            "current_round": {
+                "quality_ref": reference(quality_path),
+                "request_ref": reference(request_path),
+            },
+            "fallback": {"parent_ids": []},
+            "failed_ids": [],
+            "parent_assets": {},
+            "frozen": {},
+        },
+    )
+
+    def execute_round(pixels, current_graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        (output_dir / "masks").mkdir(parents=True)
+        for node in current_graph["nodes"]:
+            shutil.copyfile(
+                graph_dir / node["mask"], output_dir / node["mask"]
+            )
+        return copy.deepcopy(current_graph)
+
+    captured = {}
+
+    def record_execution(*args, **kwargs):
+        captured.update(kwargs["quality_input_refs"])
+
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
+    monkeypatch.setattr(
+        legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        legacy, "record_parent_fallback_execution", record_execution
+    )
+
+    legacy._execute_legacy_parent_fallback(store, "page_001", object())
+
+    migrated_ref = captured["background_responsibility"]
+    assert migrated_ref != previous_refs["background_responsibility"]
+    with Image.open(store.root / migrated_ref["path"]) as image:
+        migrated = np.asarray(image.convert("L")) > 0
+    assert np.any(migrated)
+    assert np.all(~migrated | old)
+    assert np.count_nonzero(migrated) < np.count_nonzero(old)
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "hardlink"])
+def test_background_responsibility_publication_rejects_existing_destination(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    replacement = tmp_path / "replacement.png"
+    Image.new("L", (8, 8), 255).save(replacement)
+    if kind == "file":
+        shutil.copyfile(replacement, target)
+    elif kind == "symlink":
+        try:
+            target.symlink_to(replacement)
+        except OSError as error:
+            pytest.skip(f"symbolic links are unavailable: {error}")
+    else:
+        try:
+            os.link(replacement, target)
+        except OSError as error:
+            pytest.skip(f"hard links are unavailable: {error}")
+    original = target.read_bytes()
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
+    assert target.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", ["write", "fsync", "read"])
+def test_background_responsibility_staging_failure_does_not_block_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+    def fail_operation(*args, **kwargs):
+        raise OSError(f"injected staging {failure} failure")
+
+    with monkeypatch.context() as patch:
+        if os.name == "nt" and failure == "write":
+            real_write = legacy._write_exclusive
+
+            def fail_write(path, payload, root):
+                real_write(path, payload[:1], root)
+                raise OSError("injected staging write failure")
+
+            patch.setattr(legacy, "_write_exclusive", fail_write)
+        elif os.name == "nt" and failure == "read":
+            patch.setattr(legacy, "_read_bound_file", fail_operation)
+        else:
+            patch.setattr(legacy.os, failure, fail_operation)
+        with pytest.raises(
+            ValueError, match="^background responsibility could not be published$"
+        ):
+            legacy._publish_background_responsibility(
+                store,
+                output_dir,
+                allowed=allowed,
+                previous_ref=None,
+                background_rebuilt=True,
+            )
+
+    assert not target.exists()
+    staging = list(output_dir.glob(".background-responsibility-staging-*.png"))
+    assert len(staging) == 1
+    assert all(path.name != target.name for path in staging)
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+    assert result is not None
+    assert target.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-bound publication")
+def test_background_responsibility_rejects_replaced_staging_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    real_publish = getattr(legacy, "_publish_staging_at", None)
+
+    def replace_staging(parent_fd, staging_name, final_name, identity):
+        os.unlink(staging_name, dir_fd=parent_fd)
+        os.mkdir(staging_name, dir_fd=parent_fd)
+        marker_fd = os.open(
+            f"{staging_name}/marker", os.O_WRONLY | os.O_CREAT, dir_fd=parent_fd
+        )
+        os.write(marker_fd, b"replacement")
+        os.close(marker_fd)
+        return real_publish(parent_fd, staging_name, final_name, identity)
+
+    monkeypatch.setattr(
+        legacy, "_publish_staging_at", replace_staging, raising=False
+    )
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
+    assert not (output_dir / "background-responsibility.png").exists()
+    staging = list(output_dir.glob(".background-responsibility-staging-*.png"))
+    assert len(staging) == 1
+    assert (staging[0] / "marker").read_bytes() == b"replacement"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-bound publication")
+def test_background_responsibility_parent_relocation_uses_bound_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    outside = tmp_path / "bound-parent"
+    replacement_done = False
+    real_open = legacy.os.open
+
+    def relocate_after_parent_open(path, flags, *args, **kwargs):
+        nonlocal replacement_done
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if Path(path) == output_dir and not replacement_done:
+            output_dir.rename(outside)
+            output_dir.mkdir()
+            (output_dir / "replacement-marker").write_bytes(b"untouched")
+            replacement_done = True
+        return descriptor
+
+    monkeypatch.setattr(legacy.os, "open", relocate_after_parent_open)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert replacement_done is True
+    assert result is not None
+    assert (outside / target.name).is_file()
+    assert list(output_dir.iterdir()) == [output_dir / "replacement-marker"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-bound publication")
+def test_background_responsibility_does_not_publish_replaced_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    real_verify = getattr(legacy, "_verify_regular_at", None)
+
+    def replace_before_verify(parent_fd, name, identity):
+        if name == target.name:
+            os.unlink(name, dir_fd=parent_fd)
+            replacement_fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            os.write(replacement_fd, b"replacement")
+            os.close(replacement_fd)
+        return real_verify(parent_fd, name, identity)
+
+    monkeypatch.setattr(
+        legacy, "_verify_regular_at", replace_before_verify, raising=False
+    )
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
+    assert target.read_bytes() == b"replacement"
+
+
+@pytest.mark.parametrize(
+    ("platform", "symbol", "exclusive_flag"),
+    [("linux", "renameat2", 1), ("darwin", "renameatx_np", 4)],
+)
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor rename")
+def test_background_responsibility_exclusive_rename_uses_directory_fds(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    symbol: str,
+    exclusive_flag: int,
+) -> None:
+    calls = []
+
+    class Rename:
+        argtypes = None
+
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    rename = Rename()
+    libc = type("LibC", (), {symbol: rename})()
+    monkeypatch.setattr(legacy.ctypes, "CDLL", lambda *args, **kwargs: libc)
+    monkeypatch.setattr(legacy.sys, "platform", platform)
+
+    legacy._rename_file_exclusive_at(17, "source", 23, "target")
+
+    assert calls == [(17, b"source", 23, b"target", exclusive_flag)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_bound_parent_handle_blocks_path_replacement(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    moved = tmp_path / "moved"
+    parent.mkdir()
+    status = parent.lstat()
+    kernel32, handle, _ = legacy._windows_open_bound(
+        parent, (status.st_dev, status.st_ino), directory=True
+    )
+    try:
+        with pytest.raises(OSError):
+            parent.rename(moved)
+        assert parent.is_dir()
+        assert not moved.exists()
+    finally:
+        legacy._windows_close(kernel32, handle)
+
+    parent.rename(moved)
+    assert moved.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_background_staging_rejects_new_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    alias = output_dir / "staging-alias.png"
+    real_publish = getattr(legacy, "_rename_windows_staging", None)
+
+    def add_hardlink(source_handle, parent_handle, final_name):
+        staging = next(output_dir.glob(".background-responsibility-staging-*.png"))
+        try:
+            os.link(staging, alias)
+        except OSError as error:
+            pytest.skip(f"hard links are unavailable: {error}")
+        return real_publish(source_handle, parent_handle, final_name)
+
+    monkeypatch.setattr(
+        legacy, "_rename_windows_staging", add_hardlink, raising=False
+    )
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
+    assert not (output_dir / "background-responsibility.png").exists()
+    assert alias.is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_published_handle_blocks_final_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    real_entries = legacy._windows_entries
+    attempted = False
+
+    def attempt_replacement(*args, **kwargs):
+        nonlocal attempted
+        attempted = True
+        with pytest.raises(OSError):
+            target.unlink()
+        return real_entries(*args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_windows_entries", attempt_replacement)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert attempted is True
+    assert result is not None
+    assert target.is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_background_publication_rejects_wrong_final_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    real_entries = legacy._windows_entries
+
+    def wrong_identity(*args, **kwargs):
+        entries = real_entries(*args, **kwargs)
+        return [
+            (name, attributes, (identity[0], identity[1] + 1))
+            if name == target.name else (name, attributes, identity)
+            for name, attributes, identity in entries
+        ]
+
+    monkeypatch.setattr(legacy, "_windows_entries", wrong_identity)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
+    assert target.is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_background_rename_binds_parent_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    class Rename:
+        argtypes = None
+        restype = None
+
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    rename = Rename()
+    ntdll = type("Ntdll", (), {"NtSetInformationFile": rename})()
+    monkeypatch.setattr(
+        legacy, "_windows_handle_information", lambda *args: (0, 1, (0, 0))
+    )
+    monkeypatch.setattr(
+        legacy.ctypes,
+        "WinDLL",
+        lambda name, **kwargs: ntdll if name == "ntdll" else object(),
+    )
+
+    legacy._rename_windows_staging(17, 23, "background-responsibility.png")
+
+    source, _, information, _, info_class = calls[0]
+    raw = bytes(information._obj)
+    pointer_size = legacy.ctypes.sizeof(legacy.ctypes.c_void_p)
+    root = int.from_bytes(raw[8:8 + pointer_size], "little")
+    assert source.value == 17
+    assert root == 23
+    assert info_class == 10
+
+
+def test_background_responsibility_publication_omits_over_budget_mask(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    allowed = np.zeros((100, 100), dtype=bool)
+    allowed[:6] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert result is None
+    assert not (output_dir / "background-responsibility.png").exists()
+
+
+@pytest.mark.parametrize("tamper", ["malformed", "sha256"])
+def test_background_responsibility_migration_rejects_invalid_old_artifact(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    old = store.root / "old.png"
+    if tamper == "malformed":
+        old.write_bytes(b"not a PNG")
+    else:
+        Image.new("L", (8, 8), 255).save(old)
+    reference = {
+        "path": "old.png",
+        "sha256": hashlib.sha256(old.read_bytes()).hexdigest(),
+    }
+    if tamper == "sha256":
+        reference["sha256"] = "0" * 64
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(ValueError):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=reference,
+            background_rebuilt=False,
+        )
+
+    assert not (output_dir / "background-responsibility.png").exists()
+
+
+def test_quality_assets_rejects_replaced_bound_foreground_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, graph, output_dir, previous_refs, _ = (
+        _background_responsibility_quality_case(
+            tmp_path, monkeypatch, occupied_by=None
+        )
+    )
+    foreground = store.root / previous_refs["foreground_evidence"]["path"]
+    old = store.root / "input/tamper-old-responsibility.png"
+    shutil.copyfile(foreground, old)
+    previous_refs["background_responsibility"] = {
+        "path": old.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(old.read_bytes()).hexdigest(),
+    }
+    real_read = legacy._read_bound_file
+    replaced = False
+
+    def replace_before_read(path: Path, *args, **kwargs) -> bytes:
+        nonlocal replaced
+        if path == foreground and not replaced:
+            replaced = True
+            Image.new("L", (180, 180), 0).save(path)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_read_bound_file", replace_before_read)
+
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        legacy._quality_assets(
+            store,
+            "page_001",
+            graph,
+            output_dir.parent / "graph",
+            output_dir,
+            previous_quality_refs=previous_refs,
+            background_rebuilt=False,
+        )
+
+    assert not (output_dir / "background-responsibility.png").exists()
 
 
 @pytest.mark.parametrize(
@@ -5084,13 +6316,11 @@ def test_host_agent_next_times_out_explicitly_while_execution_lease_is_held(
     ("responsibility_size", "quality_is_bound", "oversized_quality"),
     [
         ((12, 8), True, False),
-        ((2, 2), True, False),
         ((12, 8), False, False),
         ((12, 8), True, True),
     ],
     ids=[
         "valid-responsibility",
-        "invalid-responsibility",
         "unbound-compatibility-quality",
         "oversized-bound-quality",
     ],
@@ -5150,13 +6380,21 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
         quality_payload["padding"] = "x" * (4 * 1024 * 1024)
     quality.write_text(json.dumps(quality_payload), encoding="utf-8")
     quality_ref = reference(quality)
+    request_source = graph_dir / "request-source.png"
+    shutil.copyfile(source, request_source)
+    request = graph_dir / "request.json"
+    request.write_text(json.dumps({"evidence": {"source.png": {
+        "path": request_source.name,
+        "sha256": hashlib.sha256(request_source.read_bytes()).hexdigest(),
+    }}}), encoding="utf-8")
     store.write_json(
         "pages/page_001/reconstruction/component_state.json",
         {
             "repair_round": 5,
             "graph_ref": reference(graph_path),
             "current_round": {
-                "quality_ref": quality_ref if quality_is_bound else None
+                "quality_ref": quality_ref if quality_is_bound else None,
+                "request_ref": reference(request),
             },
             "fallback": {"parent_ids": ["parent_0001"]},
             "failed_ids": ["component_0001", "parent_0001"],
@@ -5179,8 +6417,6 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     monkeypatch.setattr(legacy, "execute_component_action_round", capture_execute)
     monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None)
     def quality_assets(*args, **kwargs):
-        if responsibility_size != (12, 8):
-            pytest.fail("invalid responsibility reached parent fallback quality")
         captured.update(kwargs)
         return {}
 
@@ -5216,12 +6452,6 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     (stale_output / "masks").mkdir(parents=True)
     (stale_output / "sentinel.txt").write_text("old retry", encoding="utf-8")
 
-    if responsibility_size != (12, 8):
-        with pytest.raises(
-            ValueError, match="legacy background responsibility is invalid"
-        ):
-            legacy._execute_legacy_parent_fallback(store, "page_001", object())
-        return
     if oversized_quality:
         with pytest.raises(
             ValueError, match="^legacy artifact could not be read$"
@@ -5232,15 +6462,18 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     legacy._execute_legacy_parent_fallback(store, "page_001", object())
 
     assert (stale_output / "sentinel.txt").read_text(encoding="utf-8") == "old retry"
-    assert captured["background_path_override"] == background
     if quality_is_bound:
-        assert captured["background_responsibility_path"] == responsibility
-        assert captured["background_responsibility_ref"] == responsibility_ref
+        assert captured["previous_quality_refs"] == {
+            **quality_payload["input_refs"],
+            "source": reference(request_source),
+        }
+        assert captured["frozen_manifest_path"] == manifest
+        assert captured["frozen_component_ids"] == {"component_0004"}
     else:
-        assert "background_responsibility_path" not in captured
-        assert "background_responsibility_ref" not in captured
-    assert captured["frozen_manifest_path"] == manifest
-    assert captured["frozen_component_ids"] == {"component_0004"}
+        assert captured["previous_quality_refs"] == {
+            "source": reference(request_source)
+        }
+        assert "frozen_manifest_path" not in captured
     assert [action["action"] for action in captured_actions] == [
         "discard", "collapse_to_parent",
     ]

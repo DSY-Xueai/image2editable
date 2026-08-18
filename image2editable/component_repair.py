@@ -2852,6 +2852,16 @@ def evaluate_component_quality_round(
     shape = source.shape[:2]
     packed_layers = None
     masks = None
+    semantic_ownership = None
+    if presentation_layers is not None and background_responsibility is not None:
+        semantic_ownership = np.zeros(shape, dtype=bool)
+        for node in active_visual:
+            semantic_ownership |= _load_quality_graph_mask(
+                node,
+                graph_root=graph_root,
+                trusted_chain=directory_chain,
+                shape=shape,
+            )
     if presentation_layers is None:
         mask_nodes = list(active_visual)
         loaded_ids = {node["id"] for node in mask_nodes}
@@ -3047,6 +3057,8 @@ def evaluate_component_quality_round(
             active_ownership = np.zeros(responsibility.shape, dtype=bool)
             for node in active_visual:
                 active_ownership |= component_ownership(node["id"])
+            if semantic_ownership is not None:
+                active_ownership |= semantic_ownership
             allowed_candidate = (
                 material_foreground
                 & ~(np.asarray(text_mask) > 0)
@@ -4367,7 +4379,9 @@ def _validate_stable_open_file(
     _require_directory_chain_identity(directory_identity)
 
 
-def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
+def _write_exclusive(
+    path: Path, payload: bytes, reconstruction: Path
+) -> tuple[int, int]:
     _contained_path(path, reconstruction)
     directory_identity = _snapshot_directory_chain(path.parent, reconstruction)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -4383,7 +4397,9 @@ def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
         target.write(payload)
         target.flush()
         os.fsync(target.fileno())
+        written = os.fstat(target.fileno())
         _require_directory_chain_identity(directory_identity)
+    return written.st_dev, written.st_ino
 
 
 def _load_or_create_integrity_key(reconstruction: Path) -> bytes:
