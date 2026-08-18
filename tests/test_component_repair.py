@@ -2748,6 +2748,29 @@ def test_previous_quality_allows_failed_candidate_to_be_replaced(
     assert "candidate_b" in reports
 
 
+def test_previous_quality_allows_prior_failed_candidate_to_be_merged(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["expected_component_ids"] = ["frozen_a"]
+    quality["report"] = _strict_quality_report("frozen_a", True)
+    state["failed_ids"] = ["merge_0001"]
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["frozen_a", "merge_0001"],
+    )
+
+    assert reports["frozen_a"]["accepted"] is True
+
+
 def test_previous_quality_identity_allows_unapproved_pair_reactivation(
     page_session: dict,
 ) -> None:

@@ -1,0 +1,88 @@
+{
+  "actions": [
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the full-page composite duplicates all independent cards and nodes"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent PILOT card surface"],
+      "object_ids": ["component_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent SCALE card surface"],
+      "object_ids": ["component_0003"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent DISCOVER card surface"],
+      "object_ids": ["component_0004"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete timeline line recovered from the source"],
+      "object_ids": ["component_0008"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent green timeline node 04"],
+      "object_ids": ["component_0010"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent blue timeline node 01"],
+      "object_ids": ["component_0011"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["independent red timeline node 03"],
+      "object_ids": ["component_0012"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["merged PROTOTYPE card is a complete independent surface"],
+      "object_ids": ["merge_0001"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["merged orange timeline node 02 is complete"],
+      "object_ids": ["merge_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["trigger one clean-canvas rebuild without expanding card text holes"],
+      "object_ids": ["text_0001"],
+      "parameters": {"margin_ratio": 0.004}
+    }
+  ],
+  "graph_sha256": "23bfaaff08bdf270376c0a33d45fa93cdc1406b1984936da215292813e6f81f3",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "72e152baa141158fcefbb5fbd71b825e21bdffe57ac86efe7dfb6c47f58a7029",
+  "schema_version": 1
+}

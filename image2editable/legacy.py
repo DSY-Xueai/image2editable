@@ -1406,7 +1406,7 @@ def _rebuild_canvas_background(
     graph_root = graph_dir.resolve()
     by_id = {node["id"]: node for node in graph["nodes"]}
     masks_by_id = {}
-    claimed_visual = np.zeros(text_repair.shape, dtype=bool)
+    repairable_visual = np.zeros(text_repair.shape, dtype=bool)
     for object_id, node in by_id.items():
         mask_path = (graph_dir / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(graph_root):
@@ -1418,10 +1418,24 @@ def _rebuild_canvas_background(
         if mask.shape != text_repair.shape:
             raise ValueError("background rebuild mask dimensions differ")
         masks_by_id[object_id] = mask
-        claimed_visual |= mask
+        left, top, right, bottom = node["bbox"]
+        edge_margin = max(1, round(min(mask.shape) * 0.01))
+        inactive_page_surface = (
+            node["kind"] == "parent"
+            and node["state"] == "inactive"
+            and node["parent_id"] is None
+            and node["z_index"] == 0
+            and float(mask.mean()) >= 0.75
+            and left <= edge_margin
+            and top <= edge_margin
+            and right >= mask.shape[1] - edge_margin
+            and bottom >= mask.shape[0] - edge_margin
+        )
+        if not inactive_page_surface:
+            repairable_visual |= mask
     repair = (
         cv2.dilate(
-            claimed_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+            repairable_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
         ) > 0
         if repair_all_active
         else np.zeros(text_repair.shape, dtype=bool)
@@ -1457,7 +1471,7 @@ def _rebuild_canvas_background(
         repair |= text_repair
     rebuilt = current.copy()
     if restored is not None:
-        rebuilt[~claimed_visual] = restored[~claimed_visual]
+        rebuilt[~repairable_visual] = restored[~repairable_visual]
         rebuilt[restore_repair] = restored[restore_repair]
         repair &= ~restore_repair
     if np.any(repair):

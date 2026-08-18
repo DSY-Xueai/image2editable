@@ -2849,6 +2849,61 @@ def test_rebuild_canvas_background_consumes_every_repair_request(
     assert np.array_equal(actual[:4, :4], source_pixels[:4, :4])
 
 
+def test_background_rebuild_skips_page_surface_when_repairing_foreground(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    shape = (20, 20)
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    restored = tmp_path / "restored.png"
+    Image.new("RGB", shape[::-1], "white").save(source)
+    Image.new("RGB", shape[::-1], "black").save(current)
+    Image.new("RGB", shape[::-1], "white").save(restored)
+    graph_dir = tmp_path / "graph"
+    (graph_dir / "masks").mkdir(parents=True)
+    page_surface = np.ones(shape, dtype=bool)
+    large_foreground = _background_box_mask(shape, (0, 0, 20, 16))
+    card = _background_box_mask(shape, (8, 8, 12, 12))
+    graph = _write_background_action_graph(
+        graph_dir,
+        {
+            "page_surface": page_surface,
+            "large_foreground": large_foreground,
+            "card": card,
+        },
+    )
+    graph["nodes"][0]["state"] = "inactive"
+    text_mask = tmp_path / "text-mask.png"
+    Image.new("L", shape[::-1], 0).save(text_mask)
+    output = tmp_path / "rebuilt.png"
+    captured: dict[str, np.ndarray] = {}
+
+    def choose_visual_fill(**kwargs):
+        captured["repair"] = kwargs["semantic_mask"].copy()
+        return kwargs["rgb"], "test"
+
+    monkeypatch.setattr(component_underlay, "_choose_visual_fill", choose_visual_fill)
+
+    legacy._rebuild_canvas_background(
+        source_path=source,
+        current_background_path=current,
+        restore_background_path=restored,
+        repair_requests=[],
+        graph=graph,
+        graph_dir=graph_dir,
+        text_mask_path=text_mask,
+        output_path=output,
+    )
+
+    assert captured["repair"][2, 2]
+    assert captured["repair"][9, 9]
+    assert not captured["repair"][18, 18]
+    assert Image.open(output).getpixel((18, 18)) == (255, 255, 255)
+
+
 def test_execute_legacy_round_aggregates_background_actions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

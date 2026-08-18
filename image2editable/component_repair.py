@@ -1779,11 +1779,26 @@ def _previous_component_reports(
     expected_component_ids = quality_evidence.get("expected_component_ids")
     initial_component_count = quality_evidence.get("initial_component_count")
     state_failed_ids = state.get("failed_ids", [])
+    previous_failed_ids = next(
+        (
+            entry.get("failed_ids", [])
+            for entry in reversed(state.get("round_history", []))
+            if isinstance(entry, dict)
+            and entry.get("round") == state["repair_round"] - 1
+        ),
+        [],
+    )
     valid_state_failed_ids = (
         isinstance(state_failed_ids, list)
         and all(type(value) is str for value in state_failed_ids)
+        and isinstance(previous_failed_ids, list)
+        and all(type(value) is str for value in previous_failed_ids)
     )
-    state_failed_id_set = set(state_failed_ids) if valid_state_failed_ids else set()
+    state_failed_id_set = (
+        set(state_failed_ids) | set(previous_failed_ids)
+        if valid_state_failed_ids
+        else set()
+    )
     reopened_pair_ids = (
         _unapproved_contained_parent_ids(quality_evidence)
         if _is_component_pair_list(quality_evidence["contained_parent_pairs"])

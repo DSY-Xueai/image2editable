@@ -1,0 +1,172 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["complete page background and timeline base separated from frozen OCR text"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete PILOT card surface and red border"],
+      "object_ids": ["component_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete SCALE card surface and green border"],
+      "object_ids": ["component_0003"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete DISCOVER card surface and blue border"],
+      "object_ids": ["component_0004"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.97,
+      "evidence": ["left and central portion of the PROTOTYPE card surface"],
+      "object_ids": ["component_0005"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete title-region background separated from frozen OCR text"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.97,
+      "evidence": ["right edge completing the PROTOTYPE card surface"],
+      "object_ids": ["component_0007"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["partial timeline fragment already represented by the complete page base"],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["outer ring and numeral layer for timeline node 02"],
+      "object_ids": ["component_0009"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete green timeline node 04"],
+      "object_ids": ["component_0010"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete blue timeline node 01"],
+      "object_ids": ["component_0011"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete red timeline node 03"],
+      "object_ids": ["component_0012"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["orange fill completing timeline node 02"],
+      "object_ids": ["component_0013"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["short duplicate timeline-line fragment"],
+      "object_ids": ["component_0014"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["left duplicate timeline-line fragment"],
+      "object_ids": ["component_0015"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["left duplicate timeline-line fragment contained by the page base"],
+      "object_ids": ["component_0016"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["right duplicate timeline-line fragment"],
+      "object_ids": ["component_0017"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["central duplicate timeline-line fragment"],
+      "object_ids": ["component_0018"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["partial blue node fragment contained by complete node 01"],
+      "object_ids": ["component_0019"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["partial blue node fragment contained by complete node 01"],
+      "object_ids": ["component_0020"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["small blue node fragment contained by complete node 01"],
+      "object_ids": ["component_0021"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["small orange node fragment contained by complete node 02"],
+      "object_ids": ["component_0022"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.98,
+      "evidence": ["small interior card fragment already covered by the complete PILOT card"],
+      "object_ids": ["component_0023"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "bb6c51b3dc5b76bb6e4f4ff85730c867631c08a1e0241c90137dbf04dc428acf",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "837b890be080bedaefebd616634878776255718864375b1d9bd6e44d900f0697",
+  "schema_version": 1
+}
