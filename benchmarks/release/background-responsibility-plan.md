@@ -2,17 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Every code task must also follow superpowers:test-driven-development. Work in the current release worktree and do not push.
 
-**Goal:** Keep the SHA-bound pixel responsibility artifact fail-closed while extending it to bounded horizontal and vertical chart grid segments whose 3 px cores survive erosion.
+**Goal:** Keep the SHA-bound pixel responsibility artifact fail-closed, migrate it safely when later rounds create new semantic or presentation ownership, and then re-author the blocked combo-chart and flowchart Host plans from fresh evidence.
 
-**Architecture:** Background reconstruction creates an optional binary responsibility mask from actual retained pixels. A shared pure geometry helper recognizes the existing eroded edge plus bounded axis-aligned long segments; generation and quality each rebuild their candidate mask from separately validated inputs before calling it. Execution records keep carrying the artifact by hash, and existing executions without it retain their current semantics.
+**Architecture:** Background reconstruction only produces the background image. Common quality-asset assembly computes or migrates the optional binary responsibility mask after the current graph, effective text and presentation ownership are fixed. Both publishing and quality independently derive the same allowed mask from bound inputs and the shared geometry helper. Existing artifacts are immutable: unchanged masks reuse the original ref, reduced masks are exclusively published under a new ref, and empty or over-budget masks are omitted.
 
 **Tech Stack:** Python 3.12, NumPy, OpenCV, Pillow, pytest, existing component repair artifact contracts.
 
 ---
 
-Tasks 1–3 below record the completed removal of the page-wide boolean and the first
-pixel responsibility implementation. Task 4 is the original acceptance task; its
-strict replay did not complete and Task 7 supersedes it. Execute only Tasks 5–7 next.
+Tasks 1–6 below record the completed removal of the page-wide boolean, first pixel
+responsibility implementation and long-grid geometry. Task 7 records the strict replay
+attempt that exposed a cross-round migration defect and is now superseded by Tasks
+8–10. Execute only Tasks 8–10 next.
 
 ### Task 1: Remove the page-wide authorization
 
@@ -363,6 +364,10 @@ git commit -m "修复：保留受约束的三像素网格线"
 
 ### Task 7: Re-author and strictly replay the combo-chart plans
 
+**Status:** Superseded. Two fresh author runs proved that carrying the round-2 mask
+unchanged into a round-3 graph with new active ownership fails closed. Do not reuse
+their requests, plans or hashes; Tasks 8–10 replace this task.
+
 **Files:**
 - Add or modify: `benchmarks/release/plans/image-combo-chart--component-round-*.json`
 - Modify: `Course.md` (ignored; never stage)
@@ -401,3 +406,249 @@ Run the focused component/runtime/release suites, Ruff, `py_compile`,
 Request final independent review and require zero Critical/Important findings. Update
 ignored `Course.md`, stage only the validated fixed plans, and commit with a Chinese
 message. Do not push.
+
+### Task 8: Add one strict background-responsibility artifact boundary
+
+**Files:**
+- Modify: `image2editable/component_repair.py`
+- Modify: `image2editable/legacy.py`
+- Modify: `tests/test_component_repair.py`
+- Modify: `tests/test_runtime_execution.py`
+- Modify: `Course.md` (ignored; never stage)
+
+- [ ] **Step 1: Write strict-decoder RED tests**
+
+Add focused tests for a shared decoder that accepts only an 8-bit, grayscale,
+non-interlaced PNG whose decoded array is two-dimensional `uint8`, has the exact page
+shape and contains only `0` and `255`. Add real encoded counterexamples for RGB,
+palette, 1-bit, 16-bit, interlaced, wrong-shape and `{0, 1}` data.
+
+Run:
+
+```powershell
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_component_repair.py -k "background_responsibility and (decode or png)" -q
+```
+
+Expected: RED because the current quality path uses generic `cv2.imdecode` checks and
+there is no reusable strict decoder.
+
+- [ ] **Step 2: Implement the minimum shared decoder**
+
+In `image2editable/component_repair.py`, add one private decoder used by both quality
+validation and legacy migration. Parse only enough PNG signature/IHDR bytes to require
+`bit_depth=8`, `color_type=0`, `compression=0`, `filter=0`, and `interlace=0`; then
+decode unchanged and enforce shape, dtype and exact values. Return a boolean array.
+Replace the ad-hoc background-responsibility decode in component quality with it.
+
+Do not add a generic image framework or change decoding for unrelated assets.
+
+- [ ] **Step 3: Write bound-reference RED tests**
+
+Exercise `_load_legacy_ref` with a valid lexical run-relative path and attacks using
+absolute paths, `..`, Windows drive/colon forms, symlink/reparse targets, hard links,
+path replacement during read and SHA mismatch. Add a test that proves containment is
+checked without dereferencing the path before `_read_bound_file` binds the descriptor.
+
+Run:
+
+```powershell
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_runtime_execution.py -k "legacy_ref and (bound or lexical or link or replacement)" -q
+```
+
+Expected: at least the lexical-symlink test is RED because `_legacy_ref_path` currently
+calls `resolve()` before the descriptor-bound read.
+
+- [ ] **Step 4: Make legacy refs lexical and descriptor-bound**
+
+Validate the reference schema and lowercase SHA as today, parse the path as a strict
+relative POSIX path, reject empty/dot/dot-dot/drive/colon forms, join its parts to
+`store.root`, and pass that lexical path to existing `_read_bound_file`. Hash exactly
+the returned bytes. Keep the returned path lexical; do not call `resolve()` before
+the bound read.
+
+- [ ] **Step 5: Verify and commit the boundary**
+
+Run:
+
+```powershell
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_component_repair.py tests/test_runtime_execution.py -k "background_responsibility or legacy_ref" -q
+E:\i2e-release-py312\Scripts\python.exe -m ruff check image2editable/component_repair.py image2editable/legacy.py tests/test_component_repair.py tests/test_runtime_execution.py
+E:\i2e-release-py312\Scripts\python.exe -m py_compile image2editable/component_repair.py image2editable/legacy.py
+git diff --check
+```
+
+Update ignored `Course.md`. Request specification review, then quality review; require
+zero Critical/Important findings. Stage only the four tracked files and commit:
+
+```powershell
+git add -- image2editable/component_repair.py image2editable/legacy.py tests/test_component_repair.py tests/test_runtime_execution.py
+git commit -m "安全：严格验证背景责任工件"
+```
+
+### Task 9: Generate or migrate responsibility at common quality-asset assembly
+
+**Files:**
+- Modify: `image2editable/legacy.py`
+- Modify: `image2editable/component_repair.py`
+- Modify: `tests/test_runtime_execution.py`
+- Modify: `tests/test_component_quality.py`
+- Modify: `Course.md` (ignored; never stage)
+
+- [ ] **Step 1: Write the cross-round state-transition RED tests**
+
+Build small real run artifacts and cover this exact decision table:
+
+| Rebuild | Previous ref | Result |
+|---|---|---|
+| yes | either | recompute from zero using current allowed mask |
+| no | absent | omit |
+| no | present, unchanged | reuse exact path and SHA |
+| no | present, partly invalidated | publish `old & current_allowed` under a new ref |
+| no | present, fully invalidated | omit |
+
+For partial and total invalidation, separately make pixels newly owned by current
+effective text, current semantic graph masks and current presentation ownership.
+Assert the previous artifact bytes never change and no branch can add pixels.
+
+Add integration tests for both ordinary component execution and parent fallback.
+The focused regression must reproduce the discovered sequence: round 2 publishes a
+mask; round 3 activates an owner over part of it; quality succeeds with only the safe
+remainder instead of raising `background responsibility mask is invalid`.
+
+Run:
+
+```powershell
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_runtime_execution.py tests/test_component_quality.py -k "background_responsibility and (migrate or carry or rebuild or parent)" -q
+```
+
+Expected: RED because execution currently carries the previous ref unchanged.
+
+- [ ] **Step 2: Remove responsibility output from background rebuilding**
+
+Delete `foreground_evidence_path` and `responsibility_output_path` from
+`_rebuild_canvas_background` and remove its responsibility generation block. Keep its
+background-pixel behavior unchanged. Pass only whether a rebuild occurred and the
+previous quality refs into common quality-asset assembly.
+
+- [ ] **Step 3: Derive the current allowed mask once at quality-asset assembly**
+
+After current graph, effective text and presentation assets are fixed, load all inputs
+through bound references and compute:
+
+```python
+current_visual_exclusion = semantic_mask_union | presentation_ownership_union
+candidate = (
+    material_foreground
+    & ~effective_text_mask
+    & ~current_visual_exclusion
+    & np.all(source == current_background, axis=2)
+)
+current_allowed = _background_responsibility_geometry(candidate)
+```
+
+The semantic union includes exactly non-text nodes in `pending`, `pending_gate` or
+`frozen`. The presentation union uses the bound assets for those same nodes. The
+foreground evidence comes from the previous bound quality ref, not a naked prepared
+page path. Preserve the existing 5% total budget.
+
+- [ ] **Step 4: Apply the decision table and publish safely**
+
+For rebuild, replace any previous artifact with `current_allowed`. For migration,
+strict-decode the old bound payload and calculate `next_mask = old_mask &
+current_allowed`. Empty wins over identity reuse. If unchanged, reuse the exact old
+ref without writing. If reduced, encode an 8-bit grayscale PNG in memory, write it via
+the existing exclusive/no-follow boundary, read it back through the bound reader,
+and verify bytes and SHA before returning its new run-relative ref. If empty or over
+budget, omit the ref and create no file.
+
+Use one common helper for ordinary execution and parent fallback. Do not duplicate an
+approximate migration path and do not mutate or delete the old artifact.
+
+- [ ] **Step 5: Keep quality independently fail-closed**
+
+In `evaluate_component_quality_round`, strict-decode the submitted mask and rebuild
+the allowed mask from its independently bound source/background/foreground/text,
+semantic masks and presentation ownership. Reject any submitted pixel outside the
+allowed mask; never prune it silently. Keep warning thresholds, report schemas and
+failure categories unchanged.
+
+- [ ] **Step 6: Add publication and tamper attacks**
+
+Test a pre-created destination, symlink/reparse destination, hard link, destination
+replacement, malformed old PNG, wrong SHA and changed foreground-evidence ref. Each
+must fail before a new ref is published. Assert failed writes do not overwrite an
+existing artifact and cleanup does not remove a replacement entry.
+
+- [ ] **Step 7: Verify, review and commit the migration**
+
+Run:
+
+```powershell
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_runtime_execution.py tests/test_component_quality.py tests/test_component_repair.py -q
+E:\i2e-release-py312\Scripts\python.exe -m pytest tests/test_release_benchmark.py tests/test_benchmark_conversion.py -q
+E:\i2e-release-py312\Scripts\python.exe -m ruff check image2editable/legacy.py image2editable/component_repair.py tests/test_runtime_execution.py tests/test_component_quality.py
+E:\i2e-release-py312\Scripts\python.exe -m py_compile image2editable/legacy.py image2editable/component_repair.py
+git diff --check
+```
+
+Update ignored `Course.md`. Request specification review followed by quality review,
+fix all Critical/Important findings with new RED tests, and commit only the listed
+tracked files:
+
+```powershell
+git add -- image2editable/legacy.py image2editable/component_repair.py tests/test_runtime_execution.py tests/test_component_quality.py
+git commit -m "修复：迁移跨轮背景责任"
+```
+
+### Task 10: Re-author and strictly replay both migration-blocked cases
+
+**Files:**
+- Add or modify: `benchmarks/release/plans/image-combo-chart--component-round-*.json`
+- Add or modify: `benchmarks/release/plans/image-flowchart--component-round-*.json`
+- Modify: `Course.md` (ignored; never stage)
+
+- [ ] **Step 1: Build and install the exact candidate wheel**
+
+Build from the committed migration HEAD and force-reinstall the wheel into
+`E:\i2e-release-py312`. Verify all installed production-file SHA-256 values match the
+checkout, `pip check` succeeds, runtime and agent model receipts are valid,
+`IMAGE2EDITABLE_MODEL_CACHE=E:\image2editable-model-cache`, and
+`image2editable doctor --agent-local` reports ready. Do not download, stage or commit
+model files.
+
+- [ ] **Step 2: Fresh-author combo chart plans**
+
+Use a new short E-drive author root. Complete the dynamic Host handshake, inspect each
+round's source, numbered masks, reconstruction, difference, unexplained mask and
+quality report, and author actions for the exact current request and graph SHA values.
+Before recording every plan, run schema and offline graph-transition validation and
+require unique active z-order with no active parent-child pair. Do not reuse either
+failed author root or its stale round-3 hash.
+
+- [ ] **Step 3: Strictly replay combo from a second fresh root**
+
+Use only the fixed plans. Require exact hash matches at every round, completed run,
+validated page, no warning/fallback and a real PPTX. Render the slide with the bundled
+presentation runtime, inspect bars, conversion line, legend, CJK text and complete
+3 px grid, then run `slides_test.py` and the release evaluator.
+
+- [ ] **Step 4: Fresh-author and strictly replay flowchart**
+
+Repeat Steps 2–3 with new author and replay roots for `inputs/06-flowchart.png`.
+Specifically prove that a later round may activate ownership over an earlier
+responsibility mask without failure, pixel addition or stale-ref reuse. Inspect all
+cards, connectors, arrows and text; require the same zero-warning structural gates.
+
+- [ ] **Step 5: Run final case and repository gates**
+
+Run focused migration/component/runtime/release tests, the complete model-free suite,
+Ruff, `py_compile`, `git diff --check`, plan-schema tests and a checkout-outside
+candidate-wheel smoke. Record per-stage timings without changing any quality threshold
+or warning policy.
+
+- [ ] **Step 6: Review and commit only proven plans**
+
+Request specification review followed by quality review over code, plans and fresh
+evidence. Require zero Critical/Important findings. Update ignored `Course.md`. Stage
+only plan files whose independent replay and visual QA passed; use separate Chinese
+commits for combo and flowchart if they finish independently. Do not push.
