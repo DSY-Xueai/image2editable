@@ -2005,6 +2005,117 @@ def test_background_rebuild_does_not_authorize_flattened_retained_raster(
     assert report["checks"]["visual_ownership"] == "fail"
 
 
+@pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
+def test_background_geometry_accepts_complete_three_pixel_long_lines(
+    orientation: str,
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=np.uint8)
+    if orientation == "horizontal":
+        candidate[300:303, 200:1400] = 1
+    else:
+        candidate[100:800, 700:703] = 1
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert accepted.dtype == np.bool_
+    assert np.array_equal(accepted, candidate.astype(bool))
+
+
+def test_background_geometry_accepts_long_line_intersection_core() -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[449:452, 200:1400] = True
+    candidate[100:800, 799:802] = True
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate)
+    assert np.all(accepted[449:452, 799:802])
+
+
+def test_background_geometry_short_line_keeps_only_existing_thin_edge() -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[300:303, 500:560] = True
+    core = component_quality.cv2.erode(
+        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate & ~core)
+    assert not np.any(accepted & core)
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (300, 200, 306, 1400),
+        (250, 400, 650, 1200),
+    ],
+)
+def test_background_geometry_rejects_thick_strip_and_rectangle_core(
+    box: tuple[int, int, int, int],
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    y1, x1, y2, x2 = box
+    candidate[y1:y2, x1:x2] = True
+    core = component_quality.cv2.erode(
+        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate & ~core)
+    assert not np.any(accepted & core)
+
+
+@pytest.mark.parametrize("shape", ["diagonal", "curve"])
+def test_background_geometry_rejects_diagonal_and_curved_core(shape: str) -> None:
+    candidate = np.zeros((900, 1600), dtype=np.uint8)
+    if shape == "diagonal":
+        component_quality.cv2.line(candidate, (300, 150), (1100, 750), 1, 3)
+    else:
+        component_quality.cv2.circle(candidate, (800, 450), 80, 1, 3)
+    support = candidate.astype(bool)
+    core = component_quality.cv2.erode(
+        candidate, np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+    assert np.any(core)
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, support & ~core)
+    assert not np.any(accepted & core)
+
+
+def test_background_geometry_runs_component_analysis_exactly_twice(
+    monkeypatch,
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[::9, ::11] = True
+    delegate = component_quality.cv2.connectedComponentsWithStats
+    calls = 0
+
+    def counting_delegate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return delegate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        component_quality.cv2, "connectedComponentsWithStats", counting_delegate
+    )
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert calls == 2
+    assert np.array_equal(accepted, candidate)
+
+
+@pytest.mark.parametrize("candidate", [np.zeros(8), np.zeros((2, 3, 4))])
+def test_background_geometry_requires_two_dimensions(candidate: np.ndarray) -> None:
+    with pytest.raises(ValueError, match="candidate must be a two-dimensional mask"):
+        component_quality._background_responsibility_geometry(candidate)
+
+
 def test_background_responsibility_owns_only_bound_thin_structure(
     tmp_path,
 ) -> None:

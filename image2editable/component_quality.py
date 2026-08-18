@@ -365,6 +365,39 @@ def _ratio(numerator: np.ndarray, denominator: int) -> float:
     return float(np.count_nonzero(numerator)) / max(denominator, 1)
 
 
+def _background_responsibility_geometry(candidate: np.ndarray) -> np.ndarray:
+    support = np.asarray(candidate, dtype=bool)
+    if support.ndim != 2:
+        raise ValueError("candidate must be a two-dimensional mask")
+    height, width = support.shape
+    short_side = min(height, width)
+    max_thickness = max(3, (short_side + 150) // 300)
+    min_length = max(32, (short_side + 5) // 10)
+    pixels = support.astype(np.uint8)
+    core = cv2.erode(pixels, np.ones((3, 3), dtype=np.uint8)) > 0
+    accepted = support & ~core
+    for kernel_shape, horizontal in (
+        ((1, min_length), True),
+        ((min_length, 1), False),
+    ):
+        opened = cv2.morphologyEx(
+            pixels,
+            cv2.MORPH_OPEN,
+            np.ones(kernel_shape, dtype=np.uint8),
+        )
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(opened, 8)
+        major = stats[:, cv2.CC_STAT_WIDTH if horizontal else cv2.CC_STAT_HEIGHT]
+        minor = stats[:, cv2.CC_STAT_HEIGHT if horizontal else cv2.CC_STAT_WIDTH]
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = (
+            (major[1:] >= min_length)
+            & (minor[1:] <= max_thickness)
+            & (major[1:] >= 20 * minor[1:])
+        )
+        accepted |= support & keep[labels]
+    return accepted
+
+
 def _largest_region(mask: np.ndarray) -> tuple[int, np.ndarray]:
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         np.asarray(mask, dtype=np.uint8), 8
