@@ -625,6 +625,13 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
         if any(node.get("state") != "pending" for node in selected[1:]):
             raise ValueError("absorb_into_parent requires pending absorbed components")
         return
+    if action == "rebuild_background":
+        if any(
+            node.get("kind") == "text" and node.get("state") != "frozen"
+            for node in selected
+        ):
+            raise ValueError("rebuild_background requires frozen text objects")
+        return
     if any(node.get("kind") == "text" for node in selected):
         raise ValueError("component action cannot target text kind")
     if action == "merge":

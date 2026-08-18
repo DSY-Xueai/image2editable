@@ -1,0 +1,123 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete pale-blue page background separated from frozen OCR text"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.96,
+      "evidence": ["independent left-card border and shadow detail"],
+      "object_ids": ["component_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.96,
+      "evidence": ["independent right-card border and shadow detail"],
+      "object_ids": ["component_0003"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete left profile-card surface"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete right profile-card surface"],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete middle profile-card surface"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete left avatar circle"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["84-pixel middle-avatar edge fragment is contained by the complete avatar circle"],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete middle avatar circle"],
+      "object_ids": ["component_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["63-pixel right-avatar edge fragment is contained by the complete avatar circle"],
+      "object_ids": ["component_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["complete right avatar circle"],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["complete title-region background separated from frozen OCR text"],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["independent middle-card pill control"],
+      "object_ids": ["component_0013"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["independent right-card pill control"],
+      "object_ids": ["component_0014"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["independent right-card pill control"],
+      "object_ids": ["component_0015"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["independent right-card divider line"],
+      "object_ids": ["component_0016"],
+      "parameters": {"independent": true}
+    }
+  ],
+  "graph_sha256": "285b7443143d53284bda23c189c6c590e3c0860a2a5b04de4b6f71e35cbdb88d",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "d39a57aae4470fa97c7615734e3a2f4878f79a4cac2f16127fb22ce05d067e2a",
+  "schema_version": 1
+}

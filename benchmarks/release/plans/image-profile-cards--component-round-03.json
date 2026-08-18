@@ -1,0 +1,130 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed page background retains the complete editable core"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the page background"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["left-card border passed the prior quality round"],
+      "object_ids": ["component_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed left-card surface retains the complete editable core"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the left card"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed right-card surface retains the complete editable core"],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the right card"],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed middle-card surface retains the complete editable core"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the middle card"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed left avatar retains the complete colored circle"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the left avatar"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed middle avatar retains the complete colored circle"],
+      "object_ids": ["component_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the middle avatar"],
+      "object_ids": ["component_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["trimmed right avatar retains the complete colored circle"],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": ["signed unexplained-mask contains the boundary adjacent to the right avatar"],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.98,
+      "evidence": ["quality-report attributes the remaining halo and duplicate pixels to underlay boundaries"],
+      "object_ids": ["component_0001", "component_0004", "component_0005", "component_0006", "component_0007", "component_0009", "component_0011"],
+      "parameters": {"margin_ratio": 0.004}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["right-card divider passed the prior quality round"],
+      "object_ids": ["component_0016"],
+      "parameters": {"independent": true}
+    }
+  ],
+  "graph_sha256": "c51796cd6d3a0edb489b7f7845128e667abd056e60e68c642f54deb0cb623f52",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "c86a55cbaec012150e4ba57e69b7bd22628e2b764e6f8d0fdf8dc27e6d4f9004",
+  "schema_version": 1
+}

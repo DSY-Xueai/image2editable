@@ -1381,6 +1381,7 @@ def _rebuild_canvas_background(
     graph_dir: Path,
     text_mask_path: Path,
     output_path: Path,
+    repair_all_active: bool = True,
 ) -> Path:
     import cv2
     import numpy as np
@@ -1418,9 +1419,21 @@ def _rebuild_canvas_background(
             raise ValueError("background rebuild mask dimensions differ")
         masks_by_id[object_id] = mask
         claimed_visual |= mask
-    repair = cv2.dilate(
-        claimed_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
-    ) > 0
+    repair = (
+        cv2.dilate(
+            claimed_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+        ) > 0
+        if repair_all_active
+        else np.zeros(text_repair.shape, dtype=bool)
+    )
+    restore_repair = np.zeros(text_repair.shape, dtype=bool)
+    attached_text_ids = {
+        text_id
+        for node in by_id.values()
+        if node["kind"] != "text"
+        and node["state"] in {"pending", "pending_gate", "frozen"}
+        for text_id in node["text_ids"]
+    }
     for object_ids, margin_ratio in repair_requests:
         if not 0 < margin_ratio <= 0.1:
             raise ValueError("background rebuild margin_ratio is invalid")
@@ -1428,15 +1441,25 @@ def _rebuild_canvas_background(
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
         )
-        request_mask = np.zeros(text_repair.shape, dtype=bool)
         for object_id in object_ids:
-            request_mask |= masks_by_id[object_id]
-        repair |= cv2.dilate(request_mask.astype(np.uint8), kernel) > 0
+            request_mask = cv2.dilate(
+                masks_by_id[object_id].astype(np.uint8), kernel
+            ) > 0
+            if (
+                restored is not None
+                and by_id[object_id]["kind"] == "text"
+                and object_id not in attached_text_ids
+            ):
+                restore_repair |= request_mask
+            else:
+                repair |= request_mask
     if restored is None:
         repair |= text_repair
     rebuilt = current.copy()
     if restored is not None:
         rebuilt[~claimed_visual] = restored[~claimed_visual]
+        rebuilt[restore_repair] = restored[restore_repair]
+        repair &= ~restore_repair
     if np.any(repair):
         from scripts.component_underlay import _choose_visual_fill
 
@@ -2126,6 +2149,11 @@ def _execute_legacy_round(
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
             output_path=output_dir / "background-rebuilt.png",
+            repair_all_active=(
+                current_background is None
+                or sha256_file(current_background)
+                == sha256_file(Path(prepared["background_original_path"]))
+            ),
         )
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,

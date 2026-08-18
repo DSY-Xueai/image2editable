@@ -3127,14 +3127,75 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
         restore_background_path=restored,
         repair_requests=[({"selected"}, 0.01)],
         graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
-        output_path=output,
+        output_path=output, repair_all_active=False,
     )
 
     with Image.open(output) as rebuilt:
         assert rebuilt.getpixel((15, 11)) == (255, 255, 255)
-        assert rebuilt.getpixel((31, 11)) == (255, 255, 255)
+        assert rebuilt.getpixel((31, 11)) == (210, 210, 210)
         assert rebuilt.getpixel((20, 20)) == (0, 0, 255)
     assert allow_original_values == [False]
+
+
+@pytest.mark.parametrize(
+    ("attached", "expected"),
+    [(False, (255, 255, 255)), (True, (160, 160, 160))],
+)
+def test_background_rebuild_restores_selected_text_inside_active_visual(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    attached: bool, expected: tuple[int, int, int],
+) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    restored = tmp_path / "text-clean.png"
+    text_mask = tmp_path / "text-mask.png"
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    Image.new("RGB", (40, 30), "white").save(source)
+    dirty = Image.new("RGB", (40, 30), "white")
+    ImageDraw.Draw(dirty).rectangle((14, 10, 25, 19), fill=(30, 30, 30))
+    dirty.save(current)
+    Image.new("RGB", (40, 30), "white").save(restored)
+    page_mask = masks / "page.png"
+    Image.new("L", (40, 30), 255).save(page_mask)
+    frozen_text_mask = masks / "text.png"
+    selected = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(selected).rectangle((14, 10, 25, 19), fill=255)
+    selected.save(frozen_text_mask)
+    selected.save(text_mask)
+    graph = {"nodes": [{
+        "id": "page", "kind": "parent", "parent_id": None,
+        "state": "frozen", "mask": "masks/page.png",
+        "mask_sha256": hashlib.sha256(page_mask.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 40, 30], "z_index": 0,
+        "text_ids": ["text"] if attached else [],
+    }, {
+        "id": "text", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": "masks/text.png",
+        "mask_sha256": hashlib.sha256(frozen_text_mask.read_bytes()).hexdigest(),
+        "bbox": [14, 10, 26, 20], "z_index": 1, "text_ids": [],
+    }]}
+    from scripts import component_underlay
+
+    def gray_fill(**kwargs):
+        filled = kwargs["rgb"].copy()
+        filled[kwargs["visual_hole"]] = 160
+        return filled, None
+
+    monkeypatch.setattr(component_underlay, "_choose_visual_fill", gray_fill)
+    output = tmp_path / "rebuilt.png"
+
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        restore_background_path=restored,
+        repair_requests=[({"text"}, 0.01)],
+        graph=graph, graph_dir=graph_dir, text_mask_path=text_mask,
+        output_path=output,
+    )
+
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((20, 15)) == expected
 
 
 def test_background_rebuild_preserves_local_tinted_surface(tmp_path: Path) -> None:

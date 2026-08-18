@@ -446,6 +446,16 @@ def test_component_plan_accepts_multiple_background_rebuilds() -> None:
     ) is plan
 
 
+def test_component_plan_allows_background_rebuild_for_frozen_text() -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, "rebuild_background", ["text"])
+    plan["actions"][0]["parameters"] = {"margin_ratio": 0.01}
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
 def _node(
     component_id: str,
     *,

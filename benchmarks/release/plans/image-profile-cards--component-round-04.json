@@ -1,0 +1,39 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["page background passed the prior quality round and reopened only as a dependency"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["right-card surface passed the prior quality round and reopened only as a dependency"],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["middle-card surface passed the prior quality round and reopened only as a dependency"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "attach_text",
+      "confidence": 0.99,
+      "evidence": ["quality-report isolates the remaining background-text residual to the LL initials inside the left avatar circle"],
+      "object_ids": ["component_0007", "text_0002"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "1e5ca20c9c3d32cb853134eb7951a72da96c9c2f6ab3426ce70237157586187a",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "08b713218ba81f535d88c153c61c4f75fd8317f388dbe7b136998a01dbc11653",
+  "schema_version": 1
+}
