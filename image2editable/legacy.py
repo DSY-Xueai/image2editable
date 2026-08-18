@@ -830,7 +830,7 @@ def _build_presentation_assets(
     }
 
     final_dir = output_dir / "presentation-assets"
-    staging = output_dir / f".presentation-assets.tmp-{uuid.uuid4().hex}"
+    staging = output_dir / f".pa-tmp-{uuid.uuid4().hex}"
     staging.mkdir()
     staging_identity = _directory_identity(staging.lstat())
     try:

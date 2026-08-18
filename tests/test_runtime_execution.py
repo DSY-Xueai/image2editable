@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import types
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -384,13 +385,13 @@ def test_presentation_assets_publish_atomically_and_retry_after_save_failure(
 
     final_dir = tmp_path / "presentation-assets"
     assert not final_dir.exists()
-    assert not list(tmp_path.glob(".presentation-assets.tmp-*"))
+    assert not list(tmp_path.glob(".pa-tmp-*"))
 
     monkeypatch.setattr(Image.Image, "save", real_save)
     real_sha256_file = legacy.sha256_file
 
     def reject_staging_hash(path):
-        assert not Path(path).parent.name.startswith(".presentation-assets.tmp-")
+        assert not Path(path).parent.name.startswith(".pa-tmp-")
         return real_sha256_file(path)
 
     monkeypatch.setattr(legacy, "sha256_file", reject_staging_hash)
@@ -417,7 +418,62 @@ def test_presentation_assets_publish_atomically_and_retry_after_save_failure(
             output_dir=conflict_output,
         )
     assert list(conflict_final.iterdir()) == []
-    assert not list(conflict_output.glob(".presentation-assets.tmp-*"))
+    assert not list(conflict_output.glob(".pa-tmp-*"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path-length contract")
+def test_presentation_assets_support_deep_windows_run_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "source.png"
+    mask_path = tmp_path / "mask.png"
+    Image.new("RGB", (4, 4), "red").save(source_path)
+    Image.new("L", (4, 4), 255).save(mask_path)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": mask_path.name,
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
+    }]}
+    padding = 176 - len(str(tmp_path.resolve())) - 1
+    assert 0 < padding < 200
+    output_dir = tmp_path / ("x" * padding)
+    output_dir.mkdir()
+    old_staging_asset = (
+        output_dir
+        / f".presentation-assets.tmp-{'a' * 32}"
+        / "0001-presentation-alpha-mask.png"
+    )
+    new_staging_asset = (
+        output_dir
+        / f".pa-tmp-{'a' * 32}"
+        / "0001-presentation-alpha-mask.png"
+    )
+    assert len(str(old_staging_asset.resolve())) > 260
+    assert len(str(new_staging_asset.resolve())) < 260
+    saved_paths = []
+    real_save = Image.Image.save
+
+    def capture_save(image, path, *args, **kwargs):
+        saved_paths.append(Path(path).resolve())
+        return real_save(image, path, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "save", capture_save)
+
+    manifest_path, _ = _build_test_presentation_manifest(
+        tmp_path,
+        source_path=source_path,
+        text_clean_path=source_path,
+        graph=graph,
+        graph_dir=tmp_path,
+        output_dir=output_dir,
+    )
+
+    assert manifest_path.is_file()
+    assert saved_paths
+    assert all(path.parent.name.startswith(".pa-tmp-") for path in saved_paths)
+    assert max(len(str(path)) for path in saved_paths) < 260
+    assert not list(output_dir.glob(".pa-tmp-*"))
 
 
 def test_presentation_assets_keep_fully_occluded_component_transparent(
