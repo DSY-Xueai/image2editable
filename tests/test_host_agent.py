@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import stat
 import io
+import sys
 
 import pytest
 
@@ -17,6 +18,49 @@ from image2editable.component_repair import (
     build_component_agent_request,
     initialize_component_repair_state,
 )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path-length contract")
+def test_short_host_retry_name_keeps_real_temp_path_below_max_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    padding = 175 - len(str(tmp_path.resolve())) - 1
+    assert 0 < padding < 200
+    deep_root = tmp_path / ("x" * padding)
+    deep_root.mkdir()
+    document = {"schema_version": 1, "kind": "component_plan"}
+    payload = json.dumps(
+        document,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    ).encode("utf-8") + b"\n"
+    digest = hashlib.sha256(payload).hexdigest()
+    destination = deep_root / (
+        f"host-component-plan-page_001-01-retry-{digest[:12]}.json"
+    )
+    old_destination = deep_root / (
+        "host-component-plan-page_001-01-"
+        f"{'a' * 64}-retry-{digest[:12]}.json"
+    )
+    assert len(str(old_destination)) > 260
+    captured = []
+    real_mkstemp = host_agent.tempfile.mkstemp
+
+    def capture_mkstemp(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        captured.append(Path(name))
+        return descriptor, name
+
+    monkeypatch.setattr(host_agent.tempfile, "mkstemp", capture_mkstemp)
+
+    host_agent._write_json_exclusive(destination, document)
+
+    assert destination.read_bytes() == payload
+    assert len(captured) == 1
+    assert len(str(captured[0])) < 260
+    assert not captured[0].exists()
 
 
 def test_host_skill_uses_request_review_evidence_without_skipping_quality() -> None:

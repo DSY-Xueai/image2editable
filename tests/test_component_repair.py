@@ -1224,6 +1224,7 @@ def test_recoverable_plan_rejection_reopens_same_local_round_and_preserves_plans
     assert repeated["plan_ref"] == corrected["plan_ref"]
     assert repeated["recovered"] is True
     assert rejected_path.read_bytes() == rejected_payload
+
     assert (store.root / corrected["plan_ref"]["path"]).is_file()
 
 
@@ -1375,6 +1376,23 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
     ).exists()
     assert rejected_path.read_bytes() == rejected_payload
 
+    rejected_sha256 = hashlib.sha256(rejected_payload).hexdigest()
+    short_rejected_path = store.root / (
+        "host-component-plan-page_001-01-retry-"
+        f"{rejected_sha256[:12]}.json"
+    )
+    short_rejected_path.write_bytes(rejected_payload)
+    rejection_path = (
+        Path(page_session["reconstruction_dir"])
+        / f"component-plan-rejection-{reopened['revision']:08d}.json"
+    )
+    rejection = json.loads(rejection_path.read_text(encoding="utf-8"))
+    rejection["rejected_plan_ref"] = {
+        "path": short_rejected_path.relative_to(store.root).as_posix(),
+        "sha256": rejected_sha256,
+    }
+    rejection_path.write_text(json.dumps(rejection), encoding="utf-8")
+
     import image2editable.host_agent as host_agent
 
     handshake = host_agent.next_host_agent_item(store.root)
@@ -1400,6 +1418,7 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
     assert retry_request["request_sha256"] == request_sha256
     assert retry_request["repair_round"] == 1
     assert rejected_path.read_bytes() == rejected_payload
+    short_rejected_path.unlink()
 
     corrected_plan = copy.deepcopy(rejected_plan)
     corrected_plan["actions"] = [_action("discard", ["candidate_b"])]
@@ -1420,6 +1439,11 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
         record_host_plan(store.root, corrected_source)
     retry_paths = list(store.root.glob("host-component-plan-*-retry-*.json"))
     assert len(retry_paths) == 1
+    retry_sha256 = hashlib.sha256(retry_paths[0].read_bytes()).hexdigest()
+    assert retry_paths[0].name == (
+        f"host-component-plan-page_001-01-retry-{retry_sha256[:12]}.json"
+    )
+    assert request_sha256 not in retry_paths[0].name
 
     corrected = record_host_plan(store.root, corrected_source)
 

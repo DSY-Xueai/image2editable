@@ -618,11 +618,25 @@ def load_component_plan_correction_context(
             f"host-component-plan-{page_id}-"
             f"{state['repair_round']:02d}-{request_sha256}"
         )
+    retry_paths = [base_path]
+    if state["provider"] == "host":
+        retry_paths.insert(
+            0,
+            f"host-component-plan-{page_id}-{state['repair_round']:02d}",
+        )
     plan_path = plan_ref["path"]
     if plan_path == f"{base_path}.json":
         retry_prefix = None
-    elif plan_path.startswith(f"{base_path}-retry-") and plan_path.endswith(".json"):
-        retry_prefix = plan_path[len(base_path) + len("-retry-"):-5]
+    elif plan_path.endswith(".json") and any(
+        plan_path.startswith(f"{candidate}-retry-")
+        for candidate in retry_paths
+    ):
+        retry_path = next(
+            candidate
+            for candidate in retry_paths
+            if plan_path.startswith(f"{candidate}-retry-")
+        )
+        retry_prefix = plan_path[len(retry_path) + len("-retry-"):-5]
         if (
             len(retry_prefix) != 12
             or any(character not in "0123456789abcdef" for character in retry_prefix)

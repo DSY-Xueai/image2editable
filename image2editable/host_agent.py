@@ -169,7 +169,8 @@ def record_host_plan(run_dir: str | Path, plan_path: str | Path) -> dict:
                     allow_nan=False,
                 ).encode("utf-8") + b"\n"
                 destination = destination.with_name(
-                    f"{destination.stem}-retry-"
+                    f"host-component-plan-{request['page_id']}-"
+                    f"{request['repair_round']:02d}-retry-"
                     f"{hashlib.sha256(payload).hexdigest()[:12]}.json"
                 )
         if destination.exists() or destination.is_symlink():
