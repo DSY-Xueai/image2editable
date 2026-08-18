@@ -487,6 +487,9 @@ git commit -m "安全：严格验证背景责任工件"
 
 ### Task 9: Generate or migrate responsibility at common quality-asset assembly
 
+**Status:** Completed in `cfad4f7`; the user selected capability-bound parent
+directory inode/fd semantics for publication.
+
 **Files:**
 - Modify: `image2editable/legacy.py`
 - Modify: `image2editable/component_repair.py`
@@ -556,10 +559,19 @@ page path. Preserve the existing 5% total budget.
 For rebuild, replace any previous artifact with `current_allowed`. For migration,
 strict-decode the old bound payload and calculate `next_mask = old_mask &
 current_allowed`. Empty wins over identity reuse. If unchanged, reuse the exact old
-ref without writing. If reduced, encode an 8-bit grayscale PNG in memory, write it via
-the existing exclusive/no-follow boundary, read it back through the bound reader,
-and verify bytes and SHA before returning its new run-relative ref. If empty or over
-budget, omit the ref and create no file.
+ref without writing. If reduced, encode an 8-bit grayscale PNG in memory, create a
+random O_EXCL/no-follow staging file inside the already verified and continuously held
+parent directory capability, and write/fsync/read back through the same descriptor.
+After identity, single-link, bytes and SHA verification, publish it to the fixed final
+name with a same-parent atomic no-replace rename. If empty or over budget, omit the ref
+and create no file. Pre-publication failures may leave only an unreferenced staging
+file and must keep the final name available for retry; never unlink or reverse-rename
+after publication.
+
+The authorization linearization point is the verified parent directory inode/fd.
+After binding, an ancestor or directory rename does not revoke that capability; all
+later mutations remain relative to the original descriptor and must never re-resolve a
+replacement path, symlink, junction or same-name directory.
 
 Use one common helper for ordinary execution and parent fallback. Do not duplicate an
 approximate migration path and do not mutate or delete the old artifact.
@@ -577,7 +589,8 @@ failure categories unchanged.
 Test a pre-created destination, symlink/reparse destination, hard link, destination
 replacement, malformed old PNG, wrong SHA and changed foreground-evidence ref. Each
 must fail before a new ref is published. Assert failed writes do not overwrite an
-existing artifact and cleanup does not remove a replacement entry.
+existing artifact, never touch a replacement entry, and leave the fixed final name
+available after a pre-publication write/fsync/readback failure.
 
 - [ ] **Step 7: Verify, review and commit the migration**
 

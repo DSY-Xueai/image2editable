@@ -4742,6 +4742,7 @@ def test_background_responsibility_staging_failure_does_not_block_retry(
     target = output_dir / "background-responsibility.png"
     allowed = np.zeros((8, 8), dtype=bool)
     allowed[0, 0] = True
+
     def fail_operation(*args, **kwargs):
         raise OSError(f"injected staging {failure} failure")
 
@@ -4754,8 +4755,6 @@ def test_background_responsibility_staging_failure_does_not_block_retry(
                 raise OSError("injected staging write failure")
 
             patch.setattr(legacy, "_write_exclusive", fail_write)
-        elif os.name == "nt" and failure == "read":
-            patch.setattr(legacy, "_read_bound_file", fail_operation)
         else:
             patch.setattr(legacy.os, failure, fail_operation)
         with pytest.raises(
@@ -4942,6 +4941,25 @@ def test_background_responsibility_exclusive_rename_uses_directory_fds(
     assert calls == [(17, b"source", 23, b"target", exclusive_flag)]
 
 
+def _open_windows_shared_writer(path: Path):
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0xC0000000, 0x7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    descriptor = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+    return os.fdopen(descriptor, "r+b")
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
 def test_windows_bound_parent_handle_blocks_path_replacement(tmp_path: Path) -> None:
     parent = tmp_path / "parent"
@@ -5004,6 +5022,44 @@ def test_windows_background_staging_rejects_new_hardlink(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_background_staging_rejects_preheld_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    real_write = legacy._write_exclusive
+    held_writer = None
+
+    def hold_writer(path, payload, root):
+        nonlocal held_writer
+        identity = real_write(path, payload, root)
+        held_writer = _open_windows_shared_writer(path)
+        return identity
+
+    monkeypatch.setattr(legacy, "_write_exclusive", hold_writer)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+    try:
+        with pytest.raises(
+            ValueError, match="^background responsibility could not be published$"
+        ):
+            legacy._publish_background_responsibility(
+                store,
+                output_dir,
+                allowed=allowed,
+                previous_ref=None,
+                background_rebuilt=True,
+            )
+    finally:
+        if held_writer is not None:
+            held_writer.close()
+
+    assert not (output_dir / "background-responsibility.png").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
 def test_windows_published_handle_blocks_final_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5036,6 +5092,157 @@ def test_windows_published_handle_blocks_final_replacement(
 
     assert attempted is True
     assert result is not None
+    assert target.is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_published_handle_blocks_content_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    real_entries = legacy._windows_entries
+    blocked = False
+
+    def attempt_write(*args, **kwargs):
+        nonlocal blocked
+        try:
+            with _open_windows_shared_writer(target) as writer:
+                writer.write(b"replacement")
+                writer.flush()
+                os.fsync(writer.fileno())
+        except OSError:
+            blocked = True
+        return real_entries(*args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_windows_entries", attempt_write)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert blocked is True
+    assert result is not None
+    assert result["sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_published_handle_blocks_new_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    alias = output_dir / "published-alias.png"
+    real_entries = legacy._windows_entries
+
+    def attempt_hardlink(*args, **kwargs):
+        with pytest.raises(OSError):
+            os.link(target, alias)
+        return real_entries(*args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_windows_entries", attempt_hardlink)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert result is not None
+    assert target.stat().st_nlink == 1
+    assert not alias.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_published_parent_blocks_external_hardlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    external = tmp_path / "external.bin"
+    external.write_bytes(b"external")
+    alias = output_dir / "external-alias.bin"
+    real_entries = legacy._windows_entries
+
+    def attempt_hardlink(*args, **kwargs):
+        with pytest.raises(OSError):
+            os.link(external, alias)
+        return real_entries(*args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_windows_entries", attempt_hardlink)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    result = legacy._publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=None,
+        background_rebuilt=True,
+    )
+
+    assert result is not None
+    assert external.stat().st_nlink == 1
+    assert not alias.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound publication")
+def test_windows_background_publication_rechecks_final_handle_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = RunStore(tmp_path / "run")
+    output_dir = store.root / "pages/page_001/reconstruction/execution-02"
+    output_dir.mkdir(parents=True)
+    target = output_dir / "background-responsibility.png"
+    real_entries = legacy._windows_entries
+    real_information = legacy._windows_handle_information
+    published = False
+
+    def mark_published(*args, **kwargs):
+        nonlocal published
+        entries = real_entries(*args, **kwargs)
+        published = True
+        return entries
+
+    def report_unsafe_links(*args, **kwargs):
+        attributes, links, identity = real_information(*args, **kwargs)
+        return attributes, 2 if published else links, identity
+
+    monkeypatch.setattr(legacy, "_windows_entries", mark_published)
+    monkeypatch.setattr(legacy, "_windows_handle_information", report_unsafe_links)
+    allowed = np.zeros((8, 8), dtype=bool)
+    allowed[0, 0] = True
+
+    with pytest.raises(
+        ValueError, match="^background responsibility could not be published$"
+    ):
+        legacy._publish_background_responsibility(
+            store,
+            output_dir,
+            allowed=allowed,
+            previous_ref=None,
+            background_rebuilt=True,
+        )
+
     assert target.is_file()
 
 

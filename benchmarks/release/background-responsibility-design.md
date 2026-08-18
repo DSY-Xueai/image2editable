@@ -119,9 +119,19 @@ next_responsibility = previous_responsibility & current_allowed
 - 原 artifact 永不修改。`next_responsibility` 与旧掩码相同时复用旧引用；只要减少
   了像素，就在当前 execution 目录写新 artifact 并记录新 SHA-256；结果为空时不再
   发布 `background_responsibility` 引用。
-- 新 artifact 先在内存编码 PNG，再使用现有 exclusive/no-follow 写入边界创建；
-  发布前重新 bound-read，验证 regular、non-link/reparse、单链接、内容和 SHA，不能
-  用 `Image.save` 覆盖预置路径或硬链接。
+- 新 artifact 先在内存编码 PNG，再在已验证并持续持有的 parent directory
+  inode/fd 内创建随机 O_EXCL/no-follow staging；通过同一 descriptor 完成写入、
+  fsync、readback、单链接、内容和 SHA 验证，最后相对该 parent capability 原子
+  no-replace 发布到固定名称。任何发布前失败只留下未引用 staging，不占正式路径，
+  因而可重试；发布后失败不执行 unlink、reverse rename 或 replacement cleanup。
+  不能用 `Image.save` 覆盖预置路径或硬链接。
+- 用户已明确选择 capability-bound 安全语义：授权线性化点是 parent directory 在绑定
+  时已经通过词法 Run 边界和目录身份验证，并在操作期间持续持有 inode/fd（Windows
+  handle 不共享 DELETE）。绑定后同权限进程移动其祖先或该目录，不撤销对原 inode 的
+  授权；后续 mutation 只能通过该 capability 作用于原目录，绝不能重新解析或跟随换代
+  pathname、symlink、junction 或同名目录。此语义不承诺 POSIX 命名空间中目录在每一
+  瞬间仍具有原词法路径；纯用户态没有将祖先 containment 与子项 mutation 原子绑定的
+  通用原语。
 - 迁移只能取交集，不能增加旧掩码中没有的责任像素。需要新增责任像素时，必须由
   当前轮实际 `rebuild_background` 重新生成完整掩码。
 - 普通 component execution 与 parent fallback 使用同一迁移函数和相同输入边界，
@@ -145,7 +155,7 @@ presentation ownership 从零计算 `current_allowed`，新结果直接替换旧
    超预算则不发布。
 2. 无背景重建且没有旧责任引用：不发布。
 3. 无背景重建且有旧引用：严格读取并迁移；`next` 为空时优先不发布，否则相同则
-   复用旧引用，不同才 exclusive 写入新 artifact。
+   复用旧引用，不同才通过上述 staging-before-publication 边界写入新 artifact。
 
 责任生成与迁移都放在普通 component execution 与 parent fallback 共用的当前质量
 资产组装边界：此时当前 graph、有效 text、绑定 foreground、当前 background、语义

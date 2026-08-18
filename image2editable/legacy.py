@@ -138,6 +138,8 @@ def _windows_open_bound(
     expected_identity: tuple[int, int],
     *,
     directory: bool,
+    desired_access: int | None = None,
+    share_mode: int | None = None,
 ) -> tuple[Any, Any, Any]:
     from ctypes import wintypes
 
@@ -166,8 +168,10 @@ def _windows_open_bound(
 
     handle = create_file(
         str(path),
-        0xA1 if directory else 0x00010080,
-        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        desired_access if desired_access is not None else (
+            0xA1 if directory else 0x00010080
+        ),
+        share_mode if share_mode is not None else 0x1 | 0x2,
         None,
         3,  # OPEN_EXISTING
         (0x02000000 if directory else 0) | 0x00200000,
@@ -1959,34 +1963,70 @@ def _publish_background_responsibility_file(
             target.parent, chain[-1][1][:2], directory=True
         )
         staging = target.with_name(staging_name)
-        source_kernel32 = source_handle = None
+        source_handle = source_descriptor = locked_parent_handle = None
         try:
             identity = _write_exclusive(staging, payload, root)
-            read_back = _read_bound_file(
+            _, source_handle, _ = _windows_open_bound(
                 staging,
-                root,
-                max_bytes=len(payload) + 1,
-                label="background responsibility staging",
+                identity,
+                directory=False,
+                desired_access=0x00010081,
+                share_mode=0x1,
             )
-            source_kernel32, source_handle, _ = _windows_open_bound(
-                staging, identity, directory=False
+            import msvcrt
+
+            source_descriptor = msvcrt.open_osfhandle(
+                source_handle, os.O_RDONLY | os.O_BINARY
             )
-            _rename_windows_staging(source_handle, parent_handle, target.name)
-            entries = _windows_entries(
-                kernel32, parent_handle, target.parent, parent_status
-            )
-            published = [entry for entry in entries if entry[0] == target.name]
+            source_handle = None
+            opened = os.fstat(source_descriptor)
+            os.lseek(source_descriptor, 0, os.SEEK_SET)
+            read_back = os.read(source_descriptor, len(payload) + 1)
+            stable = os.fstat(source_descriptor)
             if (
                 read_back != payload
-                or len(published) != 1
+                or opened.st_nlink != 1
+                or stable.st_nlink != 1
+                or (opened.st_dev, opened.st_ino, stable.st_size)
+                != (*identity, len(payload))
+            ):
+                raise RuntimeError("background responsibility staging changed")
+            bound_handle = msvcrt.get_osfhandle(source_descriptor)
+            _rename_windows_staging(bound_handle, parent_handle, target.name)
+            _, locked_parent_handle, _ = _windows_open_bound(
+                target.parent,
+                chain[-1][1][:2],
+                directory=True,
+                share_mode=0x1,
+            )
+            entries = _windows_entries(
+                kernel32,
+                locked_parent_handle,
+                target.parent,
+                parent_status,
+            )
+            published = [entry for entry in entries if entry[0] == target.name]
+            _, links, final_identity = _windows_handle_information(
+                kernel32, bound_handle
+            )
+            if (
+                len(published) != 1
                 or published[0][2] != identity
+                or links != 1
+                or final_identity != (identity[0] & 0xFFFFFFFF, identity[1])
             ):
                 raise RuntimeError("background responsibility publication changed")
             return read_back
         finally:
-            if source_handle is not None:
-                _windows_close(source_kernel32, source_handle)
-            _windows_close(kernel32, parent_handle)
+            try:
+                if locked_parent_handle is not None:
+                    _windows_close(kernel32, locked_parent_handle)
+                _windows_close(kernel32, parent_handle)
+            finally:
+                if source_descriptor is not None:
+                    os.close(source_descriptor)
+                elif source_handle is not None:
+                    _windows_close(kernel32, source_handle)
 
     parent_fd = os.open(
         target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
