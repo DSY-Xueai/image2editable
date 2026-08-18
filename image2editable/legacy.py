@@ -39,6 +39,7 @@ from image2editable.component_repair import (
     reject_recoverable_component_plan,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
+    _decode_binary_grayscale_png,
     _read_bound_file,
     _validate_presentation_manifest,
 )
@@ -1371,6 +1372,20 @@ def _state_artifact(store: RunStore, reference: dict) -> Path:
     return _load_legacy_ref(store, reference)[0]
 
 
+def _legacy_background_responsibility(
+    store: RunStore,
+    reference: dict,
+    expected_shape: tuple[int, int],
+) -> tuple[Path, dict]:
+    path, payload = _load_legacy_ref(store, reference)
+    _decode_binary_grayscale_png(
+        payload,
+        expected_shape,
+        label="legacy background responsibility",
+    )
+    return path, dict(reference)
+
+
 def _rebuild_canvas_background(
     *,
     source_path: Path,
@@ -1884,6 +1899,7 @@ def _quality_assets(
     *,
     background_path_override: Path | None = None,
     background_responsibility_path: Path | None = None,
+    background_responsibility_ref: dict | None = None,
     frozen_manifest_path: Path | None = None,
     frozen_component_ids: set[str] | None = None,
 ) -> dict:
@@ -2038,13 +2054,18 @@ def _quality_assets(
         "text_items": effective_items,
         "initial_diagnostics": prepared.get("initial_diagnostics", []),
     }, ensure_ascii=False), encoding="utf-8")
-    return {
-        name: {
-            "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
-            "sha256": sha256_file(path),
-        }
-        for name, path in assets.items()
-    }
+    refs = {}
+    for name, path in assets.items():
+        if name == "background_responsibility" and (
+            background_responsibility_ref is not None
+        ):
+            refs[name] = dict(background_responsibility_ref)
+        else:
+            refs[name] = {
+                "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
+                "sha256": sha256_file(path),
+            }
+    return refs
 
 
 def _record_inference_performance(
@@ -2078,19 +2099,52 @@ def _execute_legacy_round(
     state = store.read_json(
         f"pages/{page_id}/reconstruction/component_state.json"
     )
-    request_path = _state_artifact(store, state["current_round"]["request_ref"])
+    request_path, request_payload = _load_legacy_ref(
+        store, state["current_round"]["request_ref"]
+    )
     plan_path = _state_artifact(store, state["current_round"]["plan_ref"])
     graph_path = _state_artifact(store, state["graph_ref"])
-    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request = json.loads(request_payload.decode("utf-8"))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     source = request_path.parent / Path(request["evidence"]["source.png"]["path"])
+    quality_record = request["evidence"]["quality-report.json"]
+    if (
+        not isinstance(quality_record, dict)
+        or set(quality_record) != {"path", "sha256"}
+        or not isinstance(quality_record["path"], str)
+        or not quality_record["path"]
+        or "\\" in quality_record["path"]
+        or ":" in quality_record["path"]
+        or PurePosixPath(quality_record["path"]).is_absolute()
+        or any(
+            part in {"", ".", ".."}
+            for part in PurePosixPath(quality_record["path"]).parts
+        )
+        or not isinstance(quality_record["sha256"], str)
+        or len(quality_record["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in quality_record["sha256"]
+        )
+    ):
+        raise ValueError("previous component quality reference is invalid")
     quality_evidence = request_path.parent / Path(
-        request["evidence"]["quality-report.json"]["path"]
+        *PurePosixPath(quality_record["path"]).parts
     )
-    previous_quality = json.loads(quality_evidence.read_text(encoding="utf-8"))
+    quality_payload = _read_bound_legacy_file(
+        store,
+        quality_evidence,
+        max_bytes=4 * 1024 * 1024,
+        label="previous component quality",
+    )
+    if hashlib.sha256(quality_payload).hexdigest() != quality_record["sha256"]:
+        raise ValueError("previous component quality sha256 mismatch")
+    previous_quality = json.loads(quality_payload.decode("utf-8"))
     current_background = None
     current_background_responsibility = None
+    current_background_responsibility_ref = None
+    responsibility_ref = None
     previous_presentation_manifest = request_path.parent / Path(
         request["evidence"]["presentation-manifest.json"]["path"]
     )
@@ -2104,10 +2158,6 @@ def _execute_legacy_round(
         responsibility_ref = previous_quality["input_refs"].get(
             "background_responsibility"
         )
-        if isinstance(responsibility_ref, dict):
-            current_background_responsibility = _state_artifact(
-                store, responsibility_ref
-            )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
         if action["action"] == "split":
@@ -2122,6 +2172,15 @@ def _execute_legacy_round(
     )
     with Image.open(source) as image:
         pixels = np.asarray(image.convert("RGB")).copy()
+    if isinstance(responsibility_ref, dict):
+        (
+            current_background_responsibility,
+            current_background_responsibility_ref,
+        ) = _legacy_background_responsibility(
+            store,
+            responsibility_ref,
+            pixels.shape[:2],
+        )
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     output_dir = reconstruction / f"execution-{state['repair_round']:02d}"
 
@@ -2252,10 +2311,12 @@ def _execute_legacy_round(
             and responsibility_output.exists()
             else None
         )
+        current_background_responsibility_ref = None
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
         background_path_override=current_background,
         background_responsibility_path=current_background_responsibility,
+        background_responsibility_ref=current_background_responsibility_ref,
         frozen_manifest_path=previous_presentation_manifest,
         frozen_component_ids=set(state["frozen"]),
     )
@@ -2432,26 +2493,40 @@ def _execute_legacy_parent_fallback(
     )
     quality_options = {}
     quality_ref = state["current_round"].get("quality_ref")
-    previous_quality_path = (
-        _state_artifact(store, quality_ref)
-        if isinstance(quality_ref, dict)
-        else graph_path.with_name("quality-report.json")
-    )
-    if previous_quality_path.is_file():
-        previous_quality = json.loads(_read_bound_file(
-            previous_quality_path,
-            store.root,
-            max_bytes=4 * 1024 * 1024,
-            label="previous component quality",
-        ).decode("utf-8"))
+    trusted_quality = isinstance(quality_ref, dict)
+    if trusted_quality:
+        previous_quality_payload = _load_legacy_ref(
+            store, quality_ref, max_bytes=4 * 1024 * 1024
+        )[1]
+    else:
+        previous_quality_path = graph_path.with_name("quality-report.json")
+        previous_quality_payload = (
+            _read_bound_legacy_file(
+                store,
+                previous_quality_path,
+                max_bytes=4 * 1024 * 1024,
+                label="previous component quality",
+            )
+            if previous_quality_path.is_file()
+            else None
+        )
+    if previous_quality_payload is not None:
+        previous_quality = json.loads(previous_quality_payload.decode("utf-8"))
         previous_refs = previous_quality["input_refs"]
         if isinstance(previous_refs.get("background"), dict):
             quality_options["background_path_override"] = _state_artifact(
                 store, previous_refs["background"]
             )
-        if isinstance(previous_refs.get("background_responsibility"), dict):
-            quality_options["background_responsibility_path"] = _state_artifact(
-                store, previous_refs["background_responsibility"]
+        if trusted_quality and isinstance(
+            previous_refs.get("background_responsibility"), dict
+        ):
+            (
+                quality_options["background_responsibility_path"],
+                quality_options["background_responsibility_ref"],
+            ) = _legacy_background_responsibility(
+                store,
+                previous_refs["background_responsibility"],
+                pixels.shape[:2],
             )
         frozen_ids = set(state["frozen"])
         if frozen_ids and isinstance(
@@ -2709,12 +2784,35 @@ def _record_legacy_delivery(
         )
 
 
-def _load_legacy_ref(store: RunStore, reference: dict) -> tuple[Path, bytes]:
+def _read_bound_legacy_file(
+    store: RunStore,
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> bytes:
+    try:
+        return _read_bound_file(
+            path,
+            store.root,
+            max_bytes=max_bytes,
+            label=label,
+        )
+    except (OSError, RuntimeError):
+        raise ValueError("legacy artifact could not be read") from None
+
+
+def _load_legacy_ref(
+    store: RunStore,
+    reference: dict,
+    *,
+    max_bytes: int = 256 * 1024 * 1024,
+) -> tuple[Path, bytes]:
     path = _legacy_ref_path(store, reference)
-    payload = _read_bound_file(
+    payload = _read_bound_legacy_file(
+        store,
         path,
-        store.root,
-        max_bytes=256 * 1024 * 1024,
+        max_bytes=max_bytes,
         label="legacy artifact",
     )
     if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
@@ -2735,10 +2833,27 @@ def _legacy_ref_path(store: RunStore, reference: dict) -> Path:
         )
     ):
         raise ValueError("legacy artifact reference is invalid")
-    path = (store.root / Path(reference["path"])).resolve()
-    if not path.is_relative_to(store.root.resolve()):
-        raise ValueError("legacy artifact reference escapes Run directory")
-    return path
+    raw_path = reference["path"]
+    parts = raw_path.split("/")
+    windows_devices = {"CON", "PRN", "AUX", "NUL", "CLOCK$"} | {
+        f"{prefix}{suffix}"
+        for prefix in ("COM", "LPT")
+        for suffix in (*"123456789", "¹", "²", "³")
+    }
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or ":" in raw_path
+        or any(
+            not part
+            or part in {".", ".."}
+            or part[-1] in {".", " "}
+            or part.split(".", 1)[0].rstrip(" ").upper() in windows_devices
+            for part in parts
+        )
+    ):
+        raise ValueError("legacy artifact reference is invalid")
+    return store.root.joinpath(*parts)
 
 
 def _accepted_reconstruction_inputs(

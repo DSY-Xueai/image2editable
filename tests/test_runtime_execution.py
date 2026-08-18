@@ -29,6 +29,283 @@ from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
 
 
+def _legacy_artifact_case(
+    tmp_path: Path, payload: bytes = b"legacy artifact"
+) -> tuple[RunStore, Path, dict]:
+    root = tmp_path / "run"
+    artifact = root / "artifacts" / "artifact.bin"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(payload)
+    return RunStore(root), artifact, {
+        "path": "artifacts/artifact.bin",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def test_legacy_ref_loads_lexical_run_relative_posix_path(tmp_path: Path) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+
+    path, payload = legacy._load_legacy_ref(store, reference)
+
+    assert path == artifact
+    assert payload == b"legacy artifact"
+
+
+def test_legacy_ref_does_not_resolve_before_bound_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+    real_resolve = Path.resolve
+
+    def reject_artifact_resolve(path: Path, *args, **kwargs) -> Path:
+        if path == artifact:
+            raise AssertionError("legacy artifact path was resolved before bound read")
+        return real_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", reject_artifact_resolve)
+
+    path, payload = legacy._load_legacy_ref(store, reference)
+
+    assert path == artifact
+    assert payload == b"legacy artifact"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        ".",
+        "./artifacts/artifact.bin",
+        "artifacts/../artifacts/artifact.bin",
+        "../artifact.bin",
+        "/artifact.bin",
+        "C:/artifact.bin",
+        "C:\\artifact.bin",
+        "artifacts\\artifact.bin",
+        "artifacts:artifact.bin",
+    ],
+)
+def test_legacy_ref_rejects_noncanonical_or_non_posix_path(
+    tmp_path: Path, path: str
+) -> None:
+    store, _, reference = _legacy_artifact_case(tmp_path)
+    reference["path"] = path
+
+    with pytest.raises(ValueError, match="reference is invalid"):
+        legacy._legacy_ref_path(store, reference)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "artifacts/artifact.bin.",
+        "artifacts/artifact.bin ",
+        "artifacts/CON",
+        "artifacts/con.txt",
+        "artifacts/PRN.log",
+        "artifacts/AUX",
+        "artifacts/NUL.bin",
+        "artifacts/CLOCK$.json",
+        "artifacts/COM1",
+        "artifacts/lpt9.txt",
+        "artifacts/COM¹.log",
+        "artifacts/LPT²",
+        "artifacts/com³.bin",
+    ],
+)
+def test_legacy_ref_rejects_windows_canonical_aliases_on_every_platform(
+    tmp_path: Path, path: str
+) -> None:
+    store, _, reference = _legacy_artifact_case(tmp_path)
+    reference["path"] = path
+
+    with pytest.raises(ValueError, match="reference is invalid"):
+        legacy._legacy_ref_path(store, reference)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 trailing-dot alias only")
+def test_legacy_ref_rejects_real_windows_trailing_dot_alias(tmp_path: Path) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+    alias = artifact.with_name(f"{artifact.name}.")
+    if not alias.is_file():
+        pytest.skip("filesystem does not expose Win32 trailing-dot aliases")
+    reference["path"] = "artifacts/artifact.bin."
+
+    with pytest.raises(ValueError, match="reference is invalid"):
+        legacy._load_legacy_ref(store, reference)
+
+
+def test_legacy_ref_rejects_symlink_through_bound_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(artifact.read_bytes())
+    artifact.unlink()
+    try:
+        artifact.symlink_to(outside)
+    except OSError as error:
+        pytest.skip(f"symbolic links are unavailable: {error}")
+    real_read = legacy._read_bound_file
+    observed: list[Path] = []
+
+    def observe_bound_read(path: Path, *args, **kwargs) -> bytes:
+        observed.append(path)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(legacy, "_read_bound_file", observe_bound_read)
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ):
+        legacy._load_legacy_ref(store, reference)
+    assert observed == [artifact]
+
+
+def test_legacy_ref_rejects_hard_link(tmp_path: Path) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(artifact.read_bytes())
+    artifact.unlink()
+    try:
+        os.link(outside, artifact)
+    except OSError as error:
+        pytest.skip(f"hard links are unavailable: {error}")
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ) as caught:
+        legacy._load_legacy_ref(store, reference)
+    assert str(store.root) not in str(caught.value)
+
+
+def test_legacy_ref_missing_directory_error_is_relative(tmp_path: Path) -> None:
+    store, _, reference = _legacy_artifact_case(tmp_path)
+    reference["path"] = "missing/artifact.bin"
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ) as caught:
+        legacy._load_legacy_ref(store, reference)
+    assert str(store.root) not in str(caught.value)
+
+
+def test_legacy_ref_rejects_windows_reparse_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, artifact, reference = _legacy_artifact_case(tmp_path)
+    real_lstat = Path.lstat
+    reparse_flag = getattr(
+        component_repair.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+    )
+
+    class ReparseStatus:
+        def __init__(self, status: os.stat_result) -> None:
+            self.status = status
+            self.st_file_attributes = (
+                getattr(status, "st_file_attributes", 0) | reparse_flag
+            )
+
+        def __getattr__(self, name: str):
+            return getattr(self.status, name)
+
+    def reparse_lstat(path: Path):
+        status = real_lstat(path)
+        return ReparseStatus(status) if path == artifact else status
+
+    monkeypatch.setattr(
+        component_repair.stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        reparse_flag,
+        raising=False,
+    )
+    monkeypatch.setattr(Path, "lstat", reparse_lstat)
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ):
+        legacy._load_legacy_ref(store, reference)
+
+
+def test_legacy_ref_rejects_path_replaced_during_bound_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"original descriptor payload"
+    store, artifact, reference = _legacy_artifact_case(tmp_path, payload)
+    replacement = artifact.with_name("replacement.bin")
+    replacement.write_bytes(b"replacement path payload")
+    real_fdopen = component_repair.os.fdopen
+    real_lstat = Path.lstat
+    replaced = False
+    monkeypatch.setattr(component_repair, "IO_CHUNK_SIZE", 4)
+
+    class ReplaceDuringRead:
+        def __init__(self, source) -> None:
+            self.source = source
+            self.replaced = False
+
+        def __enter__(self):
+            self.source.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.source.__exit__(*args)
+
+        def fileno(self) -> int:
+            return self.source.fileno()
+
+        def read(self, size: int) -> bytes:
+            nonlocal replaced
+            chunk = self.source.read(size)
+            if chunk and not self.replaced:
+                self.replaced = True
+                replaced = True
+            return chunk
+
+    def replacing_fdopen(descriptor: int, *args, **kwargs):
+        return ReplaceDuringRead(real_fdopen(descriptor, *args, **kwargs))
+
+    def replaced_lstat(path: Path):
+        if path == artifact and replaced:
+            return real_lstat(replacement)
+        return real_lstat(path)
+
+    monkeypatch.setattr(component_repair.os, "fdopen", replacing_fdopen)
+    monkeypatch.setattr(Path, "lstat", replaced_lstat)
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ):
+        legacy._load_legacy_ref(store, reference)
+    assert replacement.read_bytes() == b"replacement path payload"
+
+
+def test_legacy_ref_rejects_sha256_mismatch(tmp_path: Path) -> None:
+    store, _, reference = _legacy_artifact_case(tmp_path)
+    reference["sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        legacy._load_legacy_ref(store, reference)
+
+
+def test_legacy_ref_normalizes_ancestor_error_without_trust_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, reference = _legacy_artifact_case(tmp_path)
+    ancestor = store.root.parent
+
+    def reject_from_ancestor(*args, **kwargs):
+        raise RuntimeError(f"unsafe trust root: {ancestor}")
+
+    monkeypatch.setattr(legacy, "_read_bound_file", reject_from_ancestor)
+
+    with pytest.raises(
+        ValueError, match="^legacy artifact could not be read$"
+    ) as caught:
+        legacy._load_legacy_ref(store, reference)
+    assert str(ancestor) not in str(caught.value)
+
+
 def _component_source(path: Path) -> None:
     image = Image.new("RGB", (32, 32), "black")
     for y in range(8, 24):
@@ -2464,6 +2741,15 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
     store = RunStore.open(run_dir)
     foreground_evidence = run_dir / "input/foreground-evidence-mask.png"
     Image.new("L", (4, 4), 255).save(foreground_evidence)
+    responsibility = run_dir / "input/background-responsibility.png"
+    Image.new("L", (4, 4), 0).save(responsibility)
+    responsibility_ref = {
+        "path": responsibility.relative_to(run_dir).as_posix(),
+        "sha256": hashlib.sha256(responsibility.read_bytes()).hexdigest(),
+    }
+    changed_responsibility = np.zeros((4, 4), dtype=np.uint8)
+    changed_responsibility[0, 0] = 255
+    Image.fromarray(changed_responsibility, mode="L").save(responsibility)
     prepared = {
         "_prepared_schema_version": 5,
         "original_image_path": str(source),
@@ -2505,12 +2791,15 @@ def test_quality_reconstruction_uses_text_clean_pixels_without_alpha_holes(
 
     refs = legacy._quality_assets(
         store, "page_001", graph, mask_dir.parent, output_dir,
+        background_responsibility_path=responsibility,
+        background_responsibility_ref=responsibility_ref,
     )
 
     assert refs["foreground_evidence"] == {
         "path": "input/foreground-evidence-mask.png",
         "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
     }
+    assert refs["background_responsibility"] == responsibility_ref
     with Image.open(run_dir / refs["reconstructed"]["path"]) as reconstructed:
         assert reconstructed.getpixel((0, 0)) == (255, 0, 0)
         assert reconstructed.getpixel((1, 1)) == (255, 0, 0)
@@ -2944,9 +3233,20 @@ def test_execute_legacy_round_aggregates_background_actions(
     request = round_dir / "request.json"
     request.write_text(json.dumps({
         "evidence": {
-            "source.png": {"path": "source.png"},
-            "quality-report.json": {"path": "quality-report.json"},
-            "presentation-manifest.json": {"path": "presentation-manifest.json"},
+            "source.png": {
+                "path": "source.png",
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            },
+            "quality-report.json": {
+                "path": "quality-report.json",
+                "sha256": hashlib.sha256(quality.read_bytes()).hexdigest(),
+            },
+            "presentation-manifest.json": {
+                "path": "presentation-manifest.json",
+                "sha256": hashlib.sha256(
+                    presentation_manifest.read_bytes()
+                ).hexdigest(),
+            },
         },
     }), encoding="utf-8")
     plan = round_dir / "plan.json"
@@ -3070,6 +3370,249 @@ def test_execute_legacy_round_aggregates_background_actions(
     assert captured["responsibility_output_path"] == expected_responsibility
     assert captured["quality_responsibility_path"] == expected_responsibility
     assert [fields["status"] for _, fields in trace.events] == ["failed"]
+
+
+def _carried_background_responsibility_round(
+    tmp_path: Path, responsibility_size: tuple[int, int]
+) -> tuple[RunStore, Path, dict[str, str]]:
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    round_dir = reconstruction / "round-02"
+    round_dir.mkdir(parents=True)
+    store = RunStore(run_dir)
+    source = round_dir / "source.png"
+    background = reconstruction / "background.png"
+    responsibility = reconstruction / "background-responsibility.png"
+    Image.new("RGB", (12, 8), "white").save(source)
+    Image.new("RGB", (12, 8), "white").save(background)
+    Image.new("L", responsibility_size, 0).save(responsibility)
+    presentation_manifest = round_dir / "presentation-manifest.json"
+    presentation_manifest.write_text("{}", encoding="utf-8")
+    graph_path = round_dir / "component-graph.json"
+    graph_path.write_text(json.dumps({"nodes": []}), encoding="utf-8")
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(run_dir).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    quality = round_dir / "quality-report.json"
+    quality.write_text(json.dumps({
+        "input_refs": {
+            "background": reference(background),
+            "presentation_manifest": reference(presentation_manifest),
+            "background_responsibility": reference(responsibility),
+        }
+    }), encoding="utf-8")
+    request = round_dir / "request.json"
+    request.write_text(json.dumps({
+        "evidence": {
+            "source.png": {
+                "path": "source.png",
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            },
+            "quality-report.json": {
+                "path": "quality-report.json",
+                "sha256": hashlib.sha256(quality.read_bytes()).hexdigest(),
+            },
+            "presentation-manifest.json": {
+                "path": "presentation-manifest.json",
+                "sha256": hashlib.sha256(
+                    presentation_manifest.read_bytes()
+                ).hexdigest(),
+            },
+        },
+    }), encoding="utf-8")
+    plan = round_dir / "plan.json"
+    plan.write_text(json.dumps({"actions": []}), encoding="utf-8")
+    store.write_json("pages/page_001/reconstruction/component_state.json", {
+        "repair_round": 2,
+        "provider": "host",
+        "graph_ref": reference(graph_path),
+        "current_round": {
+            "request_ref": reference(request),
+            "plan_ref": reference(plan),
+        },
+        "frozen": {},
+    })
+    return store, responsibility, reference(responsibility)
+
+
+def test_execute_legacy_round_strictly_decodes_carried_background_responsibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, _ = _carried_background_responsibility_round(tmp_path, (2, 2))
+    monkeypatch.setattr(
+        legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        legacy,
+        "execute_component_action_round",
+        lambda *args, **kwargs: pytest.fail(
+            "invalid carried responsibility reached action execution"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError, match="legacy background responsibility is invalid"
+    ):
+        legacy._execute_legacy_round(store, "page_001", object())
+
+
+def test_execute_legacy_round_preserves_bound_carried_responsibility_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, responsibility, responsibility_ref = (
+        _carried_background_responsibility_round(tmp_path, (12, 8))
+    )
+    monkeypatch.setattr(
+        legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
+    )
+    reconstruction = store.root / "pages/page_001/reconstruction"
+    source = reconstruction / "round-02/source.png"
+    background = reconstruction / "background.png"
+    text_mask = reconstruction / "text-mask.png"
+    foreground = reconstruction / "foreground-evidence.png"
+    Image.new("L", (12, 8), 0).save(text_mask)
+    Image.new("L", (12, 8), 0).save(foreground)
+    alternate_responsibility = reconstruction / "alternate-responsibility.png"
+    Image.new("L", (12, 8), 255).save(alternate_responsibility)
+    round_dir = reconstruction / "round-02"
+    request_path = round_dir / "request.json"
+    alternate_quality = round_dir / "alternate-quality.json"
+
+    def reference(path: Path) -> dict[str, str]:
+        return {
+            "path": path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+
+    quality_payload = json.loads(
+        (round_dir / "quality-report.json").read_text(encoding="utf-8")
+    )
+    quality_payload["input_refs"]["background_responsibility"] = reference(
+        alternate_responsibility
+    )
+    alternate_quality.write_text(json.dumps(quality_payload), encoding="utf-8")
+    replacement_request = json.loads(request_path.read_text(encoding="utf-8"))
+    replacement_request["evidence"]["quality-report.json"] = {
+        "path": alternate_quality.name,
+        "sha256": hashlib.sha256(alternate_quality.read_bytes()).hexdigest(),
+    }
+    request_ref = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )["current_round"]["request_ref"]
+    real_load_legacy_ref = legacy._load_legacy_ref
+    replaced_request = False
+
+    def replace_request_after_bound_read(store_arg, ref):
+        nonlocal replaced_request
+        result = real_load_legacy_ref(store_arg, ref)
+        if ref == request_ref and not replaced_request:
+            replaced_request = True
+            request_path.write_text(json.dumps(replacement_request), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(legacy, "_load_legacy_ref", replace_request_after_bound_read)
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path):
+            return {
+                "_prepared_schema_version": 5,
+                "original_image_path": str(source),
+                "background_original_path": str(background),
+                "_text_mask_path": str(text_mask),
+                "_foreground_evidence_mask_path": str(foreground),
+                "text_items": [],
+            }
+
+    def execute_round(pixels, graph, actions, **kwargs):
+        output_dir = kwargs["output_dir"]
+        output_dir.mkdir(parents=True)
+        (output_dir / "component-graph.json").write_text(
+            json.dumps(graph), encoding="utf-8"
+        )
+        return graph
+
+    captured: dict[str, object] = {}
+    real_quality_assets = legacy._quality_assets
+
+    def replace_then_build_quality_assets(*args, **kwargs):
+        replacement = np.zeros((8, 12), dtype=np.uint8)
+        replacement[0, 0] = 255
+        Image.fromarray(replacement, mode="L").save(responsibility)
+        return real_quality_assets(*args, **kwargs)
+
+    def record_execution(*args, **kwargs) -> None:
+        execution = json.loads(
+            kwargs["execution_path"].read_text(encoding="utf-8")
+        )
+        captured["recorded_refs"] = execution["quality_input_refs"]
+
+    monkeypatch.setattr(legacy, "execute_component_action_round", execute_round)
+    monkeypatch.setattr(
+        legacy, "_quality_assets", replace_then_build_quality_assets
+    )
+    monkeypatch.setattr(legacy, "record_component_execution", record_execution)
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+
+    assert legacy._execute_legacy_round(store, "page_001", object()) is False
+    assert captured["recorded_refs"]["background_responsibility"] == (
+        responsibility_ref
+    )
+
+
+def test_execute_legacy_round_rejects_tampered_previous_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, _ = _carried_background_responsibility_round(tmp_path, (12, 8))
+    reconstruction = store.root / "pages/page_001/reconstruction"
+    round_dir = reconstruction / "round-02"
+    quality_path = round_dir / "quality-report.json"
+    tampered_responsibility = reconstruction / "tampered-responsibility.png"
+    Image.new("L", (12, 8), 255).save(tampered_responsibility)
+    tampered_quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    tampered_quality["input_refs"]["background_responsibility"] = {
+        "path": tampered_responsibility.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(tampered_responsibility.read_bytes()).hexdigest(),
+    }
+    request_ref = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )["current_round"]["request_ref"]
+    real_load_legacy_ref = legacy._load_legacy_ref
+    replaced_quality = False
+
+    def replace_quality_after_bound_request(store_arg, ref):
+        nonlocal replaced_quality
+        result = real_load_legacy_ref(store_arg, ref)
+        if ref == request_ref and not replaced_quality:
+            replaced_quality = True
+            quality_path.write_text(json.dumps(tampered_quality), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(legacy, "_load_legacy_ref", replace_quality_after_bound_request)
+    monkeypatch.setattr(
+        legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        legacy,
+        "execute_component_action_round",
+        lambda *args, **kwargs: pytest.fail(
+            "tampered previous quality reached action execution"
+        ),
+    )
+
+    with pytest.raises(
+        ValueError, match="previous component quality sha256 mismatch"
+    ):
+        legacy._execute_legacy_round(store, "page_001", object())
 
 
 def test_agent_can_rebuild_uniform_canvas_under_active_components(
@@ -4537,8 +5080,27 @@ def test_host_agent_next_times_out_explicitly_while_execution_lease_is_held(
             runtime.next_host_agent_item(run_dir)
 
 
+@pytest.mark.parametrize(
+    ("responsibility_size", "quality_is_bound", "oversized_quality"),
+    [
+        ((12, 8), True, False),
+        ((2, 2), True, False),
+        ((12, 8), False, False),
+        ((12, 8), True, True),
+    ],
+    ids=[
+        "valid-responsibility",
+        "invalid-responsibility",
+        "unbound-compatibility-quality",
+        "oversized-bound-quality",
+    ],
+)
 def test_parent_fallback_reuses_previous_background_and_frozen_assets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    responsibility_size: tuple[int, int],
+    quality_is_bound: bool,
+    oversized_quality: bool,
 ) -> None:
     run_dir = tmp_path / "run"
     page_dir = run_dir / "pages/page_001"
@@ -4575,17 +5137,27 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
     _image(background, (4, 5, 6))
     manifest = graph_dir / "presentation-manifest.json"
     manifest.write_text("{}", encoding="utf-8")
+    responsibility = graph_dir / "background-responsibility.png"
+    Image.new("L", responsibility_size, 0).save(responsibility)
+    responsibility_ref = reference(responsibility)
     quality = graph_dir / "quality-report.json"
-    quality.write_text(json.dumps({"input_refs": {
+    quality_payload = {"input_refs": {
         "background": reference(background),
         "presentation_manifest": reference(manifest),
-    }}), encoding="utf-8")
+        "background_responsibility": responsibility_ref,
+    }}
+    if oversized_quality:
+        quality_payload["padding"] = "x" * (4 * 1024 * 1024)
+    quality.write_text(json.dumps(quality_payload), encoding="utf-8")
+    quality_ref = reference(quality)
     store.write_json(
         "pages/page_001/reconstruction/component_state.json",
         {
             "repair_round": 5,
             "graph_ref": reference(graph_path),
-            "current_round": {"quality_ref": None},
+            "current_round": {
+                "quality_ref": quality_ref if quality_is_bound else None
+            },
             "fallback": {"parent_ids": ["parent_0001"]},
             "failed_ids": ["component_0001", "parent_0001"],
             "parent_assets": {"parent_0001": reference(mask)},
@@ -4606,20 +5178,67 @@ def test_parent_fallback_reuses_previous_background_and_frozen_assets(
         return execute(pixels, graph, actions, **kwargs)
     monkeypatch.setattr(legacy, "execute_component_action_round", capture_execute)
     monkeypatch.setattr(legacy, "_ensure_component_disk_reserve", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        legacy, "_quality_assets",
-        lambda *args, **kwargs: captured.update(kwargs) or {},
-    )
+    def quality_assets(*args, **kwargs):
+        if responsibility_size != (12, 8):
+            pytest.fail("invalid responsibility reached parent fallback quality")
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(legacy, "_quality_assets", quality_assets)
     monkeypatch.setattr(legacy, "record_parent_fallback_execution", lambda *args, **kwargs: None)
+    if (
+        quality_is_bound
+        and responsibility_size == (12, 8)
+        and not oversized_quality
+    ):
+        replacement_responsibility = graph_dir / "replacement-responsibility.png"
+        Image.new("L", (12, 8), 255).save(replacement_responsibility)
+        replacement_quality = json.loads(quality.read_text(encoding="utf-8"))
+        replacement_quality["input_refs"]["background_responsibility"] = reference(
+            replacement_responsibility
+        )
+        real_load_legacy_ref = legacy._load_legacy_ref
+        replaced_quality = False
+
+        def replace_quality_after_bound_read(store_arg, ref, **kwargs):
+            nonlocal replaced_quality
+            result = real_load_legacy_ref(store_arg, ref, **kwargs)
+            if ref == quality_ref and not replaced_quality:
+                replaced_quality = True
+                quality.write_text(json.dumps(replacement_quality), encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(
+            legacy, "_load_legacy_ref", replace_quality_after_bound_read
+        )
 
     stale_output = page_dir / "reconstruction/parent-fallback"
     (stale_output / "masks").mkdir(parents=True)
     (stale_output / "sentinel.txt").write_text("old retry", encoding="utf-8")
 
+    if responsibility_size != (12, 8):
+        with pytest.raises(
+            ValueError, match="legacy background responsibility is invalid"
+        ):
+            legacy._execute_legacy_parent_fallback(store, "page_001", object())
+        return
+    if oversized_quality:
+        with pytest.raises(
+            ValueError, match="^legacy artifact could not be read$"
+        ):
+            legacy._execute_legacy_parent_fallback(store, "page_001", object())
+        return
+
     legacy._execute_legacy_parent_fallback(store, "page_001", object())
 
     assert (stale_output / "sentinel.txt").read_text(encoding="utf-8") == "old retry"
     assert captured["background_path_override"] == background
+    if quality_is_bound:
+        assert captured["background_responsibility_path"] == responsibility
+        assert captured["background_responsibility_ref"] == responsibility_ref
+    else:
+        assert "background_responsibility_path" not in captured
+        assert "background_responsibility_ref" not in captured
     assert captured["frozen_manifest_path"] == manifest
     assert captured["frozen_component_ids"] == {"component_0004"}
     assert [action["action"] for action in captured_actions] == [

@@ -11,8 +11,10 @@ from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import stat
+import struct
 import time
 import uuid
+import zlib
 
 from scripts.initial_diagnostics import validate_initial_diagnostics
 
@@ -2052,6 +2054,49 @@ def _unowned_raster_text_check(
     return "pass"
 
 
+def _decode_binary_grayscale_png(
+    payload: bytes,
+    expected_shape: tuple[int, int],
+    *,
+    label: str,
+):
+    import cv2
+    import numpy as np
+
+    invalid = ValueError(f"{label} is invalid")
+    if (
+        len(payload) < 33
+        or payload[:8] != b"\x89PNG\r\n\x1a\n"
+        or payload[8:12] != b"\x00\x00\x00\r"
+        or payload[12:16] != b"IHDR"
+        or zlib.crc32(payload[12:29]) & 0xFFFFFFFF
+        != struct.unpack(">I", payload[29:33])[0]
+    ):
+        raise invalid
+    width, height, bit_depth, color_type, compression, png_filter, interlace = (
+        struct.unpack(">IIBBBBB", payload[16:29])
+    )
+    if (
+        (height, width) != expected_shape
+        or bit_depth != 8
+        or color_type != 0
+        or compression != 0
+        or png_filter != 0
+        or interlace != 0
+    ):
+        raise invalid
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if (
+        image is None
+        or image.ndim != 2
+        or image.dtype != np.uint8
+        or image.shape != expected_shape
+        or np.any((image != 0) & (image != 255))
+    ):
+        raise invalid
+    return image == 255
+
+
 def _recompute_quality_artifact(
     store, state: dict, *, expected_component_ids: list[str],
     quality_input_refs: dict, filename: str,
@@ -2116,19 +2161,11 @@ def _recompute_quality_artifact(
     )
     background_responsibility = None
     if "background_responsibility" in payloads:
-        encoded_responsibility = decode(
-            "background_responsibility", cv2.IMREAD_UNCHANGED
+        background_responsibility = _decode_binary_grayscale_png(
+            payloads["background_responsibility"],
+            source.shape[:2],
+            label="component quality background responsibility",
         )
-        if (
-            encoded_responsibility.ndim != 2
-            or encoded_responsibility.dtype != np.uint8
-            or np.any(
-                (encoded_responsibility != 0)
-                & (encoded_responsibility != 255)
-            )
-        ):
-            raise ValueError("component quality background responsibility is invalid")
-        background_responsibility = encoded_responsibility == 255
     plan = None
     if filename == "component-quality.json":
         input_graph = load_component_agent_graph(request_path)
@@ -4186,6 +4223,21 @@ def _read_bound_file(
             stable.st_size,
         ):
             raise RuntimeError(f"Evidence file changed while reading: {path}")
+        try:
+            final_path_status = path.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Evidence file identity changed: {path}") from error
+        if _is_link_or_reparse(final_path_status):
+            raise RuntimeError(f"Evidence file is a link or reparse point: {path}")
+        if not stat.S_ISREG(final_path_status.st_mode):
+            raise RuntimeError(f"Evidence is not a regular file: {path}")
+        if final_path_status.st_nlink != 1:
+            raise RuntimeError(f"Evidence file is an unsafe hard link: {path}")
+        if (opened.st_dev, opened.st_ino) != (
+            final_path_status.st_dev,
+            final_path_status.st_ino,
+        ):
+            raise RuntimeError(f"Evidence file identity changed: {path}")
         _require_directory_chain_identity(directory_identity)
         return b"".join(chunks)
 

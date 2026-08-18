@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import hashlib
 import hmac
@@ -10,8 +11,10 @@ from pathlib import Path
 import queue
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import zlib
 
 import pytest
 import cv2
@@ -2229,6 +2232,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     )
     assert observed_layers[0]["metrics"] == first["metrics"]
     assert np.all(observed_foreground["mask"] == 255)
+    assert observed_responsibility["mask"].dtype == np.bool_
     assert np.array_equal(
         observed_responsibility["mask"],
         np.array([[False, False], [False, True]]),
@@ -3798,7 +3802,7 @@ def _execute_composite_quality_round(
     before_quality=None,
     initial_diagnostics: list[dict] | None = None,
     presentation_metrics_by_id: dict[str, dict] | None = None,
-    background_responsibility: np.ndarray | None = None,
+    background_responsibility: np.ndarray | bytes | None = None,
 ) -> tuple[dict, dict]:
     request = load_component_agent_request(request_path)
     plan = {
@@ -3826,7 +3830,10 @@ def _execute_composite_quality_round(
         quality_paths["foreground_evidence"] = foreground
     if background_responsibility is not None:
         responsibility = execution_dir / "background-responsibility.png"
-        Image.fromarray(background_responsibility).save(responsibility)
+        if isinstance(background_responsibility, bytes):
+            responsibility.write_bytes(background_responsibility)
+        else:
+            Image.fromarray(background_responsibility).save(responsibility)
         quality_paths["background_responsibility"] = responsibility
     native = execution_dir / "native-check.json"
     native.write_text(json.dumps({
@@ -3920,6 +3927,134 @@ def test_background_responsibility_artifact_must_be_binary(
             shape=(2, 2),
             background_responsibility=np.array(
                 [[0, 1], [0, 255]], dtype=np.uint8
+            ),
+        )
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", zlib.crc32(chunk_type + payload) & 0xFFFFFFFF)
+    )
+
+
+def _png_payload(mode: str, values: list[int], size: tuple[int, int]) -> bytes:
+    image = Image.new(mode, size)
+    image.putdata(values)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_binary_grayscale_png_decoder_returns_boolean_mask() -> None:
+    decoded = component_repair._decode_binary_grayscale_png(
+        _png_payload("L", [0, 255, 255, 0], (2, 2)),
+        (2, 2),
+        label="test background responsibility",
+    )
+
+    assert isinstance(decoded, np.ndarray)
+    assert decoded.dtype == np.bool_
+    assert np.array_equal(
+        decoded,
+        np.array([[False, True], [True, False]], dtype=bool),
+    )
+
+
+def _adam7_binary_png() -> bytes:
+    ihdr = struct.pack(">IIBBBBB", 2, 2, 8, 0, 0, 0, 1)
+    scanlines = bytes((0, 0, 0, 255, 0, 255, 0))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(scanlines))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _png_with_ihdr_field(payload: bytes, offset: int, value: int) -> bytes:
+    changed = bytearray(payload)
+    changed[16 + offset] = value
+    changed[29:33] = struct.pack(
+        ">I", zlib.crc32(changed[12:29]) & 0xFFFFFFFF
+    )
+    return bytes(changed)
+
+
+def _invalid_background_responsibility_png(case: str) -> bytes:
+    binary = _png_payload("L", [0, 255, 255, 0], (2, 2))
+    if case == "signature":
+        return b"not-png!" + binary[8:]
+    if case == "ihdr_length":
+        return binary[:8] + struct.pack(">I", 12) + binary[12:]
+    if case == "rgb":
+        return _png_payload(
+            "RGB",
+            [(0, 0, 0), (255, 255, 255), (255, 255, 255), (0, 0, 0)],
+            (2, 2),
+        )
+    if case == "palette":
+        image = Image.new("P", (2, 2))
+        image.putpalette([0, 0, 0, 255, 255, 255] + [0] * 762)
+        image.putdata([0, 1, 1, 0])
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+    if case == "1_bit":
+        return _png_payload("1", [0, 255, 255, 0], (2, 2))
+    if case == "16_bit":
+        array = np.array([[0, 65535], [65535, 0]], dtype=np.uint16)
+        output = io.BytesIO()
+        Image.fromarray(array, mode="I;16").save(output, format="PNG")
+        return output.getvalue()
+    if case == "compression":
+        return _png_with_ihdr_field(binary, 10, 1)
+    if case == "filter":
+        return _png_with_ihdr_field(binary, 11, 1)
+    if case == "interlaced":
+        return _adam7_binary_png()
+    if case == "wrong_shape":
+        return _png_payload("L", [0, 255, 255], (3, 1))
+    if case == "non_binary":
+        return _png_payload("L", [0, 1, 1, 0], (2, 2))
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "signature",
+        "ihdr_length",
+        "rgb",
+        "palette",
+        "1_bit",
+        "16_bit",
+        "compression",
+        "filter",
+        "interlaced",
+        "wrong_shape",
+        "non_binary",
+    ],
+)
+def test_background_responsibility_requires_strict_binary_grayscale_png(
+    page_session: dict,
+    case: str,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    with pytest.raises(
+        ValueError, match="background responsibility is invalid"
+    ):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=(
+                _invalid_background_responsibility_png(case)
             ),
         )
 
