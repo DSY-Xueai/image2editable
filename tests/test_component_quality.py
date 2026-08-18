@@ -1972,10 +1972,10 @@ def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> 
     assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
 
 
-def test_background_rebuild_does_not_authorize_flattened_retained_raster(
+def test_background_responsibility_does_not_flatten_source_backed_raster(
     tmp_path,
 ) -> None:
-    case = _synthetic_quality_case()
+    case = _synthetic_quality_case(scale=2)
     graph_dir = tmp_path / "round"
     mask_path = graph_dir / "masks/component_0001.png"
     mask_path.parent.mkdir(parents=True)
@@ -1985,11 +1985,15 @@ def test_background_rebuild_does_not_authorize_flattened_retained_raster(
     ).hexdigest()
     retained_raster = np.zeros(case["component_mask"].shape, dtype=bool)
     retained_raster[:10, :] = True
-    retained_raster[38:, :] = True
-    case["source"][retained_raster] = 40
-    case["background"][retained_raster] = 40
-    case["reconstructed"][retained_raster] = 40
+    retained_raster[86:, :] = True
+    rows, columns = np.indices(retained_raster.shape)
+    texture = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[retained_raster] = texture[retained_raster, None]
     material = case["component_mask"] | retained_raster
+    responsibility = component_quality._background_responsibility_geometry(
+        retained_raster
+    )
 
     report = evaluate_component_quality_round(
         case["source"], case["background"], case["reconstructed"],
@@ -2000,9 +2004,15 @@ def test_background_rebuild_does_not_authorize_flattened_retained_raster(
         initial_component_count=1,
         expected_component_ids=["component_0001"],
         material_foreground=material,
+        background_responsibility=responsibility,
     )
 
     assert report["checks"]["visual_ownership"] == "fail"
+    assert report["visual_metrics"]["unexplained_visual_pixels"] > 0
+    assert report["visual_metrics"]["largest_unexplained_region_pixels"] > 0
+    assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
+        np.count_nonzero(responsibility)
+    )
 
 
 @pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
@@ -2116,10 +2126,10 @@ def test_background_geometry_requires_two_dimensions(candidate: np.ndarray) -> N
         component_quality._background_responsibility_geometry(candidate)
 
 
-def test_background_responsibility_owns_only_bound_thin_structure(
+def test_background_responsibility_owns_complete_three_pixel_grid(
     tmp_path,
 ) -> None:
-    case = _synthetic_quality_case()
+    case = _synthetic_quality_case(scale=2)
     graph_dir = tmp_path / "round"
     mask_path = graph_dir / "masks/component_0001.png"
     mask_path.parent.mkdir(parents=True)
@@ -2127,11 +2137,13 @@ def test_background_responsibility_owns_only_bound_thin_structure(
     case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
         mask_path.read_bytes()
     ).hexdigest()
-    retained_line = np.zeros(case["component_mask"].shape, dtype=bool)
-    retained_line[6:8, 4:60] = True
-    case["source"][retained_line] = 40
-    case["background"][retained_line] = 40
-    case["reconstructed"][retained_line] = 40
+    retained_grid = np.zeros(case["component_mask"].shape, dtype=bool)
+    retained_grid[6:9, 4:120] = True
+    retained_grid[6:90, 116:119] = True
+    rows, columns = np.indices(retained_grid.shape)
+    structure = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[retained_grid] = structure[retained_grid, None]
 
     report = evaluate_component_quality_round(
         case["source"], case["background"], case["reconstructed"],
@@ -2141,27 +2153,28 @@ def test_background_responsibility_owns_only_bound_thin_structure(
         page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
         initial_component_count=1,
         expected_component_ids=["component_0001"],
-        material_foreground=case["component_mask"] | retained_line,
-        background_responsibility=retained_line,
+        material_foreground=case["component_mask"] | retained_grid,
+        background_responsibility=retained_grid,
     )
 
     assert report["checks"]["visual_ownership"] == "pass"
     assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
-        np.count_nonzero(retained_line)
+        np.count_nonzero(retained_grid)
     )
 
 
 @pytest.mark.parametrize(
     "mutation",
     [
-        "broad", "text", "outside_foreground", "active", "over_budget",
-        "changed", "slightly_changed",
+        "text", "active", "short_line_core", "diagonal_core",
+        "thick_block_core", "source_background_nonexact",
+        "outside_foreground", "over_budget",
     ],
 )
-def test_background_responsibility_rejects_unbound_or_broad_pixels(
+def test_background_responsibility_rejects_pixels_outside_rebuilt_allowed_set(
     tmp_path, mutation: str,
 ) -> None:
-    case = _synthetic_quality_case()
+    case = _synthetic_quality_case(scale=2)
     graph_dir = tmp_path / "round"
     mask_path = graph_dir / "masks/component_0001.png"
     mask_path.parent.mkdir(parents=True)
@@ -2170,27 +2183,63 @@ def test_background_responsibility_rejects_unbound_or_broad_pixels(
         mask_path.read_bytes()
     ).hexdigest()
     responsibility = np.zeros(case["component_mask"].shape, dtype=bool)
-    if mutation == "broad":
-        responsibility[2:8, 2:8] = True
-    elif mutation == "text":
-        responsibility[20:22, 24:40] = True
-    elif mutation == "active":
-        responsibility[12:14, 16:48] = True
-    elif mutation == "over_budget":
-        responsibility[2:12:2, 2:62] = True
-    else:
-        responsibility[6:8, 4:60] = True
+    responsibility[6:9, 4:120] = True
+    responsibility[6:90, 116:119] = True
     material = case["component_mask"] | responsibility
-    if mutation == "outside_foreground":
-        material = case["component_mask"]
-    case["source"][responsibility] = 40
-    case["reconstructed"][responsibility] = 40
-    if mutation == "slightly_changed":
-        case["background"][responsibility] = 41
-    elif mutation != "changed":
-        case["background"][responsibility] = 40
+    rows, columns = np.indices(responsibility.shape)
+    structure = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[responsibility] = structure[responsibility, None]
 
-    with pytest.raises(ValueError, match="background responsibility"):
+    invalid = np.zeros(responsibility.shape, dtype=bool)
+    if mutation == "text":
+        invalid[42, 60] = True
+    elif mutation == "active":
+        invalid[30, 50] = True
+    elif mutation == "short_line_core":
+        shape = np.zeros(responsibility.shape, dtype=bool)
+        shape[80:83, 8:28] = True
+        invalid[81, 18] = True
+    elif mutation == "diagonal_core":
+        shape = np.zeros(responsibility.shape, dtype=np.uint8)
+        component_quality.cv2.line(shape, (6, 55), (26, 75), 1, 3)
+        shape = shape.astype(bool)
+        core = component_quality.cv2.erode(
+            shape.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+        ) > 0
+        core_pixels = np.argwhere(core)
+        y, x = core_pixels[len(core_pixels) // 2]
+        invalid[y, x] = True
+    elif mutation == "thick_block_core":
+        shape = np.zeros(responsibility.shape, dtype=bool)
+        shape[78:84, 40:100] = True
+        invalid[80, 60] = True
+    elif mutation == "source_background_nonexact":
+        invalid[7, 20] = True
+        case["background"][invalid] += 1
+    elif mutation == "outside_foreground":
+        invalid[92, 2] = True
+    else:
+        responsibility = np.zeros(responsibility.shape, dtype=bool)
+        responsibility[2:14:2, 2:126] = True
+        material |= responsibility
+        for image in (
+            case["source"], case["background"], case["reconstructed"]
+        ):
+            image[responsibility] = structure[responsibility, None]
+
+    if mutation in {"short_line_core", "diagonal_core", "thick_block_core"}:
+        material |= shape
+        for image in (
+            case["source"], case["background"], case["reconstructed"]
+        ):
+            image[shape] = structure[shape, None]
+    if mutation != "over_budget":
+        responsibility |= invalid
+
+    with pytest.raises(
+        ValueError, match="^background responsibility mask is invalid$"
+    ):
         evaluate_component_quality_round(
             case["source"], case["background"], case["reconstructed"],
             case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],

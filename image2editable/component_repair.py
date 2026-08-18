@@ -2775,6 +2775,7 @@ def evaluate_component_quality_round(
         material_ownership_metrics,
         refine_material_foreground,
         resolve_visual_mask_ownership,
+        _background_responsibility_geometry,
         _strict_binary_mask,
         _validate_presentation_mask_union,
         _validate_underlay_metrics,
@@ -3006,24 +3007,18 @@ def evaluate_component_quality_round(
                 or np.any(responsibility & (np.asarray(text_mask) > 0))
             ):
                 raise ValueError("background responsibility mask is invalid")
-            if np.any(
-                responsibility
-                & np.any(np.asarray(source) != np.asarray(background), axis=2)
-            ):
-                raise ValueError("background responsibility pixels changed")
             active_ownership = np.zeros(responsibility.shape, dtype=bool)
             for node in active_visual:
                 active_ownership |= component_ownership(node["id"])
-            if np.any(responsibility & active_ownership):
-                raise ValueError("background responsibility overlaps a component")
-            kernel = np.ones((3, 3), dtype=np.uint8)
-            core = cv2.erode(
-                responsibility.astype(np.uint8), kernel
-            ) > 0
-            if np.any(core):
-                raise ValueError(
-                    "background responsibility contains broad raster"
-                )
+            allowed_candidate = (
+                material_foreground
+                & ~(np.asarray(text_mask) > 0)
+                & ~active_ownership
+                & np.all(np.asarray(source) == np.asarray(background), axis=2)
+            )
+            allowed = _background_responsibility_geometry(allowed_candidate)
+            if np.any(responsibility & ~allowed):
+                raise ValueError("background responsibility mask is invalid")
 
         def generated_underlays():
             if responsibility is not None:

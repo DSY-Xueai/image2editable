@@ -3224,23 +3224,44 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
     assert allow_original_values == [False]
 
 
-def test_background_responsibility_keeps_only_thin_unowned_nontext_structure(
+def test_background_responsibility_matches_constrained_geometry(
     tmp_path: Path,
 ) -> None:
     import cv2
+    from image2editable.component_quality import (
+        _background_responsibility_geometry,
+        calibrate_page,
+        refine_material_foreground,
+    )
 
-    shape = (100, 100)
+    shape = (180, 180)
     source = np.full((*shape, 3), 255, dtype=np.uint8)
-    thin_line = np.zeros(shape, dtype=bool)
-    thin_line[10:12, 5:45] = True
+    horizontal = np.zeros(shape, dtype=bool)
+    horizontal[20:23, 10:150] = True
+    vertical = np.zeros(shape, dtype=bool)
+    vertical[10:150, 80:83] = True
+    short_line = np.zeros(shape, dtype=bool)
+    short_line[155:158, 10:30] = True
+    diagonal = np.zeros(shape, dtype=np.uint8)
+    cv2.line(diagonal, (110, 90), (140, 120), 1, 3)
+    diagonal = diagonal.astype(bool)
+    thick_block = np.zeros(shape, dtype=bool)
+    thick_block[165:171, 50:130] = True
     broad_raster = np.zeros(shape, dtype=bool)
-    broad_raster[55:75, 55:75] = True
+    broad_raster[145:157, 150:162] = True
     text = np.zeros(shape, dtype=bool)
-    text[30:32, 5:45] = True
+    text[20:23, 45:50] = True
     active = np.zeros(shape, dtype=bool)
-    active[40:42, 5:45] = True
-    foreground = thin_line | broad_raster | text | active
-    source[foreground] = 40
+    active[20:23, 100:105] = True
+    frozen = np.zeros(shape, dtype=bool)
+    frozen[60:65, 80:83] = True
+    foreground = (
+        horizontal | vertical | short_line | diagonal | thick_block
+        | broad_raster
+    )
+    rows, columns = np.indices(shape)
+    structure = np.where((rows + columns) % 2, 40, 80).astype(np.uint8)
+    source[foreground] = structure[foreground, None]
 
     source_path = tmp_path / "source.png"
     current_path = tmp_path / "current.png"
@@ -3257,14 +3278,23 @@ def test_background_responsibility_keeps_only_thin_unowned_nontext_structure(
     graph_dir = tmp_path / "graph"
     masks = graph_dir / "masks"
     masks.mkdir(parents=True)
-    active_path = masks / "active.png"
-    Image.fromarray(active.astype(np.uint8) * 255, mode="L").save(active_path)
-    graph = {"nodes": [{
-        "id": "active", "kind": "parent", "parent_id": None,
-        "state": "pending", "mask": "masks/active.png",
-        "mask_sha256": hashlib.sha256(active_path.read_bytes()).hexdigest(),
-        "bbox": [5, 40, 45, 42], "z_index": 0, "text_ids": [],
-    }]}
+    nodes = []
+    for z_index, (component_id, state, mask) in enumerate((
+        ("active", "pending", active),
+        ("frozen", "frozen", frozen),
+    )):
+        mask_path = masks / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(mask_path)
+        ys, xs = np.where(mask)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": state, "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1,
+                     int(ys.max()) + 1],
+            "z_index": z_index, "text_ids": [],
+        })
+    graph = {"nodes": nodes}
 
     legacy._rebuild_canvas_background(
         source_path=source_path,
@@ -3281,12 +3311,27 @@ def test_background_responsibility_keeps_only_thin_unowned_nontext_structure(
 
     with Image.open(responsibility_path) as image:
         responsibility = np.asarray(image.convert("L")) > 0
-    candidate = thin_line | broad_raster
-    core = cv2.erode(
-        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    with Image.open(output_path) as image:
+        rebuilt = np.asarray(image.convert("RGB"))
+    refined = refine_material_foreground(
+        foreground,
+        source,
+        rebuilt,
+        calibrate_page(source, text),
+    )
+    candidate = (
+        refined & ~text & ~active & ~frozen
+        & np.all(source == rebuilt, axis=2)
+    )
+    expected = _background_responsibility_geometry(candidate)
+    assert np.array_equal(responsibility, expected)
+    assert not np.any(responsibility & text)
+    assert not np.any(responsibility & (active | frozen))
+    grid_core = cv2.erode(
+        (horizontal | vertical).astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
     ) > 0
-    assert np.array_equal(responsibility, candidate & ~core)
-    assert not np.any(responsibility & core)
+    assert np.any(responsibility & grid_core)
 
 
 def test_background_responsibility_rejects_page_over_budget(
@@ -3327,11 +3372,11 @@ def test_background_responsibility_rejects_page_over_budget(
     assert not responsibility_path.exists()
 
 
-def test_background_responsibility_keeps_only_the_noncore_pixels(
+def test_background_responsibility_uses_constrained_geometry_after_refinement(
     tmp_path: Path,
 ) -> None:
-    import cv2
     from image2editable.component_quality import (
+        _background_responsibility_geometry,
         calibrate_page,
         refine_material_foreground,
     )
@@ -3383,10 +3428,10 @@ def test_background_responsibility_keeps_only_the_noncore_pixels(
         rebuilt,
         calibrate_page(source, np.zeros(shape, dtype=bool)),
     )
-    core = cv2.erode(
-        refined.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
-    ) > 0
-    assert np.array_equal(responsibility, refined & ~core)
+    assert np.array_equal(
+        responsibility,
+        _background_responsibility_geometry(refined),
+    )
 
 
 @pytest.mark.parametrize(

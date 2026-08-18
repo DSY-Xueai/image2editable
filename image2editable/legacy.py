@@ -1518,6 +1518,7 @@ def _rebuild_canvas_background(
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
     if responsibility_output_path is not None:
         from image2editable.component_quality import (
+            _background_responsibility_geometry,
             calibrate_page,
             refine_material_foreground,
         )
@@ -1534,9 +1535,7 @@ def _rebuild_canvas_background(
             & ~repairable_visual
             & np.all(rebuilt == source, axis=2)
         )
-        kernel = np.ones((3, 3), dtype=np.uint8)
-        core = cv2.erode(candidate.astype(np.uint8), kernel) > 0
-        responsibility = candidate & ~core
+        responsibility = _background_responsibility_geometry(candidate)
         if float(responsibility.mean()) > 0.05:
             responsibility = None
         if responsibility is not None:
