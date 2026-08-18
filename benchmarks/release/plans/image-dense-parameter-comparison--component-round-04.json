@@ -1,0 +1,25 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["page background has zero component violations after underlay rebuild"],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed unexplained-mask contains only 347 visual pixels adjacent to the accepted page background"],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "f9652d29635dd5534d2c96503eff6d1e01abfbacdabb3207de55d8f10f8513d6",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "59ce90345be029fa5977c56429996d9f36842fc84c6659231886b0e35521343b",
+  "schema_version": 1
+}

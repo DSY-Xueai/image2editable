@@ -1,0 +1,331 @@
+{
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.98,
+      "evidence": [
+        "child is an incomplete page-background fragment; its parent restores the complete background region"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.98,
+      "evidence": [
+        "child is an incomplete cross-region background fragment; its parent restores the complete region"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete chart panel visual"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete sidebar visual"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete region panel visual"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete first metric card visual"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete third metric card visual"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete second metric card visual"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "complete selected navigation visual"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart segment"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart segment"
+      ],
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart segment"
+      ],
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart segment"
+      ],
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent region progress bar"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent region progress bar"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent region progress bar"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent region progress bar"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart segment"
+      ],
+      "object_ids": [
+        "component_0018"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent metric delta"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent metric delta"
+      ],
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent metric delta"
+      ],
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart point"
+      ],
+      "object_ids": [
+        "component_0022"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart point"
+      ],
+      "object_ids": [
+        "component_0023"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart point"
+      ],
+      "object_ids": [
+        "component_0024"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart point"
+      ],
+      "object_ids": [
+        "component_0025"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "independent chart point"
+      ],
+      "object_ids": [
+        "component_0026"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "c3f1c4ed5559a93b5d15125e337a26ddd87a6892bd9b2f3ec60b324f68c32074",
+  "schema_version": 1,
+  "graph_sha256": "0235e3e6ba8b0ae2fca0c629fe76483649e10552a400d6d6ad46fe7dcadc31cc"
+}

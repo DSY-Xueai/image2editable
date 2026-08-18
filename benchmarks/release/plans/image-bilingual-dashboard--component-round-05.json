@@ -1,0 +1,354 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "trimmed component retains its independently movable core"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "signed unexplained-mask contains the structural edge adjacent to this trimmed component"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report attributes the remaining halo and duplicate pixels to the narrow generated underlay behind these visual edges"
+      ],
+      "object_ids": [
+        "parent_0001",
+        "component_0002",
+        "component_0003",
+        "component_0004",
+        "parent_0005",
+        "component_0006",
+        "component_0007",
+        "component_0008",
+        "component_0014",
+        "component_0015",
+        "component_0016",
+        "component_0017"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the prior quality round and reopened only because its dependency was trimmed"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the prior quality round and reopened only because its dependency was trimmed"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the prior quality round and reopened only because its dependency was trimmed"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the prior quality round and reopened only because its dependency was trimmed"
+      ],
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the prior quality round and reopened only because its dependency was trimmed"
+      ],
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "bc8c09f27747e0408413fa0aa774e945359508b8d4a116a3eaf1000f5391d6e3",
+  "schema_version": 1,
+  "graph_sha256": "b6e37b582d199e2aa8d6483aed4b31f27b99455eb8efbacf1ce2241eedc60aa0"
+}

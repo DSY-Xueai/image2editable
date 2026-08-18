@@ -1,0 +1,330 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": [
+        "shrunk component retains its complete movable core"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.98,
+      "evidence": [
+        "unexplained-mask shows the signed structural edge directly adjacent to this shrunk component"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the previous quality round and was reopened only by its repaired dependency"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the previous quality round and was reopened only by its repaired dependency"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the previous quality round and was reopened only by its repaired dependency"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the previous quality round and was reopened only by its repaired dependency"
+      ],
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component passed the previous quality round and was reopened only by its repaired dependency"
+      ],
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "f1957f206c64435a69a9916b4c3b60e5e320831c6a054eb44a3baa48665a6f34",
+  "schema_version": 1,
+  "graph_sha256": "7ff6c8bcac01d0190c7adc1e7bc12c714cc73f43f669ab87825d6c6d1b32fb91"
+}

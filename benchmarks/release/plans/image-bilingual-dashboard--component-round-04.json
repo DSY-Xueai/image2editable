@@ -1,0 +1,167 @@
+{
+  "actions": [
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining alpha and duplicate ownership is confined to the outer edge"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining alpha and duplicate ownership is confined to the outer edge"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining duplicate shadow is confined to a one-pixel boundary"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining duplicate shadow is confined to a one-pixel boundary"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining duplicate ownership is concentrated at the broad fragment edge"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.003
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining card alpha halo is confined to the edge"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining card alpha halo is confined to the edge"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining card alpha halo is confined to the edge"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar shadow is confined to one pixel"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and shadow duplication is edge-local"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and duplicate ownership is edge-local"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and duplicate ownership is edge-local"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "cc472ac9d3c1c80b8ef8dbf47c938cade4591b86fe03bad33f0016a8d62dc677",
+  "schema_version": 1,
+  "graph_sha256": "2e3c58581a10b267c2499a258f0981f3a172c92b346f3dda86084ea95a4a825e"
+}

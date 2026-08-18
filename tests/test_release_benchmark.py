@@ -6,6 +6,7 @@ import importlib
 import inspect
 import json
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -806,3 +807,558 @@ def test_release_inputs_exist_and_match_manifest_sha256() -> None:
 
     for case in cases:
         _assert_release_input(case, RELEASE_ROOT)
+
+
+def _write_benchmark_plan(path: Path, value: dict[str, object]) -> None:
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+
+def _candidate_response() -> dict[str, object]:
+    return {
+        "candidate": {
+            "candidate_id": "candidate_001",
+            "page_id": "page_001",
+            "source_shape_id": "2",
+            "source_object_sha256": "1" * 64,
+            "image_sha256": "2" * 64,
+        }
+    }
+
+
+def _candidate_plan() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "candidate_decision",
+        "page_id": "page_001",
+        "candidate_id": "candidate_001",
+        "source_shape_id": "2",
+        "source_object_sha256": "1" * 64,
+        "image_sha256": "2" * 64,
+        "decision": "replace",
+        "confidence": 0.99,
+        "category": "full_slide_screenshot",
+        "evidence": ["full-slide raster bound to the candidate hashes"],
+    }
+
+
+def _component_request() -> dict[str, object]:
+    return {
+        "kind": "component_request",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+    }
+
+
+def _bound_component_request(run_dir: Path) -> tuple[dict[str, object], dict[str, object]]:
+    request_dir = run_dir / "pages/page_001/reconstruction/agent/round-01"
+    request_dir.mkdir(parents=True)
+    graph = b'{"nodes":[]}\n'
+    graph_sha256 = hashlib.sha256(graph).hexdigest()
+    (request_dir / "component-graph.json").write_bytes(graph)
+    request = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "graph_sha256": graph_sha256,
+        "evidence": {
+            "component-graph.json": {
+                "path": "component-graph.json",
+                "sha256": graph_sha256,
+            }
+        },
+    }
+    payload = (
+        json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+        + b"\n"
+    )
+    request_path = request_dir / "component_agent_request.json"
+    request_path.write_bytes(payload)
+    response = {
+        "kind": "component_request",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": hashlib.sha256(payload).hexdigest(),
+        "request_path": str(request_path.resolve()),
+    }
+    plan = {
+        **_component_plan(),
+        "request_sha256": response["request_sha256"],
+        "graph_sha256": graph_sha256,
+    }
+    return response, plan
+
+
+def _component_plan() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "component_plan",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+        "actions": [
+            {
+                "action": "accept",
+                "object_ids": ["component_0001"],
+                "parameters": {},
+                "confidence": 0.99,
+                "evidence": ["component boundary matches the source"],
+            }
+        ],
+    }
+
+
+def _runner_case() -> dict[str, object]:
+    return {
+        "id": "pptx-mixed-screenshot-candidates",
+        "kind": "pptx",
+        "path": "inputs/18-mixed-screenshot-candidates.pptx",
+        "agent_provider": "host",
+    }
+
+
+def _install_runner_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    component_plan: dict[str, object] | None = None,
+) -> Path:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json",
+        _candidate_plan(),
+    )
+    if component_plan is not None:
+        _write_benchmark_plan(
+            plans / "pptx-mixed-screenshot-candidates--component.json",
+            component_plan,
+        )
+    monkeypatch.setattr(runner, "PLAN_ROOT", plans)
+    return plans
+
+
+def test_release_runner_locks_the_complete_host_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    run_next_count = 0
+    run_execute_count = 0
+    agent_next_count = 0
+    expected_component_plan: dict[str, object] | None = None
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal agent_next_count, expected_component_plan, run_next_count, run_execute_count
+        assert cwd == tmp_path / "workspace"
+        calls.append(arguments)
+        command = arguments[:2]
+        if arguments[0] == "prepare":
+            run_dir = Path(arguments[arguments.index("--run-dir") + 1])
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps({"run_dir": str(run_dir.resolve()), "status": "prepared"}),
+                "",
+            )
+        if command == ["run", "next"]:
+            run_next_count += 1
+            value = _candidate_response() if run_next_count == 1 else {"candidate": None}
+        elif command == ["decision", "record"]:
+            value = {"status": "recorded"}
+        elif command == ["run", "execute"]:
+            run_execute_count += 1
+            value = (
+                {"status": "awaiting_agent"}
+                if run_execute_count == 1
+                else {
+                    "status": "completed",
+                    "page_results": [
+                        {"page_id": "page_001", "status": "validated"}
+                    ],
+                }
+            )
+        elif command == ["agent", "next"]:
+            agent_next_count += 1
+            if agent_next_count == 1:
+                challenge = (
+                    tmp_path
+                    / "workspace/pptx-mixed-screenshot-candidates/run/host-challenge/challenge.png"
+                )
+                challenge.parent.mkdir(parents=True)
+                image = Image.new("RGB", (240, 120), "white")
+                for left in (24, 97, 170):
+                    for x in range(left, left + 45):
+                        for y in range(20, 65):
+                            image.putpixel((x, y), (217, 72, 95))
+                image.save(challenge)
+                value = {
+                    "kind": "capability_handshake",
+                    "challenge_id": "5" * 64,
+                    "image_path": str(challenge.resolve()),
+                    "required_capabilities": [
+                        "vision",
+                        "local_file_read",
+                        "tool_use",
+                        "structured_json",
+                    ],
+                }
+            else:
+                run_dir = Path(arguments[2])
+                value, expected_component_plan = _bound_component_request(run_dir)
+                _write_benchmark_plan(
+                    plans / "pptx-mixed-screenshot-candidates--component.json",
+                    expected_component_plan,
+                )
+        elif command == ["agent", "record"]:
+            submitted = json.loads(
+                Path(arguments[arguments.index("--plan") + 1]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            if submitted["kind"] == "host_capability_response":
+                assert submitted == {
+                    "schema_version": 1,
+                    "kind": "host_capability_response",
+                    "challenge_id": "5" * 64,
+                    "observed": {"shape": "square", "color": "#d9485f", "count": 3},
+                }
+                value = {
+                    "capabilities": [
+                        "vision",
+                        "local_file_read",
+                        "tool_use",
+                        "structured_json",
+                    ],
+                    "status": "capabilities_recorded",
+                }
+            else:
+                assert expected_component_plan is not None
+                assert submitted == {
+                    key: value
+                    for key, value in expected_component_plan.items()
+                    if key != "graph_sha256"
+                }
+                plan_path = Path(arguments[2]) / "recorded-component-plan.json"
+                plan_path.write_bytes(
+                    Path(arguments[arguments.index("--plan") + 1]).read_bytes()
+                )
+                value = {
+                    "plan_path": str(plan_path.resolve()),
+                    "recovered": False,
+                    "status": "recorded",
+                }
+        else:
+            raise AssertionError(arguments)
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    result = runner.run_case(
+        _runner_case(),
+        workspace=tmp_path / "workspace",
+        command=fake_command,
+    )
+
+    run_dir = str((tmp_path / "workspace" / "pptx-mixed-screenshot-candidates" / "run").resolve())
+    input_path = str((RELEASE_ROOT / "inputs/18-mixed-screenshot-candidates.pptx").resolve())
+    assert calls == [
+        [
+            "prepare",
+            input_path,
+            "--run-dir",
+            run_dir,
+            "--output",
+            str((tmp_path / "workspace" / "pptx-mixed-screenshot-candidates" / "output.pptx").resolve()),
+            "--slide-size",
+            "original",
+            "--agent-provider",
+            "host",
+        ],
+        ["run", "next", run_dir],
+        [
+            "decision",
+            "record",
+            run_dir,
+            "--page",
+            "page_001",
+            "--object",
+            "2",
+            "--decision",
+            "replace",
+            "--confidence",
+            "0.99",
+            "--category",
+            "full_slide_screenshot",
+            "--evidence",
+            "full-slide raster bound to the candidate hashes",
+        ],
+        ["run", "next", run_dir],
+        ["run", "execute", run_dir],
+        ["agent", "next", run_dir],
+        ["agent", "record", run_dir, "--plan", calls[6][-1]],
+        ["agent", "next", run_dir],
+        ["agent", "record", run_dir, "--plan", calls[8][-1]],
+        ["run", "execute", run_dir],
+    ]
+    assert result.case_id == "pptx-mixed-screenshot-candidates"
+    assert result.run_dir == run_dir
+    assert result.pages == [{"page_id": "page_001", "status": "validated"}]
+    assert type(result.duration_ms) is int and result.duration_ms >= 0
+
+
+def test_release_runner_rejects_invalid_capability_png_size(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    image_path = tmp_path / "challenge.png"
+    Image.new("RGB", (241, 120), "white").save(image_path)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._observe_capability_challenge(image_path, tmp_path)
+
+
+def test_release_runner_rejects_out_of_bounds_capability_png(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    image_path = tmp_path / "challenge.png"
+    image = Image.new("RGB", (240, 120), "white")
+    for left in (24, 97, 170):
+        for x in range(left, left + 45):
+            for y in range(20, 65):
+                image.putpixel((x, y), (217, 72, 95))
+    image.save(image_path)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._observe_capability_challenge(image_path, run_dir)
+
+
+def test_release_runner_requires_bound_component_request_path(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._component_binding(_component_request(), tmp_path)
+
+
+def test_release_runner_preserves_preexisting_host_plan_file(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+    sentinel = workspace / ".host-plan-001.json"
+    sentinel.write_text("owner data", encoding="utf-8")
+    submitted: list[Path] = []
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        path = Path(arguments[arguments.index("--plan") + 1])
+        assert path.parent == run_dir.parent
+        assert path != sentinel
+        assert path.is_file()
+        submitted.append(path)
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_bytes(path.read_bytes())
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    runner._record_host_document(
+        fake_command,
+        {"kind": "component_plan"},
+        run_dir,
+        workspace,
+        1,
+    )
+
+    assert sentinel.read_text(encoding="utf-8") == "owner data"
+    assert len(submitted) == 1
+    assert not submitted[0].exists()
+
+
+def test_release_runner_rejects_replaced_host_submission_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+    replacement = b'{"kind":"replacement"}\n'
+    submitted: list[Path] = []
+
+    def replacing_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        path = Path(arguments[arguments.index("--plan") + 1])
+        path.unlink()
+        path.write_bytes(replacement)
+        submitted.append(path)
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_bytes(replacement)
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._record_host_document(
+            replacing_command,
+            {"kind": "component_plan"},
+            run_dir,
+            workspace,
+            1,
+        )
+
+    assert len(submitted) == 1
+    assert submitted[0].read_bytes() == replacement
+
+
+def test_release_runner_rejects_mismatched_recorded_host_plan(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+
+    def mismatched_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_text('{"kind":"different"}\n', encoding="utf-8")
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._record_host_document(
+            mismatched_command,
+            {"kind": "component_plan"},
+            run_dir,
+            workspace,
+            1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [(9, "secret stdout"), (0, "not json"), (0, '{"candidate":NaN}')],
+)
+def test_release_runner_normalizes_command_and_json_failures_without_leaks(
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    def broken_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, returncode, stdout, "private stderr")
+
+    with pytest.raises(runner.BenchmarkFailure) as caught:
+        runner.run_case(
+            _runner_case(), workspace=tmp_path / "workspace", command=broken_command
+        )
+
+    message = str(caught.value)
+    assert message in {"command_failed", "invalid_json"}
+    assert "secret stdout" not in message
+    assert "private stderr" not in message
+    assert str(tmp_path.resolve()) not in message
+
+
+def test_release_runner_rejects_missing_component_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    _install_runner_plans(tmp_path, monkeypatch)
+    responses = iter(
+        [
+            {"status": "prepared"},
+            _candidate_response(),
+            {"status": "recorded"},
+            {"candidate": None},
+            {"status": "awaiting_agent"},
+            None,
+        ]
+    )
+
+    def fake_command(arguments: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        value = next(responses)
+        if arguments[0] == "prepare":
+            value["run_dir"] = str(
+                Path(arguments[arguments.index("--run-dir") + 1]).resolve()
+            )
+        elif arguments[:2] == ["agent", "next"]:
+            value, _ = _bound_component_request(Path(arguments[2]))
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="missing_plan"):
+        runner.run_case(
+            _runner_case(), workspace=tmp_path / "workspace", command=fake_command
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"request_sha256": "5" * 64}, "stale_plan"),
+        ({"graph_sha256": "5" * 64}, "stale_plan"),
+        ({"page_id": "page_999"}, "mismatched_plan"),
+        ({"repair_round": 2}, "mismatched_plan"),
+    ],
+)
+def test_release_runner_rejects_stale_or_mismatched_component_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plan = {**_component_plan(), **mutation}
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=plan)
+
+    with pytest.raises(runner.BenchmarkFailure, match=message):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+
+def test_release_runner_rejects_duplicate_and_hardlinked_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(
+        tmp_path, monkeypatch, component_plan=_component_plan()
+    )
+    duplicate = plans / "pptx-mixed-screenshot-candidates--component-copy.json"
+    duplicate.write_bytes(
+        (plans / "pptx-mixed-screenshot-candidates--component.json").read_bytes()
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="duplicate_plan"):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+    duplicate.unlink()
+    hardlink = plans / "pptx-mixed-screenshot-candidates--component-hardlink.json"
+    hardlink.hardlink_to(plans / "pptx-mixed-screenshot-candidates--component.json")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())

@@ -1,0 +1,180 @@
+{
+  "actions": [
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows 21.9% duplicate background ownership concentrated at the broad boundary"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {
+        "margin_ratio": 0.02
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a narrow alpha halo and 1.6% duplicate edge pixels"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a one-pixel duplicate shadow boundary"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a one-pixel duplicate shadow boundary"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows 17.1% duplicate ownership and an alpha halo on the broad background fragment"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.006
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a narrow alpha halo around the card"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a narrow alpha halo around the card"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a narrow alpha halo around the card"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows a one-pixel duplicate shadow on the progress bar"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows one-pixel alpha and shadow duplication on the progress bar"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows one-pixel alpha and shadow duplication on the progress bar"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "quality-report shows one-pixel alpha and shadow duplication on the progress bar"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation proves the metric delta is independently movable from the containing background fragment"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "617d024de986c2583b9033a165c5646f7ae706649acb823ebd917ff9f63f766e",
+  "schema_version": 1,
+  "graph_sha256": "056cc31bbc28f53cbeeaf097f12142292601b956cf58280ab4104c781a735d8f"
+}
