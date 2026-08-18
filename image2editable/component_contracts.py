@@ -289,6 +289,11 @@ def _validate_quality_input_refs(value: object) -> dict:
     if not isinstance(value, dict) or frozenset(value) not in {
         frozenset(legacy_fields),
         frozenset({*legacy_fields, "foreground_evidence"}),
+        frozenset({
+            *legacy_fields,
+            "foreground_evidence",
+            "background_responsibility",
+        }),
     }:
         raise ValueError("component quality input refs are invalid")
     for reference in value.values():

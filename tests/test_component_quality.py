@@ -2005,6 +2005,96 @@ def test_background_rebuild_does_not_authorize_flattened_retained_raster(
     assert report["checks"]["visual_ownership"] == "fail"
 
 
+def test_background_responsibility_owns_only_bound_thin_structure(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    retained_line = np.zeros(case["component_mask"].shape, dtype=bool)
+    retained_line[6:8, 4:60] = True
+    case["source"][retained_line] = 40
+    case["background"][retained_line] = 40
+    case["reconstructed"][retained_line] = 40
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=case["component_mask"] | retained_line,
+        background_responsibility=retained_line,
+    )
+
+    assert report["checks"]["visual_ownership"] == "pass"
+    assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
+        np.count_nonzero(retained_line)
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "broad", "text", "outside_foreground", "active", "over_budget",
+        "changed", "slightly_changed",
+    ],
+)
+def test_background_responsibility_rejects_unbound_or_broad_pixels(
+    tmp_path, mutation: str,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    responsibility = np.zeros(case["component_mask"].shape, dtype=bool)
+    if mutation == "broad":
+        responsibility[2:8, 2:8] = True
+    elif mutation == "text":
+        responsibility[20:22, 24:40] = True
+    elif mutation == "active":
+        responsibility[12:14, 16:48] = True
+    elif mutation == "over_budget":
+        responsibility[2:12:2, 2:62] = True
+    else:
+        responsibility[6:8, 4:60] = True
+    material = case["component_mask"] | responsibility
+    if mutation == "outside_foreground":
+        material = case["component_mask"]
+    case["source"][responsibility] = 40
+    case["reconstructed"][responsibility] = 40
+    if mutation == "slightly_changed":
+        case["background"][responsibility] = 41
+    elif mutation != "changed":
+        case["background"][responsibility] = 40
+
+    with pytest.raises(ValueError, match="background responsibility"):
+        evaluate_component_quality_round(
+            case["source"], case["background"], case["reconstructed"],
+            case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+            trusted_root=tmp_path,
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={
+                "protected_native_overlap": "pass", "pptx_reopen": "pass",
+            },
+            initial_component_count=1,
+            expected_component_ids=["component_0001"],
+            material_foreground=material,
+            background_responsibility=responsibility,
+        )
+
+
 def test_repair_quality_round_rejects_reliable_text_without_editable_object(tmp_path) -> None:
     case = _synthetic_quality_case()
     graph_dir = tmp_path / "round"

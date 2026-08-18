@@ -83,6 +83,9 @@ _LEGACY_QUALITY_INPUT_NAMES = frozenset({
     "presentation_manifest",
 })
 _QUALITY_INPUT_NAMES = _LEGACY_QUALITY_INPUT_NAMES | {"foreground_evidence"}
+_BACKGROUND_QUALITY_INPUT_NAMES = _QUALITY_INPUT_NAMES | {
+    "background_responsibility"
+}
 
 
 class _RoundReviewFallback(Exception):
@@ -1838,6 +1841,7 @@ def _previous_component_reports(
         or frozenset(quality_evidence["input_refs"]) not in {
             _LEGACY_QUALITY_INPUT_NAMES | {"source"},
             _QUALITY_INPUT_NAMES | {"source"},
+            _BACKGROUND_QUALITY_INPUT_NAMES | {"source"},
         }
         or any(
             not _is_artifact_reference(reference)
@@ -1886,7 +1890,10 @@ def _verify_quality_input_refs(
         if state.get("quality_gate_version", 1) >= 2
         else _LEGACY_QUALITY_INPUT_NAMES
     )
-    if not isinstance(refs, dict) or frozenset(refs) != expected_names:
+    allowed_names = {expected_names}
+    if expected_names == _QUALITY_INPUT_NAMES:
+        allowed_names.add(_BACKGROUND_QUALITY_INPUT_NAMES)
+    if not isinstance(refs, dict) or frozenset(refs) not in allowed_names:
         missing = expected_names - frozenset(refs) if isinstance(refs, dict) else set()
         if "foreground_evidence" in missing:
             raise ValueError("component quality input refs require foreground_evidence")
@@ -2083,6 +2090,10 @@ def _recompute_quality_artifact(
         payloads["foreground_evidence"] = bound_quality_payloads[
             "foreground_evidence"
         ]
+    if "background_responsibility" in bound_quality_payloads:
+        payloads["background_responsibility"] = bound_quality_payloads[
+            "background_responsibility"
+        ]
 
     def decode(name: str, flags: int):
         image = cv2.imdecode(np.frombuffer(payloads[name], dtype=np.uint8), flags)
@@ -2103,6 +2114,21 @@ def _recompute_quality_artifact(
         if "foreground_evidence" in payloads
         else None
     )
+    background_responsibility = None
+    if "background_responsibility" in payloads:
+        encoded_responsibility = decode(
+            "background_responsibility", cv2.IMREAD_UNCHANGED
+        )
+        if (
+            encoded_responsibility.ndim != 2
+            or encoded_responsibility.dtype != np.uint8
+            or np.any(
+                (encoded_responsibility != 0)
+                & (encoded_responsibility != 255)
+            )
+        ):
+            raise ValueError("component quality background responsibility is invalid")
+        background_responsibility = encoded_responsibility == 255
     plan = None
     if filename == "component-quality.json":
         input_graph = load_component_agent_graph(request_path)
@@ -2162,6 +2188,7 @@ def _recompute_quality_artifact(
         contained_parent_pairs=contained_parent_pairs,
         approved_contained_parent_pairs=approved_contained_parent_pairs,
         material_foreground=material_foreground,
+        background_responsibility=background_responsibility,
         unexplained_output_path=(
             graph_path.parent / "unexplained-mask.png"
             if material_foreground is not None
@@ -2733,6 +2760,7 @@ def evaluate_component_quality_round(
     presentation_layers=None,
     text_items: list[dict] | None = None,
     material_foreground=None,
+    background_responsibility=None,
     unexplained_output_path: str | Path | None = None,
 ) -> dict:
     import cv2
@@ -2967,6 +2995,43 @@ def evaluate_component_quality_round(
         material_foreground = refine_material_foreground(
             material_foreground, source, background, calibration
         )
+        responsibility = None
+        if background_responsibility is not None:
+            responsibility = np.asarray(background_responsibility)
+            if (
+                responsibility.dtype != np.bool_
+                or responsibility.shape != material_foreground.shape
+                or float(responsibility.mean()) > 0.05
+                or np.any(responsibility & ~material_foreground)
+                or np.any(responsibility & (np.asarray(text_mask) > 0))
+            ):
+                raise ValueError("background responsibility mask is invalid")
+            if np.any(
+                responsibility
+                & np.any(np.asarray(source) != np.asarray(background), axis=2)
+            ):
+                raise ValueError("background responsibility pixels changed")
+            active_ownership = np.zeros(responsibility.shape, dtype=bool)
+            for node in active_visual:
+                active_ownership |= component_ownership(node["id"])
+            if np.any(responsibility & active_ownership):
+                raise ValueError("background responsibility overlaps a component")
+            kernel = np.ones((3, 3), dtype=np.uint8)
+            core = cv2.erode(
+                responsibility.astype(np.uint8), kernel
+            ) > 0
+            if np.any(core):
+                raise ValueError(
+                    "background responsibility contains broad raster"
+                )
+
+        def generated_underlays():
+            if responsibility is not None:
+                yield responsibility
+            if packed_layers is not None:
+                for node in active_visual:
+                    yield unpack(node["id"], "generated_underlay_mask")
+
         ownership_metrics, unexplained = material_ownership_metrics(
             material_foreground,
             (
@@ -2975,10 +3040,7 @@ def evaluate_component_quality_round(
             ),
             text_mask,
             calibration,
-            generated_underlay_masks=(
-                unpack(node["id"], "generated_underlay_mask")
-                for node in active_visual
-            ) if packed_layers is not None else (),
+            generated_underlay_masks=generated_underlays(),
         )
         visual_metrics = {**visual_metrics, **ownership_metrics}
         page_checks["visual_ownership"] = (

@@ -2128,6 +2128,16 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         "path": foreground_evidence.relative_to(store.root).as_posix(),
         "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
     }
+    background_responsibility = execution_dir / "background-responsibility.png"
+    Image.fromarray(np.array([[0, 0], [0, 255]], dtype=np.uint8)).save(
+        background_responsibility
+    )
+    quality_input_refs["background_responsibility"] = {
+        "path": background_responsibility.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(
+            background_responsibility.read_bytes()
+        ).hexdigest(),
+    }
     manifest_path = store.root / quality_input_refs["presentation_manifest"]["path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     first = manifest["components"][0]
@@ -2172,6 +2182,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     observed_visual = {}
     observed_layers = []
     observed_foreground = {}
+    observed_responsibility = {}
     import scripts.visual_segment as visual_segment
     real_visual_difference = visual_segment.visual_difference
 
@@ -2190,6 +2201,9 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         observed_layers.extend(kwargs["presentation_layers"])
         observed_foreground["mask"] = kwargs["material_foreground"]
         observed_foreground["output"] = kwargs["unexplained_output_path"]
+        observed_responsibility["mask"] = kwargs[
+            "background_responsibility"
+        ]
         return _quality_report_with_unexplained(
             _strict_quality_report("candidate_b", True), **kwargs
         )
@@ -2215,6 +2229,10 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     )
     assert observed_layers[0]["metrics"] == first["metrics"]
     assert np.all(observed_foreground["mask"] == 255)
+    assert np.array_equal(
+        observed_responsibility["mask"],
+        np.array([[False, False], [False, True]]),
+    )
     assert observed_foreground["output"] == execution_dir / "unexplained-mask.png"
     quality_state = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
@@ -2226,6 +2244,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     assert set(quality_artifact["input_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check",
         "presentation_manifest", "foreground_evidence",
+        "background_responsibility",
     }
     assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
@@ -2239,6 +2258,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     assert set(result["accepted_asset_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check",
         "presentation_manifest", "foreground_evidence",
+        "background_responsibility",
     }
 
 
@@ -2743,6 +2763,29 @@ def test_previous_quality_allows_failed_candidate_to_be_replaced(
         state={**state, "repair_round": 2},
         request=request,
         active_component_ids=["frozen_a"],
+    )
+
+    assert "candidate_b" in reports
+
+
+def test_previous_quality_allows_bound_background_responsibility(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["input_refs"]["background_responsibility"] = dict(
+        quality["input_refs"]["foreground_evidence"]
+    )
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["candidate_b", "frozen_a"],
     )
 
     assert "candidate_b" in reports
@@ -3755,6 +3798,7 @@ def _execute_composite_quality_round(
     before_quality=None,
     initial_diagnostics: list[dict] | None = None,
     presentation_metrics_by_id: dict[str, dict] | None = None,
+    background_responsibility: np.ndarray | None = None,
 ) -> tuple[dict, dict]:
     request = load_component_agent_request(request_path)
     plan = {
@@ -3780,6 +3824,10 @@ def _execute_composite_quality_round(
         foreground = execution_dir / "foreground-evidence.png"
         Image.fromarray(np.zeros(shape, dtype=np.uint8)).save(foreground)
         quality_paths["foreground_evidence"] = foreground
+    if background_responsibility is not None:
+        responsibility = execution_dir / "background-responsibility.png"
+        Image.fromarray(background_responsibility).save(responsibility)
+        quality_paths["background_responsibility"] = responsibility
     native = execution_dir / "native-check.json"
     native.write_text(json.dumps({
         "schema_version": 1, "page_id": "page_001",
@@ -3854,6 +3902,51 @@ def _execute_composite_quality_round(
         .read_text(encoding="utf-8")
     )
     return quality["report"], advance_component_repair(store, "page_001")
+
+
+def test_background_responsibility_artifact_must_be_binary(
+    page_session: dict,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    with pytest.raises(
+        ValueError, match="background responsibility is invalid"
+    ):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=np.array(
+                [[0, 1], [0, 255]], dtype=np.uint8
+            ),
+        )
+
+
+def test_background_responsibility_artifact_is_hash_bound(
+    page_session: dict,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    def tamper() -> None:
+        path = request_path.parents[2] / (
+            "execution-01/background-responsibility.png"
+        )
+        path.write_bytes(path.read_bytes() + b"tampered")
+
+    with pytest.raises(RuntimeError, match="artifact hash mismatch"):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=np.array(
+                [[0, 0], [0, 255]], dtype=np.uint8
+            ),
+            before_quality=tamper,
+        )
 
 
 def _start_quality_mutation_round(page_session: dict):

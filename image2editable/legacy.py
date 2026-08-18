@@ -1382,6 +1382,8 @@ def _rebuild_canvas_background(
     text_mask_path: Path,
     output_path: Path,
     repair_all_active: bool = True,
+    foreground_evidence_path: Path | None = None,
+    responsibility_output_path: Path | None = None,
 ) -> Path:
     import cv2
     import numpy as np
@@ -1396,10 +1398,22 @@ def _rebuild_canvas_background(
             restored = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
         text_repair = np.asarray(image.convert("L")) > 0
+    foreground_evidence = None
+    if (foreground_evidence_path is None) != (
+        responsibility_output_path is None
+    ):
+        raise ValueError("background responsibility paths are incomplete")
+    if foreground_evidence_path is not None:
+        with Image.open(foreground_evidence_path) as image:
+            foreground_evidence = np.asarray(image.convert("L")) > 0
     if (
         source.shape != current.shape
         or (restored is not None and restored.shape != source.shape)
         or text_repair.shape != source.shape[:2]
+        or (
+            foreground_evidence is not None
+            and foreground_evidence.shape != source.shape[:2]
+        )
     ):
         raise ValueError("background rebuild input dimensions differ")
 
@@ -1418,21 +1432,34 @@ def _rebuild_canvas_background(
         if mask.shape != text_repair.shape:
             raise ValueError("background rebuild mask dimensions differ")
         masks_by_id[object_id] = mask
-        left, top, right, bottom = node["bbox"]
-        edge_margin = max(1, round(min(mask.shape) * 0.01))
-        inactive_page_surface = (
-            node["kind"] == "parent"
-            and node["state"] == "inactive"
-            and node["parent_id"] is None
-            and node["z_index"] == 0
-            and float(mask.mean()) >= 0.75
-            and left <= edge_margin
-            and top <= edge_margin
-            and right >= mask.shape[1] - edge_margin
-            and bottom >= mask.shape[0] - edge_margin
-        )
-        if not inactive_page_surface:
-            repairable_visual |= mask
+    edge_margin = max(1, round(min(text_repair.shape) * 0.01))
+    inactive_page_surfaces = {
+        object_id
+        for object_id, node in by_id.items()
+        if node["kind"] == "parent"
+        and node["state"] == "inactive"
+        and node["parent_id"] is None
+        and node["z_index"] == 0
+        and float(masks_by_id[object_id].mean()) >= 0.75
+        and node["bbox"][0] <= edge_margin
+        and node["bbox"][1] <= edge_margin
+        and node["bbox"][2] >= text_repair.shape[1] - edge_margin
+        and node["bbox"][3] >= text_repair.shape[0] - edge_margin
+    }
+    for object_id, node in by_id.items():
+        ancestor_id = node["parent_id"]
+        belongs_to_page_surface = object_id in inactive_page_surfaces
+        while (
+            node["state"] == "inactive"
+            and ancestor_id is not None
+            and ancestor_id in by_id
+        ):
+            if ancestor_id in inactive_page_surfaces:
+                belongs_to_page_surface = True
+                break
+            ancestor_id = by_id[ancestor_id]["parent_id"]
+        if not belongs_to_page_surface:
+            repairable_visual |= masks_by_id[object_id]
     repair = (
         cv2.dilate(
             repairable_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
@@ -1471,7 +1498,9 @@ def _rebuild_canvas_background(
         repair |= text_repair
     rebuilt = current.copy()
     if restored is not None:
-        rebuilt[~repairable_visual] = restored[~repairable_visual]
+        restore_canvas = source.copy()
+        restore_canvas[text_repair] = restored[text_repair]
+        rebuilt[~repairable_visual] = restore_canvas[~repairable_visual]
         rebuilt[restore_repair] = restored[restore_repair]
         repair &= ~restore_repair
     if np.any(repair):
@@ -1487,6 +1516,33 @@ def _rebuild_canvas_background(
             allow_original=False,
         )
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
+    if responsibility_output_path is not None:
+        from image2editable.component_quality import (
+            calibrate_page,
+            refine_material_foreground,
+        )
+
+        material_foreground = refine_material_foreground(
+            foreground_evidence,
+            source,
+            rebuilt,
+            calibrate_page(source, text_repair),
+        )
+        candidate = (
+            material_foreground
+            & ~text_repair
+            & ~repairable_visual
+            & np.all(rebuilt == source, axis=2)
+        )
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        core = cv2.erode(candidate.astype(np.uint8), kernel) > 0
+        responsibility = candidate & ~core
+        if float(responsibility.mean()) > 0.05:
+            responsibility = None
+        if responsibility is not None:
+            Image.fromarray(
+                responsibility.astype(np.uint8) * 255, mode="L"
+            ).save(responsibility_output_path)
     return output_path
 
 
@@ -1828,6 +1884,7 @@ def _quality_assets(
     output_dir: Path,
     *,
     background_path_override: Path | None = None,
+    background_responsibility_path: Path | None = None,
     frozen_manifest_path: Path | None = None,
     frozen_component_ids: set[str] | None = None,
 ) -> dict:
@@ -1965,6 +2022,8 @@ def _quality_assets(
         assets["foreground_evidence"] = Path(
             prepared["_foreground_evidence_mask_path"]
         )
+    if background_responsibility_path is not None:
+        assets["background_responsibility"] = background_responsibility_path
     shutil.copyfile(background_path, assets["background"])
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
@@ -2032,6 +2091,7 @@ def _execute_legacy_round(
     )
     previous_quality = json.loads(quality_evidence.read_text(encoding="utf-8"))
     current_background = None
+    current_background_responsibility = None
     previous_presentation_manifest = request_path.parent / Path(
         request["evidence"]["presentation-manifest.json"]["path"]
     )
@@ -2042,6 +2102,13 @@ def _execute_legacy_round(
         previous_presentation_manifest = _state_artifact(
             store, previous_quality["input_refs"]["presentation_manifest"]
         )
+        responsibility_ref = previous_quality["input_refs"].get(
+            "background_responsibility"
+        )
+        if isinstance(responsibility_ref, dict):
+            current_background_responsibility = _state_artifact(
+                store, responsibility_ref
+            )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
         if action["action"] == "split":
@@ -2150,6 +2217,11 @@ def _execute_legacy_round(
         Image.fromarray(effective_text_clean, mode="RGB").save(
             effective_text_clean_path
         )
+        responsibility_output = (
+            output_dir / "background-responsibility.png"
+            if prepared.get("_prepared_schema_version", 1) >= 5
+            else None
+        )
         current_background = _rebuild_canvas_background(
             source_path=source,
             current_background_path=(
@@ -2162,6 +2234,12 @@ def _execute_legacy_round(
             graph=next_graph,
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
+            foreground_evidence_path=(
+                Path(prepared["_foreground_evidence_mask_path"])
+                if responsibility_output is not None
+                else None
+            ),
+            responsibility_output_path=responsibility_output,
             output_path=output_dir / "background-rebuilt.png",
             repair_all_active=(
                 current_background is None
@@ -2169,9 +2247,16 @@ def _execute_legacy_round(
                 == sha256_file(Path(prepared["background_original_path"]))
             ),
         )
+        current_background_responsibility = (
+            responsibility_output
+            if responsibility_output is not None
+            and responsibility_output.exists()
+            else None
+        )
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
         background_path_override=current_background,
+        background_responsibility_path=current_background_responsibility,
         frozen_manifest_path=previous_presentation_manifest,
         frozen_component_ids=set(state["frozen"]),
     )
@@ -2364,6 +2449,10 @@ def _execute_legacy_parent_fallback(
         if isinstance(previous_refs.get("background"), dict):
             quality_options["background_path_override"] = _state_artifact(
                 store, previous_refs["background"]
+            )
+        if isinstance(previous_refs.get("background_responsibility"), dict):
+            quality_options["background_responsibility_path"] = _state_artifact(
+                store, previous_refs["background_responsibility"]
             )
         frozen_ids = set(state["frozen"])
         if frozen_ids and isinstance(

@@ -2859,7 +2859,7 @@ def test_background_rebuild_skips_page_surface_when_repairing_foreground(
     source = tmp_path / "source.png"
     current = tmp_path / "current.png"
     restored = tmp_path / "restored.png"
-    Image.new("RGB", shape[::-1], "white").save(source)
+    Image.new("RGB", shape[::-1], (128, 128, 128)).save(source)
     Image.new("RGB", shape[::-1], "black").save(current)
     Image.new("RGB", shape[::-1], "white").save(restored)
     graph_dir = tmp_path / "graph"
@@ -2871,11 +2871,15 @@ def test_background_rebuild_skips_page_surface_when_repairing_foreground(
         graph_dir,
         {
             "page_surface": page_surface,
+            "page_surface_child": page_surface,
             "large_foreground": large_foreground,
             "card": card,
         },
     )
     graph["nodes"][0]["state"] = "inactive"
+    graph["nodes"][1].update({
+        "kind": "child", "parent_id": "page_surface", "state": "inactive",
+    })
     text_mask = tmp_path / "text-mask.png"
     Image.new("L", shape[::-1], 0).save(text_mask)
     output = tmp_path / "rebuilt.png"
@@ -2901,7 +2905,7 @@ def test_background_rebuild_skips_page_surface_when_repairing_foreground(
     assert captured["repair"][2, 2]
     assert captured["repair"][9, 9]
     assert not captured["repair"][18, 18]
-    assert Image.open(output).getpixel((18, 18)) == (255, 255, 255)
+    assert Image.open(output).getpixel((18, 18)) == (128, 128, 128)
 
 
 def test_execute_legacy_round_aggregates_background_actions(
@@ -2919,9 +2923,11 @@ def test_execute_legacy_round_aggregates_background_actions(
     source = round_dir / "source.png"
     background = reconstruction / "background.png"
     text_mask = reconstruction / "text-mask.png"
+    foreground_evidence = reconstruction / "foreground-evidence.png"
     for path in (source, background):
         Image.new("RGB", (12, 8), "white").save(path)
     Image.new("L", (12, 8), 0).save(text_mask)
+    Image.new("L", (12, 8), 255).save(foreground_evidence)
     quality = round_dir / "quality-report.json"
     quality.write_text("{}", encoding="utf-8")
     presentation_manifest = round_dir / "presentation-manifest.json"
@@ -2991,14 +2997,26 @@ def test_execute_legacy_round_aggregates_background_actions(
             if "repair_requests" in kwargs
             else [(kwargs["component_ids"], kwargs["margin_ratio"])]
         )
+        captured["foreground_evidence_path"] = kwargs.get(
+            "foreground_evidence_path"
+        )
+        captured["responsibility_output_path"] = kwargs.get(
+            "responsibility_output_path"
+        )
+        if captured["responsibility_output_path"] is not None:
+            Image.new("L", (12, 8), 0).save(
+                captured["responsibility_output_path"]
+            )
         return kwargs["current_background_path"]
 
     fake_image_module = types.SimpleNamespace(
         load_component_layers=lambda path: {
+            "_prepared_schema_version": 5,
             "_text_clean_path": str(source),
             "_text_cleanup_mask_path": str(text_mask),
             "_text_mask_path": str(text_mask),
             "background_original_path": str(background),
+            "_foreground_evidence_mask_path": str(foreground_evidence),
             "text_items": [],
         }
     )
@@ -3016,7 +3034,13 @@ def test_execute_legacy_round_aggregates_background_actions(
         [], np.zeros((8, 12), dtype=bool), np.full((8, 12, 3), 255, dtype=np.uint8)
     ))
     monkeypatch.setattr(legacy, "_rebuild_canvas_background", rebuild_background)
-    monkeypatch.setattr(legacy, "_quality_assets", lambda *a, **k: {})
+    def quality_assets(*args, **kwargs):
+        captured["quality_responsibility_path"] = kwargs.get(
+            "background_responsibility_path"
+        )
+        return {}
+
+    monkeypatch.setattr(legacy, "_quality_assets", quality_assets)
     monkeypatch.setattr(legacy, "record_component_execution", lambda *a, **k: None)
     monkeypatch.setattr(
         legacy.importlib, "import_module", lambda name: fake_image_module
@@ -3039,6 +3063,12 @@ def test_execute_legacy_round_aggregates_background_actions(
         ({"text_left"}, 0.01),
         ({"component_right"}, 0.02),
     ]
+    expected_responsibility = (
+        reconstruction / "execution-01/background-responsibility.png"
+    )
+    assert captured["foreground_evidence_path"] == foreground_evidence
+    assert captured["responsibility_output_path"] == expected_responsibility
+    assert captured["quality_responsibility_path"] == expected_responsibility
     assert [fields["status"] for _, fields in trace.events] == ["failed"]
 
 
@@ -3143,7 +3173,9 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
     draw.rectangle((12, 8, 18, 14), fill="red")
     draw.rectangle((28, 8, 34, 14), fill="green")
     clean.save(restored)
-    Image.new("L", (40, 30), 0).save(text_mask)
+    cleanup_mask = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(cleanup_mask).line((4, 20, 35, 20), fill=255, width=1)
+    cleanup_mask.save(text_mask)
     selected_mask = masks / "selected.png"
     mask = Image.new("L", (40, 30), 0)
     ImageDraw.Draw(mask).rectangle((12, 8, 18, 14), fill=255)
@@ -3190,6 +3222,171 @@ def test_background_rebuild_restores_structure_and_clears_only_selected_visual(
         assert rebuilt.getpixel((31, 11)) == (210, 210, 210)
         assert rebuilt.getpixel((20, 20)) == (0, 0, 255)
     assert allow_original_values == [False]
+
+
+def test_background_responsibility_keeps_only_thin_unowned_nontext_structure(
+    tmp_path: Path,
+) -> None:
+    import cv2
+
+    shape = (100, 100)
+    source = np.full((*shape, 3), 255, dtype=np.uint8)
+    thin_line = np.zeros(shape, dtype=bool)
+    thin_line[10:12, 5:45] = True
+    broad_raster = np.zeros(shape, dtype=bool)
+    broad_raster[55:75, 55:75] = True
+    text = np.zeros(shape, dtype=bool)
+    text[30:32, 5:45] = True
+    active = np.zeros(shape, dtype=bool)
+    active[40:42, 5:45] = True
+    foreground = thin_line | broad_raster | text | active
+    source[foreground] = 40
+
+    source_path = tmp_path / "source.png"
+    current_path = tmp_path / "current.png"
+    foreground_path = tmp_path / "foreground.png"
+    text_path = tmp_path / "text.png"
+    output_path = tmp_path / "background.png"
+    responsibility_path = tmp_path / "background-responsibility.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+    Image.fromarray(source, mode="RGB").save(current_path)
+    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
+        foreground_path
+    )
+    Image.fromarray(text.astype(np.uint8) * 255, mode="L").save(text_path)
+    graph_dir = tmp_path / "graph"
+    masks = graph_dir / "masks"
+    masks.mkdir(parents=True)
+    active_path = masks / "active.png"
+    Image.fromarray(active.astype(np.uint8) * 255, mode="L").save(active_path)
+    graph = {"nodes": [{
+        "id": "active", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": "masks/active.png",
+        "mask_sha256": hashlib.sha256(active_path.read_bytes()).hexdigest(),
+        "bbox": [5, 40, 45, 42], "z_index": 0, "text_ids": [],
+    }]}
+
+    legacy._rebuild_canvas_background(
+        source_path=source_path,
+        current_background_path=current_path,
+        repair_requests=[],
+        graph=graph,
+        graph_dir=graph_dir,
+        text_mask_path=text_path,
+        foreground_evidence_path=foreground_path,
+        responsibility_output_path=responsibility_path,
+        output_path=output_path,
+        repair_all_active=False,
+    )
+
+    with Image.open(responsibility_path) as image:
+        responsibility = np.asarray(image.convert("L")) > 0
+    candidate = thin_line | broad_raster
+    core = cv2.erode(
+        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+    assert np.array_equal(responsibility, candidate & ~core)
+    assert not np.any(responsibility & core)
+
+
+def test_background_responsibility_rejects_page_over_budget(
+    tmp_path: Path,
+) -> None:
+    shape = (100, 100)
+    source = np.full((*shape, 3), 255, dtype=np.uint8)
+    foreground = np.zeros(shape, dtype=bool)
+    foreground[5:35:3, :] = True
+    source[foreground] = 40
+    source_path = tmp_path / "source.png"
+    current_path = tmp_path / "current.png"
+    foreground_path = tmp_path / "foreground.png"
+    text_path = tmp_path / "text.png"
+    responsibility_path = tmp_path / "background-responsibility.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+    Image.fromarray(source, mode="RGB").save(current_path)
+    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
+        foreground_path
+    )
+    Image.new("L", shape[::-1], 0).save(text_path)
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+
+    legacy._rebuild_canvas_background(
+        source_path=source_path,
+        current_background_path=current_path,
+        repair_requests=[],
+        graph={"nodes": []},
+        graph_dir=graph_dir,
+        text_mask_path=text_path,
+        foreground_evidence_path=foreground_path,
+        responsibility_output_path=responsibility_path,
+        output_path=tmp_path / "background.png",
+        repair_all_active=False,
+    )
+
+    assert not responsibility_path.exists()
+
+
+def test_background_responsibility_keeps_only_the_noncore_pixels(
+    tmp_path: Path,
+) -> None:
+    import cv2
+    from image2editable.component_quality import (
+        calibrate_page,
+        refine_material_foreground,
+    )
+
+    shape = (100, 100)
+    source = np.full((*shape, 3), 255, dtype=np.uint8)
+    foreground = np.zeros(shape, dtype=bool)
+    foreground[10:12, 5:80] = True
+    foreground[9:12, 40:43] = True
+    unsupported = np.zeros(shape, dtype=bool)
+    unsupported[70:72, 5:80] = True
+    foreground |= unsupported
+    source[foreground] = 40
+    source[unsupported] = 255
+    source_path = tmp_path / "source.png"
+    current_path = tmp_path / "current.png"
+    foreground_path = tmp_path / "foreground.png"
+    text_path = tmp_path / "text.png"
+    responsibility_path = tmp_path / "background-responsibility.png"
+    Image.fromarray(source, mode="RGB").save(source_path)
+    Image.fromarray(source, mode="RGB").save(current_path)
+    Image.fromarray(foreground.astype(np.uint8) * 255, mode="L").save(
+        foreground_path
+    )
+    Image.new("L", shape[::-1], 0).save(text_path)
+    graph_dir = tmp_path / "graph"
+    graph_dir.mkdir()
+
+    legacy._rebuild_canvas_background(
+        source_path=source_path,
+        current_background_path=current_path,
+        repair_requests=[],
+        graph={"nodes": []},
+        graph_dir=graph_dir,
+        text_mask_path=text_path,
+        foreground_evidence_path=foreground_path,
+        responsibility_output_path=responsibility_path,
+        output_path=tmp_path / "background.png",
+        repair_all_active=False,
+    )
+
+    with Image.open(responsibility_path) as image:
+        responsibility = np.asarray(image.convert("L")) > 0
+    with Image.open(tmp_path / "background.png") as image:
+        rebuilt = np.asarray(image.convert("RGB"))
+    refined = refine_material_foreground(
+        foreground,
+        source,
+        rebuilt,
+        calibrate_page(source, np.zeros(shape, dtype=bool)),
+    )
+    core = cv2.erode(
+        refined.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+    assert np.array_equal(responsibility, refined & ~core)
 
 
 @pytest.mark.parametrize(
