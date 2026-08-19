@@ -2620,7 +2620,10 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "graph_ref": state["graph_ref"], "round_history": state["round_history"],
         "accepted_graph_sha256": quality["input_graph_sha256"],
         "fallback": state["fallback"],
-        "accepted_asset_refs": quality["input_refs"],
+        "accepted_asset_refs": {
+            key: value for key, value in quality["input_refs"].items()
+            if key != "background_responsibility"
+        },
         "text_items": quality.get("text_items", []),
         "raster_text_preserved": False,
         "warning": None,

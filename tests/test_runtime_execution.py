@@ -5872,6 +5872,22 @@ def test_accepted_slide_uses_effective_text_items_from_result(tmp_path: Path) ->
     assert slide["text_items"] == []
 
 
+def test_accepted_slide_rejects_quality_only_background_responsibility(
+    tmp_path: Path,
+) -> None:
+    store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
+    result["accepted_asset_refs"]["background_responsibility"] = dict(
+        result["accepted_asset_refs"]["source"]
+    )
+
+    with pytest.raises(
+        ValueError, match="^accepted presentation references are invalid$"
+    ):
+        legacy._accepted_slide_data(
+            store, reconstruction, {"text_items": []}, result
+        )
+
+
 def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
     import image_to_ppt
 

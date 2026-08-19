@@ -2067,6 +2067,19 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     from image2editable.host_agent import record_host_plan
     from image2editable.store import RunStore
 
+    initial_graph_path = page_session["evidence"]["component-graph.json"]
+    initial_graph = json.loads(initial_graph_path.read_text(encoding="utf-8"))
+    initial_masks = {
+        "candidate_b": np.array([[255, 255], [0, 255]], dtype=np.uint8),
+        "frozen_a": np.full((2, 2), 255, dtype=np.uint8),
+    }
+    for node in initial_graph["nodes"]:
+        mask_path = initial_graph_path.parent / node["mask"]
+        Image.fromarray(initial_masks[node["id"]]).save(mask_path)
+        node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    initial_graph_path.write_text(json.dumps(initial_graph), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
+
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
@@ -2250,6 +2263,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         "presentation_manifest", "foreground_evidence",
         "background_responsibility",
     }
+    quality_input_refs_before_commit = copy.deepcopy(quality_artifact["input_refs"])
     assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
     ready = advance_component_repair(store, "page_001")
@@ -2259,11 +2273,28 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     assert state["delivery_checks"] == {"pptx_reopen": "unknown"}
     assert state["result_ref"] is not None
     result = store.read_json("pages/page_001/reconstruction/component_result.json")
-    assert set(result["accepted_asset_refs"]) == {
-        "source", "background", "reconstructed", "text_mask", "native_check",
-        "presentation_manifest", "foreground_evidence",
-        "background_responsibility",
-    }
+    persisted_quality = store.read_json(
+        quality_state["current_round"]["quality_ref"]["path"]
+    )
+    assert persisted_quality["input_refs"] == quality_input_refs_before_commit
+    expected_accepted_refs = dict(quality_input_refs_before_commit)
+    expected_accepted_refs.pop("background_responsibility")
+    assert result["accepted_asset_refs"] == expected_accepted_refs
+    assert "background_responsibility" in persisted_quality["input_refs"]
+
+    from image2editable import legacy
+
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    slide = legacy._accepted_slide_data(
+        store, request_path.parents[2], {"text_items": []}, result
+    )
+    assembly_dir = Path(slide["_assembly_assets_dir"])
+    try:
+        assert {item["component_id"] for item in slide["components"]} == {
+            "candidate_b", "frozen_a",
+        }
+    finally:
+        shutil.rmtree(assembly_dir)
 
 
 def test_page_only_violation_stops_when_quality_does_not_improve(
@@ -3065,6 +3096,13 @@ def test_intact_parent_gate_controls_fallback_result(
     if accepted:
         assert final_state["fallback"]["status"] == "parent_preserved"
         assert final_state["frozen"]["candidate_b"] == final_state["parent_assets"]["candidate_b"]["sha256"]
+        quality = store.read_json(final_state["fallback_quality_ref"]["path"])
+        component_result = store.read_json(
+            "pages/page_001/reconstruction/component_result.json"
+        )
+        assert "background_responsibility" not in quality["input_refs"]
+        assert "foreground_evidence" in quality["input_refs"]
+        assert component_result["accepted_asset_refs"] == quality["input_refs"]
     else:
         assert final_state["fallback"]["status"] == "warning"
 
