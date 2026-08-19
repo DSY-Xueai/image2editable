@@ -1930,6 +1930,109 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
     assert {"protected_native_overlap_unknown", "pptx_reopen_unknown"} <= set(unknown["violations"])
 
 
+def test_repair_quality_round_keeps_complete_unowned_line_delta(tmp_path) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    case["source"][10, 10:90] = 20
+    material = np.zeros(case["component_mask"].shape, dtype=bool)
+    material[10, 10:26] = True
+    material[10, 30:46] = True
+    material[10, 50:66] = True
+    unexplained_path = graph_dir / "unexplained-mask.png"
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+        unexplained_output_path=unexplained_path,
+    )
+
+    with Image.open(unexplained_path) as image:
+        unexplained = np.asarray(image) > 0
+    assert np.all(unexplained[10, 10:90])
+    assert report["checks"]["visual_ownership"] == "fail"
+    assert "unexplained_visual_residual" in report["violations"]
+
+
+def test_repair_quality_round_does_not_promote_adjacent_background_texture_delta(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    rows, columns = np.indices(case["component_mask"].shape)
+    texture = np.where((rows + columns) % 2, 48, 64).astype(np.uint8)
+    background_texture = np.zeros(case["component_mask"].shape, dtype=bool)
+    background_texture[13:25, 4:124] = True
+    case["source"][background_texture] = texture[background_texture, None]
+    case["background"][background_texture] = texture[background_texture, None]
+    case["reconstructed"][background_texture] = 96
+    material = np.zeros(case["component_mask"].shape, dtype=bool)
+    material[24, 40:50] = True
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+    )
+
+    assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
+    assert report["checks"]["visual_ownership"] == "pass"
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_repair_quality_round_does_not_promote_benign_or_owned_delta(
+    tmp_path, owned: bool,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    if owned:
+        case["reconstructed"][16, 20:44] = 0
+    else:
+        case["source"][5, 10:23] = 88
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=np.zeros(case["component_mask"].shape, dtype=bool),
+    )
+
+    assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
+    assert report["checks"]["visual_ownership"] == "pass"
+
+
 def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> None:
     case = _synthetic_quality_case()
     graph_dir = tmp_path / "round"
@@ -2298,7 +2401,7 @@ def test_presentation_quality_scans_semantic_masks_only_for_responsibility(
     [
         "text", "active", "short_line_core", "diagonal_core",
         "thick_block_core", "source_background_nonexact",
-        "outside_foreground", "over_budget",
+        "outside_foreground", "reconstruction_delta", "over_budget",
     ],
 )
 def test_background_responsibility_rejects_pixels_outside_rebuilt_allowed_set(
@@ -2349,6 +2452,10 @@ def test_background_responsibility_rejects_pixels_outside_rebuilt_allowed_set(
         case["background"][invalid] += 1
     elif mutation == "outside_foreground":
         invalid[92, 2] = True
+    elif mutation == "reconstruction_delta":
+        responsibility = np.zeros(responsibility.shape, dtype=bool)
+        invalid[80:83, 8:104] = True
+        case["reconstructed"][invalid] = 20
     else:
         responsibility = np.zeros(responsibility.shape, dtype=bool)
         responsibility[2:14:2, 2:126] = True

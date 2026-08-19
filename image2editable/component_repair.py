@@ -3079,6 +3079,29 @@ def evaluate_component_quality_round(
                 for node in active_visual:
                     yield unpack(node["id"], "generated_underlay_mask")
 
+        reconstruction_structure = (
+            (page_context.reconstruction_delta > 8)
+            & (page_context.background_delta > 8)
+            & ~page_context.text
+            & (
+                cv2.morphologyEx(
+                    page_context.source_luma.astype(np.uint8),
+                    cv2.MORPH_GRADIENT,
+                    np.ones((3, 3), dtype=np.uint8),
+                ) > 8
+            )
+        )
+        count, labels = cv2.connectedComponents(
+            reconstruction_structure.astype(np.uint8), 8
+        )
+        adjacent = cv2.dilate(
+            material_foreground.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+        ) > 0
+        retained = np.zeros(count, dtype=bool)
+        retained[np.unique(labels[adjacent])] = True
+        retained[0] = False
+        material_foreground |= retained[labels]
         ownership_metrics, unexplained = material_ownership_metrics(
             material_foreground,
             (
