@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import hashlib
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Callable
@@ -688,3 +690,277 @@ def run_case(
         pages=_completed_pages(summary, run_dir),
         duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
     )
+
+
+def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str]:
+    try:
+        payload = _read_regular_file(
+            manifest_path, _JSON_LIMIT, require_single_link=True
+        )
+        manifest = _strict_json(payload, _JSON_LIMIT)
+    except Exception:
+        raise BenchmarkFailure("invalid_manifest") from None
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise BenchmarkFailure("invalid_manifest")
+    cases = manifest.get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise BenchmarkFailure("invalid_manifest")
+    identifiers: set[str] = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise BenchmarkFailure("invalid_manifest")
+        identifier = case.get("id")
+        pages = case.get("expected_pages")
+        source = case.get("path")
+        if (
+            not isinstance(identifier, str)
+            or identifier in identifiers
+            or _IDENTIFIER.fullmatch(identifier) is None
+            or not isinstance(source, str)
+            or not isinstance(pages, list)
+            or type(case.get("page_count")) is not int
+            or case["page_count"] != len(pages)
+        ):
+            raise BenchmarkFailure("invalid_manifest")
+        identifiers.add(identifier)
+        try:
+            source_path = (RELEASE_ROOT / source).resolve()
+            if not source_path.is_relative_to(RELEASE_ROOT.resolve()):
+                raise ValueError
+            payload = _read_regular_file(
+                source_path, _JSON_LIMIT * 16, require_single_link=True
+            )
+        except Exception:
+            raise BenchmarkFailure("invalid_manifest") from None
+        digest = case.get("sha256")
+        if not isinstance(digest, str) or hashlib.sha256(payload).hexdigest() != digest:
+            raise BenchmarkFailure("invalid_manifest")
+        for page in pages:
+            if (
+                not isinstance(page, dict)
+                or not isinstance(page.get("page_id"), str)
+                or page.get("expected_status") != "validated"
+                or type(page.get("min_components")) is not int
+                or page["min_components"] < 0
+                or type(page.get("min_text_boxes")) is not int
+                or page["min_text_boxes"] < 0
+                or type(page.get("max_unexplained_pixels")) is not int
+                or page["max_unexplained_pixels"] < 0
+                or type(page.get("max_quality_violations")) is not int
+                or page["max_quality_violations"] < 0
+            ):
+                raise BenchmarkFailure("invalid_manifest")
+    return [dict(case) for case in cases], hashlib.sha256(payload).hexdigest()
+
+
+def _validate_batch_case(
+    case: dict[str, object], result: BenchmarkCaseResult
+) -> None:
+    expected = case["expected_pages"]
+    actual = {page.get("page_id"): page for page in result.pages}
+    if len(actual) != len(expected):
+        raise BenchmarkFailure("invalid_page_result")
+    for page in expected:
+        page_id = page["page_id"]
+        observed = actual.get(page_id)
+        if not isinstance(observed, dict) or observed.get("status") != "validated":
+            raise BenchmarkFailure("invalid_page_result")
+        component_result_path = (
+            Path(result.run_dir)
+            / "pages"
+            / page_id
+            / "reconstruction"
+            / "component_result.json"
+        )
+        component_result = None
+        if component_result_path.is_file():
+            try:
+                component_result = _strict_json(
+                    _read_regular_file(
+                        component_result_path,
+                        _JSON_LIMIT,
+                        require_single_link=True,
+                    ),
+                    _JSON_LIMIT,
+                )
+            except Exception:
+                raise BenchmarkFailure("invalid_quality_result") from None
+        if isinstance(component_result, dict):
+            minimum_components = page.get("min_components")
+            final_components = component_result.get("final_component_ids")
+            if (
+                type(minimum_components) is int
+                and minimum_components > 0
+                and (
+                    not isinstance(final_components, list)
+                    or len(final_components) < minimum_components
+                )
+            ):
+                raise BenchmarkFailure("quality_gate")
+            minimum_text = page.get("min_text_boxes")
+            text_items = component_result.get("text_items")
+            if type(minimum_text) is int and minimum_text > 0 and (
+                not isinstance(text_items, list) or len(text_items) < minimum_text
+            ):
+                raise BenchmarkFailure("quality_gate")
+            repair_rounds = component_result.get("repair_rounds")
+            if type(repair_rounds) is int and repair_rounds > 0:
+                quality_path = (
+                    Path(result.run_dir)
+                    / "pages"
+                    / page_id
+                    / "reconstruction"
+                    / f"execution-{repair_rounds:02d}"
+                    / "component-quality.json"
+                )
+                if quality_path.is_file():
+                    try:
+                        quality = _strict_json(
+                            _read_regular_file(
+                                quality_path,
+                                _JSON_LIMIT,
+                                require_single_link=True,
+                            ),
+                            _JSON_LIMIT,
+                        )
+                        report = quality.get("report", {})
+                        metrics = report.get("visual_metrics", {})
+                        unexplained = metrics.get("unexplained_visual_pixels", 0)
+                        violations = [
+                            value
+                            for value in report.get("violations", [])
+                            if value != "pptx_reopen_unknown"
+                        ]
+                        component_violations = sum(
+                            len(item.get("violations", []))
+                            for item in report.get("component_reports", [])
+                            if isinstance(item, dict)
+                        )
+                    except Exception:
+                        raise BenchmarkFailure("invalid_quality_result") from None
+                    if (
+                        type(unexplained) is not int
+                        or unexplained > page.get("max_unexplained_pixels", 0)
+                        or violations
+                        or component_violations
+                        > page.get("max_quality_violations", 0)
+                    ):
+                        raise BenchmarkFailure("quality_gate")
+        component = (
+            Path(result.run_dir)
+            / "pages"
+            / page_id
+            / "reconstruction"
+            / "component_result.json"
+        )
+        if not component.is_file():
+            continue
+        try:
+            quality = _strict_json(
+                _read_regular_file(component, _JSON_LIMIT, require_single_link=True),
+                _JSON_LIMIT,
+            )
+        except Exception:
+            raise BenchmarkFailure("invalid_quality_result") from None
+        fallback = quality.get("fallback")
+        if quality.get("warning") not in (None, "") or (
+            isinstance(fallback, dict) and fallback.get("status") not in (None, "none")
+        ):
+            raise BenchmarkFailure("warning_fallback")
+
+
+def run_manifest(
+    manifest_path: Path,
+    *,
+    workspace: Path,
+    report_path: Path,
+    repeat: int = 3,
+    case_runner: Callable[..., BenchmarkCaseResult] = run_case,
+    command: Command = run_command,
+) -> dict[str, object]:
+    if type(repeat) is not int or repeat != 3:
+        raise BenchmarkFailure("invalid_repeat")
+    cases, manifest_sha256 = _load_batch_cases(manifest_path)
+    workspace = workspace.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    attempts: list[dict[str, object]] = []
+    for index in range(1, repeat + 1):
+        repeat_workspace = workspace / f"repeat-{index:02d}"
+        repeat_workspace.mkdir()
+        for case in cases:
+            started = time.perf_counter()
+            try:
+                result = case_runner(
+                    case, workspace=repeat_workspace, command=command
+                )
+                _validate_batch_case(case, result)
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "passed",
+                    "duration_ms": result.duration_ms,
+                    "pages": result.pages,
+                }
+            except BenchmarkFailure as error:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": str(error),
+                    "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                }
+            except Exception:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": "conversion_failed",
+                    "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                }
+            attempts.append(attempt)
+    failed = sum(attempt["status"] != "passed" for attempt in attempts)
+    report = {
+        "schema_version": 1,
+        "status": "passed" if failed == 0 else "failed",
+        "manifest_sha256": manifest_sha256,
+        "repeat": repeat,
+        "attempts": attempts,
+        "totals": {
+            "cases": len(cases),
+            "pages": sum(case["page_count"] for case in cases) * repeat,
+            "failed_attempts": failed,
+        },
+    }
+    report_path = report_path.resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2).encode(
+        "utf-8"
+    ) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(report_path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path)
+    arguments = parser.parse_args(argv)
+    try:
+        report = run_manifest(
+            arguments.manifest,
+            workspace=arguments.workspace,
+            report_path=arguments.report,
+            repeat=3,
+        )
+    except BenchmarkFailure as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    return 0 if report["status"] == "passed" else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
