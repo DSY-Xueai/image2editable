@@ -1,0 +1,340 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0018"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0022"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0023"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0024"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0025"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "component-isolation.png"
+      ],
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "4ba5b99aa953644697e09a4693d5f4b78e207b91ae0946ded543d9723e7d0357",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "d23684901e0f1498327a5e8143fde7cf585eca180f152a2e5560ecae106065cc",
+  "schema_version": 1
+}
