@@ -760,8 +760,8 @@ def _validate_batch_case(
     actual = {page.get("page_id"): page for page in result.pages}
     if len(actual) != len(expected):
         raise BenchmarkFailure("invalid_page_result")
-    for page in expected:
-        page_id = page["page_id"]
+    for page_number, page in enumerate(expected, start=1):
+        page_id = f"page_{page_number:03d}"
         observed = actual.get(page_id)
         if not isinstance(observed, dict) or observed.get("status") != "validated":
             raise BenchmarkFailure("invalid_page_result")

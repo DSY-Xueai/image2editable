@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "8307d2f8aaf181bcd47e8771c12e6365e7de2116575bbb738659d7cba8f5a262",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0003 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0003."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0005 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0005."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0006 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0006."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0011 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0011."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0014 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0014."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0017 passes every component quality check after independent ownership and background cleanup."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Only uniquely adjacent unexplained pixels are assigned to component_0017."
+      ]
+    }
+  ],
+  "graph_sha256": "ab0764ddf5aaf34f5ee86e7777e8af55e1fc474732f1faeb2ce8ab2beebf8cc8"
+}

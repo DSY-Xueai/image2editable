@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "973c297922e5afea8291f8943ac81ad8b081663efa54147b3ad615b1149b4a06",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0003 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0005 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0006 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0011 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0014 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0017 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {
+        "box": [
+          0.292,
+          0.91,
+          0.31,
+          0.935
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The only remaining residual is the missed 8 by 21 pixel footer slash inside this authenticated parent region."
+      ]
+    }
+  ],
+  "graph_sha256": "748992b3957fb0eb0424fa3a14df02e1d055bd9efddbe63f73ce8b3de931b07f"
+}

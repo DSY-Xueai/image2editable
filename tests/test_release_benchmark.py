@@ -1443,6 +1443,38 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "passed"
 
 
+def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    (reconstruction / "component_result.json").write_text(
+        '{"warning":null,"fallback":{"status":"none"}}', encoding="utf-8"
+    )
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "validated",
+                "min_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "validated"}],
+        1,
+    )
+
+    runner._validate_batch_case(case, result)
+
+
 def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
