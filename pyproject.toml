@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image2editable"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first image to editable PPTX and layered PSD runtime"
 readme = "README_EN.md"
 requires-python = ">=3.10,<3.13"
