@@ -1,0 +1,12 @@
+{
+  "actions": [
+    {"action":"collapse_to_parent","confidence":0.99,"evidence":["round-02 numbered-masks.png","round-02 component-graph.json","round-02 quality-report.json"],"object_ids":["parent_0002"],"parameters":{}}
+  ],
+  "graph_sha256":"72c411dff8639cc6265b01983b35b175c677cdac57d9887fbd918391f080c7a1",
+  "kind":"component_plan",
+  "page_id":"page_001",
+  "provider":"host",
+  "repair_round":2,
+  "request_sha256":"da528e4914ac94f3c1d0401f1eb09d8c6390984c396563fc9508c457ff65a13d",
+  "schema_version":1
+}

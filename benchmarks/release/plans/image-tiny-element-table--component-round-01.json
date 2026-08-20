@@ -1,0 +1,15 @@
+{
+  "actions": [
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0001"],"parameters":{}},
+    {"action":"accept","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 reconstructed.png","round-01 presentation-manifest.json"],"object_ids":["component_0002"],"parameters":{}},
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0003"],"parameters":{}},
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0004"],"parameters":{}}
+  ],
+  "graph_sha256":"cd7de4639c7ab250dd7b6fa90ca8c5390505bebd222f4ef04c52f9434e555463",
+  "kind":"component_plan",
+  "page_id":"page_001",
+  "provider":"host",
+  "repair_round":1,
+  "request_sha256":"e2fc8fa48a45482d15afcca5a91b95f716715091763c62a319f65e4d0df60609",
+  "schema_version":1
+}

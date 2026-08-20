@@ -1,0 +1,13 @@
+{
+  "actions": [
+    {"action":"accept","confidence":0.99,"evidence":["round-04 quality-report.json","round-04 reconstructed.png"],"object_ids":["parent_0002"],"parameters":{}},
+    {"action":"absorb_residual","confidence":0.99,"evidence":["round-04 quality-report.json","round-04 unexplained-mask.png"],"object_ids":["parent_0002"],"parameters":{}}
+  ],
+  "graph_sha256":"c7cd92e0c0bbb32ac8f919adebaf4632506957b0ccd49923d92d14151d4c2acb",
+  "kind":"component_plan",
+  "page_id":"page_001",
+  "provider":"host",
+  "repair_round":4,
+  "request_sha256":"b5fea29c41d09660b3a6262c6ec681ad0cdedb84300443661b38faa6a1392f7e",
+  "schema_version":1
+}

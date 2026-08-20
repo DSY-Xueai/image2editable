@@ -1,0 +1,12 @@
+{
+  "actions": [
+    {"action":"rebuild_background","confidence":0.99,"evidence":["round-03 reconstructed.png","round-03 difference.png","round-03 quality-report.json"],"object_ids":["parent_0002"],"parameters":{"margin_ratio":0.005}}
+  ],
+  "graph_sha256":"c7cd92e0c0bbb32ac8f919adebaf4632506957b0ccd49923d92d14151d4c2acb",
+  "kind":"component_plan",
+  "page_id":"page_001",
+  "provider":"host",
+  "repair_round":3,
+  "request_sha256":"a349ce5b2656fb474fddaefe6b6818ae056f3f7d31f570a6e8ac0a1aca8475db",
+  "schema_version":1
+}
