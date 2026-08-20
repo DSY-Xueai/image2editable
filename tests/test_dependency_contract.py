@@ -508,7 +508,7 @@ def test_readmes_document_offline_models_after_ocr_and_before_doctor() -> None:
     paddle_url = "https://www.paddlepaddle.org.cn/install/quick"
     tesseract_url = "https://tesseract-ocr.github.io/tessdoc/Installation.html"
     commands = (
-        "python -m pip install paddleocr paddlepaddle",
+        'python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"',
         "tesseract --version",
         "python -m pip install pytesseract",
         "image2editable models install runtime",

@@ -24,7 +24,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
 
     assert data["project"] == {
         "name": "image2editable",
-        "version": "0.1.0",
+            "version": "0.2.0",
         "description": "Local-first image to editable PPTX and layered PSD runtime",
         "readme": "README_EN.md",
         "requires-python": ">=3.10,<3.13",
@@ -388,7 +388,10 @@ def test_doctor_requires_one_complete_ocr_path(
         "pytesseract" in ocr_modules and tesseract_ok
     )
     if not expected_ok:
-        assert ocr["next_command"] == "python -m pip install paddleocr paddlepaddle"
+        assert ocr["next_command"] == (
+            'python -m pip install "paddleocr==3.7.0" '
+            '"paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"'
+        )
 
 
 def test_doctor_requires_valid_runtime_models_without_installing(

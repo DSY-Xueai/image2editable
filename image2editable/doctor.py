@@ -192,7 +192,10 @@ def _ocr_check(results: dict[str, dict[str, object]]) -> dict[str, Any]:
         },
     }
     if not check["ok"]:
-        check["next_command"] = "python -m pip install paddleocr paddlepaddle"
+        check["next_command"] = (
+            'python -m pip install "paddleocr==3.7.0" '
+            '"paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"'
+        )
     return check
 
 

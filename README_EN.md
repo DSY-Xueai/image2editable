@@ -94,8 +94,8 @@ A complete conversion needs at least one OCR engine. PaddleOCR is recommended fo
 ##### Option 1: PaddleOCR (recommended)
 
 ```bash
-# Install the CPU build of PaddlePaddle; no CUDA setup is needed for this option
-python -m pip install paddleocr paddlepaddle
+# Use the verified pinned CPU route; no CUDA setup is needed for this option
+python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
 ```
 
 💡 See the [official installation guide](https://www.paddlepaddle.org.cn/install/quick) for PaddlePaddle GPU packages. The CPU build is the current default; use the command above if you are unsure.

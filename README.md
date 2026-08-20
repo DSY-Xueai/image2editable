@@ -93,8 +93,8 @@ pip install .
 ##### 方案一：PaddleOCR（推荐）
 
 ```bash
-# 安装 CPU 版的 PaddlePaddle，不需要配置 CUDA，第一次使用建议选这个
-python -m pip install paddleocr paddlepaddle
+# 固定已验证的 CPU 路线；不需要配置 CUDA
+python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
 ```
 
 💡 PaddlePaddle GPU 版的安装方式可以查看[官方安装说明](https://www.paddlepaddle.org.cn/install/quick)。当前默认使用的是 CPU 版，不确定时直接按上面的命令安装即可。
