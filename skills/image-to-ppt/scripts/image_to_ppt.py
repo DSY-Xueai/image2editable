@@ -188,7 +188,9 @@ def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
                 and text_similarity >= 0.50
             )
         )
-        if overlap >= 0.80 and (same_text or contained_text or similar_text):
+        if overlap >= 0.80 and (
+            same_text or (contained_text and similar_geometry) or similar_text
+        ):
             return True
         if overlap >= 0.50 and same_text:
             return True
@@ -422,9 +424,34 @@ def _targeted_candidate_ocr_sweep(
                         right, known_items
                     ):
                         continue
-                    if left["normalized_text"] == right["normalized_text"]:
+                    same_text = left["normalized_text"] == right["normalized_text"]
+                    left_words = unicodedata.normalize(
+                        "NFKC", left["text"]
+                    ).casefold().split()
+                    right_words = unicodedata.normalize(
+                        "NFKC", right["text"]
+                    ).casefold().split()
+                    contained_text = (
+                        min(len(left["normalized_text"]), len(right["normalized_text"]))
+                        >= 4
+                        and (
+                            len(left_words) < len(right_words)
+                            and left_words in (
+                                right_words[:len(left_words)],
+                                right_words[-len(left_words):],
+                            )
+                            or len(right_words) < len(left_words)
+                            and right_words in (
+                                left_words[:len(right_words)],
+                                left_words[-len(right_words):],
+                            )
+                        )
+                    )
+                    if same_text or contained_text:
                         consistent.append(max(
-                            (left, right), key=lambda item: item["confidence"]
+                            (left, right), key=lambda item: (
+                                len(item["normalized_text"]), item["confidence"]
+                            )
                         ))
                         continue
                     left_box, right_box = left["box"], right["box"]

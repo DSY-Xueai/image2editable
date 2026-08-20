@@ -355,6 +355,7 @@ def test_candidate_text_normalization_preserves_semantic_punctuation(
         (("NX", 0.96, "NY", 0.95), 1),
         (("NX", 0.96, "NY", 0.84), 0),
         ((".", 0.99, "/", 0.99), 1),
+        (("IXED SIZE", 0.99, "IIXED SIZE", 0.99), 1),
     ],
 )
 def test_targeted_ocr_only_diagnoses_high_confidence_text_conflicts(
@@ -414,6 +415,38 @@ def test_targeted_ocr_only_diagnoses_high_confidence_text_conflicts(
                 "confidence": second_confidence,
             },
         ]
+
+
+def test_targeted_ocr_recovers_more_complete_contained_view(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    readings = iter(("LETTER", "LETTER PORTRAIT"))
+
+    def fake_detect(path, **kwargs):
+        scale = 2 if Image.open(path).width == 100 else 3
+        return [_ocr_item(next(readings), 0.99, scale)], np.zeros(
+            (30 * scale, 50 * scale), dtype=np.uint8
+        )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        [{**_ocr_item("RAIT", 0.99, 1), "box": [68, 24, 12, 9]}],
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+    )
+
+    assert [item["text"] for item in result["recovered_items"]] == [
+        "LETTER PORTRAIT"
+    ]
+    assert result["diagnostics"] == []
 
 
 def test_targeted_ocr_deduplicates_known_overlapping_text(
