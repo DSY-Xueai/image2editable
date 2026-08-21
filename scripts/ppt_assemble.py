@@ -284,15 +284,6 @@ def assemble_pptx_multi(
         if original_aspect_ratio is None:
             first_width = slides_data[0]["img_width"]
             first_height = slides_data[0]["img_height"]
-            first_ratio = first_width / first_height
-            for data in slides_data[1:]:
-                if not math.isclose(
-                    data["img_width"] / data["img_height"],
-                    first_ratio,
-                    rel_tol=1e-4,
-                    abs_tol=1e-6,
-                ):
-                    raise ValueError("original slides must have the same aspect ratio")
             original_transform = compute_slide_transform(
                 first_width,
                 first_height,

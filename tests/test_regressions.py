@@ -884,34 +884,45 @@ def test_multi_slide_original_physical_ratio_rejects_clear_pixel_mismatch(
     assert not output.exists()
 
 
-def test_multi_slide_original_rejects_mixed_ratios_before_writing(
+def test_multi_slide_original_contains_mixed_ratios_on_first_page_canvas(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "mixed.pptx"
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (400, 200), "red").save(first)
+    Image.new("RGB", (400, 300), "blue").save(second)
 
-    with pytest.raises(ValueError, match="same aspect ratio"):
-        assemble_pptx_multi(
-            [
-                {
-                    "background_original_path": "first.png",
-                    "components": [],
-                    "text_items": [],
-                    "img_width": 400,
-                    "img_height": 200,
-                },
-                {
-                    "background_original_path": "second.png",
-                    "components": [],
-                    "text_items": [],
-                    "img_width": 400,
-                    "img_height": 300,
-                },
-            ],
-            output,
-            slide_size="original",
-        )
+    assemble_pptx_multi(
+        [
+            {
+                "background_original_path": str(first),
+                "components": [],
+                "text_items": [],
+                "img_width": 400,
+                "img_height": 200,
+            },
+            {
+                "background_original_path": str(second),
+                "components": [],
+                "text_items": [],
+                "img_width": 400,
+                "img_height": 300,
+            },
+        ],
+        output,
+        slide_size="original",
+    )
 
-    assert not output.exists()
+    presentation = Presentation(output)
+    first_background = presentation.slides[0].shapes[0]
+    second_background = presentation.slides[1].shapes[0]
+    assert presentation.slide_width / presentation.slide_height == pytest.approx(2.0)
+    assert first_background.left == 0
+    assert first_background.width == presentation.slide_width
+    assert second_background.left > 0
+    assert second_background.width < presentation.slide_width
+    assert second_background.height == presentation.slide_height
 
 
 def test_batch_variants_combines_original_slides_without_repreparing(
