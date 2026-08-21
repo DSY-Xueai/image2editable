@@ -2548,6 +2548,68 @@ def test_repair_quality_round_requires_one_editable_item_per_text_node(tmp_path)
     assert "editable_text_once" in report["violations"]
 
 
+@pytest.mark.parametrize(
+    ("underlay", "text_box", "expected"),
+    [
+        ("missing", [22, 18, 20, 8], "native_text_underlay"),
+        ("covered", [22, 18, 20, 8], None),
+        ("page_background", [2, 2, 14, 8], None),
+    ],
+)
+def test_repair_quality_round_requires_visual_underlay_beneath_native_text(
+    tmp_path, underlay: str, text_box: list[int], expected: str | None,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    x, y, width, height = text_box
+    case["graph"]["nodes"].append({
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": "masks/text_0001.png",
+        "mask_sha256": "b" * 64,
+        "bbox": [x, y, x + width, y + height], "z_index": 1,
+        "text_ids": [],
+    })
+    text_mask = case["text_mask"].copy()
+    if underlay == "page_background":
+        text_mask[:] = False
+        text_mask[4:8, 5:13] = True
+    ownership = case["component_mask"].copy()
+    generated = np.zeros(ownership.shape, dtype=bool)
+    if underlay == "covered":
+        generated |= text_mask
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=text_mask,
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        text_items=[{"text": "A", "box": text_box}],
+        presentation_layers=[{
+            "component_id": "component_0001",
+            "ownership_mask": ownership,
+            "presentation_alpha_mask": ownership | generated,
+            "generated_underlay_mask": generated,
+            "metrics": _underlay_metrics(),
+        }],
+    )
+
+    if expected is None:
+        assert report["checks"]["native_text_underlay"] == "pass"
+        assert "native_text_underlay" not in report["violations"]
+    else:
+        assert report["checks"]["native_text_underlay"] == "fail"
+        assert expected in report["violations"]
+
+
 def test_repair_quality_owner_map_includes_frozen_components(tmp_path) -> None:
     shape = (40, 48)
     source = np.full((*shape, 3), 96, dtype=np.uint8)

@@ -1997,9 +1997,25 @@ def _approved_contained_parent_pairs(
 
 
 def _carried_contained_parent_pairs(
-    previous_quality: dict, contained_parent_pairs: set[tuple[str, str]]
+    previous_quality: dict, contained_parent_pairs: set[tuple[str, str]],
+    *, graph: dict | None = None, frozen: dict | None = None,
 ) -> set[tuple[str, str]]:
-    return set()
+    if graph is None or frozen is None:
+        return set()
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    previously_approved = {
+        tuple(pair)
+        for pair in previous_quality.get("approved_contained_parent_pairs", [])
+    }
+    return {
+        pair for pair in contained_parent_pairs & previously_approved
+        if all(
+            component_id in nodes
+            and nodes[component_id]["state"] == "frozen"
+            and nodes[component_id]["mask_sha256"] == frozen.get(component_id)
+            for component_id in pair
+        )
+    }
 
 
 def _unapproved_contained_parent_ids(quality: dict) -> set[str]:
@@ -2197,7 +2213,8 @@ def _recompute_quality_artifact(
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
     }
     approved_contained_parent_pairs = _carried_contained_parent_pairs(
-        quality_evidence, contained_parent_pairs
+        quality_evidence, contained_parent_pairs,
+        graph=graph, frozen=state["frozen"],
     )
     if plan is not None:
         approved_contained_parent_pairs.update(_approved_contained_parent_pairs(
@@ -2854,6 +2871,7 @@ def evaluate_component_quality_round(
     nodes_by_id = {node["id"]: node for node in validated["nodes"]}
     shape = source.shape[:2]
     packed_layers = None
+    presentation_alpha_union = None
     masks = None
     semantic_ownership = None
     if presentation_layers is not None and background_responsibility is not None:
@@ -2889,6 +2907,7 @@ def evaluate_component_quality_round(
             masks[node["id"]] = mask
     else:
         packed_layers = {}
+        presentation_alpha_union = np.zeros(shape, dtype=bool)
         layer_iterator = iter(presentation_layers)
         for node in active_visual:
             try:
@@ -2916,6 +2935,7 @@ def evaluate_component_quality_round(
             _validate_presentation_mask_union(
                 ownership, alpha, generated, label="component presentation"
             )
+            presentation_alpha_union |= alpha
             packed_layers[node["id"]] = {
                 "ownership_mask": np.packbits(ownership, axis=None).tobytes(),
                 "presentation_alpha_mask": np.packbits(alpha, axis=None).tobytes(),
@@ -3042,6 +3062,30 @@ def evaluate_component_quality_round(
             )
             else "fail"
         )
+        if presentation_alpha_union is not None:
+            underlay_ok = True
+            page_height, page_width = shape
+            for item in text_items:
+                x, y, width, height = item["box"]
+                x1, y1 = max(0, x), max(0, y)
+                x2, y2 = min(page_width, x + width), min(page_height, y + height)
+                box_text = page_context.text[y1:y2, x1:x2]
+                box_alpha = presentation_alpha_union[y1:y2, x1:x2]
+                nontext = ~box_text
+                support_floor = max(
+                    calibration.min_component_pixels,
+                    round(int(np.count_nonzero(nontext)) * 0.5),
+                )
+                if int(np.count_nonzero(box_alpha & nontext)) < support_floor:
+                    continue
+                text_pixels = int(np.count_nonzero(box_text))
+                missing_limit = max(
+                    calibration.min_component_pixels, round(text_pixels * 0.01)
+                )
+                if int(np.count_nonzero(box_text & ~box_alpha)) > missing_limit:
+                    underlay_ok = False
+                    break
+            page_checks["native_text_underlay"] = "pass" if underlay_ok else "fail"
     if material_foreground is not None:
         material_foreground = refine_material_foreground(
             material_foreground, source, background, calibration

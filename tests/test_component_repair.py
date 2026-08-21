@@ -4502,6 +4502,37 @@ def test_contained_pair_approval_does_not_survive_without_mask_binding() -> None
     ) == set()
 
 
+def test_contained_pair_approval_survives_with_unchanged_frozen_masks() -> None:
+    previous = {
+        "approved_contained_parent_pairs": [["inner", "outer"]],
+    }
+    graph = {"nodes": [
+        {
+            "id": "inner", "kind": "component", "state": "frozen",
+            "mask_sha256": "1" * 64,
+        },
+        {
+            "id": "outer", "kind": "component", "state": "frozen",
+            "mask_sha256": "2" * 64,
+        },
+    ]}
+
+    assert component_repair._carried_contained_parent_pairs(
+        previous,
+        {("inner", "outer")},
+        graph=graph,
+        frozen={"inner": "1" * 64, "outer": "2" * 64},
+    ) == {("inner", "outer")}
+
+    graph["nodes"][0]["mask_sha256"] = "3" * 64
+    assert component_repair._carried_contained_parent_pairs(
+        previous,
+        {("inner", "outer")},
+        graph=graph,
+        frozen={"inner": "1" * 64, "outer": "2" * 64},
+    ) == set()
+
+
 def test_explicit_retry_authorizes_one_next_round_without_prior_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

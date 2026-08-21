@@ -1108,6 +1108,10 @@ def evaluate_page_quality(
                 "editable_text_once_unknown"
                 if editable_state == "unknown" else "editable_text_once"
             )
+    if page_checks is not None and "native_text_underlay" in page_checks:
+        underlay_state = _check_state(page_checks, "native_text_underlay")
+        if underlay_state != "pass":
+            violations.append("native_text_underlay")
     if page_checks is not None and "background_text_clean" in page_checks:
         background_state = _check_state(page_checks, "background_text_clean")
         if background_state != "pass":
@@ -1139,6 +1143,13 @@ def evaluate_page_quality(
             **(
                 {"editable_text_once": _check_state(page_checks, "editable_text_once")}
                 if page_checks is not None and "editable_text_once" in page_checks
+                else {}
+            ),
+            **(
+                {"native_text_underlay": _check_state(
+                    page_checks, "native_text_underlay"
+                )}
+                if page_checks is not None and "native_text_underlay" in page_checks
                 else {}
             ),
             **(
