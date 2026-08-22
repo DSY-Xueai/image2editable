@@ -1,0 +1,51 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete header underlay is source-backed; its reported duplicate pixels are the text-clean shadow region to be rebuilt against the retained native title."
+      ],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete left card has zero component violations and remains a distinct movable visual."
+      ],
+      "object_ids": ["parent_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "component_0005 is an incomplete right-card outer shell with underlay pixels outside its child ownership; parent_0005 restores the original shell boundary."
+      ],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": [
+        "The quality report attributes the remaining page-wide unexplained responsibility and header duplicate-shadow pixels to background around otherwise complete visual owners."
+      ],
+      "object_ids": [
+        "parent_0003",
+        "parent_0004",
+        "component_0005"
+      ],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "graph_sha256": "8613e824ae3a09b3c8910db6d9fd032d2b85f7a1e301824665f4952f5f4478b5",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "f85a52e1cdc36e73f3acfd31eed6b09e6ff0fb4ac35106ec368f56aefa6c9f9e",
+  "schema_version": 1
+}

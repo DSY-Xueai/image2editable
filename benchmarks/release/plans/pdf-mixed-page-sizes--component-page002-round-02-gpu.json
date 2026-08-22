@@ -1,0 +1,68 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["The complete header has no missing pixels and its duplicate shadow is addressed by the same-round background rebuild."],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["The complete right card is source-backed; its alpha halo and duplicate pixels are addressed by the same-round background rebuild."],
+      "object_ids": ["parent_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0005",
+        "parent_0010",
+        "The middle-card outer and inner visual layers are intentionally nested and resolved into disjoint effective ownership."
+      ],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["The quality report measures zero effective pixels for parent_0006; parent_0007 already owns the complete source-backed left card, so retaining parent_0006 would create an empty visual component."],
+      "object_ids": ["parent_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["The complete left-card body is source-backed; its halo and duplicate pixels are addressed by the same-round background rebuild."],
+      "object_ids": ["parent_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0005",
+        "parent_0010",
+        "The middle-card inner body has intentional contained ownership within the retained outer visual layer."
+      ],
+      "object_ids": ["parent_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["The report attributes the page-wide residual, native-title underlay gap, alpha halos, and duplicate edge pixels to background around the retained visual owners."],
+      "object_ids": ["parent_0003", "parent_0004", "parent_0005", "parent_0007", "parent_0010"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "graph_sha256": "771935b7603bb77e823a8f552d5429b35e374583e96f91af1aaac1bd7db27977",
+  "kind": "component_plan",
+  "page_id": "page_002",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "5e052f88d2b53b76cc8ce1d47ae428e395834f97f03f95f3dcefa7fffd647158",
+  "schema_version": 1
+}
