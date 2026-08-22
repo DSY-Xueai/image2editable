@@ -134,7 +134,7 @@ CASE_SPECS = [
         "thin_line_network",
         None,
         12,
-        3,
+        5,
     ),
     (
         "image-tiny-element-table",

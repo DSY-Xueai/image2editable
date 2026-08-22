@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "b9d3798b6a4a2a42cbd499846a4e56593288245303de256b8bf8e96d6fb1bdd4",
+  "actions": [
+    {
+      "action": "rebuild_background",
+      "object_ids": ["component_0008","component_0010","component_0011","component_0012","component_0013","component_0014","component_0015","component_0016","component_0017","component_0018","component_0019","component_0020","component_0021","component_0022","component_0023","component_0024","component_0025","component_0026","component_0027","component_0028","text_0001","text_0002","text_0003","text_0004","text_0005"],
+      "parameters": {"margin_ratio": 0.005},
+      "confidence": 0.99,
+      "evidence": ["The first reconstruction shows that the retained network and native text need one bounded clean-background rebuild."]
+    }
+  ],
+  "graph_sha256": "2d5824309df25d5a9a73a97836cfe49cfd987250fa0db653b7337cd073b4d943"
+}
