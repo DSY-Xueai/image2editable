@@ -591,6 +591,26 @@ def _to_tesseract_lang(lang: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_spaced_semantic_separator_text(text: str) -> bool:
+    if any(separator in text for separator in ":;.\\"):
+        return False
+
+    parts = re.split(r"\s+[/\-]\s+", text)
+    if len(parts) == 1 or any(char in "/-" for part in parts for char in part):
+        return False
+    return all(
+        sum(
+            1
+            for char in part
+            if char.isalnum()
+            or "\u4e00" <= char <= "\u9fff"
+            or "\u3400" <= char <= "\u4dbf"
+        )
+        >= 2
+        for part in parts
+    )
+
+
 def _filter_noise(
     boxes: list[dict], confidence_threshold: float = 0.7
 ) -> list[dict]:
@@ -650,6 +670,10 @@ def _filter_noise(
         if has_technical_separator and compact_label and not valid_technical_label:
             continue
 
+        spaced_semantic_separator = _is_spaced_semantic_separator_text(text)
+        if re.search(r"\s[/\-]\s", text) and not spaced_semantic_separator:
+            continue
+
         # Skip single-char lines that are common OCR artifacts
         if len(text) == 1 and not text.isalnum() and not ('\u4e00' <= text <= '\u9fff'):
             continue
@@ -666,6 +690,7 @@ def _filter_noise(
                 and has_garbled_separator
                 and not has_cjk
                 and not valid_technical_label
+                and not spaced_semantic_separator
             ):
                 continue
 
