@@ -237,7 +237,7 @@
           "page_id": "image-dark-poster-page-001",
           "expected_status": "validated",
           "min_visual_components": 5,
-          "min_text_boxes": 4,
+          "min_text_boxes": 5,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         }

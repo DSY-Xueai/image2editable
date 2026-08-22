@@ -154,7 +154,7 @@ CASE_SPECS = [
         "dark_poster",
         None,
         5,
-        4,
+        5,
     ),
     (
         "image-non-16-9-infographic",

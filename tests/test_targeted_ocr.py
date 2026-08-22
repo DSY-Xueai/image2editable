@@ -281,6 +281,95 @@ def test_estimate_style_default_reference_width_preserves_full_image_behavior() 
     assert default == explicit
 
 
+@pytest.mark.parametrize("terminal", [".", "!", "?"])
+def test_build_text_result_preserves_terminal_semantic_punctuation(
+    terminal: str,
+) -> None:
+    items, _ = image_to_ppt.text_detection._build_text_result(
+        np.zeros((120, 400, 3), dtype=np.uint8),
+        [{
+            "box": (20, 20, 180, 50),
+            "text": f"EDITABLE{terminal}",
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == f"EDITABLE{terminal}"
+
+
+def test_build_text_result_recovers_adjacent_large_heading_period() -> None:
+    pixels = np.full((120, 300, 3), (8, 13, 22), dtype=np.uint8)
+    pixels[30:60, 30:150] = (240, 244, 248)
+    pixels[56:68, 184:196] = (240, 244, 248)
+
+    items, mask = image_to_ppt.text_detection._build_text_result(
+        pixels,
+        [{
+            "box": (20, 20, 160, 50),
+            "text": "EDITABLE",
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == "EDITABLE."
+    assert items[0]["box"] == [20, 20, 176, 50]
+    assert mask[60, 190] == 255
+
+
+@pytest.mark.parametrize(
+    ("text", "dot_top"),
+    [("Editable", 56), ("EDITABLE", 30)],
+)
+def test_build_text_result_does_not_invent_heading_period(
+    text: str,
+    dot_top: int,
+) -> None:
+    pixels = np.full((120, 300, 3), (8, 13, 22), dtype=np.uint8)
+    pixels[30:60, 30:150] = (240, 244, 248)
+    pixels[dot_top:dot_top + 12, 184:196] = (240, 244, 248)
+
+    items, _ = image_to_ppt.text_detection._build_text_result(
+        pixels,
+        [{
+            "box": (20, 20, 160, 50),
+            "text": text,
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == text
+    assert items[0]["box"] == [20, 20, 160, 50]
+
+
+def test_adjust_font_size_uses_bbox_for_large_uppercase_latin_heading() -> None:
+    adjusted = image_to_ppt.text_detection._adjust_font_size(
+        "MAKE IT",
+        34.9,
+        bbox_height=83,
+        reference_width=1600,
+    )
+
+    assert adjusted == 53.8
+    assert image_to_ppt.text_detection._adjust_font_size(
+        "Release Notes",
+        34.9,
+        bbox_height=83,
+        reference_width=1600,
+    ) == 34.9
+    assert image_to_ppt.text_detection._adjust_font_size(
+        "RELEASE",
+        20.0,
+        bbox_height=25,
+        reference_width=1600,
+    ) == 20.0
+
+
 def test_detect_text_uses_explicit_display_width_for_style_estimation(
     tmp_path: Path,
     monkeypatch,
@@ -643,6 +732,40 @@ def test_targeted_ocr_deduplicates_known_overlapping_text(
     )
 
     assert result["recovered_items"] == []
+    assert result["diagnostics"] == []
+
+
+def test_targeted_ocr_upgrades_known_text_with_terminal_punctuation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    known = [{
+        **_ocr_item("EDITABLE", 0.99, 1),
+        "box": [44, 23, 37, 11],
+    }]
+
+    def fake_detect(path, **kwargs):
+        scale = 2 if Image.open(path).width == 100 else 3
+        return [_ocr_item("EDITABLE.", 0.99, scale)], np.zeros(
+            (30 * scale, 50 * scale), dtype=np.uint8
+        )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        known,
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+    )
+
+    assert [item["text"] for item in result["recovered_items"]] == ["EDITABLE."]
+    assert [item["text"] for item in result["items"]] == ["EDITABLE."]
     assert result["diagnostics"] == []
 
 

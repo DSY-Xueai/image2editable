@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "e698e19e8ad58900761936c84645b1fbf8378952cfa546ddb19bc22296cf8811",
+  "graph_sha256": "ed5b38e27d43176346661f286ca51fcf6bd209caa9175adabe36d43f56fdc3ef",
+  "actions": [
+    {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the dark canvas owner with zero text residual, missing, duplicate, and orphan pixels"]},
+    {"action": "accept", "object_ids": ["component_0004"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique blue-ring fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0005"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique blue-ring fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this complete outer-ring arc with no violations"]},
+    {"action": "accept", "object_ids": ["component_0007"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this complete outer-ring arc with no violations"]},
+    {"action": "accept", "object_ids": ["component_0010"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique red-ring intersection fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0011"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the principal inner-red-ring arcs with no violations"]},
+    {"action": "retry_with_box", "object_ids": ["component_0002"], "parameters": {"box": [0.66875, 0.156667, 0.9575, 0.666667], "independent": true}, "confidence": 0.99, "evidence": ["the 147580px round-01 mask contains 147564 exact dark-background pixels and matches the 148312px unexplained circular interior; recover it as a non-overlapping background patch"]}
+  ]
+}

@@ -228,6 +228,24 @@ def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
     return False
 
 
+def _extends_known_text_with_terminal_punctuation(
+    item: dict,
+    known_items: list[dict],
+) -> bool:
+    item_text = item["normalized_text"]
+    base_text = item_text.rstrip(".!?")
+    if not base_text or base_text == item_text:
+        return False
+    item_box = [int(value) for value in item["box"]]
+    for known in known_items:
+        if _normalized_candidate_text(known.get("text", "")) != base_text:
+            continue
+        known_box = [int(value) for value in known.get("box", [0, 0, 0, 0])]
+        if _box_intersection_ratio(known_box, item_box) >= 0.80:
+            return True
+    return False
+
+
 def _deduplicate_overlapping_text_items(items: list[dict]) -> list[dict]:
     """Keep the most complete OCR reading for the same spatial text line."""
     kept: list[dict] = []
@@ -494,9 +512,14 @@ def _targeted_candidate_ocr_sweep(
                     min(pair[0]["box"][0], pair[1]["box"][0]),
                 ))
                 for pair_index, (left, right) in enumerate(pairs, start=1):
-                    if _matches_known_text(left, known_items) or _matches_known_text(
-                        right, known_items
-                    ):
+                    known_match = _matches_known_text(
+                        left, known_items
+                    ) or _matches_known_text(right, known_items)
+                    punctuation_upgrade = (
+                        _extends_known_text_with_terminal_punctuation(left, known_items)
+                        or _extends_known_text_with_terminal_punctuation(right, known_items)
+                    )
+                    if known_match and not punctuation_upgrade:
                         continue
                     same_text = left["normalized_text"] == right["normalized_text"]
                     left_words = unicodedata.normalize(
@@ -602,7 +625,10 @@ def _targeted_candidate_ocr_sweep(
                     reference_width=page_width,
                 )
                 font_size = text_detection._adjust_font_size(
-                    item["text"], style["font_size"]
+                    item["text"],
+                    style["font_size"],
+                    bbox_height=height,
+                    reference_width=page_width,
                 )
                 recovered_item = {
                 "box": item["box"],
