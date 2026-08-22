@@ -1114,6 +1114,7 @@ def _prepare_rerun_fixture(
     wrong_component_shape: bool = False,
     forbid_cache_cleanup: bool = False,
     replace_mask_after_first_worker: bool = False,
+    unchanged_text_mask: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1123,11 +1124,14 @@ def _prepare_rerun_fixture(
     stale_parent = work_dir / "semantic-masks/stale.png"
     outside_component = tmp_path / "outside-component.png"
 
+    initial_text_mask = np.zeros((70, 120), dtype=np.uint8)
+    if unchanged_text_mask:
+        initial_text_mask[18:39, 39:86] = 255
     monkeypatch.setattr(
         image_to_ppt,
         "detect_text",
         lambda *args, **kwargs: (
-            [], np.zeros((70, 120), dtype=np.uint8)
+            [], initial_text_mask.copy()
         ),
     )
     monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
@@ -1417,6 +1421,22 @@ def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
         removal_mask = np.asarray(removal.convert("L")) > 0
     assert np.all(removal_mask[18:39, 39:86])
     assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
+
+
+def test_prepare_reuses_visual_assets_when_targeted_ocr_keeps_exact_masks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+    )
+
+    assert process_text_counts == [0]
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
 
 
 def test_text_delta_mask_changed_after_first_worker_uses_full_visual_fallback(

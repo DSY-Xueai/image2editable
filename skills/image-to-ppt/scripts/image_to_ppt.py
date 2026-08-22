@@ -3608,14 +3608,29 @@ def _reuse_disjoint_text_delta(
                 if stored.size != (metadata["w"], metadata["h"]):
                     return False
                 stored.convert("RGBA").load()
-        scope = _text_delta_recompute_scope(
-            old_mask=old_cleanup_mask,
-            new_mask=new_cleanup_mask,
-            graph=payload["graph"],
-            graph_dir=work_dir,
-            source_sha256=manifest["assets"]["source_image"]["sha256"],
-            cache_identity=payload["identity"],
+        _, cached_text_content = _read_prepared_asset_bytes(
+            work_dir,
+            manifest["assets"]["ocr_mask"],
+            "first visual OCR mask",
         )
+        with Image.open(io.BytesIO(cached_text_content)) as stored_text_mask:
+            cached_text_mask = np.asarray(
+                stored_text_mask.convert("L"), dtype=np.uint8
+            ).copy()
+        if (
+            np.array_equal(old_cleanup_mask, new_cleanup_mask)
+            and np.array_equal(cached_text_mask, new_text_mask)
+        ):
+            scope = set()
+        else:
+            scope = _text_delta_recompute_scope(
+                old_mask=old_cleanup_mask,
+                new_mask=new_cleanup_mask,
+                graph=payload["graph"],
+                graph_dir=work_dir,
+                source_sha256=manifest["assets"]["source_image"]["sha256"],
+                cache_identity=payload["identity"],
+            )
         if scope != set():
             return False
         element_masks = []
