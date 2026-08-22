@@ -1672,6 +1672,41 @@ def test_text_ghost_is_only_attributed_to_the_adjacent_component() -> None:
     assert "text_ghost" not in remote["violations"]
 
 
+def test_text_ink_excludes_flat_fill_pixels_beside_large_glyphs() -> None:
+    import cv2
+    import sys
+
+    skill_path = (
+        Path(__file__).parents[1]
+        / "skills/image-to-ppt/scripts/component_quality.py"
+    )
+    spec = importlib.util.spec_from_file_location("skill_component_quality", skill_path)
+    assert spec is not None and spec.loader is not None
+    skill_quality = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = skill_quality
+    try:
+        spec.loader.exec_module(skill_quality)
+    finally:
+        sys.modules.pop(spec.name, None)
+    fill = np.array((46, 135, 171), dtype=np.uint8)
+    source = np.full((160, 500, 3), fill, dtype=np.uint8)
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[30:120, 20:480] = True
+    cv2.putText(
+        source, "A4 LANDSCAPE", (30, 100), cv2.FONT_HERSHEY_SIMPLEX,
+        1.5, (255, 255, 255), 5, cv2.LINE_AA,
+    )
+
+    flat_fill = np.all(source == fill, axis=2)
+    glyph = np.any(source != fill, axis=2)
+    for module in (component_quality, skill_quality):
+        text_ink = module._text_ink_mask(
+            source, text_mask, module.calibrate_page(source, text_mask)
+        )
+        assert not np.any(text_ink & flat_fill)
+        assert np.count_nonzero(text_ink & glyph) >= 1000
+
+
 def test_text_box_background_is_not_counted_as_a_text_ghost() -> None:
     case = _synthetic_quality_case()
     text = case["text_mask"]
