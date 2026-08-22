@@ -1,0 +1,98 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete header is source-backed with no missing pixels; its duplicate shadow is addressed by the same-round background rebuild."
+      ],
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete right card is source-backed; its alpha halo and duplicate edge pixels are addressed by the same-round background rebuild."
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0006",
+        "parent_0009",
+        "The middle-card outer and inner layers are intentionally nested with disjoint effective ownership."
+      ],
+      "object_ids": [
+        "parent_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "The quality report measures zero effective pixels for parent_0007; parent_0008 already owns the complete source-backed left card."
+      ],
+      "object_ids": [
+        "parent_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete left card is source-backed; its halo and duplicate edge pixels are addressed by the same-round background rebuild."
+      ],
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0006",
+        "parent_0009",
+        "The middle-card inner body has intentional contained ownership within the retained outer layer."
+      ],
+      "object_ids": [
+        "parent_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": [
+        "The report attributes the page-wide residual, native-title underlay gap, alpha halos, and duplicate edge pixels to background around the retained visual owners."
+      ],
+      "object_ids": [
+        "parent_0003",
+        "parent_0005",
+        "parent_0006",
+        "parent_0008",
+        "parent_0009"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      }
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "4194c86c3bb996b6c911437d4a84ff23daf3d62c5a0e7ad7ecccd81129370922",
+  "schema_version": 1,
+  "graph_sha256": "42a313dcb6036f3cc2be17c6c8ac99787b6cb7fbef11beda39b0b2e146c5a23b"
+}
