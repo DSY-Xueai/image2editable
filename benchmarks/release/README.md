@@ -30,4 +30,4 @@ runner 固定执行 3 次独立重复；每次都重新校验输入 hash、按�
 
 ## 通过标准
 
-每页必须达到 manifest 中的最小组件数和文本框数、状态为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。全部 18 个输入共 30 页，三次重复均须通过；真实模型 runner 不放入普通 push CI，发布前在受控环境执行并保存报告。
+每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。全部 18 个输入共 30 页，三次重复均须通过；真实模型 runner 不放入普通 push CI，发布前在受控环境执行并保存报告。

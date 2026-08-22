@@ -700,7 +700,11 @@ def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str
         manifest = _strict_json(payload, _JSON_LIMIT)
     except Exception:
         raise BenchmarkFailure("invalid_manifest") from None
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if (
+        not isinstance(manifest, dict)
+        or type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 2
+    ):
         raise BenchmarkFailure("invalid_manifest")
     cases = manifest.get("cases")
     if not isinstance(cases, list) or not cases:
@@ -740,8 +744,8 @@ def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str
                 not isinstance(page, dict)
                 or not isinstance(page.get("page_id"), str)
                 or page.get("expected_status") != "validated"
-                or type(page.get("min_components")) is not int
-                or page["min_components"] < 0
+                or type(page.get("min_visual_components")) is not int
+                or page["min_visual_components"] < 0
                 or type(page.get("min_text_boxes")) is not int
                 or page["min_text_boxes"] < 0
                 or type(page.get("max_unexplained_pixels")) is not int
@@ -785,88 +789,120 @@ def _validate_batch_case(
                 )
             except Exception:
                 raise BenchmarkFailure("invalid_quality_result") from None
-        if isinstance(component_result, dict):
-            minimum_components = page.get("min_components")
-            final_components = component_result.get("final_component_ids")
-            if (
-                type(minimum_components) is int
-                and minimum_components > 0
-                and (
-                    not isinstance(final_components, list)
-                    or len(final_components) < minimum_components
-                )
-            ):
-                raise BenchmarkFailure("quality_gate")
-            minimum_text = page.get("min_text_boxes")
-            text_items = component_result.get("text_items")
-            if type(minimum_text) is int and minimum_text > 0 and (
-                not isinstance(text_items, list) or len(text_items) < minimum_text
-            ):
-                raise BenchmarkFailure("quality_gate")
-            repair_rounds = component_result.get("repair_rounds")
-            if type(repair_rounds) is int and repair_rounds > 0:
-                quality_path = (
-                    Path(result.run_dir)
-                    / "pages"
-                    / page_id
-                    / "reconstruction"
-                    / f"execution-{repair_rounds:02d}"
-                    / "component-quality.json"
-                )
-                if quality_path.is_file():
-                    try:
-                        quality = _strict_json(
-                            _read_regular_file(
-                                quality_path,
-                                _JSON_LIMIT,
-                                require_single_link=True,
-                            ),
-                            _JSON_LIMIT,
-                        )
-                        report = quality.get("report", {})
-                        metrics = report.get("visual_metrics", {})
-                        unexplained = metrics.get("unexplained_visual_pixels", 0)
-                        violations = [
-                            value
-                            for value in report.get("violations", [])
-                            if value != "pptx_reopen_unknown"
-                        ]
-                        component_violations = sum(
-                            len(item.get("violations", []))
-                            for item in report.get("component_reports", [])
-                            if isinstance(item, dict)
-                        )
-                    except Exception:
-                        raise BenchmarkFailure("invalid_quality_result") from None
-                    if (
-                        type(unexplained) is not int
-                        or unexplained > page.get("max_unexplained_pixels", 0)
-                        or violations
-                        or component_violations
-                        > page.get("max_quality_violations", 0)
-                    ):
-                        raise BenchmarkFailure("quality_gate")
-        component = (
+        if not isinstance(component_result, dict):
+            raise BenchmarkFailure("invalid_quality_result")
+        if "warning" not in component_result:
+            raise BenchmarkFailure("invalid_quality_result")
+        if component_result["warning"] is not None:
+            raise BenchmarkFailure("warning_fallback")
+        fallback = component_result.get("fallback")
+        if not isinstance(fallback, dict) or set(fallback) != {"status", "parent_ids"}:
+            raise BenchmarkFailure("invalid_quality_result")
+        if fallback["status"] != "none":
+            raise BenchmarkFailure("warning_fallback")
+        if fallback["parent_ids"] != []:
+            raise BenchmarkFailure("invalid_quality_result")
+
+        minimum_visual = page.get("min_visual_components")
+        final_components = component_result.get("final_component_ids")
+        if (
+            not isinstance(final_components, list)
+            or any(
+                not isinstance(identifier, str) or not identifier
+                for identifier in final_components
+            )
+            or len(set(final_components)) != len(final_components)
+        ):
+            raise BenchmarkFailure("invalid_quality_result")
+        if type(minimum_visual) is int and len(final_components) < minimum_visual:
+            raise BenchmarkFailure("quality_gate")
+
+        minimum_text = page.get("min_text_boxes")
+        text_items = component_result.get("text_items")
+        if (
+            not isinstance(text_items, list)
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("_component_id"), str)
+                or not item["_component_id"]
+                for item in text_items
+            )
+            or len({item["_component_id"] for item in text_items}) != len(text_items)
+        ):
+            raise BenchmarkFailure("invalid_quality_result")
+        if type(minimum_text) is int and len(text_items) < minimum_text:
+            raise BenchmarkFailure("quality_gate")
+
+        repair_rounds = component_result.get("repair_rounds")
+        accepted_graph = component_result.get("accepted_graph_sha256")
+        if (
+            type(repair_rounds) is not int
+            or repair_rounds < 1
+            or not _sha256(accepted_graph)
+        ):
+            raise BenchmarkFailure("invalid_quality_result")
+        quality_path = (
             Path(result.run_dir)
             / "pages"
             / page_id
             / "reconstruction"
-            / "component_result.json"
+            / f"execution-{repair_rounds:02d}"
+            / "component-quality.json"
         )
-        if not component.is_file():
-            continue
         try:
             quality = _strict_json(
-                _read_regular_file(component, _JSON_LIMIT, require_single_link=True),
+                _read_regular_file(
+                    quality_path,
+                    _JSON_LIMIT,
+                    require_single_link=True,
+                ),
                 _JSON_LIMIT,
+            )
+            if (
+                not isinstance(quality, dict)
+                or quality.get("page_id") != page_id
+                or quality.get("repair_round") != repair_rounds
+                or quality.get("input_graph_sha256") != accepted_graph
+            ):
+                raise ValueError
+            report = quality.get("report")
+            if not isinstance(report, dict):
+                raise ValueError
+            metrics = report.get("visual_metrics")
+            violations = report.get("violations")
+            component_reports = report.get("component_reports")
+            if (
+                not isinstance(metrics, dict)
+                or not isinstance(violations, list)
+                or any(not isinstance(value, str) for value in violations)
+                or not isinstance(component_reports, list)
+                or any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("violations"), list)
+                    or any(
+                        not isinstance(value, str) for value in item["violations"]
+                    )
+                    for item in component_reports
+                )
+            ):
+                raise ValueError
+            unexplained = metrics.get("unexplained_visual_pixels")
+            if type(unexplained) is not int or unexplained < 0:
+                raise ValueError
+            active_violations = [
+                value for value in violations if value != "pptx_reopen_unknown"
+            ]
+            component_violations = sum(
+                len(item["violations"]) for item in component_reports
             )
         except Exception:
             raise BenchmarkFailure("invalid_quality_result") from None
-        fallback = quality.get("fallback")
-        if quality.get("warning") not in (None, "") or (
-            isinstance(fallback, dict) and fallback.get("status") not in (None, "none")
+        if (
+            unexplained > page.get("max_unexplained_pixels", 0)
+            or active_violations
+            or component_violations > page.get("max_quality_violations", 0)
         ):
-            raise BenchmarkFailure("warning_fallback")
+            raise BenchmarkFailure("quality_gate")
 
 
 def run_manifest(

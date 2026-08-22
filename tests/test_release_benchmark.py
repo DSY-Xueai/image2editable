@@ -39,7 +39,7 @@ CASE_FIELDS = {
 PAGE_FIELDS = {
     "page_id",
     "expected_status",
-    "min_components",
+    "min_visual_components",
     "min_text_boxes",
     "max_unexplained_pixels",
     "max_quality_violations",
@@ -173,8 +173,8 @@ CASE_SPECS = [
         2,
         "pdf_mixed_page_sizes",
         None,
-        6,
         4,
+        11,
     ),
     (
         "pdf-rotated-page",
@@ -183,8 +183,8 @@ CASE_SPECS = [
         2,
         "pdf_rotated_page",
         None,
-        6,
         4,
+        11,
     ),
     ("pdf-high-dpi", "pdf", "inputs/15-high-dpi.pdf", 2, "pdf_high_dpi", None, 6, 4),
     (
@@ -252,7 +252,7 @@ runner 固定执行 3 次独立重复；每次都重新校验输入 hash、按�
 
 ## 通过标准
 
-每页必须达到 manifest 中的最小组件数和文本框数、状态为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。全部 18 个输入共 30 页，三次重复均须通过；真实模型 runner 不放入普通 push CI，发布前在受控环境执行并保存报告。
+每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。全部 18 个输入共 30 页，三次重复均须通过；真实模型 runner 不放入普通 push CI，发布前在受控环境执行并保存报告。
 """
 
 EXPECTED_INPUT_NAMES = {Path(spec[2]).name for spec in CASE_SPECS}
@@ -338,13 +338,13 @@ def _assert_exact_fields(manifest: dict[str, object]) -> None:
 
 def _assert_numeric_contract(manifest: dict[str, object]) -> None:
     assert type(manifest["schema_version"]) is int
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     for case in manifest["cases"]:
         assert type(case["page_count"]) is int
         assert case["page_count"] > 0
         for page in case["expected_pages"]:
             for field in (
-                "min_components",
+                "min_visual_components",
                 "min_text_boxes",
                 "max_unexplained_pixels",
                 "max_quality_violations",
@@ -378,7 +378,7 @@ def test_release_manifest_has_exact_root_schema_and_categories() -> None:
 
     _assert_exact_fields(manifest)
     _assert_numeric_contract(manifest)
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["categories"] == EXPECTED_CATEGORIES
     assert len(manifest["cases"]) == 18
     assert len({case["id"] for case in manifest["cases"]}) == 18
@@ -414,7 +414,7 @@ def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
     cases = _manifest()["cases"]
 
     for case, spec in zip(cases, CASE_SPECS, strict=True):
-        identifier, _, _, page_count, category, _, min_components, min_text_boxes = spec
+        identifier, _, _, page_count, category, _, min_visual, min_text_boxes = spec
         assert re.fullmatch(r"[0-9a-f]{64}", case["sha256"])
         assert case["source"] == "project-generated"
         assert case["license"] == "CC0-1.0"
@@ -426,7 +426,7 @@ def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
             assert page == {
                 "page_id": f"{identifier}-page-{page_number:03d}",
                 "expected_status": "validated",
-                "min_components": min_components,
+                "min_visual_components": min_visual,
                 "min_text_boxes": min_text_boxes,
                 "max_unexplained_pixels": 0,
                 "max_quality_violations": 0,
@@ -448,7 +448,7 @@ def test_release_manifest_pptx_modes_are_exact_and_only_apply_to_pptx() -> None:
 @pytest.mark.parametrize(
     ("needle", "duplicate"),
     [
-        ('  "schema_version": 1,', '  "schema_version": 1,\n  "schema_version": 1,'),
+        ('  "schema_version": 2,', '  "schema_version": 2,\n  "schema_version": 2,'),
         (
             '      "id": "image-bilingual-dashboard",',
             '      "id": "image-bilingual-dashboard",\n'
@@ -484,8 +484,8 @@ def test_release_manifest_rejects_duplicate_keys_in_every_object(
         ("schema_version", True),
         ("page_count", True),
         ("page_count", 0),
-        ("min_components", True),
-        ("min_components", -1),
+        ("min_visual_components", True),
+        ("min_visual_components", -1),
         ("min_text_boxes", True),
         ("min_text_boxes", -1),
         ("max_unexplained_pixels", False),
@@ -1372,6 +1372,40 @@ def test_release_runner_rejects_duplicate_and_hardlinked_plans(
         runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
 
 
+def _write_valid_release_quality(reconstruction: Path) -> None:
+    graph_sha256 = "a" * 64
+    (reconstruction / "component_result.json").write_text(
+        json.dumps(
+            {
+                "final_component_ids": [],
+                "text_items": [],
+                "repair_rounds": 1,
+                "accepted_graph_sha256": graph_sha256,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    quality_path = reconstruction / "execution-01/component-quality.json"
+    quality_path.parent.mkdir()
+    quality_path.write_text(
+        json.dumps(
+            {
+                "page_id": "page_001",
+                "repair_round": 1,
+                "input_graph_sha256": graph_sha256,
+                "report": {
+                    "visual_metrics": {"unexplained_visual_pixels": 0},
+                    "violations": ["pptx_reopen_unknown"],
+                    "component_reports": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _batch_manifest(tmp_path: Path, *, warning: bool = False) -> Path:
     root = tmp_path / "release"
     source = root / "inputs/01.png"
@@ -1387,7 +1421,7 @@ def _batch_manifest(tmp_path: Path, *, warning: bool = False) -> Path:
             {
                 "page_id": "page_001",
                 "expected_status": "validated",
-                "min_components": 0,
+                "min_visual_components": 0,
                 "min_text_boxes": 0,
                 "max_unexplained_pixels": 0,
                 "max_quality_violations": 0,
@@ -1398,7 +1432,7 @@ def _batch_manifest(tmp_path: Path, *, warning: bool = False) -> Path:
     if warning:
         case["expected_pages"][0]["warning"] = True
     manifest = root / "manifest.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "cases": [case]}), encoding="utf-8")
+    manifest.write_text(json.dumps({"schema_version": 2, "cases": [case]}), encoding="utf-8")
     return manifest
 
 
@@ -1418,9 +1452,7 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
         (page / "page_result.json").write_text(
             '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
         )
-        (page / "reconstruction/component_result.json").write_text(
-            '{"warning":null,"fallback":{"status":"none"}}', encoding="utf-8"
-        )
+        _write_valid_release_quality(page / "reconstruction")
         return runner.BenchmarkCaseResult(
             case_id=str(case["id"]),
             run_dir=str(run_dir),
@@ -1450,15 +1482,13 @@ def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
     run_dir = tmp_path / "run"
     reconstruction = run_dir / "pages/page_001/reconstruction"
     reconstruction.mkdir(parents=True)
-    (reconstruction / "component_result.json").write_text(
-        '{"warning":null,"fallback":{"status":"none"}}', encoding="utf-8"
-    )
+    _write_valid_release_quality(reconstruction)
     case = {
         "expected_pages": [
             {
                 "page_id": "image-one-page-001",
                 "expected_status": "validated",
-                "min_components": 0,
+                "min_visual_components": 0,
                 "min_text_boxes": 0,
                 "max_unexplained_pixels": 0,
                 "max_quality_violations": 0,
@@ -1473,6 +1503,156 @@ def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
     )
 
     runner._validate_batch_case(case, result)
+
+
+def test_release_runner_enforces_visual_components_separately_from_text(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    result_path = reconstruction / "component_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": ["visual_001", "visual_002", "visual_003"],
+                "text_items": [
+                    {"_component_id": f"text_{index:03d}"}
+                    for index in range(1, 12)
+                ],
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "pdf-page-001",
+                "expected_status": "validated",
+                "min_visual_components": 4,
+                "min_text_boxes": 11,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "pdf",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "validated"}],
+        1,
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="quality_gate"):
+        runner._validate_batch_case(case, result)
+
+    duplicate_visual = ["visual_001"] * 4
+    text_items = [
+        {"_component_id": f"text_{index:03d}"} for index in range(1, 12)
+    ]
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": duplicate_visual,
+                "text_items": text_items,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    unique_visual = [
+        "visual_001",
+        "visual_002",
+        "visual_003",
+        "visual_004",
+    ]
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": unique_visual,
+                "text_items": [{"_component_id": "text_001"}] * 11,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result = {
+        "final_component_ids": unique_visual,
+        "text_items": text_items,
+        "warning": None,
+        "fallback": {"status": "none", "parent_ids": []},
+    }
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result.update(
+        {"repair_rounds": 1, "accepted_graph_sha256": "a" * 64}
+    )
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    quality_path = reconstruction / "execution-01/component-quality.json"
+    quality_path.parent.mkdir()
+    quality = {
+        "page_id": "page_001",
+        "repair_round": 1,
+        "input_graph_sha256": "a" * 64,
+        "report": {
+            "visual_metrics": {"unexplained_visual_pixels": 0},
+            "violations": ["pptx_reopen_unknown"],
+            "component_reports": [
+                {"component_id": identifier, "violations": []}
+                for identifier in unique_visual
+            ],
+        },
+    }
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    runner._validate_batch_case(case, result)
+
+    quality_path.unlink()
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    del component_result["warning"]
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result["warning"] = None
+    del component_result["fallback"]
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    result_path.unlink()
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+
+def test_release_loader_rejects_float_schema_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _manifest()
+    manifest["schema_version"] = 2.0
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(runner, "RELEASE_ROOT", RELEASE_ROOT)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_manifest"):
+        runner._load_batch_cases(path)
 
 
 def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(

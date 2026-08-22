@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "cases": [
     {
       "id": "image-bilingual-dashboard",
@@ -16,7 +16,7 @@
         {
           "page_id": "image-bilingual-dashboard-page-001",
           "expected_status": "validated",
-          "min_components": 12,
+          "min_visual_components": 12,
           "min_text_boxes": 8,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -38,7 +38,7 @@
         {
           "page_id": "image-dense-parameter-comparison-page-001",
           "expected_status": "validated",
-          "min_components": 15,
+          "min_visual_components": 15,
           "min_text_boxes": 12,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -60,7 +60,7 @@
         {
           "page_id": "image-profile-cards-page-001",
           "expected_status": "validated",
-          "min_components": 10,
+          "min_visual_components": 10,
           "min_text_boxes": 8,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -82,7 +82,7 @@
         {
           "page_id": "image-four-stage-timeline-page-001",
           "expected_status": "validated",
-          "min_components": 10,
+          "min_visual_components": 10,
           "min_text_boxes": 6,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -104,7 +104,7 @@
         {
           "page_id": "image-combo-chart-page-001",
           "expected_status": "validated",
-          "min_components": 8,
+          "min_visual_components": 8,
           "min_text_boxes": 5,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -126,7 +126,7 @@
         {
           "page_id": "image-flowchart-page-001",
           "expected_status": "validated",
-          "min_components": 10,
+          "min_visual_components": 10,
           "min_text_boxes": 6,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -148,7 +148,7 @@
         {
           "page_id": "image-icon-matrix-page-001",
           "expected_status": "validated",
-          "min_components": 12,
+          "min_visual_components": 12,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -170,7 +170,7 @@
         {
           "page_id": "image-light-text-gradient-page-001",
           "expected_status": "validated",
-          "min_components": 4,
+          "min_visual_components": 4,
           "min_text_boxes": 3,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -192,7 +192,7 @@
         {
           "page_id": "image-thin-line-network-page-001",
           "expected_status": "validated",
-          "min_components": 12,
+          "min_visual_components": 12,
           "min_text_boxes": 3,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -214,7 +214,7 @@
         {
           "page_id": "image-tiny-element-table-page-001",
           "expected_status": "validated",
-          "min_components": 15,
+          "min_visual_components": 15,
           "min_text_boxes": 10,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -236,7 +236,7 @@
         {
           "page_id": "image-dark-poster-page-001",
           "expected_status": "validated",
-          "min_components": 5,
+          "min_visual_components": 5,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -258,7 +258,7 @@
         {
           "page_id": "image-non-16-9-infographic-page-001",
           "expected_status": "validated",
-          "min_components": 12,
+          "min_visual_components": 12,
           "min_text_boxes": 8,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -280,16 +280,16 @@
         {
           "page_id": "pdf-mixed-page-sizes-page-001",
           "expected_status": "validated",
-          "min_components": 6,
-          "min_text_boxes": 4,
+          "min_visual_components": 4,
+          "min_text_boxes": 11,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         },
         {
           "page_id": "pdf-mixed-page-sizes-page-002",
           "expected_status": "validated",
-          "min_components": 6,
-          "min_text_boxes": 4,
+          "min_visual_components": 4,
+          "min_text_boxes": 11,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         }
@@ -310,16 +310,16 @@
         {
           "page_id": "pdf-rotated-page-page-001",
           "expected_status": "validated",
-          "min_components": 6,
-          "min_text_boxes": 4,
+          "min_visual_components": 4,
+          "min_text_boxes": 11,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         },
         {
           "page_id": "pdf-rotated-page-page-002",
           "expected_status": "validated",
-          "min_components": 6,
-          "min_text_boxes": 4,
+          "min_visual_components": 4,
+          "min_text_boxes": 11,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         }
@@ -340,7 +340,7 @@
         {
           "page_id": "pdf-high-dpi-page-001",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -348,7 +348,7 @@
         {
           "page_id": "pdf-high-dpi-page-002",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -370,7 +370,7 @@
         {
           "page_id": "pptx-image-only-page-001",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -378,7 +378,7 @@
         {
           "page_id": "pptx-image-only-page-002",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -386,7 +386,7 @@
         {
           "page_id": "pptx-image-only-page-003",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -394,7 +394,7 @@
         {
           "page_id": "pptx-image-only-page-004",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -416,7 +416,7 @@
         {
           "page_id": "pptx-mixed-native-page-001",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -424,7 +424,7 @@
         {
           "page_id": "pptx-mixed-native-page-002",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -432,7 +432,7 @@
         {
           "page_id": "pptx-mixed-native-page-003",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -440,7 +440,7 @@
         {
           "page_id": "pptx-mixed-native-page-004",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -462,7 +462,7 @@
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-001",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -470,7 +470,7 @@
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-002",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -478,7 +478,7 @@
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-003",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
@@ -486,7 +486,7 @@
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-004",
           "expected_status": "validated",
-          "min_components": 6,
+          "min_visual_components": 6,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
