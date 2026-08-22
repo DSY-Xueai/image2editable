@@ -384,6 +384,7 @@ def test_filter_noise_keeps_spaced_semantic_separators() -> None:
         "LETTER PORTRAIT / MIXED SIZE",
         "ALPHA - BETA",
         "ALPHA / BETA / GAMMA",
+        "842 x 595 pt / project-generated / CC0-1.0",
     ]
     boxes = [
         {"box": (0, index * 20, 240, 16), "text": label, "confidence": 0.95}
@@ -400,6 +401,8 @@ def test_filter_noise_rejects_ambiguous_spaced_separators() -> None:
         "/ BETA",
         "ALPHA // BETA",
         "ALPHA / BETA:V2",
+        "ALPHA / BETA. GAMMA",
+        "ALPHA / beta-.gamma",
         "A / B",
     ]
     boxes = [
@@ -438,6 +441,30 @@ def test_build_text_result_preserves_internal_semantic_separator(
 
     assert [item["text"] for item in text_items] == [
         "LETTER PORTRAIT / MIXED SIZE"
+    ]
+
+
+def test_build_text_result_preserves_mixed_technical_separator(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        text_detect,
+        "_estimate_style",
+        lambda *_: {"font_size": 12.6, "color": "#3f576f", "bold": False},
+    )
+    image = np.full((80, 700, 3), 255, dtype=np.uint8)
+    raw_boxes = [
+        {
+            "box": (10, 10, 581, 42),
+            "text": "842 x 595 pt / project-generated / CC0-1.0",
+            "confidence": 0.9892293214797974,
+        }
+    ]
+
+    text_items, _ = text_detect._build_text_result(image, raw_boxes, 0.7, 2)
+
+    assert [item["text"] for item in text_items] == [
+        "842 x 595 pt / project-generated / CC0-1.0"
     ]
 
 

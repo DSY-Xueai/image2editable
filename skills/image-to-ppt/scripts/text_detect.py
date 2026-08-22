@@ -592,23 +592,34 @@ def _to_tesseract_lang(lang: str) -> str:
 
 
 def _is_spaced_semantic_separator_text(text: str) -> bool:
-    if any(separator in text for separator in ":;.\\"):
+    parts = re.split(r"\s+[/\-]\s+", text)
+    if len(parts) == 1:
         return False
 
-    parts = re.split(r"\s+[/\-]\s+", text)
-    if len(parts) == 1 or any(char in "/-" for part in parts for char in part):
-        return False
-    return all(
-        sum(
-            1
-            for char in part
-            if char.isalnum()
-            or "\u4e00" <= char <= "\u9fff"
-            or "\u3400" <= char <= "\u4dbf"
-        )
-        >= 2
-        for part in parts
-    )
+    for part in parts:
+        meaningful = 0
+        for index, char in enumerate(part):
+            if (
+                char.isalnum()
+                or "\u4e00" <= char <= "\u9fff"
+                or "\u3400" <= char <= "\u4dbf"
+            ):
+                meaningful += 1
+                continue
+            if char.isspace():
+                continue
+            if (
+                char in ".-"
+                and index > 0
+                and index + 1 < len(part)
+                and part[index - 1].isalnum()
+                and part[index + 1].isalnum()
+            ):
+                continue
+            return False
+        if meaningful < 2:
+            return False
+    return True
 
 
 def _filter_noise(
