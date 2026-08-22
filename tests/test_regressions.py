@@ -4541,6 +4541,35 @@ def test_centered_textbox_keeps_detected_horizontal_bounds(tmp_path: Path) -> No
     assert abs(text_box.width / 914400 - 5.3332) < 0.01
 
 
+def test_rotated_textbox_keeps_displayed_bounds_and_center(tmp_path: Path) -> None:
+    bg_path = tmp_path / "bg.png"
+    Image.new("RGB", (100, 50), "white").save(bg_path)
+    out_path = tmp_path / "out.pptx"
+
+    assemble_pptx(
+        background_path=bg_path,
+        components=[],
+        text_items=[{
+            "box": [20, 10, 10, 30],
+            "text": "Rotated",
+            "font_size": 18,
+            "rotation": 90,
+        }],
+        img_width=100,
+        img_height=50,
+        output_path=out_path,
+    )
+
+    text_box = Presentation(out_path).slides[0].shapes[1]
+    center_x = (text_box.left + text_box.width / 2) / 914400
+    center_y = (text_box.top + text_box.height / 2) / 914400
+
+    assert text_box.rotation == 90
+    assert abs(text_box.width / text_box.height - 3.0) < 0.01
+    assert abs(center_x - 10 / 3) < 0.01
+    assert abs(center_y - 3.75) < 0.01
+
+
 def test_widescreen_canvas_places_component_without_aspect_change(
     tmp_path: Path,
 ) -> None:
@@ -8762,6 +8791,7 @@ def _prepare_component_layers_fixture(
     resource_isolation: bool = False,
     before_visual_worker=None,
     before_prepare=None,
+    ocr_rotation: int = 0,
 ) -> tuple[dict, Path]:
     source_path = tmp_path / "outside-source.png"
     Image.new("RGB", (16, 10), "white").save(source_path)
@@ -8773,6 +8803,11 @@ def _prepare_component_layers_fixture(
         assert Path(path).resolve().is_relative_to(work_dir.resolve())
         assert lang == "en"
         assert bool(kwargs.get("isolated")) is resource_isolation
+        assert kwargs.get("style_reference_width") == (
+            16 if ocr_rotation else None
+        )
+        with Image.open(path) as ocr_image:
+            ocr_size = ocr_image.size
         return (
             [{
                 "box": [1, 1, 3, 2],
@@ -8784,7 +8819,9 @@ def _prepare_component_layers_fixture(
                 "align": 1,
                 "confidence": 0.99,
             }],
-            image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros(
+                (ocr_size[1], ocr_size[0]), dtype=image_to_ppt.np.uint8
+            ),
         )
 
     def fake_slide(path: Path, target: Path, text_analysis: dict) -> dict:
@@ -8910,6 +8947,7 @@ def _prepare_component_layers_fixture(
         work_dir,
         lang="en",
         resource_isolation=resource_isolation,
+        ocr_rotation=ocr_rotation,
     )
     assert calls == {"ocr": 1, "visual": 1}
     return prepared, work_dir
@@ -9032,7 +9070,7 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     cleanup_path = Path(prepared["_text_cleanup_mask_path"])
     assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
     assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
@@ -9066,7 +9104,20 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
         else:
             assert_asset(value)
     for component in manifest["components"]:
-            assert_asset(component["asset"])
+        assert_asset(component["asset"])
+
+
+def test_prepare_component_layers_rotates_ocr_and_restores_display_coordinates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(
+        tmp_path, monkeypatch, ocr_rotation=90
+    )
+
+    assert prepared["text_items"][0]["box"] == [13, 1, 2, 3]
+    assert prepared["text_items"][0]["rotation"] == 90
+    assert not list(work_dir.glob(".ocr-upright-*.png"))
 
 
 def test_load_component_layers_rejects_foreground_evidence_not_matching_semantics(
@@ -9298,6 +9349,39 @@ def test_prepare_component_layers_ocr_cleanup_does_not_mask_primary_error(
         )
 
 
+def test_prepare_component_layers_temporary_ocr_cleanup_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (8, 4), "red").save(source_path)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("OCR primary failure")
+        ),
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    original_unlink = Path.unlink
+
+    def fail_temporary_ocr_unlink(path, *args, **kwargs):
+        if Path(path).name.startswith(".ocr-upright-"):
+            raise OSError("temporary OCR cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary_ocr_unlink)
+
+    with pytest.raises(RuntimeError, match="OCR primary failure"):
+        image_to_ppt.prepare_component_layers(
+            source_path,
+            tmp_path / "prepared",
+            lang="en",
+            resource_isolation=False,
+            ocr_rotation=90,
+        )
+
+
 def test_prepare_component_layers_visual_cleanup_does_not_mask_primary_error(
     tmp_path: Path,
     monkeypatch,
@@ -9505,8 +9589,10 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     manifest["schema_version"] = 1
+    for item in manifest["text_items"]:
+        item.pop("rotation")
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("semantic_masks")
     manifest["assets"].pop("text_cleanup_mask")

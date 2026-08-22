@@ -1847,6 +1847,7 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
     store = RunStore.open(run_dir)
     calls = {"prepare": 0, "request": 0, "state": 0}
+    prepare_kwargs = []
     request_leases = []
     reconstruction = run_dir / "pages" / "page_001" / "reconstruction"
 
@@ -1854,6 +1855,7 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
         @staticmethod
         def prepare_component_layers(*args, **kwargs):
             calls["prepare"] += 1
+            prepare_kwargs.append(kwargs)
             return {"state_path": str(reconstruction / "initial/prepared-page.json"),
                     "initial_component_count": 2}
 
@@ -1895,9 +1897,56 @@ def test_legacy_page_initialization_is_idempotent_without_rerunning_models(
     assert second["status"] == "already_initialized"
     assert calls == {"prepare": 1, "request": 1, "state": 1}
     assert request_leases == [lease]
+    assert prepare_kwargs == [{
+        "lang": "ch",
+        "resource_isolation": True,
+        "ocr_rotation": 0,
+    }]
 
 
-@pytest.mark.parametrize("prepared_schema_version", [1, 5])
+def test_legacy_page_initialization_passes_pdf_rotation_to_ocr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
+    store = RunStore.open(run_dir)
+    request = store.read_json("pages/page_001/page_request.json")
+    request.update({"source_type": "pdf", "render": {"rotation": 90}})
+    store.write_json("pages/page_001/page_request.json", request)
+    captured = {}
+    reconstruction = run_dir / "pages" / "page_001" / "reconstruction"
+
+    class FakeImageModule:
+        @staticmethod
+        def prepare_component_layers(*args, **kwargs):
+            captured.update(kwargs)
+            return {"state_path": str(reconstruction / "initial/prepared-page.json"),
+                    "initial_component_count": 1}
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule
+    )
+    monkeypatch.setattr(
+        legacy, "_build_initial_page_session",
+        lambda *args: {"page_id": "page_001"}, raising=False,
+    )
+    monkeypatch.setattr(
+        legacy, "build_component_agent_request",
+        lambda *args, **kwargs: reconstruction / "request.json", raising=False,
+    )
+    monkeypatch.setattr(
+        legacy, "initialize_component_repair_state",
+        lambda *args, **kwargs: {"phase": "request_published"}, raising=False,
+    )
+
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        legacy.initialize_legacy_page(store, "page_001", _lease=lease)
+
+    assert captured["ocr_rotation"] == 90
+
+
+@pytest.mark.parametrize("prepared_schema_version", [1, 6])
 def test_initial_page_session_uses_versioned_foreground_evidence(
     tmp_path: Path,
     prepared_schema_version: int,
@@ -1941,7 +1990,7 @@ def test_initial_page_session_uses_versioned_foreground_evidence(
         }],
         "text_items": [{"text": "T", "box": [10, 4, 3, 2]}],
     }
-    if prepared_schema_version == 5:
+    if prepared_schema_version >= 5:
         foreground = prepared_root / "foreground-evidence-mask.png"
         Image.new("L", (20, 10), 0).save(foreground)
         with Image.open(foreground) as image:
@@ -1975,7 +2024,7 @@ def test_initial_page_session_uses_versioned_foreground_evidence(
     request = json.loads(request_path.read_text(encoding="utf-8"))
     assert request["candidate_ids"] == ["component_0001"]
     assert request["frozen_ids"] == ["text_0001"]
-    if prepared_schema_version == 5:
+    if prepared_schema_version >= 5:
         record = request["evidence"]["unexplained-mask.png"]
         unexplained = request_path.parent / record["path"]
         assert unexplained.read_bytes() == foreground.read_bytes()
@@ -2924,6 +2973,17 @@ def test_filtered_text_items_keep_their_original_component_ids() -> None:
         "id": "text_0002",
         "text": "keep",
         "box": [2, 1, 5, 3],
+    }]
+
+
+def test_component_text_items_keep_canonical_rotation() -> None:
+    items = [{"text": "vertical", "box": [2, 1, 3, 2], "rotation": 90}]
+
+    assert legacy._component_text_items(items, (8, 6)) == [{
+        "id": "text_0001",
+        "text": "vertical",
+        "box": [2, 1, 5, 3],
+        "rotation": 90,
     }]
 
 

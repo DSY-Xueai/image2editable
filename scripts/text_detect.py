@@ -51,6 +51,7 @@ def detect_text(
     *,
     isolated: bool = False,
     worker_root: str | Path | None = None,
+    style_reference_width: int | None = None,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect text regions and estimate styling.
 
@@ -78,7 +79,11 @@ def detect_text(
     )
 
     return _build_text_result(
-        img_rgb, raw_boxes, confidence_threshold, mask_padding,
+        img_rgb,
+        raw_boxes,
+        confidence_threshold,
+        mask_padding,
+        style_reference_width=style_reference_width,
     )
 
 
@@ -127,7 +132,13 @@ def _build_text_result(
     raw_boxes: list[dict],
     confidence_threshold: float,
     mask_padding: int,
+    *,
+    style_reference_width: int | None = None,
 ) -> tuple[list[dict], np.ndarray]:
+    if style_reference_width is not None and (
+        type(style_reference_width) is not int or style_reference_width <= 0
+    ):
+        raise ValueError("reference_width must be a positive integer")
     h, w = img_rgb.shape[:2]
     if not raw_boxes:
         logger.warning("No text detected by OCR.")
@@ -151,7 +162,14 @@ def _build_text_result(
     text_items = []
     for rb in raw_boxes:
         box = rb["box"]  # (x, y, w, h) in pixels
-        style = _estimate_style(img_rgb, box)
+        if style_reference_width is None:
+            style = _estimate_style(img_rgb, box)
+        else:
+            style = _estimate_style(
+                img_rgb,
+                box,
+                reference_width=style_reference_width,
+            )
 
         # Filter out tiny text (likely decorative labels, icon text, noise)
         if style["font_size"] < 8.0:

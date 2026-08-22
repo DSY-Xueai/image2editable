@@ -750,9 +750,20 @@ def _add_textbox(
         content_offset_y,
     )
 
+    rotation = item.get("rotation", 0)
+    if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+        raise ValueError("text rotation must be one of 0, 90, 180, or 270")
+    if rotation in {90, 270}:
+        center_x = left + width / 2
+        center_y = top + height / 2
+        width, height = height, width
+        left = center_x - width / 2
+        top = center_y - height / 2
+
     box = slide.shapes.add_textbox(
         Inches(left), Inches(top), Inches(width), Inches(height)
     )
+    box.rotation = rotation
     tf = box.text_frame
     tf.word_wrap = False
     tf.margin_left = 0

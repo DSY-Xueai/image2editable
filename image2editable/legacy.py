@@ -79,6 +79,18 @@ def _source_path(store: RunStore, page_id: str) -> Path:
     return source
 
 
+def _page_ocr_rotation(store: RunStore, page_id: str) -> int:
+    request = store.read_json(Path("pages") / page_id / "page_request.json")
+    validate_schema_version(request)
+    if request.get("source_type") != "pdf":
+        return 0
+    render = request.get("render")
+    rotation = render.get("rotation") if isinstance(render, dict) else None
+    if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+        raise ValueError(f"{page_id}: PDF render rotation is invalid")
+    return rotation
+
+
 def _is_link_or_reparse(status: Any) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return stat.S_ISLNK(status.st_mode) or bool(
@@ -595,6 +607,7 @@ def initialize_legacy_page(
             reconstruction / "initial",
             lang=manifest["options"]["lang"],
             resource_isolation=True,
+            ocr_rotation=_page_ocr_rotation(store, page_id),
         )
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
@@ -804,13 +817,19 @@ def _component_text_records(items: object, page_size: tuple[int, int]) -> list[d
         ):
             raise ValueError("component text id is invalid")
         used_ids.add(component_id)
+        rotation = item.get("rotation", 0)
+        if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+            raise ValueError("component text rotation is invalid")
+        normalized_item = {
+            "id": component_id,
+            "text": item["text"],
+            "box": [left, top, right, bottom],
+        }
+        if rotation:
+            normalized_item["rotation"] = rotation
         normalized.append({
             "raw": item,
-            "normalized": {
-                "id": component_id,
-                "text": item["text"],
-                "box": [left, top, right, bottom],
-            },
+            "normalized": normalized_item,
         })
     return normalized
 
