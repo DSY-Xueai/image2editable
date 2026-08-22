@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "280673f9900522fa1f334e610f313b9ae3afb2a825d8fe97c0cb5d98ed3b560a",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": ["parent_0003"],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": ["The upper-right translucent circle is the complete source object; the remaining unexplained pixels are only its thin antialiased edge fragments inside this candidate."]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": ["parent_0003"],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": ["The tiny upper-right regions in unexplained-mask.png lie on the circle boundary and must be unioned into the same visual owner."]
+    },
+    {
+      "action": "attach_text",
+      "object_ids": ["parent_0005", "text_0004"],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": ["The native Chinese subtitle crosses the lower-left circle; binding it to that visual owner authorizes filling only the subtitle-shaped alpha holes inside the circle silhouette."]
+    }
+  ],
+  "graph_sha256": "f2966eb0ca1a6a18ba5a1a6d30af2f741779e777293b906cd1c27e48b619801b"
+}

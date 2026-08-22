@@ -123,8 +123,8 @@ CASE_SPECS = [
         1,
         "light_text_gradient",
         None,
-        4,
         3,
+        4,
     ),
     (
         "image-thin-line-network",

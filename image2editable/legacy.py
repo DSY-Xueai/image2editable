@@ -904,7 +904,8 @@ def _build_presentation_assets(
             text_mask |= masks[node["id"]]
             left, top, right, bottom = node["bbox"]
             text_items.append({
-                "box": [left, top, right - left, bottom - top]
+                "box": [left, top, right - left, bottom - top],
+                "component_id": node["id"],
             })
     if text_mask_path is not None:
         with Image.open(text_mask_path) as image:
@@ -912,10 +913,19 @@ def _build_presentation_assets(
         if text_mask.shape != source.shape[:2]:
             raise ValueError("presentation text mask dimensions differ")
     active_nodes = _active_visual_nodes(graph)
+    text_owners = {
+        text_id: component_index
+        for component_index, node in enumerate(active_nodes)
+        for text_id in node["text_ids"]
+    }
     assigned_masks = _assign_text_regions_to_component_masks(
         [masks[node["id"]] for node in active_nodes],
         text_mask,
         text_items,
+        text_owner_indices=[
+            text_owners.get(item["component_id"])
+            for item in text_items
+        ],
     )
     ownership_masks = resolve_visual_mask_ownership(
         active_nodes, assigned_masks
@@ -1616,6 +1626,8 @@ def _assign_text_regions_to_component_masks(
     component_masks: list[Any],
     text_mask: Any,
     text_items: list[dict] | None = None,
+    *,
+    text_owner_indices: list[int | None] | None = None,
 ) -> list[Any]:
     import cv2
     import numpy as np
@@ -1626,10 +1638,20 @@ def _assign_text_regions_to_component_masks(
         return assigned
     if any(mask.shape != text.shape for mask in assigned):
         raise ValueError("component text ownership mask dimensions differ")
+    if text_owner_indices is not None and (
+        text_items is None
+        or len(text_owner_indices) != len(text_items)
+        or any(
+            value is not None
+            and (type(value) is not int or not 0 <= value < len(assigned))
+            for value in text_owner_indices
+        )
+    ):
+        raise ValueError("component text owner indices are invalid")
     if text_items:
         regions = []
         height, width = text.shape
-        for item in text_items:
+        for item_index, item in enumerate(text_items):
             box = item.get("box") if isinstance(item, dict) else None
             if not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
@@ -1647,11 +1669,16 @@ def _assign_text_regions_to_component_masks(
                     max(0, y1 - halo):min(height, y2 + halo),
                     max(0, x1 - halo):min(width, x2 + halo),
                 ] = True
-                regions.append((ownership_region, fill_region))
+                regions.append((
+                    ownership_region,
+                    fill_region,
+                    None if text_owner_indices is None else text_owner_indices[item_index],
+                ))
     else:
         count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
         regions = [
-            (labels == label, labels == label) for label in range(1, count)
+            (labels == label, labels == label, None)
+            for label in range(1, count)
         ]
     mask_boxes = []
     silhouette_masks = []
@@ -1669,15 +1696,19 @@ def _assign_text_regions_to_component_masks(
         if contours:
             cv2.drawContours(silhouette, contours, -1, 1, thickness=cv2.FILLED)
         silhouette_masks.append(silhouette.astype(bool))
-    for ownership_region, fill_region in regions:
+    for ownership_region, fill_region, explicit_owner in regions:
         pixels = int(np.count_nonzero(ownership_region))
         overlaps = [
             int(np.count_nonzero(mask & ownership_region)) for mask in assigned
         ]
-        best = max(range(len(assigned)), key=overlaps.__getitem__)
+        best = (
+            explicit_owner
+            if explicit_owner is not None
+            else max(range(len(assigned)), key=overlaps.__getitem__)
+        )
         overlap_ratio = overlaps[best] / max(pixels, 1)
         backing_ratio = 0.0
-        if text_items and overlap_ratio < 0.2:
+        if explicit_owner is None and text_items and overlap_ratio < 0.2:
             fill_pixels = int(np.count_nonzero(fill_region))
             backing = [
                 int(np.count_nonzero(mask & fill_region)) for mask in assigned
@@ -1691,12 +1722,14 @@ def _assign_text_regions_to_component_masks(
             contained_ratio = np.count_nonzero(
                 fill_region[top:bottom, left:right]
             ) / max(int(np.count_nonzero(fill_region)), 1)
-        owns_text_region = (
+        owns_text_region = explicit_owner is not None or (
             overlap_ratio >= (0.2 if text_items else 0.45)
             or (bool(text_items) and backing_ratio >= 0.5)
         )
         if owns_text_region and (
-            not text_items or contained_ratio >= 0.8
+            explicit_owner is not None
+            or not text_items
+            or contained_ratio >= 0.8
         ):
             for index, mask in enumerate(assigned):
                 if index != best:
@@ -1761,7 +1794,30 @@ def _refine_quality_text_clean(
         text_items,
     )
     refined = cleaned.copy()
-    refined[repair_mask] = candidate[repair_mask]
+    local_background = cv2.inpaint(
+        cleaned,
+        repair_mask.astype(np.uint8) * 255,
+        3,
+        cv2.INPAINT_TELEA,
+    )
+    cleaned_error = np.sum(
+        np.abs(cleaned.astype(np.int16) - local_background.astype(np.int16)),
+        axis=2,
+    )
+    candidate_error = np.sum(
+        np.abs(candidate.astype(np.int16) - local_background.astype(np.int16)),
+        axis=2,
+    )
+    unchanged_from_source = np.all(cleaned == source, axis=2)
+    source_candidate_delta = np.max(
+        np.abs(source.astype(np.int16) - candidate.astype(np.int16)),
+        axis=2,
+    )
+    use_candidate = repair_mask & (
+        (unchanged_from_source & (source_candidate_delta > 32))
+        | (~unchanged_from_source & (candidate_error < cleaned_error))
+    )
+    refined[use_candidate] = candidate[use_candidate]
 
     short_side = min(source.shape[:2])
     line_length = max(9, min(31, round(short_side * 0.03)))
@@ -1846,8 +1902,22 @@ def _effective_text_context(
     }
     frozen_mask = np.zeros(original_mask.shape, dtype=bool)
     suppressed_mask = np.zeros(original_mask.shape, dtype=bool)
+    active_visual_mask = np.zeros(original_mask.shape, dtype=bool)
     frozen_ids = set()
     for node in graph["nodes"]:
+        if (
+            node["kind"] != "text"
+            and node["state"] in {"pending", "pending_gate", "frozen"}
+        ):
+            mask_path = graph_dir / Path(node["mask"])
+            if sha256_file(mask_path) != node["mask_sha256"]:
+                raise ValueError("effective visual graph mask sha256 mismatch")
+            with Image.open(mask_path) as image:
+                node_mask = np.asarray(image.convert("L")) > 0
+            if node_mask.shape != original_mask.shape:
+                raise ValueError("effective visual graph mask dimensions differ")
+            active_visual_mask |= node_mask
+            continue
         if node["kind"] != "text" or node["id"] not in records_by_id:
             continue
         mask_path = graph_dir / Path(node["mask"])
@@ -1922,9 +1992,16 @@ def _effective_text_context(
                 ).astype(np.uint8)
                 effective_mask |= repair
     if refine_text_clean and effective_items and np.any(effective_mask):
+        import cv2
+
         effective_clean = _refine_quality_text_clean(
             source, effective_clean, effective_mask, effective_items
         )
+        protected_visual_mask = cv2.dilate(
+            active_visual_mask.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+        ).astype(bool)
+        effective_clean[protected_visual_mask] = cleaned[protected_visual_mask]
         effective_mask = _quality_text_repair_mask(
             effective_mask, effective_items
         )

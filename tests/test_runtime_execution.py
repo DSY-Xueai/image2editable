@@ -3138,6 +3138,29 @@ def test_item_text_region_does_not_expand_a_partial_icon_owner() -> None:
     assert np.array_equal(assigned[0], icon)
 
 
+def test_explicit_text_owner_fills_only_its_partial_silhouette() -> None:
+    text = np.zeros((100, 120), dtype=bool)
+    text[40:50, 50:70] = True
+    text[40:50, 90:100] = True
+    owner = np.zeros_like(text)
+    owner[35:55, 45:75] = True
+    owner[text] = False
+    competitor = np.zeros_like(text)
+    competitor[30:60, 75:110] = True
+    competitor[text] = False
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [owner, competitor],
+        text,
+        [{"box": [50, 40, 50, 10]}],
+        text_owner_indices=[0],
+    )
+
+    assert np.all(assigned[0][40:50, 50:70])
+    assert not np.any(assigned[0][40:50, 90:100])
+    assert np.array_equal(assigned[1], competitor)
+
+
 def _background_box_mask(
     shape: tuple[int, int], box: tuple[int, int, int, int]
 ) -> np.ndarray:

@@ -1299,6 +1299,82 @@ def test_quality_text_refinement_uses_colored_horizontal_container() -> None:
     assert np.all(refined[10, 90] == 255)
 
 
+def test_quality_text_refinement_does_not_regress_clean_gradient(
+    monkeypatch,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+    import image_to_ppt
+
+    height, width = 80, 180
+    x = np.arange(width, dtype=np.uint8)
+    background = np.empty((height, width, 3), dtype=np.uint8)
+    background[:, :, 0] = 45 + x // 5
+    background[:, :, 1] = 65 + x // 8
+    background[:, :, 2] = 110 + x // 6
+    source = background.copy()
+    cv2.putText(
+        source, "TEXT", (42, 50), cv2.FONT_HERSHEY_SIMPLEX,
+        0.8, (245, 245, 245), 2, cv2.LINE_AA,
+    )
+    text_mask = np.any(source != background, axis=2)
+    regressed = background.copy()
+    regressed[text_mask] = (35, 40, 70)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_repair_text_with_local_planes",
+        lambda *args, **kwargs: regressed,
+    )
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        background,
+        text_mask,
+        [{"box": [40, 25, 90, 32]}],
+    )
+
+    assert np.max(np.abs(
+        refined[text_mask].astype(np.int16)
+        - background[text_mask].astype(np.int16)
+    )) <= 2
+
+
+def test_quality_text_refinement_preserves_subtle_curved_structure(
+    monkeypatch,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+    import image_to_ppt
+
+    background = np.full((100, 180, 3), (80, 100, 160), dtype=np.uint8)
+    cv2.circle(background, (72, 72), 42, (60, 75, 130), -1)
+    source = background.copy()
+    cv2.putText(
+        source, "A", (66, 78), cv2.FONT_HERSHEY_SIMPLEX,
+        0.8, (245, 245, 245), 2, cv2.LINE_AA,
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[42:88, 42:105] = True
+    regressed = background.copy()
+    regressed[text_mask] = (80, 100, 160)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_repair_text_with_local_planes",
+        lambda *args, **kwargs: regressed,
+    )
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        background,
+        text_mask,
+        [{"box": [42, 42, 63, 46]}],
+    )
+
+    assert np.array_equal(refined[72, 45], background[72, 45])
+
+
 def test_effective_text_context_reuses_authenticated_clean_image(
     tmp_path: Path,
     monkeypatch,
@@ -1370,6 +1446,61 @@ def test_effective_text_context_excludes_the_full_repaired_text_halo(
     )
 
     assert effective_mask[28, 58]
+
+
+def test_effective_text_context_preserves_cleaned_active_visual_pixels(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import cv2
+    import hashlib
+
+    from image2editable import legacy
+
+    source = np.full((100, 180, 3), (80, 100, 160), dtype=np.uint8)
+    cv2.circle(source, (72, 72), 42, (60, 75, 130), -1)
+    cleaned = source.copy()
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[42:88, 28:105] = 255
+    visual_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    cv2.circle(visual_mask, (72, 72), 40, 255, -1)
+    text_path = tmp_path / "text.png"
+    visual_path = tmp_path / "visual.png"
+    Image.fromarray(text_mask, mode="L").save(text_path)
+    Image.fromarray(visual_mask, mode="L").save(visual_path)
+    graph = {"nodes": [
+        {
+            "id": "visual_0001", "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": visual_path.name,
+            "mask_sha256": hashlib.sha256(visual_path.read_bytes()).hexdigest(),
+            "bbox": [30, 30, 115, 100], "z_index": 0, "text_ids": [],
+        },
+        {
+            "id": "text_0001", "kind": "text", "parent_id": None,
+            "state": "frozen", "mask": text_path.name,
+            "mask_sha256": hashlib.sha256(text_path.read_bytes()).hexdigest(),
+            "bbox": [28, 42, 105, 88], "z_index": 1, "text_ids": [],
+        },
+    ]}
+    regressed = cleaned.copy()
+    regressed[text_mask > 0] = (80, 100, 160)
+    monkeypatch.setattr(
+        legacy,
+        "_refine_quality_text_clean",
+        lambda *args, **kwargs: regressed,
+    )
+
+    _, _, effective_clean = legacy._effective_text_context(
+        source=source,
+        text_clean=cleaned,
+        text_mask=text_mask,
+        text_items=[{"box": [28, 42, 77, 46], "text": "A"}],
+        graph=graph,
+        graph_dir=tmp_path,
+        refine_text_clean=True,
+    )
+
+    assert np.array_equal(effective_clean[72, 31], cleaned[72, 31])
 
 
 def test_quality_text_repair_mask_excludes_visual_outside_text_boxes() -> None:

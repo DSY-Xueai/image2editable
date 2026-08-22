@@ -170,8 +170,8 @@
         {
           "page_id": "image-light-text-gradient-page-001",
           "expected_status": "validated",
-          "min_visual_components": 4,
-          "min_text_boxes": 3,
+          "min_visual_components": 3,
+          "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         }
