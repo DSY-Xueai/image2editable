@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from statistics import median
 import stat
 import subprocess
 import sys
@@ -905,6 +906,48 @@ def _validate_batch_case(
             raise BenchmarkFailure("quality_gate")
 
 
+def aggregate_performance(
+    attempts: list[dict[str, object]],
+) -> dict[str, object]:
+    if not isinstance(attempts, list) or not attempts:
+        raise BenchmarkFailure("invalid_performance_result")
+    case_durations: dict[str, dict[int, int]] = {}
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            raise BenchmarkFailure("invalid_performance_result")
+        repeat = attempt.get("repeat")
+        duration = attempt.get("duration_ms")
+        case_id = attempt.get("case_id")
+        if (
+            attempt.get("status") != "passed"
+            or not isinstance(case_id, str)
+            or _IDENTIFIER.fullmatch(case_id) is None
+            or type(repeat) is not int
+            or repeat not in (1, 2, 3)
+            or type(duration) is not int
+            or duration < 0
+        ):
+            raise BenchmarkFailure("invalid_performance_result")
+        durations = case_durations.setdefault(case_id, {})
+        if repeat in durations:
+            raise BenchmarkFailure("invalid_performance_result")
+        durations[repeat] = duration
+    if any(set(durations) != {1, 2, 3} for durations in case_durations.values()):
+        raise BenchmarkFailure("invalid_performance_result")
+    repeat_totals = [
+        sum(durations[repeat] for durations in case_durations.values())
+        for repeat in (1, 2, 3)
+    ]
+    return {
+        "repeat_total_duration_ms": repeat_totals,
+        "median_total_duration_ms": int(median(repeat_totals)),
+        "case_median_duration_ms": {
+            case_id: int(median(durations.values()))
+            for case_id, durations in case_durations.items()
+        },
+    }
+
+
 def run_manifest(
     manifest_path: Path,
     *,
@@ -967,6 +1010,8 @@ def run_manifest(
             "failed_attempts": failed,
         },
     }
+    if failed == 0:
+        report["performance"] = aggregate_performance(attempts)
     report_path = report_path.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2).encode(

@@ -467,7 +467,13 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
                     "required": True,
                     "type": "boolean",
                     "default": False,
-                }
+                },
+                "run_core_benchmark": {
+                    "description": "Run protected v0.2 core 14-page benchmark",
+                    "required": True,
+                    "type": "boolean",
+                    "default": False,
+                },
             }
         }
     }
@@ -476,6 +482,7 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
     jobs = workflow["jobs"]
     assert set(jobs) == {
         "build-distribution",
+        "core-benchmark",
         "installed-package",
         "real-model-smoke",
     }
@@ -648,12 +655,100 @@ def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
     ]
 
 
+def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() -> None:
+    job = _release_workflow()["jobs"]["core-benchmark"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == 360
+    assert _needs(job) == {"build-distribution"}
+    assert job["if"] == "${{ inputs.run_core_benchmark }}"
+    assert job["environment"] == "core-benchmark"
+    assert "strategy" not in job
+    assert [_step_id(step) for step in _steps(job)] == [
+        "Require protected core-benchmark approval",
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/download-artifact",
+        "Locate the built wheel",
+        "Bootstrap pinned build runtime",
+        "Install built wheel",
+        "Install Tesseract OCR",
+        "Check installed dependencies",
+        "Install runtime models",
+        "Run doctor",
+        "Run v0.2 core 14-page benchmark",
+        "actions/upload-artifact",
+    ]
+    approval = _named_step(job, "Require protected core-benchmark approval")
+    assert approval["env"] == {
+        "IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED": (
+            "${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}"
+        )
+    }
+    assert _commands(approval) == [
+        'test "${IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED}" = "approved"'
+    ]
+    assert _action_step(job, "actions/setup-python")["with"] == {
+        "python-version": "3.12"
+    }
+    assert _action_step(job, "actions/download-artifact")["with"] == {
+        "name": "distribution",
+        "path": "${{ runner.temp }}/distribution",
+    }
+    assert _commands(_named_step(job, "Locate the built wheel")) == (
+        LOCATE_WHEEL_COMMANDS
+    )
+    assert _commands(_named_step(job, "Bootstrap pinned build runtime")) == [
+        BOOTSTRAP_BUILD_RUNTIME_COMMAND
+    ]
+    assert _commands(_named_step(job, "Install built wheel")) == [
+        INSTALL_WHEEL_COMMAND
+    ]
+    assert _commands(_named_step(job, "Install Tesseract OCR")) == [
+        "sudo apt-get update",
+        "sudo apt-get install --yes tesseract-ocr",
+        (
+            "python -m pip install --constraint constraints/runtime.txt "
+            "pytesseract==0.3.13"
+        ),
+    ]
+    assert _commands(_named_step(job, "Check installed dependencies")) == [
+        "python -m pip check"
+    ]
+    assert _commands(_named_step(job, "Install runtime models")) == [
+        "image2editable models install runtime --yes"
+    ]
+    assert _commands(_named_step(job, "Run doctor")) == ["image2editable doctor"]
+    benchmark = _named_step(job, "Run v0.2 core 14-page benchmark")
+    assert benchmark["working-directory"] == "${{ runner.temp }}"
+    assert _commands(benchmark) == [
+        (
+            'python "${{ github.workspace }}/scripts/release_benchmark.py" '
+            '--manifest "${{ github.workspace }}/benchmarks/release/'
+            'core-v0.2-manifest.json" '
+            '--workspace "${{ runner.temp }}/core-v0.2-benchmark/workspace" '
+            '--report "${{ runner.temp }}/core-v0.2-benchmark/report.json"'
+        )
+    ]
+    upload = _action_step(job, "actions/upload-artifact")
+    assert upload["if"] == "${{ always() }}"
+    assert upload["with"] == {
+        "name": "core-v0.2-benchmark-report",
+        "path": "${{ runner.temp }}/core-v0.2-benchmark/report.json",
+        "if-no-files-found": "error",
+    }
+
+
 def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
     workflow = _release_workflow()
     jobs = workflow["jobs"]
+    core_job = jobs["core-benchmark"]
+    core_upload = _action_step(core_job, "actions/upload-artifact")
     for mapping in _all_mappings(workflow):
         assert "continue-on-error" not in mapping
-        if mapping is not jobs["real-model-smoke"]:
+        if not any(
+            mapping is allowed
+            for allowed in (jobs["real-model-smoke"], core_job, core_upload)
+        ):
             assert "if" not in mapping
     for job in jobs.values():
         assert "defaults" not in job

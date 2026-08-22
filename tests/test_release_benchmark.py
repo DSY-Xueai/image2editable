@@ -21,6 +21,7 @@ from pypdf import PdfReader, PdfWriter
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ROOT = ROOT / "benchmarks" / "release"
 MANIFEST_PATH = RELEASE_ROOT / "manifest.json"
+CORE_MANIFEST_PATH = RELEASE_ROOT / "core-v0.2-manifest.json"
 
 ROOT_FIELDS = {"schema_version", "cases", "categories"}
 CASE_FIELDS = {
@@ -220,15 +221,29 @@ CASE_SPECS = [
 ]
 
 EXPECTED_CATEGORIES = [spec[4] for spec in CASE_SPECS]
+CORE_CASE_IDS = (
+    "image-bilingual-dashboard",
+    "image-combo-chart",
+    "image-flowchart",
+    "image-icon-matrix",
+    "image-thin-line-network",
+    "image-tiny-element-table",
+    "image-dark-poster",
+    "image-non-16-9-infographic",
+    "pdf-rotated-page",
+    "pptx-mixed-screenshot-candidates",
+)
 EXPECTED_README = """# 发布质量语料契约
 
-本目录包含固定发布 benchmark 语料：18 个输入、30 页，包括 12 张图片、3 个双页 PDF、3 个四页 PPTX。
+本目录包含固定的 30 页扩展语料库：18 个输入，包括 12 张图片、3 个双页 PDF、3 个四页 PPTX。v0.2 发布门禁使用 `core-v0.2-manifest.json` 中的 10 个完整 case、14 页，不裁剪多页输入。
 
 ## 覆盖范围
 
 图片固定覆盖：中英双语仪表盘、密集参数对比、人物信息卡、四段时间线、柱线组合图、流程图、图标矩阵、浅色文字渐变页、细线网络图、小元素表格、深色海报、非 16:9 信息图。
 
 PDF 分别覆盖双页不同尺寸、旋转、高 DPI。PPTX 分别覆盖 `image_only`、`mixed_native`、`mixed_screenshot_candidates`。
+
+v0.2 核心 14 页由 8 张图片、完整 2 页 `pdf-rotated-page` 和完整 4 页 `pptx-mixed-screenshot-candidates` 组成。`manifest.json` 继续描述 18 case / 30 页扩展语料库，不作为 v0.2 核心完成声明。
 
 ## 来源与许可
 
@@ -240,19 +255,25 @@ PDF 分别覆盖双页不同尺寸、旋转、高 DPI。PPTX 分别覆盖 `image
 
 ## 阶段状态
 
-当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。
+当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。v0.2 核心 14 页 benchmark 正在验证；30 页集合始终称为扩展语料库，未完成的扩展页面不得计入核心成功率。
 
-严格 Host runner 使用已安装发行包和固定 plans，命令为：
+严格 Host runner 使用已安装发行包和固定 plans。v0.2 核心命令为：
 
 ```bash
-python -m scripts.release_benchmark --manifest benchmarks/release/manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/benchmark-report.json
+python -m scripts.release_benchmark --manifest benchmarks/release/core-v0.2-manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/benchmark-report.json
+```
+
+完整扩展语料命令为：
+
+```bash
+python -m scripts.release_benchmark --manifest benchmarks/release/manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/extended-benchmark-report.json
 ```
 
 runner 固定执行 3 次独立重复；每次都重新校验输入 hash、按真实 request/graph hash 选择 plans，并拒绝非 `validated` 页面、warning、fallback、缺失/异常质量工件。报告只有三次重复的所有 case 都通过时才是 `status: passed`；任一失败会保留失败类型并返回非零退出码。模型缓存和 run 证据留在本机，不进入 Git。
 
 ## 通过标准
 
-每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。全部 18 个输入共 30 页，三次重复均须通过；真实模型 runner 不放入普通 push CI，发布前在受控环境执行并保存报告。
+每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。v0.2 核心 10 个 case、14 页必须三次重复全部通过；真实模型 runner 不放入普通 push CI，而由受保护的发布门禁显式执行并保存报告。核心完成不代表 30 页扩展语料已全部完成。
 """
 
 EXPECTED_INPUT_NAMES = {Path(spec[2]).name for spec in CASE_SPECS}
@@ -324,6 +345,13 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
 def _manifest() -> dict[str, object]:
     return json.loads(
         MANIFEST_PATH.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
+def _core_manifest() -> dict[str, object]:
+    return json.loads(
+        CORE_MANIFEST_PATH.read_text(encoding="utf-8"),
         object_pairs_hook=_reject_duplicate_keys,
     )
 
@@ -408,6 +436,28 @@ def test_release_manifest_defines_eighteen_inputs_and_thirty_pages() -> None:
         "pptx": 3,
     }
     assert sum(case["page_count"] for case in cases) == 30
+
+
+def test_core_v020_manifest_is_exact_subset_of_extended_corpus() -> None:
+    extended = _manifest()
+    core = _core_manifest()
+    selected = {case["id"]: case for case in extended["cases"]}
+
+    _assert_exact_fields(core)
+    _assert_numeric_contract(core)
+    assert [case["id"] for case in core["cases"]] == list(CORE_CASE_IDS)
+    assert core["cases"] == [selected[case_id] for case_id in CORE_CASE_IDS]
+    assert core["categories"] == [
+        case["categories"][0] for case in core["cases"]
+    ]
+    assert len(core["cases"]) == 10
+    assert sum(case["page_count"] for case in core["cases"]) == 14
+    kinds = [case["kind"] for case in core["cases"]]
+    assert {kind: kinds.count(kind) for kind in ("image", "pdf", "pptx")} == {
+        "image": 8,
+        "pdf": 1,
+        "pptx": 1,
+    }
 
 
 def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
@@ -1436,6 +1486,86 @@ def _batch_manifest(tmp_path: Path, *, warning: bool = False) -> Path:
     return manifest
 
 
+def test_release_performance_summary_uses_three_passed_repeats() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    attempts = [
+        {"case_id": "a", "repeat": 1, "status": "passed", "duration_ms": 300},
+        {"case_id": "b", "repeat": 1, "status": "passed", "duration_ms": 30},
+        {"case_id": "a", "repeat": 2, "status": "passed", "duration_ms": 100},
+        {"case_id": "b", "repeat": 2, "status": "passed", "duration_ms": 10},
+        {"case_id": "a", "repeat": 3, "status": "passed", "duration_ms": 200},
+        {"case_id": "b", "repeat": 3, "status": "passed", "duration_ms": 20},
+    ]
+
+    assert runner.aggregate_performance(attempts) == {
+        "repeat_total_duration_ms": [330, 110, 220],
+        "median_total_duration_ms": 220,
+        "case_median_duration_ms": {"a": 200, "b": 20},
+    }
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    [
+        [],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "failed",
+                "duration_ms": 1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": True,
+                "status": "passed",
+                "duration_ms": 1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": -1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": 1,
+            },
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": 2,
+            },
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": repeat,
+                "status": "passed",
+                "duration_ms": repeat,
+            }
+            for repeat in (1, 2)
+        ],
+    ],
+)
+def test_release_performance_summary_rejects_incomplete_or_failed_attempts(
+    attempts: list[dict[str, object]],
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_performance_result"):
+        runner.aggregate_performance(attempts)
+
+
 def test_release_runner_manifest_repeats_three_times_and_writes_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1470,6 +1600,11 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
     assert report["status"] == "passed"
     assert report["repeat"] == 3
     assert report["totals"] == {"cases": 1, "pages": 3, "failed_attempts": 0}
+    assert report["performance"] == {
+        "repeat_total_duration_ms": [7, 7, 7],
+        "median_total_duration_ms": 7,
+        "case_median_duration_ms": {"image-one": 7},
+    }
     assert len(calls) == 3
     assert len(set(calls)) == 3
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "passed"
@@ -1682,6 +1817,7 @@ def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(
     )
     assert report["status"] == "failed"
     assert report["totals"]["failed_attempts"] == 3
+    assert "performance" not in report
     with pytest.raises(runner.BenchmarkFailure, match="invalid_repeat"):
         runner.run_manifest(
             manifest,
