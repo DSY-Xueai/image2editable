@@ -1,22 +1,22 @@
-# Security policy
+# Security Policy
 
 ## Supported versions
 
-The `0.2.x` release line receives security fixes. Older releases are not supported.
+Only the `0.2.x` release line receives security fixes.
 
-## Reporting a vulnerability
+## Reporting a Vulnerability
 
-Please do not open a public issue for a security vulnerability. Use GitHub Private Vulnerability Reporting to send the report to me. I will acknowledge a complete report within 48 hours and provide an initial assessment within 7 days.
+Please do not open a public issue for a security vulnerability. Use GitHub Private Vulnerability Reporting when it is enabled for this repository; otherwise contact the maintainer privately. I will acknowledge a complete report within 48 hours and provide an initial assessment within 7 days.
 
 Include:
 
 - a short description and impact;
 - reproducible steps or a minimal proof of concept;
-- affected version and operating system;
-- any logs or artifacts needed to reproduce the issue, after removing private input data.
+- the affected version and operating system;
+- sanitized logs or artifacts needed to reproduce the issue.
 
-Do not include source images, PDFs, presentations, model caches, API keys, or other private data unless the maintainer explicitly requests a redacted sample.
+Do not include source images, PDFs, presentations, model caches, API keys, or other private data unless I explicitly request a redacted sample.
 
-## Local model and host data
+## Local Model and Host Data
 
-Local model files and conversion inputs remain on the user's machine and are not part of releases. Host-agent mode may send diagnostic artifacts to the configured host service; use the local agent for sensitive files.
+Local model files and conversion inputs stay on the user's machine and are not included in releases. Host Agent may send diagnostic artifacts to the configured host service. Use Local Agent for sensitive files.
