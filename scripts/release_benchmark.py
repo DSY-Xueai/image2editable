@@ -154,6 +154,19 @@ def _sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
 
+def _canonical_manifest_payload(payload: bytes) -> bytes:
+    return payload.replace(b"\r\n", b"\n")
+
+
+def canonical_text_sha256(path: Path) -> str:
+    payload = _read_regular_file(path, _JSON_LIMIT, require_single_link=True)
+    return hashlib.sha256(_canonical_manifest_payload(payload)).hexdigest()
+
+
+def manifest_sha256(path: Path) -> str:
+    return canonical_text_sha256(path)
+
+
 def _strings(value: object) -> bool:
     return (
         isinstance(value, list)
@@ -762,7 +775,9 @@ def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str
                 or page["max_quality_violations"] < 0
             ):
                 raise BenchmarkFailure("invalid_manifest")
-    return [dict(case) for case in cases], hashlib.sha256(manifest_payload).hexdigest()
+    return [dict(case) for case in cases], hashlib.sha256(
+        _canonical_manifest_payload(manifest_payload)
+    ).hexdigest()
 
 
 def _validate_preserved_pptx_page(

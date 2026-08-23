@@ -38,13 +38,21 @@ EXPECTED_RELEASE_MATRIX = {
     for version in ("3.10", "3.11", "3.12")
 }
 FAST_INSTALL_COMMAND = (
-    "python -m pip install --constraint constraints/runtime.txt pytest PyYAML "
+    "python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML "
     "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch"
+)
+PROJECT_METADATA_INSTALL_COMMAND = (
+    "python -m pip install --constraint constraints/runtime.txt --no-deps "
+    "--no-build-isolation -e ."
 )
 BUILD_INSTALL_COMMAND = "python -m pip install build twine"
 FAST_PYTEST_COMMAND = (
     'python -m pytest "${{ github.workspace }}/tests" --import-mode=importlib '
     '-m "not powerpoint" -q'
+)
+INSTALLED_PACKAGE_CONTRACT_COMMAND = (
+    'python -m pytest "${{ github.workspace }}/tests/test_installed_package_contract.py" '
+    "--import-mode=importlib -q"
 )
 LOCATE_WHEEL_COMMANDS = [
     "from pathlib import Path",
@@ -317,13 +325,14 @@ def test_ci_has_exact_jobs_and_supported_install_matrix() -> None:
     }
 
 
-def test_fast_job_runs_checkout_tests_without_installing_the_project() -> None:
+def test_fast_job_installs_metadata_then_runs_checkout_tests() -> None:
     fast = _workflow()["jobs"]["fast-model-free"]
     assert "defaults" not in fast
     assert [_step_id(step) for step in _steps(fast)] == [
         "actions/checkout",
         "actions/setup-python",
         "Install model-free test dependencies",
+        "Install project metadata",
         "Run model-free tests",
     ]
     install = _named_step(fast, "Install model-free test dependencies")
@@ -335,7 +344,10 @@ def test_fast_job_runs_checkout_tests_without_installing_the_project() -> None:
         for command in _commands(step)
         if re.search(r"\bpip install\b", command)
     ]
-    assert pip_installs == [FAST_INSTALL_COMMAND]
+    assert pip_installs == [FAST_INSTALL_COMMAND, PROJECT_METADATA_INSTALL_COMMAND]
+
+    metadata = _named_step(fast, "Install project metadata")
+    assert _commands(metadata) == [PROJECT_METADATA_INSTALL_COMMAND]
 
     pytest_step = _named_step(fast, "Run model-free tests")
     assert pytest_step["working-directory"] == "${{ runner.temp }}"
@@ -344,7 +356,7 @@ def test_fast_job_runs_checkout_tests_without_installing_the_project() -> None:
     assert all(
         "env" not in step
         for step in _steps(fast)
-        if step is not pytest_step
+        if step is not pytest_step and step is not metadata
     )
 
 
@@ -368,7 +380,7 @@ def test_installed_package_uses_the_built_wheel_outside_checkout() -> None:
         "Install built wheel",
         "Check installed dependencies",
         "installed_package_smoke",
-        "Run tests against installed wheel",
+        "Run installed-package contract",
     ]
 
     assert _needs(installed) == {"build-distribution"}
@@ -416,12 +428,12 @@ def test_installed_package_uses_the_built_wheel_outside_checkout() -> None:
     assert smoke["working-directory"] == "${{ runner.temp }}"
     assert _commands(smoke) == [SMOKE_COMMAND]
 
-    installed_tests = _named_step(installed, "Run tests against installed wheel")
+    installed_tests = _named_step(installed, "Run installed-package contract")
     assert installed_tests["working-directory"] == "${{ runner.temp }}"
-    installed_test_env = installed_tests.get("env", {})
-    assert isinstance(installed_test_env, dict)
-    assert "PYTHONPATH" not in installed_test_env
-    assert _commands(installed_tests) == [FAST_PYTEST_COMMAND]
+    assert installed_tests["env"] == {
+        "IMAGE2EDITABLE_INSTALLED_PACKAGE_CONTRACT": "1"
+    }
+    assert _commands(installed_tests) == [INSTALLED_PACKAGE_CONTRACT_COMMAND]
     for step in _steps(installed):
         env = step.get("env", {})
         assert isinstance(env, dict)
@@ -541,7 +553,7 @@ def test_release_gate_builds_once_and_tests_the_same_artifact() -> None:
         "Install built wheel",
         "Check installed dependencies",
         "installed_package_smoke",
-        "Run tests against installed wheel",
+        "Run installed-package contract",
     ]
     assert "with" not in _action_step(installed, "actions/checkout")
     assert _action_step(installed, "actions/download-artifact")["with"] == {
@@ -564,9 +576,12 @@ def test_release_gate_builds_once_and_tests_the_same_artifact() -> None:
     installed_smoke = _named_step(installed, "installed_package_smoke")
     assert installed_smoke["working-directory"] == "${{ runner.temp }}"
     assert _commands(installed_smoke) == [SMOKE_COMMAND]
-    installed_tests = _named_step(installed, "Run tests against installed wheel")
+    installed_tests = _named_step(installed, "Run installed-package contract")
     assert installed_tests["working-directory"] == "${{ runner.temp }}"
-    assert _commands(installed_tests) == [FAST_PYTEST_COMMAND]
+    assert installed_tests["env"] == {
+        "IMAGE2EDITABLE_INSTALLED_PACKAGE_CONTRACT": "1"
+    }
+    assert _commands(installed_tests) == [INSTALLED_PACKAGE_CONTRACT_COMMAND]
 
 
 def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:

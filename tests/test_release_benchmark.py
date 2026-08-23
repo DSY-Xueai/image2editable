@@ -1776,7 +1776,7 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
         case_runner=fake_case,
     )
     assert report["status"] == "passed"
-    assert report["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert report["manifest_sha256"] == runner.manifest_sha256(manifest)
     assert report["repeat"] == 3
     assert report["totals"] == {"cases": 1, "pages": 3, "failed_attempts": 0}
     assert report["performance"] == {
@@ -1787,6 +1787,19 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
     assert len(calls) == 3
     assert len(set(calls)) == 3
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_release_runner_manifest_identity_is_line_ending_independent(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    lf = tmp_path / "manifest-lf.json"
+    crlf = tmp_path / "manifest-crlf.json"
+    payload = CORE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
+    lf.write_bytes(payload)
+    crlf.write_bytes(payload.replace(b"\n", b"\r\n"))
+
+    assert runner.manifest_sha256(lf) == runner.manifest_sha256(crlf)
 
 
 def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(

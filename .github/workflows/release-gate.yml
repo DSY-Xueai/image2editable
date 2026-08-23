@@ -92,9 +92,11 @@ jobs:
       - name: installed_package_smoke
         working-directory: ${{ runner.temp }}
         run: python "${{ github.workspace }}/scripts/installed_package_smoke.py" --checkout-root "${{ github.workspace }}"
-      - name: Run tests against installed wheel
+      - name: Run installed-package contract
         working-directory: ${{ runner.temp }}
-        run: python -m pytest "${{ github.workspace }}/tests" --import-mode=importlib -m "not powerpoint" -q
+        env:
+          IMAGE2EDITABLE_INSTALLED_PACKAGE_CONTRACT: "1"
+        run: python -m pytest "${{ github.workspace }}/tests/test_installed_package_contract.py" --import-mode=importlib -q
 
   real-model-smoke:
     name: Protected real-model smoke / Ubuntu / Python 3.12

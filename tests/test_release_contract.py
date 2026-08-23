@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from image2editable import cli
+from scripts import release_benchmark
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,12 +95,12 @@ def test_release_workflow_validates_passed_core_report() -> None:
 
 def test_core_baseline_is_bound_to_manifest_and_runtime_constraints() -> None:
     baseline = json.loads((RELEASE_ROOT / "BASELINE.json").read_text(encoding="utf-8"))
-    manifest_sha = hashlib.sha256(
-        (RELEASE_ROOT / "core-v0.2-manifest.json").read_bytes()
-    ).hexdigest()
-    constraints_sha = hashlib.sha256(
-        (ROOT / "constraints" / "runtime.txt").read_bytes()
-    ).hexdigest()
+    manifest_sha = release_benchmark.manifest_sha256(
+        RELEASE_ROOT / "core-v0.2-manifest.json"
+    )
+    constraints_sha = release_benchmark.canonical_text_sha256(
+        ROOT / "constraints" / "runtime.txt"
+    )
 
     assert baseline["benchmark"] == "v0.2-core-14-page"
     assert baseline["manifest_sha256"] == manifest_sha

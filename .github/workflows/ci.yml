@@ -19,7 +19,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install model-free test dependencies
-        run: python -m pip install --constraint constraints/runtime.txt pytest PyYAML pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch
+        run: python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch
+      - name: Install project metadata
+        run: python -m pip install --constraint constraints/runtime.txt --no-deps --no-build-isolation -e .
       - name: Run model-free tests
         working-directory: ${{ runner.temp }}
         env:
@@ -92,6 +94,8 @@ jobs:
       - name: installed_package_smoke
         working-directory: ${{ runner.temp }}
         run: python "${{ github.workspace }}/scripts/installed_package_smoke.py" --checkout-root "${{ github.workspace }}"
-      - name: Run tests against installed wheel
+      - name: Run installed-package contract
         working-directory: ${{ runner.temp }}
-        run: python -m pytest "${{ github.workspace }}/tests" --import-mode=importlib -m "not powerpoint" -q
+        env:
+          IMAGE2EDITABLE_INSTALLED_PACKAGE_CONTRACT: "1"
+        run: python -m pytest "${{ github.workspace }}/tests/test_installed_package_contract.py" --import-mode=importlib -q
