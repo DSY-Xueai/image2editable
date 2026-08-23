@@ -255,7 +255,7 @@ v0.2 核心 14 页由 8 张图片、完整 2 页 `pdf-rotated-page` 和完整 4 
 
 ## 阶段状态
 
-当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。v0.2 核心 14 页 benchmark 正在验证；30 页集合始终称为扩展语料库，未完成的扩展页面不得计入核心成功率。
+当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。v0.2 核心 14 页 benchmark 已严格通过 3 次独立重复；30 页集合始终称为扩展语料库，尚未全部严格重放，未完成的扩展页面不得计入核心成功率。
 
 严格 Host runner 使用已安装发行包和固定 plans。v0.2 核心命令为：
 
@@ -460,8 +460,87 @@ def test_core_v020_manifest_is_exact_subset_of_extended_corpus() -> None:
     }
 
 
+def test_core_v020_pptx_contract_matches_authored_page_routes_and_objects() -> None:
+    core = _core_manifest()
+    case = next(
+        item
+        for item in core["cases"]
+        if item["id"] == "pptx-mixed-screenshot-candidates"
+    )
+
+    assert [
+        (
+            page["expected_status"],
+            page["min_visual_components"],
+            page["min_text_boxes"],
+        )
+        for page in case["expected_pages"]
+    ] == [
+        ("replaced", 4, 39),
+        ("replaced", 24, 14),
+        ("replaced", 3, 4),
+        ("preserved", 1, 1),
+    ]
+
+
+def test_core_v020_pptx_replay_plans_match_authored_requests() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(
+            (RELEASE_ROOT / "plans").glob("pptx-mixed-screenshot-candidates--*.json")
+        )
+    ]
+    candidate_plans = [plan for plan in plans if plan.get("kind") == "candidate_decision"]
+    component_plans = [plan for plan in plans if plan.get("kind") == "component_plan"]
+
+    assert len(candidate_plans) == 3
+    assert all(runner._valid_candidate_plan(plan) for plan in candidate_plans)
+    assert [
+        (plan["page_id"], plan["image_sha256"], plan["source_object_sha256"])
+        for plan in candidate_plans
+    ] == [
+        ("page_001", "594d8f1eeeb94746e8aaa5730a3fa291855423f2eaea48ba30b1eeb577ed4e9d", "3362dd457e443599faf0e3f1254e3c5ff1a570e3c3362e5d3e09e77ba0b010a5"),
+        ("page_002", "cc2d8482b48fd32f9920cf0092da88ad16d345821db0d0f98b11103b09871900", "7fa090a9f03eef6ec086214c8c9639197369193d850c72d51faa241b617c5c18"),
+        ("page_003", "65eafdda6be280feceee856cda45b76a68e2e9cf1f82646abed7c1dadacab798", "0030b760342c417d22d0b35e2ece11c7adfc1c65dde72018bd93ed61f8e63c02"),
+    ]
+    assert len(component_plans) == 12
+    assert all(runner._valid_component_plan(plan) for plan in component_plans)
+    assert [
+        (plan["page_id"], plan["repair_round"], plan["request_sha256"], plan["graph_sha256"])
+        for plan in component_plans
+    ] == [
+        ("page_001", 1, "622e4e59ab0f62ba295eefd16d240b38618069bdf4e52d7ebafe0fabbff53835", "42f08c104547a45dc2694e2306a2afc76c3ec26f06495d59ce3638267b733626"),
+        ("page_001", 2, "be91c362b75e8cb3b4a94984a80257a33a7bed9bdce58cbb3b6cf8eed74d4033", "7503bb59a081db29baa3fce27935b8418011c2e5d65a2813a44018a8b5e8924f"),
+        ("page_001", 3, "2f77692e4c7e1a7ac49ce64332557edaffb274590d1f69bcadbca7bc1884b32f", "988a6c1018a55752c3346e1b23821da6f4738cba39e72e10d271e7affc57389d"),
+        ("page_001", 4, "bee399fb3b3cc507f5b4f72af3161ff780bea96866c4a0d553a8ff8ffe812bef", "0817bea4220685dc3411d32cde1a66051552ec6647ed08970ba28576baa68bc8"),
+        ("page_001", 5, "cdb6ae30d30f97ae328f6fc2dddfc024867e5796ae67aa0de2a8ebad20f4ee11", "5550e55d4ecca889d7c9c9ed3a17133aaadc23d2b3170d971883054d4baefdef"),
+        ("page_002", 1, "ca36339fa03baf2b2f37ea555f343bb043d09b4a99fd493aab5f95d99c468738", "b2bbc450e787024447be02bb1845d2159ae39f879ae107fe6f80417d91d010ea"),
+        ("page_002", 2, "46e259990f740395e5f5ab195b5b2ae5880ce8a2bf54bf717a4a518c1298c905", "c61d3f6cf8f70811dd6c319ab4cfac7dc731df60b69e5d2ef2e566b11c2add60"),
+        ("page_002", 3, "2246b47bdae30acf5e093153ad725ea31269383e33d5051079bf6417bd324953", "aa1dade15edf9d8b05859fb2101cece20dabdf2e4e93875f9daaf7e5f0a8ce74"),
+        ("page_003", 1, "1ee94fe181e144b956a566a94bfc51be655f5455cb99905a65b06a8c427da9d4", "6502588807cbdafb0640f45f0ee254acd941f67a0d84aa75de2723fd602fce3e"),
+        ("page_003", 2, "fd761a1c2bda39e2a20ec8a32f2da4bad9d79daa49b24ca290f4fe62e781e95c", "0724cb513611ccf7d1dbc2c97be6803852d7f25639f59a6228464ae650c71752"),
+        ("page_003", 3, "324b7c47bf5801b5f9aa222c7f7eb778ca68aaf01780f1974f4c9878b86feca7", "f2966eb0ca1a6a18ba5a1a6d30af2f741779e777293b906cd1c27e48b619801b"),
+        ("page_003", 4, "a28a036e789f0327319d7a35fc35b08160c7fdb43058cb8edaee336dcdf61dab", "55b9fdab2d7b56beb271b4157286004b56c470c6db1ab297bc988186d8dc6342"),
+    ]
 def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
     cases = _manifest()["cases"]
+    real_statuses = {
+        "pptx-mixed-screenshot-candidates": [
+            "replaced",
+            "replaced",
+            "replaced",
+            "preserved",
+        ]
+    }
+    real_thresholds = {
+        "pptx-mixed-screenshot-candidates": [
+            (4, 39),
+            (24, 14),
+            (3, 4),
+            (1, 1),
+        ]
+    }
 
     for case, spec in zip(cases, CASE_SPECS, strict=True):
         identifier, _, _, page_count, category, _, min_visual, min_text_boxes = spec
@@ -473,11 +552,17 @@ def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
         assert len(case["expected_pages"]) == page_count
 
         for page_number, page in enumerate(case["expected_pages"], start=1):
+            expected_status = real_statuses.get(
+                identifier, ["validated"] * page_count
+            )[page_number - 1]
+            page_min_visual, page_min_text = real_thresholds.get(
+                identifier, [(min_visual, min_text_boxes)] * page_count
+            )[page_number - 1]
             assert page == {
                 "page_id": f"{identifier}-page-{page_number:03d}",
-                "expected_status": "validated",
-                "min_visual_components": min_visual,
-                "min_text_boxes": min_text_boxes,
+                "expected_status": expected_status,
+                "min_visual_components": page_min_visual,
+                "min_text_boxes": page_min_text,
                 "max_unexplained_pixels": 0,
                 "max_quality_violations": 0,
             }
@@ -1504,6 +1589,99 @@ def test_release_performance_summary_uses_three_passed_repeats() -> None:
     }
 
 
+def _release_baseline() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "benchmark": "v0.2-core-14-page",
+        "manifest_sha256": "a" * 64,
+        "constraints_sha256": "b" * 64,
+        "environment": {
+            "os": "Windows",
+            "architecture": "AMD64",
+            "python": "3.12",
+            "device": "cuda",
+        },
+        "median_total_duration_ms": 100,
+        "case_median_duration_ms": {"image-one": 100},
+    }
+
+
+def _release_report(duration_ms: int = 100) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "passed",
+        "manifest_sha256": "a" * 64,
+        "repeat": 3,
+        "totals": {"cases": 1, "pages": 3, "failed_attempts": 0},
+        "attempts": [],
+        "performance": {
+            "repeat_total_duration_ms": [duration_ms] * 3,
+            "median_total_duration_ms": duration_ms,
+            "case_median_duration_ms": {"image-one": duration_ms},
+        },
+    }
+
+
+def test_release_baseline_comparison_uses_same_environment_and_fifteen_percent_limit() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    baseline = _release_baseline()
+    keywords = {
+        "constraints_sha256": "b" * 64,
+        "environment": baseline["environment"],
+    }
+
+    assert runner.compare_baseline(_release_report(115), baseline, **keywords) == {
+        "status": "passed",
+        "median_total_duration_ms": 115,
+        "limit_ms": 115,
+    }
+    assert runner.compare_baseline(_release_report(116), baseline, **keywords) == {
+        "status": "regressed",
+        "median_total_duration_ms": 116,
+        "limit_ms": 115,
+    }
+
+
+def test_release_baseline_does_not_compare_different_device_or_inputs() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    baseline = _release_baseline()
+    report = _release_report()
+    report["manifest_sha256"] = "c" * 64
+    environment = {**baseline["environment"], "device": "cpu"}
+
+    assert runner.compare_baseline(
+        report,
+        baseline,
+        constraints_sha256="d" * 64,
+        environment=environment,
+    ) == {
+        "status": "not_comparable",
+        "reasons": ["manifest_sha256", "constraints_sha256", "environment"],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"status": "failed"},
+        {"repeat": 2},
+        {"performance": {"median_total_duration_ms": 100}},
+    ],
+)
+def test_release_baseline_rejects_non_strict_report(mutation: dict[str, object]) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    report = {**_release_report(), **mutation}
+    baseline = _release_baseline()
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_performance_result"):
+        runner.compare_baseline(
+            report,
+            baseline,
+            constraints_sha256="b" * 64,
+            environment=baseline["environment"],
+        )
+
+
 @pytest.mark.parametrize(
     "attempts",
     [
@@ -1598,6 +1776,7 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
         case_runner=fake_case,
     )
     assert report["status"] == "passed"
+    assert report["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
     assert report["repeat"] == 3
     assert report["totals"] == {"cases": 1, "pages": 3, "failed_attempts": 0}
     assert report["performance"] == {
@@ -1611,6 +1790,36 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
 
 
 def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    _write_valid_release_quality(reconstruction)
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "replaced",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "replaced"}],
+        1,
+    )
+
+    runner._validate_batch_case(case, result)
+
+
+def test_release_runner_accepts_strict_legacy_validated_page_status(
     tmp_path: Path,
 ) -> None:
     runner = importlib.import_module("scripts.release_benchmark")
@@ -1640,6 +1849,33 @@ def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
     runner._validate_batch_case(case, result)
 
 
+def test_release_runner_rejects_replaced_page_when_validated_is_expected(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "validated",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(tmp_path / "run"),
+        [{"page_id": "page_001", "status": "replaced"}],
+        1,
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_page_result"):
+        runner._validate_batch_case(case, result)
+
+
 def test_release_runner_enforces_visual_components_separately_from_text(
     tmp_path: Path,
 ) -> None:
@@ -1666,7 +1902,7 @@ def test_release_runner_enforces_visual_components_separately_from_text(
         "expected_pages": [
             {
                 "page_id": "pdf-page-001",
-                "expected_status": "validated",
+                "expected_status": "replaced",
                 "min_visual_components": 4,
                 "min_text_boxes": 11,
                 "max_unexplained_pixels": 0,
@@ -1677,7 +1913,7 @@ def test_release_runner_enforces_visual_components_separately_from_text(
     result = runner.BenchmarkCaseResult(
         "pdf",
         str(run_dir),
-        [{"page_id": "page_001", "status": "validated"}],
+        [{"page_id": "page_001", "status": "replaced"}],
         1,
     )
 
@@ -1772,6 +2008,63 @@ def test_release_runner_enforces_visual_components_separately_from_text(
 
     result_path.unlink()
     with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+
+def test_release_runner_requires_preserved_pptx_page_and_related_parts_to_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    release_root = tmp_path / "release"
+    source = release_root / "inputs/source.pptx"
+    run_dir = tmp_path / "runs/pptx/run"
+    output = run_dir.parent / "output.pptx"
+    source.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True)
+    slide = (
+        b'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        b'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        b'<p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>'
+        b'<p:pic/><p:sp><p:txBody><a:p><a:r><a:t>04</a:t></a:r></a:p></p:txBody></p:sp>'
+        b'</p:spTree></p:cSld></p:sld>'
+    )
+    relationships = (
+        b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        b'<Relationship Id="rId1" Type="image" Target="../media/image1.png"/>'
+        b'</Relationships>'
+    )
+
+    def write_pptx(path: Path, media: bytes) -> None:
+        with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("ppt/slides/slide1.xml", slide)
+            archive.writestr("ppt/slides/_rels/slide1.xml.rels", relationships)
+            archive.writestr("ppt/media/image1.png", media)
+
+    write_pptx(source, b"same-image")
+    write_pptx(output, b"same-image")
+    monkeypatch.setattr(runner, "RELEASE_ROOT", release_root)
+    case = {
+        "kind": "pptx",
+        "path": "inputs/source.pptx",
+        "expected_pages": [
+            {
+                "page_id": "pptx-page-001",
+                "expected_status": "preserved",
+                "min_visual_components": 1,
+                "min_text_boxes": 1,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ],
+    }
+    result = runner.BenchmarkCaseResult(
+        "pptx", str(run_dir), [{"page_id": "page_001", "status": "preserved"}], 1
+    )
+
+    runner._validate_batch_case(case, result)
+
+    write_pptx(output, b"changed-image")
+    with pytest.raises(runner.BenchmarkFailure, match="quality_gate"):
         runner._validate_batch_case(case, result)
 
 

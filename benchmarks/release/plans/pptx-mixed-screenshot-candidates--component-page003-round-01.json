@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_003",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "1ee94fe181e144b956a566a94bfc51be655f5455cb99905a65b06a8c427da9d4",
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The parent mask is the complete visible upper-right translucent circle; its smaller children are duplicate fragments."
+      ]
+    },
+    {
+      "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The parent mask is the complete visible lower-left translucent circle with native text protected from its raster layer."
+      ]
+    },
+    {
+      "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The parent mask covers the full 420-pixel horizontal rule; the later line candidate is a shorter duplicate."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This near-page mask is the fixed gradient background and would flatten the slide if retained as a movable foreground."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This large right-side mask is another gradient-background region rather than an independent visual object."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This raster mask duplicates the two native editable headline text boxes."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This upper fragment of the lower-left circle duplicates the complete retained parent_0005."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This shorter horizontal-rule mask duplicates the complete retained parent_0010."
+      ]
+    }
+  ],
+  "graph_sha256": "6502588807cbdafb0640f45f0ee254acd941f67a0d84aa75de2723fd602fce3e"
+}

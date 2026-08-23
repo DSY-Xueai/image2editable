@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "622e4e59ab0f62ba295eefd16d240b38618069bdf4e52d7ebafe0fabbff53835",
+  "actions": [
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Sparse table-edge fragment is fully contained by the complete table outline."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.98,
+      "evidence": [
+        "Independent table outline and grid detail are visible in isolation."
+      ]
+    },
+    {
+      "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Child covers only part of the left table region; its parent restores the complete table background."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Complete right table-region background is separated from frozen OCR text."
+      ]
+    },
+    {
+      "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Child is an incomplete page-background fragment; its parent restores the complete background region."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Complete title background is separated from frozen OCR text."
+      ]
+    }
+  ],
+  "graph_sha256": "42f08c104547a45dc2694e2306a2afc76c3ec26f06495d59ce3638267b733626"
+}

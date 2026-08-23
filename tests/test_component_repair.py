@@ -591,6 +591,37 @@ def test_visual_fill_rebuilds_smooth_canvas_hole_from_outside_ring(
     assert float(np.abs(rebuilt[hole].astype(int) - source[hole]).mean()) <= 2.0
 
 
+def test_visual_fill_aligns_generated_hole_boundary_with_owned_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.full((24, 32, 3), 100, dtype=np.uint8)
+    hole = np.zeros(source.shape[:2], dtype=bool)
+    hole[9:13, 14:18] = True
+    damaged = source.copy()
+    damaged[hole] = 180
+
+    monkeypatch.setattr(
+        component_underlay.cv2,
+        "inpaint",
+        lambda image, mask, radius, method: np.where(
+            mask[:, :, None] > 0, 140, image
+        ).astype(np.uint8),
+    )
+    repaired, metrics = component_underlay._choose_visual_fill(
+        rgb=damaged,
+        source_rgb=source,
+        semantic_mask=hole,
+        donor_mask=~hole,
+        visual_hole=hole,
+    )
+
+    assert np.array_equal(repaired[~hole], damaged[~hole])
+    assert metrics["boundary_color_mae"] <= 6.0
+    assert metrics["gradient_jump_p95"] <= 12.0
+
+
 def test_gradient_continuation_keeps_text_hole_boundary_smooth() -> None:
     from scripts import component_underlay
 

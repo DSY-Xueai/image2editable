@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "e698e19e8ad58900761936c84645b1fbf8378952cfa546ddb19bc22296cf8811",
+  "request_sha256": "41a1d37cf1fe1d981568b09183c2bc13eaf29e960d57588da2b3f5ed4464f4ce",
   "graph_sha256": "ed5b38e27d43176346661f286ca51fcf6bd209caa9175adabe36d43f56fdc3ef",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the dark canvas owner with zero text residual, missing, duplicate, and orphan pixels"]},

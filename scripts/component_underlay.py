@@ -348,6 +348,50 @@ def _choose_visual_fill(
         )
         if selected_key is None or key < selected_key:
             selected, selected_metrics, selected_key = candidate, metrics, key
+    boundary_candidate = selected.copy()
+    hole_y, hole_x = np.nonzero(visual_hole)
+    boundary_sums = np.zeros_like(boundary_candidate, dtype=np.float32)
+    boundary_counts = np.zeros(visual_hole.shape, dtype=np.uint8)
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        donor_y, donor_x = hole_y + dy, hole_x + dx
+        valid = (
+            (donor_y >= 0) & (donor_y < visual_hole.shape[0])
+            & (donor_x >= 0) & (donor_x < visual_hole.shape[1])
+        )
+        inside_y, inside_x = hole_y[valid], hole_x[valid]
+        donor_y, donor_x = donor_y[valid], donor_x[valid]
+        owned = donor_mask[donor_y, donor_x]
+        inside_y, inside_x = inside_y[owned], inside_x[owned]
+        donor_y, donor_x = donor_y[owned], donor_x[owned]
+        boundary_sums[inside_y, inside_x] += source_rgb[donor_y, donor_x]
+        boundary_counts[inside_y, inside_x] += 1
+    boundary = visual_hole & (boundary_counts > 0)
+    if np.any(boundary):
+        boundary_candidate[boundary] = np.clip(np.rint(
+            boundary_sums[boundary] / boundary_counts[boundary, None]
+        ), 0, 255).astype(np.uint8)
+        boundary_metrics = _visual_metrics(
+            boundary_candidate, source_rgb, donor_mask, visual_hole
+        )
+        limits = (
+            6.0,
+            12.0,
+            float(max(4, round(np.count_nonzero(visual_hole) * 0.005))),
+        )
+        values = (
+            boundary_metrics["boundary_color_mae"],
+            boundary_metrics["gradient_jump_p95"],
+            boundary_metrics["added_high_frequency_pixels"],
+        )
+        ratios = tuple(value / limit for value, limit in zip(values, limits))
+        key = (
+            float(sum(value > limit for value, limit in zip(values, limits))),
+            max(ratios),
+            sum(ratios),
+            *values,
+        )
+        if selected_key is None or key < selected_key:
+            selected, selected_metrics = boundary_candidate, boundary_metrics
     return selected, selected_metrics or _visual_metrics(
         selected, source_rgb, donor_mask, visual_hole,
     )

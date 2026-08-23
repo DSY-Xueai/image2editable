@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
+from importlib import metadata
 import json
 from pathlib import Path
 import sys
@@ -40,6 +41,11 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="image2editable")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {metadata.version('image2editable')}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     convert_parser = subparsers.add_parser("convert")

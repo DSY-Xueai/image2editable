@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "2f77692e4c7e1a7ac49ce64332557edaffb274590d1f69bcadbca7bc1884b32f",
+  "actions": [
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Post-shrink table-outline fragment is only 116 pixels and quality report shows duplicate shadow."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Trimmed restored left table region retains its editable core."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Signed unexplained mask contains the boundary adjacent to the restored left table region."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Trimmed restored page background retains the complete non-table region."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.98,
+      "evidence": [
+        "Signed unexplained mask contains the boundary adjacent to the restored page background."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "parent_0003",
+        "parent_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.98,
+      "evidence": [
+        "Quality report attributes the remaining halo, native-text underlay, and duplicate pixels to the underlay behind the restored regions."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Right table region passed the prior quality round and reopened only because its dependency was trimmed."
+      ]
+    }
+  ],
+  "graph_sha256": "988a6c1018a55752c3346e1b23821da6f4738cba39e72e10d271e7affc57389d"
+}

@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import posixpath
 import re
 from statistics import median
 import stat
@@ -15,6 +16,8 @@ import sys
 import tempfile
 import time
 from typing import Callable
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 from scripts.benchmark_conversion import _read_regular_file, _strict_json
 
@@ -695,10 +698,10 @@ def run_case(
 
 def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str]:
     try:
-        payload = _read_regular_file(
+        manifest_payload = _read_regular_file(
             manifest_path, _JSON_LIMIT, require_single_link=True
         )
-        manifest = _strict_json(payload, _JSON_LIMIT)
+        manifest = _strict_json(manifest_payload, _JSON_LIMIT)
     except Exception:
         raise BenchmarkFailure("invalid_manifest") from None
     if (
@@ -732,19 +735,23 @@ def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str
             source_path = (RELEASE_ROOT / source).resolve()
             if not source_path.is_relative_to(RELEASE_ROOT.resolve()):
                 raise ValueError
-            payload = _read_regular_file(
+            source_payload = _read_regular_file(
                 source_path, _JSON_LIMIT * 16, require_single_link=True
             )
         except Exception:
             raise BenchmarkFailure("invalid_manifest") from None
         digest = case.get("sha256")
-        if not isinstance(digest, str) or hashlib.sha256(payload).hexdigest() != digest:
+        if (
+            not isinstance(digest, str)
+            or hashlib.sha256(source_payload).hexdigest() != digest
+        ):
             raise BenchmarkFailure("invalid_manifest")
         for page in pages:
             if (
                 not isinstance(page, dict)
                 or not isinstance(page.get("page_id"), str)
-                or page.get("expected_status") != "validated"
+                or page.get("expected_status")
+                not in {"validated", "replaced", "preserved"}
                 or type(page.get("min_visual_components")) is not int
                 or page["min_visual_components"] < 0
                 or type(page.get("min_text_boxes")) is not int
@@ -755,7 +762,71 @@ def _load_batch_cases(manifest_path: Path) -> tuple[list[dict[str, object]], str
                 or page["max_quality_violations"] < 0
             ):
                 raise BenchmarkFailure("invalid_manifest")
-    return [dict(case) for case in cases], hashlib.sha256(payload).hexdigest()
+    return [dict(case) for case in cases], hashlib.sha256(manifest_payload).hexdigest()
+
+
+def _validate_preserved_pptx_page(
+    case: dict[str, object], result: BenchmarkCaseResult, page: dict[str, object], page_number: int
+) -> None:
+    source_value = case.get("path")
+    if case.get("kind") != "pptx" or not isinstance(source_value, str):
+        raise BenchmarkFailure("invalid_page_result")
+    source = (RELEASE_ROOT / source_value).resolve()
+    output = Path(result.run_dir).resolve().parent / "output.pptx"
+    slide_part = f"ppt/slides/slide{page_number}.xml"
+    relationships_part = f"ppt/slides/_rels/slide{page_number}.xml.rels"
+    try:
+        with ZipFile(source) as source_archive, ZipFile(output) as output_archive:
+            source_slide = source_archive.read(slide_part)
+            if source_slide != output_archive.read(slide_part):
+                raise BenchmarkFailure("quality_gate")
+            source_relationships = source_archive.read(relationships_part)
+            if source_relationships != output_archive.read(relationships_part):
+                raise BenchmarkFailure("quality_gate")
+            relationships = ElementTree.fromstring(source_relationships)
+            for relationship in relationships:
+                if relationship.get("TargetMode") == "External":
+                    continue
+                target = relationship.get("Target")
+                if not isinstance(target, str) or not target:
+                    raise ValueError
+                target_part = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(slide_part), target)
+                )
+                if target_part.startswith("../") or target_part.startswith("/"):
+                    raise ValueError
+                if source_archive.read(target_part) != output_archive.read(target_part):
+                    raise BenchmarkFailure("quality_gate")
+    except BenchmarkFailure:
+        raise
+    except Exception:
+        raise BenchmarkFailure("invalid_quality_result") from None
+
+    try:
+        slide = ElementTree.fromstring(source_slide)
+        namespace = {
+            "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+            "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+        }
+        shape_tree = slide.find(".//p:spTree", namespace)
+        if shape_tree is None:
+            raise ValueError
+        text_boxes = sum(
+            1
+            for shape in shape_tree.findall("p:sp", namespace)
+            if any((node.text or "").strip() for node in shape.findall(".//a:t", namespace))
+        )
+        visual_components = sum(
+            len(shape_tree.findall(f"p:{name}", namespace))
+            for name in ("pic", "graphicFrame", "cxnSp", "grpSp", "contentPart")
+        )
+    except Exception:
+        raise BenchmarkFailure("invalid_quality_result") from None
+    if (
+        visual_components < page.get("min_visual_components", 0)
+        or text_boxes < page.get("min_text_boxes", 0)
+    ):
+        raise BenchmarkFailure("quality_gate")
 
 
 def _validate_batch_case(
@@ -768,7 +839,16 @@ def _validate_batch_case(
     for page_number, page in enumerate(expected, start=1):
         page_id = f"page_{page_number:03d}"
         observed = actual.get(page_id)
-        if not isinstance(observed, dict) or observed.get("status") != "validated":
+        if not isinstance(observed, dict):
+            raise BenchmarkFailure("invalid_page_result")
+        expected_status = page.get("expected_status")
+        observed_status = observed.get("status")
+        if observed_status != expected_status:
+            raise BenchmarkFailure("invalid_page_result")
+        if observed_status == "preserved":
+            _validate_preserved_pptx_page(case, result, page, page_number)
+            continue
+        if observed_status not in {"validated", "replaced"}:
             raise BenchmarkFailure("invalid_page_result")
         component_result_path = (
             Path(result.run_dir)
@@ -945,6 +1025,94 @@ def aggregate_performance(
             case_id: int(median(durations.values()))
             for case_id, durations in case_durations.items()
         },
+    }
+
+
+def compare_baseline(
+    report: dict[str, object],
+    baseline: dict[str, object],
+    *,
+    constraints_sha256: str,
+    environment: object,
+) -> dict[str, object]:
+    baseline_fields = {
+        "schema_version",
+        "benchmark",
+        "manifest_sha256",
+        "constraints_sha256",
+        "environment",
+        "median_total_duration_ms",
+        "case_median_duration_ms",
+    }
+    environment_fields = {"os", "architecture", "python", "device"}
+    baseline_environment = baseline.get("environment")
+    baseline_cases = baseline.get("case_median_duration_ms")
+    baseline_total = baseline.get("median_total_duration_ms")
+    if (
+        set(baseline) != baseline_fields
+        or baseline.get("schema_version") != 1
+        or baseline.get("benchmark") != "v0.2-core-14-page"
+        or not _sha256(baseline.get("manifest_sha256"))
+        or not _sha256(baseline.get("constraints_sha256"))
+        or not isinstance(baseline_environment, dict)
+        or set(baseline_environment) != environment_fields
+        or not all(
+            isinstance(baseline_environment[field], str)
+            and bool(baseline_environment[field])
+            for field in environment_fields
+        )
+        or type(baseline_total) is not int
+        or baseline_total < 0
+        or not isinstance(baseline_cases, dict)
+        or not baseline_cases
+        or not all(
+            isinstance(case_id, str)
+            and _IDENTIFIER.fullmatch(case_id) is not None
+            and type(value) is int
+            and value >= 0
+            for case_id, value in baseline_cases.items()
+        )
+    ):
+        raise BenchmarkFailure("invalid_baseline")
+
+    performance = report.get("performance")
+    totals = report.get("totals")
+    if (
+        report.get("status") != "passed"
+        or report.get("repeat") != 3
+        or not _sha256(report.get("manifest_sha256"))
+        or not isinstance(totals, dict)
+        or totals.get("failed_attempts") != 0
+        or not isinstance(performance, dict)
+        or set(performance)
+        != {
+            "repeat_total_duration_ms",
+            "median_total_duration_ms",
+            "case_median_duration_ms",
+        }
+        or type(performance.get("median_total_duration_ms")) is not int
+        or performance["median_total_duration_ms"] < 0
+        or not isinstance(performance.get("case_median_duration_ms"), dict)
+        or set(performance["case_median_duration_ms"]) != set(baseline_cases)
+    ):
+        raise BenchmarkFailure("invalid_performance_result")
+
+    reasons = []
+    if report["manifest_sha256"] != baseline["manifest_sha256"]:
+        reasons.append("manifest_sha256")
+    if constraints_sha256 != baseline["constraints_sha256"]:
+        reasons.append("constraints_sha256")
+    if environment != baseline_environment:
+        reasons.append("environment")
+    if reasons:
+        return {"status": "not_comparable", "reasons": reasons}
+
+    current = performance["median_total_duration_ms"]
+    limit = baseline_total * 115 // 100
+    return {
+        "status": "regressed" if current > limit else "passed",
+        "median_total_duration_ms": current,
+        "limit_ms": limit,
     }
 
 

@@ -3080,6 +3080,34 @@ def test_item_text_region_fills_text_hole_backed_by_surrounding_component() -> N
     assert np.all(assigned[0][2:10, 3:17])
 
 
+def test_item_text_region_uses_original_box_for_dense_row_backing() -> None:
+    text = np.zeros((60, 100), dtype=bool)
+    text[28:32, 35:45] = True
+    component = np.zeros_like(text)
+    component[25:35, 30:50] = True
+    component[text] = False
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [component], text, [{"box": [30, 25, 20, 10]}]
+    )
+
+    assert np.all(assigned[0][25:35, 30:50])
+
+
+def test_item_text_region_bridges_disconnected_dense_box_backing() -> None:
+    text = np.zeros((60, 100), dtype=bool)
+    text[28:32, 38:42] = True
+    component = np.zeros_like(text)
+    component[25:35, 30:37] = True
+    component[25:35, 43:50] = True
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [component], text, [{"box": [30, 25, 20, 10]}]
+    )
+
+    assert np.all(assigned[0][text])
+
+
 def test_item_text_region_does_not_expand_beyond_component_silhouette() -> None:
     text = np.zeros((100, 120), dtype=bool)
     text[30:60, 50:70] = True

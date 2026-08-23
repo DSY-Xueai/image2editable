@@ -1,23 +1,25 @@
 {
-  "schema_version": 1,
+  "actions": [
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 15 adjacent pixels to this owner"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 16 adjacent pixels to this owner"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 22 adjacent pixels to this owner"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 97 adjacent pixels to this owner"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 105 adjacent pixels to this owner"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 89 adjacent pixels to this owner"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains the complete line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 44 adjacent pixels to this owner"], "object_ids": ["parent_0011"], "parameters": {}}
+  ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 5,
-  "request_sha256": "cb4f5de0ee7d791b8580e08c5114c7b82158ccd19cb0d64030a73711c80041a0",
-  "graph_sha256": "b12ad6a1f53be19d59fc21747219287e03df559100f766e07fd0779e6ed3464a",
-  "actions": [
-    {"action": "accept", "object_ids": ["component_0003"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 quality accepts the complete 60-level grid line with zero missing, duplicate, or shadow pixels"]},
-    {"action": "absorb_residual", "object_ids": ["component_0003"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows only small structural fragments touching the 60-level grid-line owner"]},
-    {"action": "accept", "object_ids": ["component_0008"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 isolation and quality retain the complete MAR bar"]},
-    {"action": "absorb_residual", "object_ids": ["component_0008"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows a small structural boundary fragment adjacent to the MAR bar"]},
-    {"action": "accept", "object_ids": ["component_0012"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 quality accepts the complete 20-level grid line with zero missing, duplicate, or shadow pixels"]},
-    {"action": "absorb_residual", "object_ids": ["component_0012"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows only small structural fragments touching the 20-level grid-line owner"]},
-    {"action": "accept", "object_ids": ["component_0013"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 quality accepts the complete 0-level grid line with zero missing, duplicate, or shadow pixels"]},
-    {"action": "absorb_residual", "object_ids": ["component_0013"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows only small structural fragments touching the 0-level grid-line owner"]},
-    {"action": "accept", "object_ids": ["parent_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 quality accepts the complete 40-level grid line with zero missing, duplicate, or shadow pixels"]},
-    {"action": "absorb_residual", "object_ids": ["parent_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows only small structural fragments touching the 40-level grid-line root owner"]},
-    {"action": "accept", "object_ids": ["parent_0011"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 quality accepts the complete six-point conversion line with zero missing or duplicate pixels"]},
-    {"action": "absorb_residual", "object_ids": ["parent_0011"], "parameters": {}, "confidence": 0.99, "evidence": ["round-05 unexplained mask shows small structural fragments adjacent to the conversion-line owner"]}
-  ]
+  "request_sha256": "ee8d55529a57e0655b12a21461721682ad0f2bcbbf319f81ceb1588f8e895549",
+  "schema_version": 1,
+  "graph_sha256": "c2314df7ae210ffd1ae3d81d324cd8f306bd97a0c075e5353e2aa333cb3341a1"
 }

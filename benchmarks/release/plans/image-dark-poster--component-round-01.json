@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "9d3530a326e353349b3447e532ca85aad37930623eeb2ea6052d4157908b9e5f",
+  "request_sha256": "0e9e8a50f14510044d5becc6faf320e147e53d77130e2cc2e33b5e2b46ba50d0",
   "graph_sha256": "91051d302437c50ced991ca60d640322312aa2e6568e9c983bdf137626ae0a60",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["mask statistics show this is the non-overlapping dark canvas owner: 1069108 of 1069207 mask pixels are exact background color, while foreground artwork is owned by separate children"]},

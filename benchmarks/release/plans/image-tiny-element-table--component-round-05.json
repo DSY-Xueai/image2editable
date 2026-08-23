@@ -4,7 +4,20 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
+        "final component quality accepts this semantic table visual"
+      ],
+      "object_ids": [
+        "split_0001"
+      ],
+      "parameters": {
+        "independent": true
+      }
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "signed final residual partition assigns 2192 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0001"
@@ -15,7 +28,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
+      ],
+      "object_ids": [
+        "split_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "signed final residual partition assigns 622 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0002"
@@ -26,18 +50,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
-        "split_0003"
+        "split_0004"
       ],
       "parameters": {}
     },
     {
-      "action": "accept",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "signed final residual partition assigns 6846 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0004"
@@ -48,18 +72,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
-        "split_0005"
+        "split_0006"
       ],
       "parameters": {}
     },
     {
-      "action": "accept",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "signed final residual partition assigns 52 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0006"
@@ -70,18 +94,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
-        "split_0007"
+        "split_0008"
       ],
       "parameters": {}
     },
     {
-      "action": "accept",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "signed final residual partition assigns 58897 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0008"
@@ -92,18 +116,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
-        "split_0009"
+        "split_0010"
       ],
       "parameters": {}
     },
     {
-      "action": "accept",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "signed final residual partition assigns 371 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0010"
@@ -114,18 +138,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
-        "split_0011"
+        "split_0012"
       ],
       "parameters": {}
     },
     {
-      "action": "accept",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "signed final residual partition assigns 199 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0012"
@@ -136,7 +160,18 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one semantic data-row visual"
+        "final component quality accepts this semantic table visual"
+      ],
+      "object_ids": [
+        "split_0013"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "signed final residual partition assigns 357 adjacent pixels to this owner"
       ],
       "object_ids": [
         "split_0013"
@@ -147,18 +182,7 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
-      ],
-      "object_ids": [
-        "split_0014"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
+        "final component quality accepts this semantic table visual"
       ],
       "object_ids": [
         "split_0015"
@@ -166,38 +190,22 @@
       "parameters": {}
     },
     {
-      "action": "rebuild_background",
+      "action": "absorb_residual",
       "confidence": 0.99,
       "evidence": [
-        "duplicate, halo, and native-underlay diagnostics require removal of original pixels beneath the fifteen semantic table visuals"
+        "signed final residual partition assigns 35 adjacent pixels to this owner"
       ],
       "object_ids": [
-        "split_0001",
-        "split_0002",
-        "split_0003",
-        "split_0004",
-        "split_0005",
-        "split_0006",
-        "split_0007",
-        "split_0008",
-        "split_0009",
-        "split_0010",
-        "split_0011",
-        "split_0012",
-        "split_0013",
-        "split_0014",
         "split_0015"
       ],
-      "parameters": {
-        "margin_ratio": 0.005
-      }
+      "parameters": {}
     }
   ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
-  "repair_round": 4,
-  "request_sha256": "8ce27421354224e5db409ea69fc7c4d96b131982b48d7d2c6af5eb70e6ae0984",
+  "repair_round": 5,
+  "request_sha256": "6a4c7e253803f40b4d2c86d3ed5832159f4a25f2daefef72f51883a93a194987",
   "schema_version": 1,
-  "graph_sha256": "e77c0b5e2d87366b4ea3578cf0cd4287a64f923fae1fc6bbe4ddcea475857e94"
+  "graph_sha256": "8b6f1a0d240c958dc5c4ae138d9b2342796621d00297c96e7255bf8a669b6c50"
 }

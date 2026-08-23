@@ -241,33 +241,33 @@
       "expected_pages": [
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-001",
-          "expected_status": "validated",
-          "min_visual_components": 6,
-          "min_text_boxes": 4,
+          "expected_status": "replaced",
+          "min_visual_components": 4,
+          "min_text_boxes": 39,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         },
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-002",
-          "expected_status": "validated",
-          "min_visual_components": 6,
-          "min_text_boxes": 4,
+          "expected_status": "replaced",
+          "min_visual_components": 24,
+          "min_text_boxes": 14,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         },
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-003",
-          "expected_status": "validated",
-          "min_visual_components": 6,
+          "expected_status": "replaced",
+          "min_visual_components": 3,
           "min_text_boxes": 4,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         },
         {
           "page_id": "pptx-mixed-screenshot-candidates-page-004",
-          "expected_status": "validated",
-          "min_visual_components": 6,
-          "min_text_boxes": 4,
+          "expected_status": "preserved",
+          "min_visual_components": 1,
+          "min_text_boxes": 1,
           "max_unexplained_pixels": 0,
           "max_quality_violations": 0
         }

@@ -1664,6 +1664,8 @@ def _assign_text_regions_to_component_masks(
             ownership_region[y1:y2, x1:x2] = text[y1:y2, x1:x2]
             if np.any(ownership_region):
                 halo = _text_item_halo_px(box_height)
+                box_region = np.zeros(text.shape, dtype=bool)
+                box_region[y1:y2, x1:x2] = True
                 fill_region = np.zeros(text.shape, dtype=bool)
                 fill_region[
                     max(0, y1 - halo):min(height, y2 + halo),
@@ -1672,12 +1674,13 @@ def _assign_text_regions_to_component_masks(
                 regions.append((
                     ownership_region,
                     fill_region,
+                    box_region,
                     None if text_owner_indices is None else text_owner_indices[item_index],
                 ))
     else:
         count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
         regions = [
-            (labels == label, labels == label, None)
+            (labels == label, labels == label, labels == label, None)
             for label in range(1, count)
         ]
     mask_boxes = []
@@ -1696,7 +1699,7 @@ def _assign_text_regions_to_component_masks(
         if contours:
             cv2.drawContours(silhouette, contours, -1, 1, thickness=cv2.FILLED)
         silhouette_masks.append(silhouette.astype(bool))
-    for ownership_region, fill_region, explicit_owner in regions:
+    for ownership_region, fill_region, box_region, explicit_owner in regions:
         pixels = int(np.count_nonzero(ownership_region))
         overlaps = [
             int(np.count_nonzero(mask & ownership_region)) for mask in assigned
@@ -1715,21 +1718,43 @@ def _assign_text_regions_to_component_masks(
             ]
             best = max(range(len(assigned)), key=backing.__getitem__)
             backing_ratio = backing[best] / max(fill_pixels, 1)
+        box_nontext = box_region & ~text
+        box_pixels = int(np.count_nonzero(box_nontext))
+        box_backing = [
+            int(np.count_nonzero(mask & box_nontext)) for mask in assigned
+        ]
+        if explicit_owner is None and box_pixels:
+            box_best = max(range(len(assigned)), key=box_backing.__getitem__)
+            if box_backing[box_best] > box_backing[best]:
+                best = box_best
+                overlap_ratio = overlaps[best] / max(pixels, 1)
+                backing_ratio = 0.0
+        box_backing_ratio = box_backing[best] / max(box_pixels, 1)
         box = mask_boxes[best]
         contained_ratio = 0.0
+        box_contained_ratio = 0.0
         if box is not None:
             left, top, right, bottom = box
             contained_ratio = np.count_nonzero(
                 fill_region[top:bottom, left:right]
             ) / max(int(np.count_nonzero(fill_region)), 1)
+            box_contained_ratio = np.count_nonzero(
+                box_region[top:bottom, left:right]
+            ) / max(int(np.count_nonzero(box_region)), 1)
+        dense_box_owner = bool(text_items) and (
+            box_backing_ratio >= 0.5
+            and box_contained_ratio >= 0.8
+        )
         owns_text_region = explicit_owner is not None or (
             overlap_ratio >= (0.2 if text_items else 0.45)
             or (bool(text_items) and backing_ratio >= 0.5)
+            or dense_box_owner
         )
         if owns_text_region and (
             explicit_owner is not None
             or not text_items
             or contained_ratio >= 0.8
+            or dense_box_owner
         ):
             for index, mask in enumerate(assigned):
                 if index != best:
@@ -1742,6 +1767,8 @@ def _assign_text_regions_to_component_masks(
                 silhouette_masks[best]
                 if text_items else np.ones(text.shape, dtype=bool)
             )
+            if dense_box_owner:
+                support |= box_region
             assigned[best] |= fill_region & support & ~occupied_by_others
     return assigned
 

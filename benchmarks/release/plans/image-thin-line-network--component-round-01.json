@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "d2b205451b85b040e9490bbbb19ac2042295959d241e3087a80b74042978f22a",
+  "request_sha256": "9b4a9ac8637d3a783fc89b492449b344820eb86a99a7f705b69d6df376114efc",
   "actions": [
     {"action":"discard","object_ids":["component_0001"],"parameters":{},"confidence":0.99,"evidence":["The full-page mask is background, not an editable network object."]},
     {"action":"discard","object_ids":["component_0002"],"parameters":{},"confidence":0.99,"evidence":["The broad network-area mask is an overlapping background composite."]},

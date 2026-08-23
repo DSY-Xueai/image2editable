@@ -1,22 +1,28 @@
 {
-  "schema_version": 1,
+  "actions": [
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0001"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0002"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts this independently movable chart bar"], "object_ids": ["component_0005"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0015"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0017"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts the complete line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["duplicate metrics are caused by original pixels remaining beneath the eight newly retried grid-line and axis-marker components"],
+      "object_ids": ["component_0001", "component_0002", "component_0003", "component_0009", "component_0012", "component_0013", "component_0015", "component_0017"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "bf9ff61d25db0d1cbc7fb5fccc700c9b2775003e444d6d65dc29a4e701395e80",
-  "graph_sha256": "242d59755636e4ba7615caa51dbc8a7f0b9c1b58d47c0d9bd409b36c4cdad8bb",
-  "actions": [
-    {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 100-level 3px grid line"]},
-    {"action": "accept", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 80-level 3px grid line"]},
-    {"action": "accept", "object_ids": ["component_0003"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 60-level 3px grid line"]},
-    {"action": "accept", "object_ids": ["parent_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 40-level 3px grid line using the sole active root owner"]},
-    {"action": "accept", "object_ids": ["component_0012"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 20-level 3px grid line"]},
-    {"action": "accept", "object_ids": ["component_0013"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation and ownership show the recovered complete 0-level 3px grid line"]},
-    {"action": "accept", "object_ids": ["component_0015"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation shows the OCR-missed 40 label recovered inside its exact source box"]},
-    {"action": "accept", "object_ids": ["component_0017"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 isolation shows the OCR-missed 0 label recovered inside its exact source box"]},
-    {"action": "accept", "object_ids": ["component_0009"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 component quality retains the complete FEB bar with no component violations"]},
-    {"action": "accept", "object_ids": ["parent_0011"], "parameters": {}, "confidence": 0.99, "evidence": ["round-04 component quality retains the complete six-point conversion line with no component violations"]},
-    {"action": "rebuild_background", "object_ids": ["component_0001", "component_0002", "component_0003", "parent_0006", "component_0012", "component_0013", "component_0015", "component_0017"], "parameters": {"margin_ratio": 0.005}, "confidence": 0.99, "evidence": ["round-04 difference and unexplained evidence isolate the newly recovered grid lines and y-axis labels while previous bars, line, and legends remain clean"]}
-  ]
+  "request_sha256": "91296ccc34080d922648919bb2a183de92d645d35fc305379299679e9397b055",
+  "schema_version": 1,
+  "graph_sha256": "08c0a6dbd836efb6210a6484b0338574e740f2ec895e3cf780c96035df7a9a39"
 }

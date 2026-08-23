@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "benchmark": "v0.2-core-14-page",
+  "manifest_sha256": "65094ef13cf13d9070ebbea5415100649603fc87b086948979bf87ef386fed08",
+  "constraints_sha256": "11c7d4f4059e8e5e7fc39c3d3773c401bc0a900ba742081aedc15426a91da133",
+  "environment": {
+    "os": "Windows",
+    "architecture": "AMD64",
+    "python": "3.12",
+    "device": "cuda"
+  },
+  "median_total_duration_ms": 3623083,
+  "case_median_duration_ms": {
+    "image-bilingual-dashboard": 300209,
+    "image-combo-chart": 334054,
+    "image-dark-poster": 235434,
+    "image-flowchart": 265611,
+    "image-icon-matrix": 236130,
+    "image-non-16-9-infographic": 221887,
+    "image-thin-line-network": 300412,
+    "image-tiny-element-table": 445036,
+    "pdf-rotated-page": 607310,
+    "pptx-mixed-screenshot-candidates": 719743
+  }
+}

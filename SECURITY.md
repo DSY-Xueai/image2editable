@@ -6,7 +6,9 @@ The `0.2.x` release line receives security fixes. Older releases are not support
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a security vulnerability. Send a private report to the repository maintainers with:
+Please do not open a public issue for a security vulnerability. Use GitHub Private Vulnerability Reporting to send the report to me. I will acknowledge a complete report within 48 hours and provide an initial assessment within 7 days.
+
+Include:
 
 - a short description and impact;
 - reproducible steps or a minimal proof of concept;

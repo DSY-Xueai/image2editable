@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 5,
-  "request_sha256": "d44874fd717fa055fe20f53efe8859e956068304bc1e70c7926176fb12ba9527",
+  "request_sha256": "fe8a7744ac61b1ebe38a6f09ecedd4a3ecc0899f7b9c29f62ede02488ad132f8",
   "actions": [
     {"action":"accept","object_ids":["component_0016"],"parameters":{},"confidence":0.99,"evidence":["The component passes quality before absorbing its adjacent right-lower node residual."]},
     {"action":"absorb_residual","object_ids":["component_0016"],"parameters":{},"confidence":0.99,"evidence":["The unexplained mask contains only the adjacent right-lower node edge assigned to this owner."]},

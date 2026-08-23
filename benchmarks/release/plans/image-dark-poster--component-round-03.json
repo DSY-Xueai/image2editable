@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "b753a841bd329d8e1224c63f52e7c0b816531504fdc9d5c3eee4d6f9a7690aff",
+  "request_sha256": "844f7b6bfff73ec76bce61baeb2ab8360eccba4e5b80a827ee13080712de526a",
   "graph_sha256": "ee10e7bfaa7cb366d21305aa075a5fc361c73cb93e011e7d64f7397782d8e1ca",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the dark outer canvas with no violations"]},
