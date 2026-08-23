@@ -161,17 +161,21 @@ jobs:
         run: python "${{ github.workspace }}/scripts/runtime_model_smoke.py"
 
   core-benchmark:
-    name: Protected v0.2 core 14-page benchmark / Ubuntu / Python 3.12
+    name: Protected v0.2 core 14-page benchmark / Windows / Python 3.12
     if: ${{ inputs.run_core_benchmark }}
     environment: core-benchmark
     needs: build-distribution
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 360
     steps:
       - name: Require protected core-benchmark approval
+        shell: pwsh
         env:
           IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED: ${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}
-        run: test "${IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED}" = "approved"
+        run: >-
+          if ($env:IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED -ne 'approved') {
+            throw 'IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED must be approved'
+          }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -194,11 +198,17 @@ jobs:
         run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
       - name: Install built wheel
         run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
+      - name: Install PaddleOCR runtime
+        run: |
+          python -m pip install --constraint constraints/runtime.txt "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install Tesseract OCR
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes tesseract-ocr
+          choco install tesseract --version=5.3.1.20230401 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install --constraint constraints/runtime.txt pytesseract==0.3.13
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Check installed dependencies
         run: python -m pip check
       - name: Install runtime models

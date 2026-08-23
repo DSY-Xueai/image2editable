@@ -672,7 +672,7 @@ def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
 
 def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() -> None:
     job = _release_workflow()["jobs"]["core-benchmark"]
-    assert job["runs-on"] == "ubuntu-latest"
+    assert job["runs-on"] == "windows-latest"
     assert job["timeout-minutes"] == 360
     assert _needs(job) == {"build-distribution"}
     assert job["if"] == "${{ inputs.run_core_benchmark }}"
@@ -686,6 +686,7 @@ def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() ->
         "Locate the built wheel",
         "Bootstrap pinned build runtime",
         "Install built wheel",
+        "Install PaddleOCR runtime",
         "Install Tesseract OCR",
         "Check installed dependencies",
         "Install runtime models",
@@ -694,13 +695,16 @@ def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() ->
         "actions/upload-artifact",
     ]
     approval = _named_step(job, "Require protected core-benchmark approval")
+    assert approval["shell"] == "pwsh"
     assert approval["env"] == {
         "IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED": (
             "${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}"
         )
     }
     assert _commands(approval) == [
-        'test "${IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED}" = "approved"'
+        "if ($env:IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED -ne 'approved') {",
+        "  throw 'IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED must be approved'",
+        "}",
     ]
     assert _action_step(job, "actions/setup-python")["with"] == {
         "python-version": "3.12"
@@ -718,13 +722,23 @@ def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() ->
     assert _commands(_named_step(job, "Install built wheel")) == [
         INSTALL_WHEEL_COMMAND
     ]
+    assert _commands(_named_step(job, "Install PaddleOCR runtime")) == [
+        (
+            'python -m pip install --constraint constraints/runtime.txt '
+            '"paddleocr==3.7.0" "paddlepaddle==3.3.1" '
+            '"PaddleX==3.7.2" "PyYAML==6.0.2"'
+        ),
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+    ]
     assert _commands(_named_step(job, "Install Tesseract OCR")) == [
-        "sudo apt-get update",
-        "sudo apt-get install --yes tesseract-ocr",
+        "choco install tesseract --version=5.3.1.20230401 --yes --no-progress",
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
         (
             "python -m pip install --constraint constraints/runtime.txt "
             "pytesseract==0.3.13"
         ),
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+        '"$env:ProgramFiles\\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append',
     ]
     assert _commands(_named_step(job, "Check installed dependencies")) == [
         "python -m pip check"
@@ -777,6 +791,8 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
                 "Verify installed model smoke",
             }:
                 assert step.get("shell") == "python"
+            elif step.get("name") == "Require protected core-benchmark approval":
+                assert step.get("shell") == "pwsh"
             else:
                 assert "shell" not in step
         for run in _runs(job):
