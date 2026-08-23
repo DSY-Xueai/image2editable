@@ -1,0 +1,88 @@
+{
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["The full header parent is the complete rounded banner required beneath the native title text."],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["The right-card parent is the complete independently movable card while its text remains native."],
+      "object_ids": ["parent_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["The middle-card outer parent retains the source-backed outer layer around the separately owned inner body."],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["The left-card outer parent retains the 739-pixel boundary layer around the separately owned body."],
+      "object_ids": ["parent_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["This parent is the left-card inner body, disjoint in effective ownership from its retained outer boundary."],
+      "object_ids": ["parent_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["This parent is the middle-card inner body, disjoint in effective ownership from its retained outer layer."],
+      "object_ids": ["parent_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["The whole-page composite would flatten and duplicate every retained visual region."],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["The cross-card composite duplicates the independently retained card layers."],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This right header partition duplicates the complete retained header parent."],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This left header partition duplicates the complete retained header parent."],
+      "object_ids": ["component_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This is a raster fragment of the native editable footer text."],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "2c6194ad09874a072e8b3eefc3c7b105f0afcc906177868e66f07289284bf06e",
+  "kind": "component_plan",
+  "page_id": "page_002",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "aef074cef7abaa323f5ef8185f51c53b19d97171e847ebc063973417453b3ad0",
+  "schema_version": 1
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "candidate_decision",
+  "page_id": "page_003",
+  "candidate_id": "candidate_001",
+  "source_shape_id": "2",
+  "source_object_sha256": "0030b760342c417d22d0b35e2ece11c7adfc1c65dde72018bd93ed61f8e63c02",
+  "image_sha256": "65eafdda6be280feceee856cda45b76a68e2e9cf1f82646abed7c1dadacab798",
+  "decision": "replace",
+  "confidence": 0.99,
+  "category": "full_slide_screenshot",
+  "evidence": [
+    "Image covers the full slide and contains the complete rasterized gradient composition."
+  ]
+}

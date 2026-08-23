@@ -51,6 +51,7 @@ def detect_text(
     *,
     isolated: bool = False,
     worker_root: str | Path | None = None,
+    style_reference_width: int | None = None,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect text regions and estimate styling.
 
@@ -78,7 +79,11 @@ def detect_text(
     )
 
     return _build_text_result(
-        img_rgb, raw_boxes, confidence_threshold, mask_padding,
+        img_rgb,
+        raw_boxes,
+        confidence_threshold,
+        mask_padding,
+        style_reference_width=style_reference_width,
     )
 
 
@@ -127,7 +132,13 @@ def _build_text_result(
     raw_boxes: list[dict],
     confidence_threshold: float,
     mask_padding: int,
+    *,
+    style_reference_width: int | None = None,
 ) -> tuple[list[dict], np.ndarray]:
+    if style_reference_width is not None and (
+        type(style_reference_width) is not int or style_reference_width <= 0
+    ):
+        raise ValueError("reference_width must be a positive integer")
     h, w = img_rgb.shape[:2]
     if not raw_boxes:
         logger.warning("No text detected by OCR.")
@@ -136,9 +147,19 @@ def _build_text_result(
     # Filter out noise lines (pure symbols, very short, etc.)
     raw_boxes = _filter_noise(raw_boxes, confidence_threshold)
 
-    # Clean up text (strip leading/trailing symbols)
+    # Clean up OCR edge noise while preserving semantic sentence endings.
     for rb in raw_boxes:
-        rb["text"] = rb["text"].strip(" |/\\-_=.,:;!?~`'\"")
+        rb["text"] = (
+            rb["text"]
+            .strip()
+            .lstrip("|/\\-_=.,:;!?~`'\"")
+            .rstrip("|/\\-_=,:;~`'\"")
+        )
+        rb["text"], rb["box"] = _recover_trailing_heading_period(
+            img_rgb,
+            rb["text"],
+            rb["box"],
+        )
 
     # Remove boxes that became empty after cleanup
     raw_boxes = [rb for rb in raw_boxes if rb["text"]]
@@ -151,14 +172,26 @@ def _build_text_result(
     text_items = []
     for rb in raw_boxes:
         box = rb["box"]  # (x, y, w, h) in pixels
-        style = _estimate_style(img_rgb, box)
+        if style_reference_width is None:
+            style = _estimate_style(img_rgb, box)
+        else:
+            style = _estimate_style(
+                img_rgb,
+                box,
+                reference_width=style_reference_width,
+            )
 
         # Filter out tiny text (likely decorative labels, icon text, noise)
         if style["font_size"] < 8.0:
             continue
 
         text = rb["text"]
-        font_size = _adjust_font_size(text, style["font_size"])
+        font_size = _adjust_font_size(
+            text,
+            style["font_size"],
+            bbox_height=box[3],
+            reference_width=style_reference_width or w,
+        )
         text_items.append({
             "box": list(box),
             "text": text,
@@ -591,6 +624,37 @@ def _to_tesseract_lang(lang: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _is_spaced_semantic_separator_text(text: str) -> bool:
+    parts = re.split(r"\s+[/\-]\s+", text)
+    if len(parts) == 1:
+        return False
+
+    for part in parts:
+        meaningful = 0
+        for index, char in enumerate(part):
+            if (
+                char.isalnum()
+                or "\u4e00" <= char <= "\u9fff"
+                or "\u3400" <= char <= "\u4dbf"
+            ):
+                meaningful += 1
+                continue
+            if char.isspace():
+                continue
+            if (
+                char in ".-"
+                and index > 0
+                and index + 1 < len(part)
+                and part[index - 1].isalnum()
+                and part[index + 1].isalnum()
+            ):
+                continue
+            return False
+        if meaningful < 2:
+            return False
+    return True
+
+
 def _filter_noise(
     boxes: list[dict], confidence_threshold: float = 0.7
 ) -> list[dict]:
@@ -631,23 +695,28 @@ def _filter_noise(
         if total > 0 and meaningful / total < 0.6:
             continue
 
+        technical_text = text.rstrip(".!?") or text
         technical_separators = "-_./"
-        has_technical_separator = any(c in technical_separators for c in text)
+        has_technical_separator = any(c in technical_separators for c in technical_text)
         compact_label = all(
-            c.isalnum() or c in technical_separators for c in text
+            c.isalnum() or c in technical_separators for c in technical_text
         )
         valid_technical_label = (
             compact_label
-            and text[0].isalnum()
-            and text[-1].isalnum()
+            and technical_text[0].isalnum()
+            and technical_text[-1].isalnum()
             and not any(
                 left in technical_separators and right in technical_separators
-                for left, right in zip(text, text[1:])
+                for left, right in zip(technical_text, technical_text[1:])
             )
             and meaningful >= (4 if has_technical_separator else 2)
         )
 
         if has_technical_separator and compact_label and not valid_technical_label:
+            continue
+
+        spaced_semantic_separator = _is_spaced_semantic_separator_text(text)
+        if re.search(r"\s[/\-]\s", text) and not spaced_semantic_separator:
             continue
 
         # Skip single-char lines that are common OCR artifacts
@@ -666,6 +735,7 @@ def _filter_noise(
                 and has_garbled_separator
                 and not has_cjk
                 and not valid_technical_label
+                and not spaced_semantic_separator
             ):
                 continue
 
@@ -689,6 +759,70 @@ def _is_likely_vertical_decorative_fragment(box: dict) -> bool:
     if has_cjk and len(text) == 1 and h >= 120 and w >= 80:
         return True
     return False
+
+
+def _recover_trailing_heading_period(
+    img_rgb: np.ndarray,
+    text: str,
+    box: tuple,
+) -> tuple[str, tuple]:
+    letters = [char for char in text if char.isalpha()]
+    x, y, width, height = (int(value) for value in box)
+    if (
+        text.endswith((".", "!", "?"))
+        or height < 48
+        or len(letters) < 4
+        or not all(char.isascii() and char.isupper() for char in letters)
+    ):
+        return text, box
+
+    image_height, image_width = img_rgb.shape[:2]
+    right = x + width
+    scan_width = min(image_width - right, max(8, int(round(height * 0.45))))
+    if scan_width <= 0:
+        return text, box
+    top = max(0, y)
+    bottom = min(image_height, y + height)
+    text_region = img_rgb[top:bottom, max(0, x):min(image_width, right)]
+    candidate_region = img_rgb[top:bottom, right:right + scan_width]
+    if text_region.size == 0 or candidate_region.size == 0:
+        return text, box
+
+    color = _sample_text_color(text_region)
+    color_rgb = np.array(
+        [int(color[index:index + 2], 16) for index in (1, 3, 5)],
+        dtype=np.int16,
+    )
+    color_distance = np.linalg.norm(
+        candidate_region.astype(np.int16) - color_rgb,
+        axis=2,
+    )
+    candidate_mask = (color_distance <= 48.0).astype(np.uint8)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(
+        candidate_mask,
+        connectivity=8,
+    )
+    matches = []
+    for index in range(1, count):
+        left = int(stats[index, cv2.CC_STAT_LEFT])
+        candidate_top = int(stats[index, cv2.CC_STAT_TOP])
+        candidate_width = int(stats[index, cv2.CC_STAT_WIDTH])
+        candidate_height = int(stats[index, cv2.CC_STAT_HEIGHT])
+        area = int(stats[index, cv2.CC_STAT_AREA])
+        fill_ratio = area / max(1, candidate_width * candidate_height)
+        if (
+            left <= height * 0.15
+            and candidate_top >= height * 0.58
+            and height * 0.08 <= candidate_width <= height * 0.30
+            and height * 0.08 <= candidate_height <= height * 0.30
+            and fill_ratio >= 0.45
+            and left + candidate_width < scan_width
+        ):
+            matches.append((left, candidate_width))
+    if len(matches) != 1:
+        return text, box
+    left, candidate_width = matches[0]
+    return f"{text}.", (x, y, width + left + candidate_width, height)
 
 
 # ---------------------------------------------------------------------------
@@ -753,8 +887,24 @@ def _select_font(text: str, font_size: float) -> str:
     return "Microsoft YaHei" if _has_cjk(text) else "Arial"
 
 
-def _adjust_font_size(text: str, font_size: float) -> float:
+def _adjust_font_size(
+    text: str,
+    font_size: float,
+    *,
+    bbox_height: int | None = None,
+    reference_width: int | None = None,
+) -> float:
     """Constrain large Chinese title text so editable text does not wrap."""
+    letters = [char for char in text if char.isalpha()]
+    if (
+        font_size >= 30.0
+        and len(letters) >= 4
+        and all(char.isascii() and char.isupper() for char in letters)
+        and bbox_height is not None
+        and reference_width is not None
+    ):
+        pixels_per_inch = reference_width / 13.333
+        return round(bbox_height / pixels_per_inch * 72.0 * 1.08, 1)
     if _has_cjk(text) and font_size >= 80.0:
         return round(font_size * 0.88, 1)
     if _has_cjk(text) and font_size >= 48.0:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
+from importlib import metadata
 import json
 from pathlib import Path
 import sys
@@ -28,7 +29,7 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--agent-provider",
-        choices=("host", "local"),
+        choices=("host", "local", "local-service"),
         default="host",
     )
     parser.add_argument(
@@ -40,6 +41,11 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="image2editable")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {metadata.version('image2editable')}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     convert_parser = subparsers.add_parser("convert")
@@ -118,11 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
     models_recommend_parser = models_subparsers.add_parser("recommend")
     models_recommend_parser.add_argument("--json", action="store_true")
     models_install_parser = models_subparsers.add_parser("install")
-    models_install_parser.add_argument("target", choices=("agent",))
+    models_install_parser.add_argument("target", choices=("agent", "runtime"))
     models_install_parser.add_argument("--yes", action="store_true")
     models_subparsers.add_parser("status")
 
-    subparsers.add_parser("doctor")
+    doctor_parser = subparsers.add_parser("doctor")
+    doctor_parser.add_argument("--agent-local", action="store_true")
     return parser
 
 
@@ -136,6 +143,12 @@ def _models_module():
     return models
 
 
+def _runtime_models_module():
+    from image2editable import runtime_models
+
+    return runtime_models
+
+
 def _print_model_plan(plan: dict[str, object]) -> None:
     print(
         json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True), file=sys.stderr
@@ -146,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
         with redirect_stdout(sys.stderr):
-            report = check_environment()
+            report = check_environment(agent_local=args.agent_local)
         _print_json(report)
         return 0 if report["ready"] else 1
 
@@ -161,15 +174,54 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_model_plan(recommendation)
             return 0
         if args.models_command == "status":
-            _print_json(models.model_status())
+            runtime_models = _runtime_models_module()
+            _print_json(
+                {
+                    "agent": models.model_status(),
+                    "runtime": runtime_models.runtime_model_status(),
+                }
+            )
             return 0
         if args.models_command == "install":
-            hardware = models.detect_hardware()
-            plan = models.recommend_agent_model(hardware)
+            if args.target == "agent":
+                hardware = models.detect_hardware()
+                plan = models.recommend_agent_model(hardware)
+            else:
+                runtime_models = _runtime_models_module()
+                catalog = runtime_models.load_runtime_catalog()
+                entries = catalog["models"]
+                plan = {
+                    "target": "runtime",
+                    "models": {
+                        "sam2_large": {
+                            "size": entries["sam2_large"]["size"],
+                            "sha256": entries["sam2_large"]["sha256"],
+                        },
+                        "big_lama": {
+                            "size": entries["big_lama"]["size"],
+                            "sha256": entries["big_lama"]["sha256"],
+                        },
+                        "grounding_dino": {
+                            "model_id": entries["grounding_dino"]["model_id"],
+                            "revision": entries["grounding_dino"]["revision"],
+                        },
+                    },
+                    "estimated_download": {
+                        "minimum_bytes": entries["sam2_large"]["size"]
+                        + entries["big_lama"]["size"],
+                        "additional": (
+                            "Grounding DINO snapshot (size not declared in catalog)"
+                        ),
+                    },
+                    "cache": (
+                        "IMAGE2EDITABLE_MODEL_CACHE or the default user runtime cache"
+                    ),
+                }
             _print_model_plan(plan)
             confirmed = args.yes
             if not confirmed:
-                print("确认下载上述实验性模型？[y/N] ", file=sys.stderr, end="")
+                model_kind = "实验性模型" if args.target == "agent" else "运行时模型"
+                print(f"确认下载上述{model_kind}？[y/N] ", file=sys.stderr, end="")
                 try:
                     confirmed = input("").strip().casefold() in {"y", "yes"}
                 except EOFError:
@@ -177,12 +229,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not confirmed:
                 _print_json({"status": "cancelled"})
                 return 1
-            receipt = models.install_agent_model(
-                cache_dir=None,
-                confirmed=True,
-                model_id=plan["model_id"],
-                revision=plan["revision"],
-            )
+            if args.target == "agent":
+                receipt = models.install_agent_model(
+                    cache_dir=None,
+                    confirmed=True,
+                    model_id=plan["model_id"],
+                    revision=plan["revision"],
+                )
+            else:
+                receipt = runtime_models.install_runtime_models(
+                    cache_dir=None,
+                    confirmed=True,
+                )
             _print_json(receipt)
             return 0
 

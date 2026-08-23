@@ -1,0 +1,178 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["parent_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0014"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0015"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0016"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0017"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["strict round-four isolation retains this independently movable visual core"],
+      "object_ids": ["component_0021"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["parent_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0014"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0015"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0016"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["signed final-round residual partition assigns a nonzero adjacent region to this owner"],
+      "object_ids": ["component_0017"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["final signed ownership covers all 204681 residual pixels before strict background reconstruction"],
+      "object_ids": [
+        "parent_0001",
+        "component_0002",
+        "component_0003",
+        "component_0004",
+        "component_0006",
+        "component_0007",
+        "component_0008",
+        "component_0014",
+        "component_0015",
+        "component_0016",
+        "component_0017",
+        "component_0021"
+      ],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "4d266163d3a64f5d9c55d799404ed0cd401c16885fe732e0854f14bc7ee24414",
+  "schema_version": 1,
+  "graph_sha256": "ed8838004594c597889e7732b8eaa86c43374bd63d950c65e6a282dc3e5824eb"
+}

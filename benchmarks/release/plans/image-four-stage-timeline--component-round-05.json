@@ -1,0 +1,123 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the PILOT card remains an independently movable surface"],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent PILOT card border"],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the SCALE card remains an independently movable surface"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent SCALE card border"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the DISCOVER card remains an independently movable surface"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent DISCOVER card border"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the green node remains independently movable"],
+      "object_ids": ["component_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent green node ring"],
+      "object_ids": ["component_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the blue node remains independently movable"],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent blue node ring"],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the red node remains independently movable"],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent red node ring"],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the merged PROTOTYPE card remains independently movable"],
+      "object_ids": ["merge_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent PROTOTYPE card border"],
+      "object_ids": ["merge_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["the merged orange node remains independently movable"],
+      "object_ids": ["merge_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed residual is the adjacent orange node ring"],
+      "object_ids": ["merge_0002"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "dd6e431d8165f2cba8dec89204610a3a9ed495ab884505bc194a5aa00dc5620c",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "cc076153a7059acb287f56f82e39ba57108d004ac144d9788c5c8c7fc2bc7d0a",
+  "schema_version": 1
+}

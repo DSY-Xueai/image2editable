@@ -1,0 +1,214 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows one complete independently movable chart bar"],
+      "object_ids": ["component_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows the independent blue legend swatch without raster text"],
+      "object_ids": ["component_0023"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows the independent red legend swatch without raster text"],
+      "object_ids": ["component_0024"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": ["the parent mask is the complete movable line-chart geometry while child proposals duplicate partial line segments and markers"],
+      "object_ids": ["parent_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows a composite full-page duplicate"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows a composite multi-bar duplicate"],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows a composite multi-bar duplicate"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["component-isolation shows raster title backing duplicated by native editable text"],
+      "object_ids": ["component_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed parent owns this partial line duplicate"],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed parent owns this partial line duplicate"],
+      "object_ids": ["component_0013"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed parent owns this partial line duplicate"],
+      "object_ids": ["component_0014"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster label backing"],
+      "object_ids": ["component_0015"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster label backing"],
+      "object_ids": ["component_0016"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0017"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0018"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0019"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0020"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0021"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["native editable text replaces this raster axis-label backing"],
+      "object_ids": ["component_0022"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
+      "object_ids": ["component_0025"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
+      "object_ids": ["component_0026"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
+      "object_ids": ["component_0027"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
+      "object_ids": ["component_0028"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
+      "object_ids": ["component_0029"],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "478324fb65c2a1c34092924cfab46131e36207c8507da6b5bc842c4d98f05851",
+  "schema_version": 1,
+  "graph_sha256": "32d8d38ac2f433987054f290ca7882488d6485e046546161a3f728f939d28df1"
+}

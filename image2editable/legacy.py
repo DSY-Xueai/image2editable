@@ -39,8 +39,11 @@ from image2editable.component_repair import (
     reject_recoverable_component_plan,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
+    _decode_binary_grayscale_png,
     _read_bound_file,
+    _snapshot_directory_chain,
     _validate_presentation_manifest,
+    _write_exclusive,
 )
 from image2editable.inputs import sha256_file
 from image2editable.store import RunStore
@@ -76,6 +79,18 @@ def _source_path(store: RunStore, page_id: str) -> Path:
     return source
 
 
+def _page_ocr_rotation(store: RunStore, page_id: str) -> int:
+    request = store.read_json(Path("pages") / page_id / "page_request.json")
+    validate_schema_version(request)
+    if request.get("source_type") != "pdf":
+        return 0
+    render = request.get("render")
+    rotation = render.get("rotation") if isinstance(render, dict) else None
+    if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+        raise ValueError(f"{page_id}: PDF render rotation is invalid")
+    return rotation
+
+
 def _is_link_or_reparse(status: Any) -> bool:
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return stat.S_ISLNK(status.st_mode) or bool(
@@ -103,27 +118,42 @@ def _validate_directory(
         raise RuntimeError(f"Cleanup path is not a directory: {path}")
 
 
+def _windows_handle_information(
+    kernel32: Any, handle: Any
+) -> tuple[int, int, tuple[int, int]]:
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD), ("creation", wintypes.FILETIME),
+            ("access", wintypes.FILETIME), ("write", wintypes.FILETIME),
+            ("volume", wintypes.DWORD), ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD), ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD),
+        ]
+
+    information = FileInformation()
+    query = kernel32.GetFileInformationByHandle
+    query.argtypes = [wintypes.HANDLE, ctypes.POINTER(FileInformation)]
+    query.restype = wintypes.BOOL
+    if not query(handle, ctypes.byref(information)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    identity = (
+        information.volume,
+        (information.index_high << 32) | information.index_low,
+    )
+    return information.attributes, information.links, identity
+
+
 def _windows_open_bound(
     path: Path,
     expected_identity: tuple[int, int],
     *,
     directory: bool,
+    desired_access: int | None = None,
+    share_mode: int | None = None,
 ) -> tuple[Any, Any, Any]:
     from ctypes import wintypes
-
-    class FileInformation(ctypes.Structure):
-        _fields_ = [
-            ("dwFileAttributes", wintypes.DWORD),
-            ("ftCreationTime", wintypes.FILETIME),
-            ("ftLastAccessTime", wintypes.FILETIME),
-            ("ftLastWriteTime", wintypes.FILETIME),
-            ("dwVolumeSerialNumber", wintypes.DWORD),
-            ("nFileSizeHigh", wintypes.DWORD),
-            ("nFileSizeLow", wintypes.DWORD),
-            ("nNumberOfLinks", wintypes.DWORD),
-            ("nFileIndexHigh", wintypes.DWORD),
-            ("nFileIndexLow", wintypes.DWORD),
-        ]
 
     status = path.lstat()
     if _directory_identity(status) != expected_identity:
@@ -144,20 +174,16 @@ def _windows_open_bound(
         wintypes.HANDLE,
     ]
     create_file.restype = wintypes.HANDLE
-    get_information = kernel32.GetFileInformationByHandle
-    get_information.argtypes = [
-        wintypes.HANDLE,
-        ctypes.POINTER(FileInformation),
-    ]
-    get_information.restype = wintypes.BOOL
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
 
     handle = create_file(
         str(path),
-        0x1 if directory else 0x00010080,
-        0x1 | 0x2,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+        desired_access if desired_access is not None else (
+            0xA1 if directory else 0x00010080
+        ),
+        share_mode if share_mode is not None else 0x1 | 0x2,
         None,
         3,  # OPEN_EXISTING
         (0x02000000 if directory else 0) | 0x00200000,
@@ -167,18 +193,13 @@ def _windows_open_bound(
         raise ctypes.WinError(ctypes.get_last_error())
 
     try:
-        information = FileInformation()
-        if not get_information(handle, ctypes.byref(information)):
-            raise ctypes.WinError(ctypes.get_last_error())
-        attributes = information.dwFileAttributes
+        attributes, _, handle_identity = _windows_handle_information(
+            kernel32, handle
+        )
         if bool(attributes & 0x10) != directory or attributes & 0x400:
             raise RuntimeError(
                 f"Cleanup handle has unexpected attributes: {path}"
             )
-        handle_identity = (
-            information.dwVolumeSerialNumber,
-            (information.nFileIndexHigh << 32) | information.nFileIndexLow,
-        )
         path_identity = (status.st_dev & 0xFFFFFFFF, status.st_ino)
         if handle_identity != path_identity:
             raise RuntimeError(f"Directory changed while opening cleanup handle: {path}")
@@ -391,6 +412,74 @@ def _rename_directory_exclusive(
     raise OSError(error_number, os.strerror(error_number), str(staging), str(final))
 
 
+def _rename_file_exclusive_at(
+    source_fd: int,
+    source_name: str,
+    destination_fd: int,
+    destination_name: str,
+) -> None:
+    if os.name == "nt":
+        raise RuntimeError("exclusive publication is unavailable")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux"):
+        symbol, exclusive_flag = "renameat2", 1
+    elif sys.platform == "darwin":
+        symbol, exclusive_flag = "renameatx_np", 4
+    else:
+        raise RuntimeError("exclusive publication is unavailable")
+    rename = getattr(libc, symbol, None)
+    if rename is None:
+        raise RuntimeError("exclusive publication is unavailable")
+    rename.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    )
+    result = rename(
+        source_fd, os.fsencode(source_name), destination_fd,
+        os.fsencode(destination_name), exclusive_flag,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise RuntimeError("publication destination already exists")
+    raise OSError(error_number, os.strerror(error_number))
+
+
+def _rename_windows_staging(source_handle: Any, parent_handle: Any, final_name: str) -> None:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if _windows_handle_information(kernel32, source_handle)[1] != 1:
+        raise RuntimeError("background responsibility staging has unsafe links")
+
+    class RenameInformation(ctypes.Structure):
+        _fields_ = [
+            ("replace", wintypes.BOOL),
+            ("root", wintypes.HANDLE),
+            ("name_length", wintypes.DWORD),
+            ("name", wintypes.WCHAR * (len(final_name) + 1)),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("status", wintypes.LPVOID), ("information", ctypes.c_size_t)]
+
+    information = RenameInformation()
+    information.root = parent_handle
+    information.name_length = len(final_name.encode("utf-16-le"))
+    information.name = final_name
+    rename = ctypes.WinDLL("ntdll").NtSetInformationFile
+    rename.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.LPVOID, wintypes.ULONG, ctypes.c_int]
+    rename.restype = ctypes.c_long
+    status = rename(
+        wintypes.HANDLE(source_handle), ctypes.byref(IoStatusBlock()), ctypes.byref(information),
+        ctypes.sizeof(information), 10,
+    )
+    if status:
+        if status & 0xFFFFFFFF == 0xC0000035:
+            raise RuntimeError("publication destination already exists")
+        raise OSError(f"background responsibility rename failed: {status:#x}")
+
+
 def _prepare_work_root(
     store: RunStore,
 ) -> tuple[Path, tuple[int, int]]:
@@ -518,11 +607,14 @@ def initialize_legacy_page(
             reconstruction / "initial",
             lang=manifest["options"]["lang"],
             resource_isolation=True,
+            ocr_rotation=_page_ocr_rotation(store, page_id),
         )
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
     )
-    request_path = build_component_agent_request(session, repair_round=1)
+    request_path = build_component_agent_request(
+        session, repair_round=1, _lease=_lease,
+    )
     initialize_component_repair_state(
         store, page_id, request_path=request_path,
         initial_component_count=prepared["initial_component_count"],
@@ -725,13 +817,19 @@ def _component_text_records(items: object, page_size: tuple[int, int]) -> list[d
         ):
             raise ValueError("component text id is invalid")
         used_ids.add(component_id)
+        rotation = item.get("rotation", 0)
+        if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+            raise ValueError("component text rotation is invalid")
+        normalized_item = {
+            "id": component_id,
+            "text": item["text"],
+            "box": [left, top, right, bottom],
+        }
+        if rotation:
+            normalized_item["rotation"] = rotation
         normalized.append({
             "raw": item,
-            "normalized": {
-                "id": component_id,
-                "text": item["text"],
-                "box": [left, top, right, bottom],
-            },
+            "normalized": normalized_item,
         })
     return normalized
 
@@ -806,7 +904,8 @@ def _build_presentation_assets(
             text_mask |= masks[node["id"]]
             left, top, right, bottom = node["bbox"]
             text_items.append({
-                "box": [left, top, right - left, bottom - top]
+                "box": [left, top, right - left, bottom - top],
+                "component_id": node["id"],
             })
     if text_mask_path is not None:
         with Image.open(text_mask_path) as image:
@@ -814,10 +913,19 @@ def _build_presentation_assets(
         if text_mask.shape != source.shape[:2]:
             raise ValueError("presentation text mask dimensions differ")
     active_nodes = _active_visual_nodes(graph)
+    text_owners = {
+        text_id: component_index
+        for component_index, node in enumerate(active_nodes)
+        for text_id in node["text_ids"]
+    }
     assigned_masks = _assign_text_regions_to_component_masks(
         [masks[node["id"]] for node in active_nodes],
         text_mask,
         text_items,
+        text_owner_indices=[
+            text_owners.get(item["component_id"])
+            for item in text_items
+        ],
     )
     ownership_masks = resolve_visual_mask_ownership(
         active_nodes, assigned_masks
@@ -828,7 +936,7 @@ def _build_presentation_assets(
     }
 
     final_dir = output_dir / "presentation-assets"
-    staging = output_dir / f".presentation-assets.tmp-{uuid.uuid4().hex}"
+    staging = output_dir / f".pa-tmp-{uuid.uuid4().hex}"
     staging.mkdir()
     staging_identity = _directory_identity(staging.lstat())
     try:
@@ -1379,6 +1487,7 @@ def _rebuild_canvas_background(
     graph_dir: Path,
     text_mask_path: Path,
     output_path: Path,
+    repair_all_active: bool = True,
 ) -> Path:
     import cv2
     import numpy as np
@@ -1403,7 +1512,7 @@ def _rebuild_canvas_background(
     graph_root = graph_dir.resolve()
     by_id = {node["id"]: node for node in graph["nodes"]}
     masks_by_id = {}
-    claimed_visual = np.zeros(text_repair.shape, dtype=bool)
+    repairable_visual = np.zeros(text_repair.shape, dtype=bool)
     for object_id, node in by_id.items():
         mask_path = (graph_dir / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(graph_root):
@@ -1415,10 +1524,49 @@ def _rebuild_canvas_background(
         if mask.shape != text_repair.shape:
             raise ValueError("background rebuild mask dimensions differ")
         masks_by_id[object_id] = mask
-        claimed_visual |= mask
-    repair = cv2.dilate(
-        claimed_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
-    ) > 0
+    edge_margin = max(1, round(min(text_repair.shape) * 0.01))
+    inactive_page_surfaces = {
+        object_id
+        for object_id, node in by_id.items()
+        if node["kind"] == "parent"
+        and node["state"] == "inactive"
+        and node["parent_id"] is None
+        and node["z_index"] == 0
+        and float(masks_by_id[object_id].mean()) >= 0.75
+        and node["bbox"][0] <= edge_margin
+        and node["bbox"][1] <= edge_margin
+        and node["bbox"][2] >= text_repair.shape[1] - edge_margin
+        and node["bbox"][3] >= text_repair.shape[0] - edge_margin
+    }
+    for object_id, node in by_id.items():
+        ancestor_id = node["parent_id"]
+        belongs_to_page_surface = object_id in inactive_page_surfaces
+        while (
+            node["state"] == "inactive"
+            and ancestor_id is not None
+            and ancestor_id in by_id
+        ):
+            if ancestor_id in inactive_page_surfaces:
+                belongs_to_page_surface = True
+                break
+            ancestor_id = by_id[ancestor_id]["parent_id"]
+        if not belongs_to_page_surface:
+            repairable_visual |= masks_by_id[object_id]
+    repair = (
+        cv2.dilate(
+            repairable_visual.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+        ) > 0
+        if repair_all_active
+        else np.zeros(text_repair.shape, dtype=bool)
+    )
+    restore_repair = np.zeros(text_repair.shape, dtype=bool)
+    attached_text_ids = {
+        text_id
+        for node in by_id.values()
+        if node["kind"] != "text"
+        and node["state"] in {"pending", "pending_gate", "frozen"}
+        for text_id in node["text_ids"]
+    }
     for object_ids, margin_ratio in repair_requests:
         if not 0 < margin_ratio <= 0.1:
             raise ValueError("background rebuild margin_ratio is invalid")
@@ -1426,15 +1574,27 @@ def _rebuild_canvas_background(
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
         )
-        request_mask = np.zeros(text_repair.shape, dtype=bool)
         for object_id in object_ids:
-            request_mask |= masks_by_id[object_id]
-        repair |= cv2.dilate(request_mask.astype(np.uint8), kernel) > 0
+            request_mask = cv2.dilate(
+                masks_by_id[object_id].astype(np.uint8), kernel
+            ) > 0
+            if (
+                restored is not None
+                and by_id[object_id]["kind"] == "text"
+                and object_id not in attached_text_ids
+            ):
+                restore_repair |= request_mask
+            else:
+                repair |= request_mask
     if restored is None:
         repair |= text_repair
     rebuilt = current.copy()
     if restored is not None:
-        rebuilt[~claimed_visual] = restored[~claimed_visual]
+        restore_canvas = source.copy()
+        restore_canvas[text_repair] = restored[text_repair]
+        rebuilt[~repairable_visual] = restore_canvas[~repairable_visual]
+        rebuilt[restore_repair] = restored[restore_repair]
+        repair &= ~restore_repair
     if np.any(repair):
         from scripts.component_underlay import _choose_visual_fill
 
@@ -1466,6 +1626,8 @@ def _assign_text_regions_to_component_masks(
     component_masks: list[Any],
     text_mask: Any,
     text_items: list[dict] | None = None,
+    *,
+    text_owner_indices: list[int | None] | None = None,
 ) -> list[Any]:
     import cv2
     import numpy as np
@@ -1476,10 +1638,20 @@ def _assign_text_regions_to_component_masks(
         return assigned
     if any(mask.shape != text.shape for mask in assigned):
         raise ValueError("component text ownership mask dimensions differ")
+    if text_owner_indices is not None and (
+        text_items is None
+        or len(text_owner_indices) != len(text_items)
+        or any(
+            value is not None
+            and (type(value) is not int or not 0 <= value < len(assigned))
+            for value in text_owner_indices
+        )
+    ):
+        raise ValueError("component text owner indices are invalid")
     if text_items:
         regions = []
         height, width = text.shape
-        for item in text_items:
+        for item_index, item in enumerate(text_items):
             box = item.get("box") if isinstance(item, dict) else None
             if not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
@@ -1492,16 +1664,24 @@ def _assign_text_regions_to_component_masks(
             ownership_region[y1:y2, x1:x2] = text[y1:y2, x1:x2]
             if np.any(ownership_region):
                 halo = _text_item_halo_px(box_height)
+                box_region = np.zeros(text.shape, dtype=bool)
+                box_region[y1:y2, x1:x2] = True
                 fill_region = np.zeros(text.shape, dtype=bool)
                 fill_region[
                     max(0, y1 - halo):min(height, y2 + halo),
                     max(0, x1 - halo):min(width, x2 + halo),
                 ] = True
-                regions.append((ownership_region, fill_region))
+                regions.append((
+                    ownership_region,
+                    fill_region,
+                    box_region,
+                    None if text_owner_indices is None else text_owner_indices[item_index],
+                ))
     else:
         count, labels = cv2.connectedComponents(text.astype(np.uint8), 8)
         regions = [
-            (labels == label, labels == label) for label in range(1, count)
+            (labels == label, labels == label, labels == label, None)
+            for label in range(1, count)
         ]
     mask_boxes = []
     silhouette_masks = []
@@ -1519,34 +1699,62 @@ def _assign_text_regions_to_component_masks(
         if contours:
             cv2.drawContours(silhouette, contours, -1, 1, thickness=cv2.FILLED)
         silhouette_masks.append(silhouette.astype(bool))
-    for ownership_region, fill_region in regions:
+    for ownership_region, fill_region, box_region, explicit_owner in regions:
         pixels = int(np.count_nonzero(ownership_region))
         overlaps = [
             int(np.count_nonzero(mask & ownership_region)) for mask in assigned
         ]
-        best = max(range(len(assigned)), key=overlaps.__getitem__)
+        best = (
+            explicit_owner
+            if explicit_owner is not None
+            else max(range(len(assigned)), key=overlaps.__getitem__)
+        )
         overlap_ratio = overlaps[best] / max(pixels, 1)
         backing_ratio = 0.0
-        if text_items and overlap_ratio < 0.2:
+        if explicit_owner is None and text_items and overlap_ratio < 0.2:
             fill_pixels = int(np.count_nonzero(fill_region))
             backing = [
                 int(np.count_nonzero(mask & fill_region)) for mask in assigned
             ]
             best = max(range(len(assigned)), key=backing.__getitem__)
             backing_ratio = backing[best] / max(fill_pixels, 1)
+        box_nontext = box_region & ~text
+        box_pixels = int(np.count_nonzero(box_nontext))
+        box_backing = [
+            int(np.count_nonzero(mask & box_nontext)) for mask in assigned
+        ]
+        if explicit_owner is None and box_pixels:
+            box_best = max(range(len(assigned)), key=box_backing.__getitem__)
+            if box_backing[box_best] > box_backing[best]:
+                best = box_best
+                overlap_ratio = overlaps[best] / max(pixels, 1)
+                backing_ratio = 0.0
+        box_backing_ratio = box_backing[best] / max(box_pixels, 1)
         box = mask_boxes[best]
         contained_ratio = 0.0
+        box_contained_ratio = 0.0
         if box is not None:
             left, top, right, bottom = box
             contained_ratio = np.count_nonzero(
                 fill_region[top:bottom, left:right]
             ) / max(int(np.count_nonzero(fill_region)), 1)
-        owns_text_region = (
+            box_contained_ratio = np.count_nonzero(
+                box_region[top:bottom, left:right]
+            ) / max(int(np.count_nonzero(box_region)), 1)
+        dense_box_owner = bool(text_items) and (
+            box_backing_ratio >= 0.5
+            and box_contained_ratio >= 0.8
+        )
+        owns_text_region = explicit_owner is not None or (
             overlap_ratio >= (0.2 if text_items else 0.45)
             or (bool(text_items) and backing_ratio >= 0.5)
+            or dense_box_owner
         )
         if owns_text_region and (
-            not text_items or contained_ratio >= 0.8
+            explicit_owner is not None
+            or not text_items
+            or contained_ratio >= 0.8
+            or dense_box_owner
         ):
             for index, mask in enumerate(assigned):
                 if index != best:
@@ -1559,6 +1767,8 @@ def _assign_text_regions_to_component_masks(
                 silhouette_masks[best]
                 if text_items else np.ones(text.shape, dtype=bool)
             )
+            if dense_box_owner:
+                support |= box_region
             assigned[best] |= fill_region & support & ~occupied_by_others
     return assigned
 
@@ -1611,7 +1821,30 @@ def _refine_quality_text_clean(
         text_items,
     )
     refined = cleaned.copy()
-    refined[repair_mask] = candidate[repair_mask]
+    local_background = cv2.inpaint(
+        cleaned,
+        repair_mask.astype(np.uint8) * 255,
+        3,
+        cv2.INPAINT_TELEA,
+    )
+    cleaned_error = np.sum(
+        np.abs(cleaned.astype(np.int16) - local_background.astype(np.int16)),
+        axis=2,
+    )
+    candidate_error = np.sum(
+        np.abs(candidate.astype(np.int16) - local_background.astype(np.int16)),
+        axis=2,
+    )
+    unchanged_from_source = np.all(cleaned == source, axis=2)
+    source_candidate_delta = np.max(
+        np.abs(source.astype(np.int16) - candidate.astype(np.int16)),
+        axis=2,
+    )
+    use_candidate = repair_mask & (
+        (unchanged_from_source & (source_candidate_delta > 32))
+        | (~unchanged_from_source & (candidate_error < cleaned_error))
+    )
+    refined[use_candidate] = candidate[use_candidate]
 
     short_side = min(source.shape[:2])
     line_length = max(9, min(31, round(short_side * 0.03)))
@@ -1696,8 +1929,22 @@ def _effective_text_context(
     }
     frozen_mask = np.zeros(original_mask.shape, dtype=bool)
     suppressed_mask = np.zeros(original_mask.shape, dtype=bool)
+    active_visual_mask = np.zeros(original_mask.shape, dtype=bool)
     frozen_ids = set()
     for node in graph["nodes"]:
+        if (
+            node["kind"] != "text"
+            and node["state"] in {"pending", "pending_gate", "frozen"}
+        ):
+            mask_path = graph_dir / Path(node["mask"])
+            if sha256_file(mask_path) != node["mask_sha256"]:
+                raise ValueError("effective visual graph mask sha256 mismatch")
+            with Image.open(mask_path) as image:
+                node_mask = np.asarray(image.convert("L")) > 0
+            if node_mask.shape != original_mask.shape:
+                raise ValueError("effective visual graph mask dimensions differ")
+            active_visual_mask |= node_mask
+            continue
         if node["kind"] != "text" or node["id"] not in records_by_id:
             continue
         mask_path = graph_dir / Path(node["mask"])
@@ -1772,13 +2019,234 @@ def _effective_text_context(
                 ).astype(np.uint8)
                 effective_mask |= repair
     if refine_text_clean and effective_items and np.any(effective_mask):
+        import cv2
+
         effective_clean = _refine_quality_text_clean(
             source, effective_clean, effective_mask, effective_items
         )
+        protected_visual_mask = cv2.dilate(
+            active_visual_mask.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+        ).astype(bool)
+        effective_clean[protected_visual_mask] = cleaned[protected_visual_mask]
         effective_mask = _quality_text_repair_mask(
             effective_mask, effective_items
         )
     return effective_items, effective_mask, effective_clean
+
+
+def _decode_bound_legacy_image(
+    payload: bytes,
+    *,
+    mode: str,
+    expected_size: tuple[int, int] | None = None,
+):
+    import numpy as np
+
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            if expected_size is not None and image.size != expected_size:
+                raise ValueError("legacy image dimensions differ")
+            return np.asarray(image.convert(mode)).copy()
+    except (OSError, ValueError):
+        raise ValueError("legacy image is invalid") from None
+
+
+def _verify_regular_at(
+    parent_fd: int,
+    name: str,
+    identity: tuple[int, int],
+) -> None:
+    status = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(status.st_mode)
+        or status.st_nlink != 1
+        or (status.st_dev, status.st_ino) != identity
+    ):
+        raise RuntimeError("background responsibility artifact changed")
+
+
+def _publish_staging_at(
+    parent_fd: int, staging_name: str, final_name: str, identity: tuple[int, int]
+) -> None:
+    _verify_regular_at(parent_fd, staging_name, identity)
+    _rename_file_exclusive_at(parent_fd, staging_name, parent_fd, final_name)
+
+
+def _publish_background_responsibility_file(
+    target: Path,
+    payload: bytes,
+    root: Path,
+) -> bytes:
+    chain = _snapshot_directory_chain(target.parent, root)
+    staging_name = f".background-responsibility-staging-{uuid.uuid4().hex}.png"
+    if os.name == "nt":
+        kernel32, parent_handle, parent_status = _windows_open_bound(
+            target.parent, chain[-1][1][:2], directory=True
+        )
+        staging = target.with_name(staging_name)
+        source_handle = source_descriptor = locked_parent_handle = None
+        try:
+            identity = _write_exclusive(staging, payload, root)
+            _, source_handle, _ = _windows_open_bound(
+                staging,
+                identity,
+                directory=False,
+                desired_access=0x00010081,
+                share_mode=0x1,
+            )
+            import msvcrt
+
+            source_descriptor = msvcrt.open_osfhandle(
+                source_handle, os.O_RDONLY | os.O_BINARY
+            )
+            source_handle = None
+            opened = os.fstat(source_descriptor)
+            os.lseek(source_descriptor, 0, os.SEEK_SET)
+            read_back = os.read(source_descriptor, len(payload) + 1)
+            stable = os.fstat(source_descriptor)
+            if (
+                read_back != payload
+                or opened.st_nlink != 1
+                or stable.st_nlink != 1
+                or (opened.st_dev, opened.st_ino, stable.st_size)
+                != (*identity, len(payload))
+            ):
+                raise RuntimeError("background responsibility staging changed")
+            bound_handle = msvcrt.get_osfhandle(source_descriptor)
+            _rename_windows_staging(bound_handle, parent_handle, target.name)
+            _, locked_parent_handle, _ = _windows_open_bound(
+                target.parent,
+                chain[-1][1][:2],
+                directory=True,
+                share_mode=0x1,
+            )
+            entries = _windows_entries(
+                kernel32,
+                locked_parent_handle,
+                target.parent,
+                parent_status,
+            )
+            published = [entry for entry in entries if entry[0] == target.name]
+            _, links, final_identity = _windows_handle_information(
+                kernel32, bound_handle
+            )
+            if (
+                len(published) != 1
+                or published[0][2] != identity
+                or links != 1
+                or final_identity != (identity[0] & 0xFFFFFFFF, identity[1])
+            ):
+                raise RuntimeError("background responsibility publication changed")
+            return read_back
+        finally:
+            try:
+                if locked_parent_handle is not None:
+                    _windows_close(kernel32, locked_parent_handle)
+                _windows_close(kernel32, parent_handle)
+            finally:
+                if source_descriptor is not None:
+                    os.close(source_descriptor)
+                elif source_handle is not None:
+                    _windows_close(kernel32, source_handle)
+
+    parent_fd = os.open(
+        target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        opened_parent = os.fstat(parent_fd)
+        if (
+            opened_parent.st_dev,
+            opened_parent.st_ino,
+            opened_parent.st_mode,
+            getattr(opened_parent, "st_file_attributes", 0),
+        ) != chain[-1][1]:
+            raise RuntimeError("background responsibility parent changed")
+        descriptor = os.open(
+            staging_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            identity = opened.st_dev, opened.st_ino
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise RuntimeError("background responsibility staging is unsafe")
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(descriptor, view):]
+            os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            read_back = bytearray()
+            while chunk := os.read(descriptor, len(payload) + 1 - len(read_back)):
+                read_back.extend(chunk)
+                if len(read_back) > len(payload):
+                    break
+            stable = os.fstat(descriptor)
+            if (
+                bytes(read_back) != payload
+                or stable.st_nlink != 1
+                or (stable.st_dev, stable.st_ino, stable.st_size)
+                != (*identity, len(payload))
+            ):
+                raise RuntimeError("background responsibility staging changed")
+            _publish_staging_at(parent_fd, staging_name, target.name, identity)
+            _verify_regular_at(parent_fd, target.name, identity)
+            return bytes(read_back)
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_fd)
+
+
+def _publish_background_responsibility(
+    store: RunStore,
+    output_dir: Path,
+    *,
+    allowed,
+    previous_ref: dict | None,
+    background_rebuilt: bool,
+) -> dict | None:
+    import numpy as np
+
+    if allowed is None:
+        return None
+    next_mask = allowed
+    previous_mask = None
+    if not background_rebuilt:
+        if previous_ref is None:
+            return None
+        _, payload = _load_legacy_ref(store, previous_ref)
+        previous_mask = _decode_binary_grayscale_png(
+            payload,
+            allowed.shape,
+            label="legacy background responsibility",
+        )
+        next_mask = previous_mask & allowed
+    if not np.any(next_mask):
+        return None
+    if float(np.asarray(next_mask, dtype=bool).mean()) > 0.05:
+        return None
+    if previous_mask is not None and np.array_equal(next_mask, previous_mask):
+        return dict(previous_ref)
+    encoded = io.BytesIO()
+    Image.fromarray(next_mask.astype(np.uint8) * 255, mode="L").save(
+        encoded, format="PNG"
+    )
+    payload = encoded.getvalue()
+    target = output_dir / "background-responsibility.png"
+    try:
+        read_back = _publish_background_responsibility_file(
+            target, payload, store.root
+        )
+    except (OSError, RuntimeError):
+        raise ValueError("background responsibility could not be published") from None
+    return {
+        "path": target.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(read_back).hexdigest(),
+    }
 
 
 def _quality_assets(
@@ -1789,6 +2257,8 @@ def _quality_assets(
     output_dir: Path,
     *,
     background_path_override: Path | None = None,
+    previous_quality_refs: dict | None = None,
+    background_rebuilt: bool = False,
     frozen_manifest_path: Path | None = None,
     frozen_component_ids: set[str] | None = None,
 ) -> dict:
@@ -1802,18 +2272,56 @@ def _quality_assets(
     prepared = module.load_component_layers(
         store.root / "pages" / page_id / "reconstruction/initial/prepared_page.json"
     )
+    previous_refs = (
+        previous_quality_refs
+        if isinstance(previous_quality_refs, dict)
+        else {}
+    )
+    previous_responsibility_ref = (
+        previous_refs.get("background_responsibility")
+        if isinstance(previous_refs.get("background_responsibility"), dict)
+        else None
+    )
+    source_ref = previous_refs.get("source")
     source_path = Path(prepared["original_image_path"])
+    source_payload = None
+    if isinstance(source_ref, dict):
+        source_path, source_payload = _load_legacy_ref(store, source_ref)
     text_clean_path = Path(prepared.get("_text_clean_path", source_path))
-    background_path = (
-        Path(prepared["background_original_path"])
-        if background_path_override is None
-        else background_path_override
+    background_payload = None
+    if background_rebuilt:
+        background_path = output_dir / "background-rebuilt.png"
+        background_payload = _read_bound_legacy_file(
+            store,
+            background_path,
+            max_bytes=256 * 1024 * 1024,
+            label="rebuilt background",
+        )
+    elif isinstance(previous_refs.get("background"), dict):
+        background_path, background_payload = _load_legacy_ref(
+            store, previous_refs["background"]
+        )
+    else:
+        background_path = (
+            Path(prepared["background_original_path"])
+            if background_path_override is None
+            else background_path_override
+        )
+    foreground_ref = previous_refs.get("foreground_evidence")
+    compute_responsibility_allowed = (
+        (background_rebuilt or previous_responsibility_ref is not None)
+        and source_payload is not None
+        and background_payload is not None
+        and isinstance(foreground_ref, dict)
     )
     text_mask_path = Path(prepared.get(
         "_text_cleanup_mask_path", prepared["_text_mask_path"]
     ))
-    with Image.open(source_path) as image:
-        source = np.asarray(image.convert("RGB")).copy()
+    if source_payload is None:
+        with Image.open(source_path) as image:
+            source = np.asarray(image.convert("RGB")).copy()
+    else:
+        source = _decode_bound_legacy_image(source_payload, mode="RGB")
     with Image.open(text_clean_path) as image:
         text_clean = np.asarray(image.convert("RGB")).copy()
     with Image.open(text_mask_path) as image:
@@ -1834,8 +2342,23 @@ def _quality_assets(
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
         text_mask_output
     )
+    text_mask = _decode_binary_grayscale_png(
+        _read_bound_legacy_file(
+            store,
+            text_mask_output,
+            max_bytes=max(1024 * 1024, source.shape[0] * source.shape[1] * 2),
+            label="effective text mask",
+        ),
+        source.shape[:2],
+        label="effective text mask",
+    )
     component_nodes = []
     component_masks = []
+    semantic_ownership = (
+        np.zeros(source.shape[:2], dtype=bool)
+        if compute_responsibility_allowed
+        else None
+    )
     for node in graph["nodes"]:
         if node["kind"] == "text" or node["state"] not in {
             "pending", "pending_gate", "frozen"
@@ -1843,11 +2366,22 @@ def _quality_assets(
             continue
         component_nodes.append(node)
         mask_path = graph_dir / Path(node["mask"])
-        if sha256_file(mask_path) != node["mask_sha256"]:
+        mask_payload = _read_bound_legacy_file(
+            store,
+            mask_path,
+            max_bytes=max(1024 * 1024, source.shape[0] * source.shape[1] * 2),
+            label="execution graph mask",
+        )
+        if hashlib.sha256(mask_payload).hexdigest() != node["mask_sha256"]:
             raise ValueError("execution graph mask sha256 mismatch")
-        with Image.open(mask_path) as image:
-            mask = np.asarray(image.convert("L")) > 0
+        mask = _decode_bound_legacy_image(
+            mask_payload,
+            mode="L",
+            expected_size=(source.shape[1], source.shape[0]),
+        ) > 0
         component_masks.append(mask)
+        if semantic_ownership is not None:
+            semantic_ownership |= mask
     contained_parent_pairs = contained_active_parent_pairs(
         component_nodes, component_masks
     )
@@ -1882,8 +2416,18 @@ def _quality_assets(
             ) + "\n",
             encoding="utf-8",
         )
-    with Image.open(background_path) as image:
-        background_image = image.convert("RGB")
+    if background_payload is None:
+        with Image.open(background_path) as image:
+            background_image = image.convert("RGB")
+    else:
+        background_image = Image.fromarray(
+            _decode_bound_legacy_image(
+                background_payload,
+                mode="RGB",
+                expected_size=(source.shape[1], source.shape[0]),
+            ),
+            mode="RGB",
+        )
     try:
         active_nodes = _active_visual_nodes(graph)
         indexed = {node["id"]: index for index, node in enumerate(active_nodes)}
@@ -1895,10 +2439,14 @@ def _quality_assets(
                 ),
             )
         ]
-        reconstructed_image = _composite_presentation_layers(
-            background_image,
-            graph,
-            _load_presentation_assets(
+        presentation_ownership = (
+            np.zeros(source.shape[:2], dtype=bool)
+            if compute_responsibility_allowed
+            else None
+        )
+
+        def presentation_layers():
+            for layer in _load_presentation_assets(
                 run_root=store.root,
                 reconstruction=(
                     store.root / "pages" / page_id / "reconstruction"
@@ -1909,12 +2457,59 @@ def _quality_assets(
                 graph=graph,
                 page_size=background_image.size,
                 component_ids=component_ids,
-            ),
+            ):
+                if presentation_ownership is not None:
+                    presentation_ownership[:] |= layer["ownership_mask"] > 0
+                yield layer
+
+        reconstructed_image = _composite_presentation_layers(
+            background_image,
+            graph,
+            presentation_layers(),
         )
     finally:
         background_image.close()
     reconstructed = np.asarray(reconstructed_image).copy()
     reconstructed_image.close()
+    allowed = None
+    if compute_responsibility_allowed:
+        _, foreground_payload = _load_legacy_ref(store, foreground_ref)
+        foreground = _decode_bound_legacy_image(
+            foreground_payload,
+            mode="L",
+            expected_size=(source.shape[1], source.shape[0]),
+        ) > 0
+        background_pixels = _decode_bound_legacy_image(
+            background_payload,
+            mode="RGB",
+            expected_size=(source.shape[1], source.shape[0]),
+        )
+        from image2editable.component_quality import (
+            _background_responsibility_geometry,
+            calibrate_page,
+            refine_material_foreground,
+        )
+
+        material_foreground = refine_material_foreground(
+            foreground,
+            source,
+            background_pixels,
+            calibrate_page(source, text_mask),
+        )
+        candidate = (
+            material_foreground
+            & ~text_mask
+            & ~(semantic_ownership | presentation_ownership)
+            & np.all(source == background_pixels, axis=2)
+        )
+        allowed = _background_responsibility_geometry(candidate)
+    responsibility_ref = _publish_background_responsibility(
+        store,
+        output_dir,
+        allowed=allowed,
+        previous_ref=previous_responsibility_ref,
+        background_rebuilt=background_rebuilt,
+    )
     assets = {
         "background": output_dir / "background.png",
         "reconstructed": output_dir / "reconstructed.png",
@@ -1922,11 +2517,13 @@ def _quality_assets(
         "native_check": output_dir / "native-check.json",
         "presentation_manifest": presentation_manifest,
     }
-    if prepared.get("_prepared_schema_version", 1) >= 5:
-        assets["foreground_evidence"] = Path(
-            prepared["_foreground_evidence_mask_path"]
-        )
-    shutil.copyfile(background_path, assets["background"])
+    if background_payload is None:
+        shutil.copyfile(background_path, assets["background"])
+    else:
+        try:
+            _write_exclusive(assets["background"], background_payload, store.root)
+        except (OSError, RuntimeError):
+            raise ValueError("legacy background could not be published") from None
     Image.fromarray(reconstructed, mode="RGB").save(assets["reconstructed"])
     Image.fromarray(text_mask.astype(np.uint8) * 255, mode="L").save(
         assets["text_mask"]
@@ -1941,13 +2538,17 @@ def _quality_assets(
         "text_items": effective_items,
         "initial_diagnostics": prepared.get("initial_diagnostics", []),
     }, ensure_ascii=False), encoding="utf-8")
-    return {
-        name: {
+    refs = {}
+    for name, path in assets.items():
+        refs[name] = {
             "path": path.resolve().relative_to(store.root.resolve()).as_posix(),
             "sha256": sha256_file(path),
         }
-        for name, path in assets.items()
-    }
+    if isinstance(foreground_ref, dict) and source_payload is not None:
+        refs["foreground_evidence"] = dict(foreground_ref)
+    if responsibility_ref is not None:
+        refs["background_responsibility"] = responsibility_ref
+    return refs
 
 
 def _record_inference_performance(
@@ -1970,6 +2571,22 @@ def _record_inference_performance(
         _LOGGER.warning("Performance trace recording failed")
 
 
+def _request_evidence_ref(
+    store: RunStore,
+    request_path: Path,
+    record: dict,
+) -> tuple[dict, bytes]:
+    request_dir = request_path.parent.relative_to(store.root).as_posix()
+    if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+        raise ValueError("legacy request evidence reference is invalid")
+    reference = {
+        "path": f"{request_dir}/{record.get('path', '')}",
+        "sha256": record.get("sha256"),
+    }
+    _, payload = _load_legacy_ref(store, reference)
+    return reference, payload
+
+
 def _execute_legacy_round(
     store: RunStore, page_id: str, lease: ExecutionLease,
     *, performance_trace=None,
@@ -1981,28 +2598,76 @@ def _execute_legacy_round(
     state = store.read_json(
         f"pages/{page_id}/reconstruction/component_state.json"
     )
-    request_path = _state_artifact(store, state["current_round"]["request_ref"])
+    request_path, request_payload = _load_legacy_ref(
+        store, state["current_round"]["request_ref"]
+    )
     plan_path = _state_artifact(store, state["current_round"]["plan_ref"])
     graph_path = _state_artifact(store, state["graph_ref"])
-    request = json.loads(request_path.read_text(encoding="utf-8"))
+    request = json.loads(request_payload.decode("utf-8"))
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    source = request_path.parent / Path(request["evidence"]["source.png"]["path"])
+    source_ref, _ = _request_evidence_ref(
+        store, request_path, request["evidence"]["source.png"]
+    )
+    source = _legacy_ref_path(store, source_ref)
+    quality_record = request["evidence"]["quality-report.json"]
+    if (
+        not isinstance(quality_record, dict)
+        or set(quality_record) != {"path", "sha256"}
+        or not isinstance(quality_record["path"], str)
+        or not quality_record["path"]
+        or "\\" in quality_record["path"]
+        or ":" in quality_record["path"]
+        or PurePosixPath(quality_record["path"]).is_absolute()
+        or any(
+            part in {"", ".", ".."}
+            for part in PurePosixPath(quality_record["path"]).parts
+        )
+        or not isinstance(quality_record["sha256"], str)
+        or len(quality_record["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in quality_record["sha256"]
+        )
+    ):
+        raise ValueError("previous component quality reference is invalid")
     quality_evidence = request_path.parent / Path(
-        request["evidence"]["quality-report.json"]["path"]
+        *PurePosixPath(quality_record["path"]).parts
     )
-    previous_quality = json.loads(quality_evidence.read_text(encoding="utf-8"))
-    current_background = None
-    previous_presentation_manifest = request_path.parent / Path(
-        request["evidence"]["presentation-manifest.json"]["path"]
+    quality_payload = _read_bound_legacy_file(
+        store,
+        quality_evidence,
+        max_bytes=4 * 1024 * 1024,
+        label="previous component quality",
     )
+    if hashlib.sha256(quality_payload).hexdigest() != quality_record["sha256"]:
+        raise ValueError("previous component quality sha256 mismatch")
+    previous_quality = json.loads(quality_payload.decode("utf-8"))
+    previous_refs = {}
     if isinstance(previous_quality.get("input_refs"), dict):
-        current_background = _state_artifact(
-            store, previous_quality["input_refs"]["background"]
-        )
-        previous_presentation_manifest = _state_artifact(
-            store, previous_quality["input_refs"]["presentation_manifest"]
-        )
+        previous_refs = dict(previous_quality["input_refs"])
+    else:
+        for evidence_name, ref_name in (
+            ("background.png", "background"),
+            ("unexplained-mask.png", "foreground_evidence"),
+            ("presentation-manifest.json", "presentation_manifest"),
+        ):
+            record = request["evidence"].get(evidence_name)
+            if isinstance(record, dict):
+                previous_refs[ref_name] = _request_evidence_ref(
+                    store, request_path, record
+                )[0]
+    previous_refs["source"] = source_ref
+    current_background = (
+        _state_artifact(store, previous_refs["background"])
+        if isinstance(previous_refs.get("background"), dict)
+        else None
+    )
+    previous_presentation_manifest = (
+        _state_artifact(store, previous_refs["presentation_manifest"])
+        if isinstance(previous_refs.get("presentation_manifest"), dict)
+        else None
+    )
     projected_nodes = len(graph["nodes"])
     for action in plan["actions"]:
         if action["action"] == "split":
@@ -2062,13 +2727,14 @@ def _execute_legacy_round(
             pixels, graph, plan["actions"], sam_batch_runner=sam_batch_runner,
             input_dir=graph_path.parent, output_dir=output_dir,
         )
-    except RecoverableComponentPlanError:
+    except RecoverableComponentPlanError as error:
         reject_recoverable_component_plan(
             store,
             page_id,
             repair_round=state["repair_round"],
             request_ref=state["current_round"]["request_ref"],
             plan_ref=state["current_round"]["plan_ref"],
+            reason=error.reason,
             _lease=lease,
         )
         return True
@@ -2110,7 +2776,7 @@ def _execute_legacy_round(
         Image.fromarray(effective_text_clean, mode="RGB").save(
             effective_text_clean_path
         )
-        current_background = _rebuild_canvas_background(
+        _rebuild_canvas_background(
             source_path=source,
             current_background_path=(
                 current_background
@@ -2123,10 +2789,16 @@ def _execute_legacy_round(
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
             output_path=output_dir / "background-rebuilt.png",
+            repair_all_active=(
+                current_background is None
+                or sha256_file(current_background)
+                == sha256_file(Path(prepared["background_original_path"]))
+            ),
         )
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
-        background_path_override=current_background,
+        previous_quality_refs=previous_refs,
+        background_rebuilt=bool(rebuild_actions),
         frozen_manifest_path=previous_presentation_manifest,
         frozen_component_ids=set(state["frozen"]),
     )
@@ -2239,7 +2911,7 @@ def _publish_next_legacy_request(
         "reconstruction_dir": reconstruction, "evidence": evidence,
     }
     request_path = build_component_agent_request(
-        session, repair_round=repair_round
+        session, repair_round=repair_round, _lease=lease,
     )
     record_next_component_request(
         store, page_id, request_path=request_path, _lease=lease
@@ -2301,33 +2973,52 @@ def _execute_legacy_parent_fallback(
         json.dumps(next_graph, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    quality_options = {}
+    quality_options = {"background_rebuilt": False}
     quality_ref = state["current_round"].get("quality_ref")
-    previous_quality_path = (
-        _state_artifact(store, quality_ref)
-        if isinstance(quality_ref, dict)
-        else graph_path.with_name("quality-report.json")
-    )
-    if previous_quality_path.is_file():
-        previous_quality = json.loads(_read_bound_file(
-            previous_quality_path,
-            store.root,
-            max_bytes=4 * 1024 * 1024,
-            label="previous component quality",
-        ).decode("utf-8"))
-        previous_refs = previous_quality["input_refs"]
-        if isinstance(previous_refs.get("background"), dict):
-            quality_options["background_path_override"] = _state_artifact(
-                store, previous_refs["background"]
+    trusted_quality = isinstance(quality_ref, dict)
+    if trusted_quality:
+        previous_quality_payload = _load_legacy_ref(
+            store, quality_ref, max_bytes=4 * 1024 * 1024
+        )[1]
+    else:
+        previous_quality_path = graph_path.with_name("quality-report.json")
+        previous_quality_payload = (
+            _read_bound_legacy_file(
+                store,
+                previous_quality_path,
+                max_bytes=4 * 1024 * 1024,
+                label="previous component quality",
             )
-        frozen_ids = set(state["frozen"])
-        if frozen_ids and isinstance(
-            previous_refs.get("presentation_manifest"), dict
+            if previous_quality_path.is_file()
+            else None
+        )
+    trusted_refs = {}
+    if trusted_quality and previous_quality_payload is not None:
+        previous_quality = json.loads(previous_quality_payload.decode("utf-8"))
+        trusted_refs.update(previous_quality["input_refs"])
+    request_ref = state["current_round"].get("request_ref")
+    if isinstance(request_ref, dict):
+        request_path, request_payload = _load_legacy_ref(store, request_ref)
+        request = json.loads(request_payload.decode("utf-8"))
+        for evidence_name, ref_name in (
+            ("source.png", "source"),
+            ("unexplained-mask.png", "foreground_evidence"),
+            ("background.png", "background"),
+            ("presentation-manifest.json", "presentation_manifest"),
         ):
-            quality_options["frozen_manifest_path"] = _state_artifact(
-                store, previous_refs["presentation_manifest"]
-            )
-            quality_options["frozen_component_ids"] = frozen_ids
+            record = request["evidence"].get(evidence_name)
+            if ref_name not in trusted_refs and isinstance(record, dict):
+                trusted_refs[ref_name] = _request_evidence_ref(
+                    store, request_path, record
+                )[0]
+    if trusted_refs:
+        quality_options["previous_quality_refs"] = trusted_refs
+    frozen_ids = set(state["frozen"])
+    if frozen_ids and isinstance(trusted_refs.get("presentation_manifest"), dict):
+        quality_options["frozen_manifest_path"] = _state_artifact(
+            store, trusted_refs["presentation_manifest"]
+        )
+        quality_options["frozen_component_ids"] = frozen_ids
     refs = _quality_assets(
         store, page_id, next_graph, output_dir, output_dir,
         **quality_options,
@@ -2576,12 +3267,35 @@ def _record_legacy_delivery(
         )
 
 
-def _load_legacy_ref(store: RunStore, reference: dict) -> tuple[Path, bytes]:
+def _read_bound_legacy_file(
+    store: RunStore,
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> bytes:
+    try:
+        return _read_bound_file(
+            path,
+            store.root,
+            max_bytes=max_bytes,
+            label=label,
+        )
+    except (OSError, RuntimeError):
+        raise ValueError("legacy artifact could not be read") from None
+
+
+def _load_legacy_ref(
+    store: RunStore,
+    reference: dict,
+    *,
+    max_bytes: int = 256 * 1024 * 1024,
+) -> tuple[Path, bytes]:
     path = _legacy_ref_path(store, reference)
-    payload = _read_bound_file(
+    payload = _read_bound_legacy_file(
+        store,
         path,
-        store.root,
-        max_bytes=256 * 1024 * 1024,
+        max_bytes=max_bytes,
         label="legacy artifact",
     )
     if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
@@ -2602,10 +3316,27 @@ def _legacy_ref_path(store: RunStore, reference: dict) -> Path:
         )
     ):
         raise ValueError("legacy artifact reference is invalid")
-    path = (store.root / Path(reference["path"])).resolve()
-    if not path.is_relative_to(store.root.resolve()):
-        raise ValueError("legacy artifact reference escapes Run directory")
-    return path
+    raw_path = reference["path"]
+    parts = raw_path.split("/")
+    windows_devices = {"CON", "PRN", "AUX", "NUL", "CLOCK$"} | {
+        f"{prefix}{suffix}"
+        for prefix in ("COM", "LPT")
+        for suffix in (*"123456789", "¹", "²", "³")
+    }
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or ":" in raw_path
+        or any(
+            not part
+            or part in {".", ".."}
+            or part[-1] in {".", " "}
+            or part.split(".", 1)[0].rstrip(" ").upper() in windows_devices
+            for part in parts
+        )
+    ):
+        raise ValueError("legacy artifact reference is invalid")
+    return store.root.joinpath(*parts)
 
 
 def _accepted_reconstruction_inputs(

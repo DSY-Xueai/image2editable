@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "773f1bab0bb13624226433081f0f1e448657ce2017cec1bdeda2313a6ed1ef3f",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "This non-overlapping third-card partition is nonempty; independent ownership removes only the irrelevant parent-coverage constraint."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes its measured halo and duplicate pixels."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "This non-overlapping second-card partition is nonempty; independent ownership removes only the irrelevant parent-coverage constraint."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes its measured halo and duplicate pixels."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "This first divider partition is nonempty and disjoint from the other accepted divider partition."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes the generated underlay around the divider partition."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This second divider partition already passes every component quality check."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The header layer is complete and needs only halo cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes the measured header halo."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The first card skeleton is complete and needs only background cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes alpha halo and duplicate card pixels."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The second card skeleton is complete and needs only background cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes alpha halo and duplicate card pixels."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The third card skeleton is complete and needs only background cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes alpha halo and duplicate card pixels."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The blue circle is complete and needs duplicate-shadow cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes duplicate circle pixels and shadow."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The yellow circle is complete and needs duplicate-shadow cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes duplicate circle pixels and shadow."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The red circle is complete and needs duplicate-shadow cleanup."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild removes duplicate circle pixels and shadow."
+      ]
+    }
+  ],
+  "graph_sha256": "3da2f46992b35ca10568ebb82c413c9044a33506f34860caf58bbb2f7776defe"
+}

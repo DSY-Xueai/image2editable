@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_003",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "a28a036e789f0327319d7a35fc35b08160c7fdb43058cb8edaee336dcdf61dab",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The lower-left circle passes every component check after its crossing native subtitle was explicitly attached in round 3."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The remaining lower-left curved pixels are antialiased boundary fragments of the same circle and are contained by this sole candidate."
+      ]
+    }
+  ],
+  "graph_sha256": "55b9fdab2d7b56beb271b4157286004b56c470c6db1ab297bc988186d8dc6342"
+}

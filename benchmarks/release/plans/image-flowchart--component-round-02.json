@@ -1,0 +1,68 @@
+{
+  "actions": [
+    {
+      "action": "absorb_into_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "parent_0005",
+        "component_0005",
+        "component_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0005",
+        "component_0006",
+        "component_0007",
+        "component_0008",
+        "component_0009",
+        "component_0010"
+      ],
+      "parameters": {
+        "margin_ratio": 0.01
+      }
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "857cc236cfc5aa19499599e35e4233ab0d4e3341d7c0e20685293663e15a704d",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "f6215b68749fc84e9397d0b6db8a33d3761ac2397d6d944ecc68b645db0c8d13",
+  "schema_version": 1
+}

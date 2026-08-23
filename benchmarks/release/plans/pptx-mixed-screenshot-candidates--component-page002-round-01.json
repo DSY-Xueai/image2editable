@@ -1,0 +1,354 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_002",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "ca36339fa03baf2b2f37ea555f343bb043d09b4a99fd493aab5f95d99c468738",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Complete rounded card surface in component isolation."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0018"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0022"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0023"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0024"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0025"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0026"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0027"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0028"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0029"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Large sparse matrix fragment overlaps the twelve complete card surfaces."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Partial multi-card fragment overlaps complete card and icon components."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Partial right-column fragment overlaps complete card and icon components."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Partial two-card fragment overlaps complete card and icon components."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Partial two-card fragment overlaps complete card and icon components."
+      ]
+    }
+  ],
+  "graph_sha256": "b2bbc450e787024447be02bb1845d2159ae39f879ae107fe6f80417d91d010ea"
+}

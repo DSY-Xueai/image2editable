@@ -1,0 +1,218 @@
+name: Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_real_model_smoke:
+        description: Run protected real-model smoke
+        required: true
+        type: boolean
+        default: false
+      run_core_benchmark:
+        description: Run protected v0.2 core 14-page benchmark
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-distribution:
+    name: Build distribution / Python 3.12
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install distribution tools
+        run: python -m pip install build twine
+      - name: Build and check distributions
+        run: |
+          python -m build
+          python -m twine check dist/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: distribution
+          path: dist/*
+          if-no-files-found: error
+
+  installed-package:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }} / installed wheel
+    needs: build-distribution
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/distribution
+      - name: Locate the built wheel
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          wheels = list((Path(os.environ["RUNNER_TEMP"]) / "distribution").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              print(f"WHEEL_PATH={wheels[0]}", file=env_file)
+      - name: Bootstrap pinned build runtime
+        run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
+      - name: Install built wheel
+        run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: installed_package_smoke
+        working-directory: ${{ runner.temp }}
+        run: python "${{ github.workspace }}/scripts/installed_package_smoke.py" --checkout-root "${{ github.workspace }}"
+      - name: Run tests against installed wheel
+        working-directory: ${{ runner.temp }}
+        run: python -m pytest "${{ github.workspace }}/tests" --import-mode=importlib -m "not powerpoint" -q
+
+  real-model-smoke:
+    name: Protected real-model smoke / Ubuntu / Python 3.12
+    if: ${{ inputs.run_real_model_smoke }}
+    environment: real-model-smoke
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require protected model-smoke approval
+        env:
+          IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED: ${{ secrets.IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED }}
+        run: test "${IMAGE2EDITABLE_REAL_MODEL_SMOKE_APPROVED}" = "approved"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/distribution
+      - name: Locate the built wheel
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          wheels = list((Path(os.environ["RUNNER_TEMP"]) / "distribution").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              print(f"WHEEL_PATH={wheels[0]}", file=env_file)
+      - name: Bootstrap pinned build runtime
+        run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
+      - name: Install built wheel
+        run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
+      - name: Verify installed model smoke
+        shell: python
+        run: |
+          from importlib.metadata import distribution
+          import os
+          from pathlib import Path, PurePosixPath
+          relative = PurePosixPath("scripts/runtime_model_smoke.py")
+          package = distribution("image2editable")
+          if relative not in (package.files or []):
+              raise SystemExit("installed runtime model smoke is missing")
+          installed = Path(package.locate_file(relative))
+          checkout = Path(os.environ["GITHUB_WORKSPACE"], *relative.parts)
+          if installed.read_bytes() != checkout.read_bytes():
+              raise SystemExit("installed runtime model smoke differs from checkout")
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
+          python -m pip install --constraint constraints/runtime.txt pytesseract==0.3.13
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: Install runtime models
+        run: image2editable models install runtime --yes
+      - name: Run doctor
+        run: image2editable doctor
+      - name: Run real model smoke
+        working-directory: ${{ runner.temp }}
+        run: python "${{ github.workspace }}/scripts/runtime_model_smoke.py"
+
+  core-benchmark:
+    name: Protected v0.2 core 14-page benchmark / Ubuntu / Python 3.12
+    if: ${{ inputs.run_core_benchmark }}
+    environment: core-benchmark
+    needs: build-distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Require protected core-benchmark approval
+        env:
+          IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED: ${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}
+        run: test "${IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED}" = "approved"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/distribution
+      - name: Locate the built wheel
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          wheels = list((Path(os.environ["RUNNER_TEMP"]) / "distribution").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              print(f"WHEEL_PATH={wheels[0]}", file=env_file)
+      - name: Bootstrap pinned build runtime
+        run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
+      - name: Install built wheel
+        run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tesseract-ocr
+          python -m pip install --constraint constraints/runtime.txt pytesseract==0.3.13
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: Install runtime models
+        run: image2editable models install runtime --yes
+      - name: Run doctor
+        run: image2editable doctor
+      - name: Run v0.2 core 14-page benchmark
+        working-directory: ${{ runner.temp }}
+        run: >-
+          python "${{ github.workspace }}/scripts/release_benchmark.py"
+          --manifest "${{ github.workspace }}/benchmarks/release/core-v0.2-manifest.json"
+          --workspace "${{ runner.temp }}/core-v0.2-benchmark/workspace"
+          --report "${{ runner.temp }}/core-v0.2-benchmark/report.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: core-v0.2-benchmark-report
+          path: ${{ runner.temp }}/core-v0.2-benchmark/report.json
+          if-no-files-found: error

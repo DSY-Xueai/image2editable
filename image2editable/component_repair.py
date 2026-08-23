@@ -11,8 +11,10 @@ from pathlib import Path, PurePosixPath
 import secrets
 import shutil
 import stat
+import struct
 import time
 import uuid
+import zlib
 
 from scripts.initial_diagnostics import validate_initial_diagnostics
 
@@ -53,11 +55,27 @@ ROUND_REVIEW_MAX_WORKING_BYTES = 256 * 1024 * 1024
 ROUND_REVIEW_MAX_ENCODED_BYTES = 64 * 1024 * 1024
 COMPONENT_STATE_NAME = "component_state.json"
 UNRELATED_RESIDUAL_TARGET_REASON = "unrelated_residual_target"
+INVALID_SPLIT_TARGET_REASON = "invalid_split_target"
 COMPONENT_PLAN_CORRECTION_INSTRUCTION = (
     "The previous plan was rejected because an absorb_residual target had no "
     "containment or 3px adjacency with the signed residual. Modify or remove "
     "the related absorb_residual action; do not change request_sha256."
 )
+SPLIT_PLAN_CORRECTION_INSTRUCTION = (
+    "The previous plan was rejected because a split target did not contain "
+    "the exact requested number of connected proposals. Modify or remove "
+    "the related split action; do not change request_sha256."
+)
+COMPONENT_PLAN_CORRECTIONS = {
+    UNRELATED_RESIDUAL_TARGET_REASON: (
+        "absorb_residual", COMPONENT_PLAN_CORRECTION_INSTRUCTION,
+    ),
+    INVALID_SPLIT_TARGET_REASON: ("split", SPLIT_PLAN_CORRECTION_INSTRUCTION),
+}
+COMPONENT_PLAN_CORRECTION_ACTIONS = {
+    instruction: action
+    for action, instruction in COMPONENT_PLAN_CORRECTIONS.values()
+}
 _REPAIRABLE_PAGE_VIOLATIONS = frozenset({
     "background_text_residual",
     "unexplained_visual_residual",
@@ -67,6 +85,9 @@ _LEGACY_QUALITY_INPUT_NAMES = frozenset({
     "presentation_manifest",
 })
 _QUALITY_INPUT_NAMES = _LEGACY_QUALITY_INPUT_NAMES | {"foreground_evidence"}
+_BACKGROUND_QUALITY_INPUT_NAMES = _QUALITY_INPUT_NAMES | {
+    "background_responsibility"
+}
 
 
 class _RoundReviewFallback(Exception):
@@ -301,7 +322,9 @@ def record_local_component_plan(
         )
         state = validate_component_repair_state(store.read_json(relative_state))
         _validate_repair_state_identity(store, state, page_id)
-        if state["provider"] != "local" or state["phase"] not in {
+        if state["provider"] not in {"local", "local-service"} or state[
+            "phase"
+        ] not in {
             "awaiting_plan",
             "plan_recorded",
         }:
@@ -418,8 +441,11 @@ def reject_recoverable_component_plan(
     repair_round: int,
     request_ref: dict,
     plan_ref: dict,
+    reason: str = UNRELATED_RESIDUAL_TARGET_REASON,
     _lease: ExecutionLease | None = None,
 ) -> dict:
+    if reason not in COMPONENT_PLAN_CORRECTIONS:
+        raise ValueError("Recoverable component plan rejection reason is invalid")
     if _lease is not None:
         _require_held_execution_lease(store, _lease)
     lease = nullcontext() if _lease is not None else ExecutionLease(
@@ -442,14 +468,50 @@ def reject_recoverable_component_plan(
         ):
             raise RuntimeError("Recoverable component plan rejection is stale")
         _load_state_artifact(store.root, request_ref)
-        _load_state_artifact(store.root, plan_ref)
+        plan_payload = _load_state_artifact(store.root, plan_ref)
+        rejected_action = COMPONENT_PLAN_CORRECTIONS[reason][0]
+        forbidden_action_pairs = _plan_action_pairs(
+            plan_payload, rejected_action
+        )
+        reconstruction = store.root / "pages" / page_id / "reconstruction"
+        if "-retry-" in PurePosixPath(plan_ref["path"]).name:
+            prior_payload = _read_bound_file(
+                reconstruction / (
+                    f"component-plan-rejection-{state['revision'] - 1:08d}.json"
+                ),
+                store.root,
+                max_bytes=MARKER_JSON_LIMIT,
+                label="prior component plan rejection",
+            )
+            prior = _load_rejection_json(prior_payload)
+            if (
+                set(prior) not in ({
+                    "schema_version", "page_id", "repair_round", "request_ref",
+                    "rejected_plan_ref", "reason",
+                }, {
+                    "schema_version", "page_id", "repair_round", "request_ref",
+                    "rejected_plan_ref", "reason", "forbidden_action_pairs",
+                })
+                or prior.get("schema_version") != 1
+                or prior.get("page_id") != page_id
+                or prior.get("repair_round") != repair_round
+                or prior.get("request_ref") != request_ref
+                or prior.get("reason") not in COMPONENT_PLAN_CORRECTIONS
+                or not isinstance(prior.get("rejected_plan_ref"), dict)
+                or set(prior["rejected_plan_ref"]) != {"path", "sha256"}
+            ):
+                raise RuntimeError("Prior component plan rejection binding is invalid")
+            forbidden_action_pairs = _merge_action_pairs(
+                _rejection_action_pairs(store, prior), forbidden_action_pairs
+            )
         rejection = {
             "schema_version": 1,
             "page_id": page_id,
             "repair_round": repair_round,
             "request_ref": request_ref,
             "rejected_plan_ref": plan_ref,
-            "reason": UNRELATED_RESIDUAL_TARGET_REASON,
+            "reason": reason,
+            "forbidden_action_pairs": forbidden_action_pairs,
         }
         rejection_payload = json.dumps(
             rejection,
@@ -458,17 +520,24 @@ def reject_recoverable_component_plan(
             sort_keys=True,
         ).encode("utf-8") + b"\n"
         rejection_revision = state["revision"] + 1
-        reconstruction = store.root / "pages" / page_id / "reconstruction"
         rejection_path = reconstruction / (
             f"component-plan-rejection-{rejection_revision:08d}.json"
         )
         if rejection_path.exists() or rejection_path.is_symlink():
-            if _read_bound_file(
+            existing = _read_bound_file(
                 rejection_path,
                 store.root,
                 max_bytes=MARKER_JSON_LIMIT,
                 label="component plan rejection",
-            ) != rejection_payload:
+            )
+            legacy_payload = json.dumps(
+                {key: value for key, value in rejection.items()
+                 if key != "forbidden_action_pairs"},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8") + b"\n"
+            if existing not in {rejection_payload, legacy_payload}:
                 raise RuntimeError(
                     "A different component plan rejection is already recorded"
                 )
@@ -526,22 +595,25 @@ def load_component_plan_correction_context(
         raise RuntimeError("Component plan rejection JSON is invalid") from error
     if (
         not isinstance(rejection, dict)
-        or set(rejection) != {
+        or set(rejection) not in ({
             "schema_version", "page_id", "repair_round", "request_ref",
             "rejected_plan_ref", "reason",
-        }
+        }, {
+            "schema_version", "page_id", "repair_round", "request_ref",
+            "rejected_plan_ref", "reason", "forbidden_action_pairs",
+        })
         or rejection["schema_version"] != 1
         or rejection["page_id"] != page_id
         or rejection["repair_round"] != state["repair_round"]
         or rejection["request_ref"] != request_ref
-        or rejection["reason"] != UNRELATED_RESIDUAL_TARGET_REASON
+        or rejection["reason"] not in COMPONENT_PLAN_CORRECTIONS
         or not isinstance(rejection["rejected_plan_ref"], dict)
         or set(rejection["rejected_plan_ref"]) != {"path", "sha256"}
     ):
         raise RuntimeError("Component plan rejection binding is invalid")
     plan_ref = rejection["rejected_plan_ref"]
     request_sha256 = request_ref["sha256"]
-    if state["provider"] == "local":
+    if state["provider"] in {"local", "local-service"}:
         base_path = (
             f"pages/{page_id}/reconstruction/local-component-plan-"
             f"{state['repair_round']:02d}-{request_sha256}"
@@ -551,11 +623,25 @@ def load_component_plan_correction_context(
             f"host-component-plan-{page_id}-"
             f"{state['repair_round']:02d}-{request_sha256}"
         )
+    retry_paths = [base_path]
+    if state["provider"] == "host":
+        retry_paths.insert(
+            0,
+            f"host-component-plan-{page_id}-{state['repair_round']:02d}",
+        )
     plan_path = plan_ref["path"]
     if plan_path == f"{base_path}.json":
         retry_prefix = None
-    elif plan_path.startswith(f"{base_path}-retry-") and plan_path.endswith(".json"):
-        retry_prefix = plan_path[len(base_path) + len("-retry-"):-5]
+    elif plan_path.endswith(".json") and any(
+        plan_path.startswith(f"{candidate}-retry-")
+        for candidate in retry_paths
+    ):
+        retry_path = next(
+            candidate
+            for candidate in retry_paths
+            if plan_path.startswith(f"{candidate}-retry-")
+        )
+        retry_prefix = plan_path[len(retry_path) + len("-retry-"):-5]
         if (
             len(retry_prefix) != 12
             or any(character not in "0123456789abcdef" for character in retry_prefix)
@@ -571,15 +657,92 @@ def load_component_plan_correction_context(
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("Rejected component plan JSON is invalid") from error
     validate_component_plan(rejected_plan, request=request, graph=graph)
+    rejected_action, instruction = COMPONENT_PLAN_CORRECTIONS[rejection["reason"]]
     if not any(
-        action["action"] == "absorb_residual"
+        action["action"] == rejected_action
         for action in rejected_plan["actions"]
     ):
-        raise RuntimeError("Rejected component plan has no absorb_residual action")
+        raise RuntimeError("Rejected component plan lacks its rejected action")
     return {
-        "instruction": COMPONENT_PLAN_CORRECTION_INSTRUCTION,
+        "instruction": instruction,
         "rejected_plan": rejected_plan,
+        "forbidden_action_pairs": _rejection_action_pairs(store, rejection),
     }
+
+
+def _load_rejection_json(payload: bytes) -> dict:
+    try:
+        rejection = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Component plan rejection JSON is invalid") from error
+    if not isinstance(rejection, dict):
+        raise RuntimeError("Component plan rejection JSON is invalid")
+    return rejection
+
+
+def _plan_action_pairs(payload: bytes, action_name: str) -> list[list[str]]:
+    try:
+        plan = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Rejected component plan JSON is invalid") from error
+    if not isinstance(plan, dict) or not isinstance(plan.get("actions"), list):
+        raise RuntimeError("Rejected component plan JSON is invalid")
+    pairs = [
+        [action_name, object_id]
+        for action in plan["actions"]
+        if isinstance(action, dict) and action.get("action") == action_name
+        for object_id in action.get("object_ids", [])
+        if isinstance(object_id, str)
+    ]
+    if not pairs:
+        raise RuntimeError("Rejected component plan lacks its rejected action")
+    return pairs
+
+
+def _validated_action_pairs(value: object) -> list[list[str]]:
+    if (
+        not isinstance(value, list)
+        or any(
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or pair[0] not in {item[0] for item in COMPONENT_PLAN_CORRECTIONS.values()}
+            or not isinstance(pair[1], str)
+            or not pair[1]
+            for pair in value
+        )
+    ):
+        raise RuntimeError("Component plan rejection pairs are invalid")
+    pairs = [list(pair) for pair in value]
+    if len({tuple(pair) for pair in pairs}) != len(pairs):
+        raise RuntimeError("Component plan rejection pairs are duplicated")
+    return pairs
+
+
+def _rejection_action_pairs(store, rejection: dict) -> list[list[str]]:
+    reason = rejection.get("reason")
+    plan_ref = rejection.get("rejected_plan_ref")
+    if reason not in COMPONENT_PLAN_CORRECTIONS or not isinstance(plan_ref, dict):
+        raise RuntimeError("Component plan rejection binding is invalid")
+    expected = _plan_action_pairs(
+        _load_state_artifact(store.root, plan_ref),
+        COMPONENT_PLAN_CORRECTIONS[reason][0],
+    )
+    if "forbidden_action_pairs" not in rejection:
+        return expected
+    pairs = _validated_action_pairs(rejection["forbidden_action_pairs"])
+    if not {tuple(pair) for pair in expected} <= {tuple(pair) for pair in pairs}:
+        raise RuntimeError("Component plan rejection pairs are incomplete")
+    return pairs
+
+
+def _merge_action_pairs(
+    previous: list[list[str]], current: list[list[str]]
+) -> list[list[str]]:
+    merged = []
+    for pair in [*previous, *current]:
+        if pair not in merged:
+            merged.append(pair)
+    return merged
 
 
 def _require_held_execution_lease(store, lease: ExecutionLease) -> None:
@@ -1621,11 +1784,26 @@ def _previous_component_reports(
     expected_component_ids = quality_evidence.get("expected_component_ids")
     initial_component_count = quality_evidence.get("initial_component_count")
     state_failed_ids = state.get("failed_ids", [])
+    previous_failed_ids = next(
+        (
+            entry.get("failed_ids", [])
+            for entry in reversed(state.get("round_history", []))
+            if isinstance(entry, dict)
+            and entry.get("round") == state["repair_round"] - 1
+        ),
+        [],
+    )
     valid_state_failed_ids = (
         isinstance(state_failed_ids, list)
         and all(type(value) is str for value in state_failed_ids)
+        and isinstance(previous_failed_ids, list)
+        and all(type(value) is str for value in previous_failed_ids)
     )
-    state_failed_id_set = set(state_failed_ids) if valid_state_failed_ids else set()
+    state_failed_id_set = (
+        set(state_failed_ids) | set(previous_failed_ids)
+        if valid_state_failed_ids
+        else set()
+    )
     reopened_pair_ids = (
         _unapproved_contained_parent_ids(quality_evidence)
         if _is_component_pair_list(quality_evidence["contained_parent_pairs"])
@@ -1665,6 +1843,7 @@ def _previous_component_reports(
         or frozenset(quality_evidence["input_refs"]) not in {
             _LEGACY_QUALITY_INPUT_NAMES | {"source"},
             _QUALITY_INPUT_NAMES | {"source"},
+            _BACKGROUND_QUALITY_INPUT_NAMES | {"source"},
         }
         or any(
             not _is_artifact_reference(reference)
@@ -1713,7 +1892,10 @@ def _verify_quality_input_refs(
         if state.get("quality_gate_version", 1) >= 2
         else _LEGACY_QUALITY_INPUT_NAMES
     )
-    if not isinstance(refs, dict) or frozenset(refs) != expected_names:
+    allowed_names = {expected_names}
+    if expected_names == _QUALITY_INPUT_NAMES:
+        allowed_names.add(_BACKGROUND_QUALITY_INPUT_NAMES)
+    if not isinstance(refs, dict) or frozenset(refs) not in allowed_names:
         missing = expected_names - frozenset(refs) if isinstance(refs, dict) else set()
         if "foreground_evidence" in missing:
             raise ValueError("component quality input refs require foreground_evidence")
@@ -1815,9 +1997,25 @@ def _approved_contained_parent_pairs(
 
 
 def _carried_contained_parent_pairs(
-    previous_quality: dict, contained_parent_pairs: set[tuple[str, str]]
+    previous_quality: dict, contained_parent_pairs: set[tuple[str, str]],
+    *, graph: dict | None = None, frozen: dict | None = None,
 ) -> set[tuple[str, str]]:
-    return set()
+    if graph is None or frozen is None:
+        return set()
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    previously_approved = {
+        tuple(pair)
+        for pair in previous_quality.get("approved_contained_parent_pairs", [])
+    }
+    return {
+        pair for pair in contained_parent_pairs & previously_approved
+        if all(
+            component_id in nodes
+            and nodes[component_id]["state"] == "frozen"
+            and nodes[component_id]["mask_sha256"] == frozen.get(component_id)
+            for component_id in pair
+        )
+    }
 
 
 def _unapproved_contained_parent_ids(quality: dict) -> set[str]:
@@ -1872,6 +2070,49 @@ def _unowned_raster_text_check(
     return "pass"
 
 
+def _decode_binary_grayscale_png(
+    payload: bytes,
+    expected_shape: tuple[int, int],
+    *,
+    label: str,
+):
+    import cv2
+    import numpy as np
+
+    invalid = ValueError(f"{label} is invalid")
+    if (
+        len(payload) < 33
+        or payload[:8] != b"\x89PNG\r\n\x1a\n"
+        or payload[8:12] != b"\x00\x00\x00\r"
+        or payload[12:16] != b"IHDR"
+        or zlib.crc32(payload[12:29]) & 0xFFFFFFFF
+        != struct.unpack(">I", payload[29:33])[0]
+    ):
+        raise invalid
+    width, height, bit_depth, color_type, compression, png_filter, interlace = (
+        struct.unpack(">IIBBBBB", payload[16:29])
+    )
+    if (
+        (height, width) != expected_shape
+        or bit_depth != 8
+        or color_type != 0
+        or compression != 0
+        or png_filter != 0
+        or interlace != 0
+    ):
+        raise invalid
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if (
+        image is None
+        or image.ndim != 2
+        or image.dtype != np.uint8
+        or image.shape != expected_shape
+        or np.any((image != 0) & (image != 255))
+    ):
+        raise invalid
+    return image == 255
+
+
 def _recompute_quality_artifact(
     store, state: dict, *, expected_component_ids: list[str],
     quality_input_refs: dict, filename: str,
@@ -1910,6 +2151,10 @@ def _recompute_quality_artifact(
         payloads["foreground_evidence"] = bound_quality_payloads[
             "foreground_evidence"
         ]
+    if "background_responsibility" in bound_quality_payloads:
+        payloads["background_responsibility"] = bound_quality_payloads[
+            "background_responsibility"
+        ]
 
     def decode(name: str, flags: int):
         image = cv2.imdecode(np.frombuffer(payloads[name], dtype=np.uint8), flags)
@@ -1930,6 +2175,13 @@ def _recompute_quality_artifact(
         if "foreground_evidence" in payloads
         else None
     )
+    background_responsibility = None
+    if "background_responsibility" in payloads:
+        background_responsibility = _decode_binary_grayscale_png(
+            payloads["background_responsibility"],
+            source.shape[:2],
+            label="component quality background responsibility",
+        )
     plan = None
     if filename == "component-quality.json":
         input_graph = load_component_agent_graph(request_path)
@@ -1961,7 +2213,8 @@ def _recompute_quality_artifact(
         tuple(pair) for pair in native.get("contained_parent_pairs", [])
     }
     approved_contained_parent_pairs = _carried_contained_parent_pairs(
-        quality_evidence, contained_parent_pairs
+        quality_evidence, contained_parent_pairs,
+        graph=graph, frozen=state["frozen"],
     )
     if plan is not None:
         approved_contained_parent_pairs.update(_approved_contained_parent_pairs(
@@ -1989,6 +2242,7 @@ def _recompute_quality_artifact(
         contained_parent_pairs=contained_parent_pairs,
         approved_contained_parent_pairs=approved_contained_parent_pairs,
         material_foreground=material_foreground,
+        background_responsibility=background_responsibility,
         unexplained_output_path=(
             graph_path.parent / "unexplained-mask.png"
             if material_foreground is not None
@@ -2220,46 +2474,45 @@ def _page_residual_owner_ids(
             trusted_chain=trusted_chain,
             shape=residual.shape,
         )
-        active_nodes.append((node, mask))
+        active_nodes.append((
+            node,
+            mask,
+            cv2.dilate(mask.astype(np.uint8), np.ones((7, 7), dtype=np.uint8))
+            > 0,
+            cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 3),
+            int(np.count_nonzero(mask)),
+        ))
     region_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         residual.astype(np.uint8), 8
     )
     for label in range(1, region_count):
         region = labels == label
-        nearby = cv2.dilate(
-            region.astype(np.uint8), np.ones((9, 9), dtype=np.uint8)
-        ) > 0
-        adjacent = []
-        for node, mask in active_nodes:
-            overlap = int(np.count_nonzero(mask & nearby))
-            minimum_overlap = max(1, round(np.count_nonzero(mask) * 0.0002))
-            if overlap >= minimum_overlap:
-                adjacent.append(node["id"])
-        if adjacent:
-            owners.update(adjacent)
-            continue
         x = int(stats[label, cv2.CC_STAT_LEFT])
         y = int(stats[label, cv2.CC_STAT_TOP])
         width = int(stats[label, cv2.CC_STAT_WIDTH])
         height = int(stats[label, cv2.CC_STAT_HEIGHT])
-        containing = [
-            node for node, _ in active_nodes
-            if node["bbox"][0] <= x
-            and node["bbox"][1] <= y
-            and node["bbox"][2] >= x + width
-            and node["bbox"][3] >= y + height
+        eligible = [
+            (node, distance, area)
+            for node, _, nearby, distance, area in active_nodes
+            if (
+                node["bbox"][0] <= x
+                and node["bbox"][1] <= y
+                and node["bbox"][2] >= x + width
+                and node["bbox"][3] >= y + height
+            )
+            or np.any(nearby & region)
         ]
-        if containing:
+        if eligible:
             owner = min(
-                containing,
-                key=lambda node: (
-                    (node["bbox"][2] - node["bbox"][0])
-                    * (node["bbox"][3] - node["bbox"][1]),
-                    -node["z_index"],
-                    node["id"],
+                eligible,
+                key=lambda item: (
+                    float(np.min(item[1][region])),
+                    item[2],
+                    -item[0]["z_index"],
+                    item[0]["id"],
                 ),
             )
-            owners.add(owner["id"])
+            owners.add(owner[0]["id"])
     return owners
 
 
@@ -2384,7 +2637,10 @@ def _commit_ready_result(store, state: dict, page_id: str) -> dict:
         "graph_ref": state["graph_ref"], "round_history": state["round_history"],
         "accepted_graph_sha256": quality["input_graph_sha256"],
         "fallback": state["fallback"],
-        "accepted_asset_refs": quality["input_refs"],
+        "accepted_asset_refs": {
+            key: value for key, value in quality["input_refs"].items()
+            if key != "background_responsibility"
+        },
         "text_items": quality.get("text_items", []),
         "raster_text_preserved": False,
         "warning": None,
@@ -2561,6 +2817,7 @@ def evaluate_component_quality_round(
     presentation_layers=None,
     text_items: list[dict] | None = None,
     material_foreground=None,
+    background_responsibility=None,
     unexplained_output_path: str | Path | None = None,
 ) -> dict:
     import cv2
@@ -2575,6 +2832,7 @@ def evaluate_component_quality_round(
         material_ownership_metrics,
         refine_material_foreground,
         resolve_visual_mask_ownership,
+        _background_responsibility_geometry,
         _strict_binary_mask,
         _validate_presentation_mask_union,
         _validate_underlay_metrics,
@@ -2613,7 +2871,18 @@ def evaluate_component_quality_round(
     nodes_by_id = {node["id"]: node for node in validated["nodes"]}
     shape = source.shape[:2]
     packed_layers = None
+    presentation_alpha_union = None
     masks = None
+    semantic_ownership = None
+    if presentation_layers is not None and background_responsibility is not None:
+        semantic_ownership = np.zeros(shape, dtype=bool)
+        for node in active_visual:
+            semantic_ownership |= _load_quality_graph_mask(
+                node,
+                graph_root=graph_root,
+                trusted_chain=directory_chain,
+                shape=shape,
+            )
     if presentation_layers is None:
         mask_nodes = list(active_visual)
         loaded_ids = {node["id"] for node in mask_nodes}
@@ -2638,6 +2907,7 @@ def evaluate_component_quality_round(
             masks[node["id"]] = mask
     else:
         packed_layers = {}
+        presentation_alpha_union = np.zeros(shape, dtype=bool)
         layer_iterator = iter(presentation_layers)
         for node in active_visual:
             try:
@@ -2665,6 +2935,7 @@ def evaluate_component_quality_round(
             _validate_presentation_mask_union(
                 ownership, alpha, generated, label="component presentation"
             )
+            presentation_alpha_union |= alpha
             packed_layers[node["id"]] = {
                 "ownership_mask": np.packbits(ownership, axis=None).tobytes(),
                 "presentation_alpha_mask": np.packbits(alpha, axis=None).tobytes(),
@@ -2791,10 +3062,90 @@ def evaluate_component_quality_round(
             )
             else "fail"
         )
+        if presentation_alpha_union is not None:
+            underlay_ok = True
+            page_height, page_width = shape
+            for item in text_items:
+                x, y, width, height = item["box"]
+                x1, y1 = max(0, x), max(0, y)
+                x2, y2 = min(page_width, x + width), min(page_height, y + height)
+                box_text = page_context.text[y1:y2, x1:x2]
+                box_alpha = presentation_alpha_union[y1:y2, x1:x2]
+                nontext = ~box_text
+                support_floor = max(
+                    calibration.min_component_pixels,
+                    round(int(np.count_nonzero(nontext)) * 0.5),
+                )
+                if int(np.count_nonzero(box_alpha & nontext)) < support_floor:
+                    continue
+                text_pixels = int(np.count_nonzero(box_text))
+                missing_limit = max(
+                    calibration.min_component_pixels, round(text_pixels * 0.01)
+                )
+                if int(np.count_nonzero(box_text & ~box_alpha)) > missing_limit:
+                    underlay_ok = False
+                    break
+            page_checks["native_text_underlay"] = "pass" if underlay_ok else "fail"
     if material_foreground is not None:
         material_foreground = refine_material_foreground(
             material_foreground, source, background, calibration
         )
+        responsibility = None
+        if background_responsibility is not None:
+            responsibility = np.asarray(background_responsibility)
+            if (
+                responsibility.dtype != np.bool_
+                or responsibility.shape != material_foreground.shape
+                or float(responsibility.mean()) > 0.05
+                or np.any(responsibility & ~material_foreground)
+                or np.any(responsibility & (np.asarray(text_mask) > 0))
+            ):
+                raise ValueError("background responsibility mask is invalid")
+            active_ownership = np.zeros(responsibility.shape, dtype=bool)
+            for node in active_visual:
+                active_ownership |= component_ownership(node["id"])
+            if semantic_ownership is not None:
+                active_ownership |= semantic_ownership
+            allowed_candidate = (
+                material_foreground
+                & ~(np.asarray(text_mask) > 0)
+                & ~active_ownership
+                & np.all(np.asarray(source) == np.asarray(background), axis=2)
+            )
+            allowed = _background_responsibility_geometry(allowed_candidate)
+            if np.any(responsibility & ~allowed):
+                raise ValueError("background responsibility mask is invalid")
+
+        def generated_underlays():
+            if responsibility is not None:
+                yield responsibility
+            if packed_layers is not None:
+                for node in active_visual:
+                    yield unpack(node["id"], "generated_underlay_mask")
+
+        reconstruction_structure = (
+            (page_context.reconstruction_delta > 8)
+            & (page_context.background_delta > 8)
+            & ~page_context.text
+            & (
+                cv2.morphologyEx(
+                    page_context.source_luma.astype(np.uint8),
+                    cv2.MORPH_GRADIENT,
+                    np.ones((3, 3), dtype=np.uint8),
+                ) > 8
+            )
+        )
+        count, labels = cv2.connectedComponents(
+            reconstruction_structure.astype(np.uint8), 8
+        )
+        adjacent = cv2.dilate(
+            material_foreground.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+        ) > 0
+        retained = np.zeros(count, dtype=bool)
+        retained[np.unique(labels[adjacent])] = True
+        retained[0] = False
+        material_foreground |= retained[labels]
         ownership_metrics, unexplained = material_ownership_metrics(
             material_foreground,
             (
@@ -2803,10 +3154,7 @@ def evaluate_component_quality_round(
             ),
             text_mask,
             calibration,
-            generated_underlay_masks=(
-                unpack(node["id"], "generated_underlay_mask")
-                for node in active_visual
-            ) if packed_layers is not None else (),
+            generated_underlay_masks=generated_underlays(),
         )
         visual_metrics = {**visual_metrics, **ownership_metrics}
         page_checks["visual_ownership"] = (
@@ -3317,11 +3665,20 @@ def build_component_agent_request(
     page_session: dict,
     *,
     repair_round: int,
+    _lease: ExecutionLease | None = None,
 ) -> Path:
     repair_round = validate_repair_round(repair_round)
     validated = _validate_page_session(page_session)
     reconstruction = validated[2]
-    with _run_publication_lease(reconstruction):
+    run_root = reconstruction.parent.parent.parent
+    if _lease is not None:
+        _lease.assert_authorizes(run_root)
+    lease = (
+        nullcontext()
+        if _lease is not None and os.name != "nt"
+        else _run_publication_lease(reconstruction)
+    )
+    with lease:
         try:
             return _build_component_agent_request_locked(
                 validated, repair_round, build_review=True,
@@ -3948,6 +4305,21 @@ def _read_bound_file(
             stable.st_size,
         ):
             raise RuntimeError(f"Evidence file changed while reading: {path}")
+        try:
+            final_path_status = path.lstat()
+        except OSError as error:
+            raise RuntimeError(f"Evidence file identity changed: {path}") from error
+        if _is_link_or_reparse(final_path_status):
+            raise RuntimeError(f"Evidence file is a link or reparse point: {path}")
+        if not stat.S_ISREG(final_path_status.st_mode):
+            raise RuntimeError(f"Evidence is not a regular file: {path}")
+        if final_path_status.st_nlink != 1:
+            raise RuntimeError(f"Evidence file is an unsafe hard link: {path}")
+        if (opened.st_dev, opened.st_ino) != (
+            final_path_status.st_dev,
+            final_path_status.st_ino,
+        ):
+            raise RuntimeError(f"Evidence file identity changed: {path}")
         _require_directory_chain_identity(directory_identity)
         return b"".join(chunks)
 
@@ -3994,7 +4366,10 @@ def _copy_bound_file(
     for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
         read_flags |= getattr(os, name, 0)
         write_flags |= getattr(os, name, 0)
-    source_descriptor = os.open(source_path, read_flags)
+    try:
+        source_descriptor = os.open(source_path, read_flags)
+    except OSError:
+        raise RuntimeError("Evidence file cannot be opened safely") from None
     try:
         target_descriptor = os.open(target_path, write_flags, 0o600)
     except BaseException:
@@ -4074,7 +4449,9 @@ def _validate_stable_open_file(
     _require_directory_chain_identity(directory_identity)
 
 
-def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
+def _write_exclusive(
+    path: Path, payload: bytes, reconstruction: Path
+) -> tuple[int, int]:
     _contained_path(path, reconstruction)
     directory_identity = _snapshot_directory_chain(path.parent, reconstruction)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -4090,7 +4467,9 @@ def _write_exclusive(path: Path, payload: bytes, reconstruction: Path) -> None:
         target.write(payload)
         target.flush()
         os.fsync(target.fileno())
+        written = os.fstat(target.fileno())
         _require_directory_chain_identity(directory_identity)
+    return written.st_dev, written.st_ino
 
 
 def _load_or_create_integrity_key(reconstruction: Path) -> bytes:

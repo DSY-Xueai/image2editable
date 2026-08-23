@@ -1,0 +1,114 @@
+{
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The full header parent is the complete rounded banner required for continuous underlay beneath both native title boxes."
+      ],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The left card parent is the complete movable card background while its text remains native and editable."
+      ],
+      "object_ids": ["parent_0004"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The middle card parent is the complete movable card background while its text remains native and editable."
+      ],
+      "object_ids": ["parent_0006"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "This mask is the disjoint outer and lower shell of the right card, separate from the retained inner body."
+      ],
+      "object_ids": ["component_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "This parent is the independently movable inner body of the right card and is disjoint from its outer shell."
+      ],
+      "object_ids": ["parent_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This raster title fragment duplicates the complete native editable title, including its slash."
+      ],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["The whole-page composite would flatten and duplicate every retained visual region."],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["The cross-card composite duplicates the independently retained card pieces."],
+      "object_ids": ["component_0002"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This partial header segment duplicates the complete retained header parent."],
+      "object_ids": ["component_0008"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This partial header segment duplicates the complete retained header parent."],
+      "object_ids": ["component_0010"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This raster title fragment duplicates native editable title text."],
+      "object_ids": ["component_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This is a raster fragment of the native editable footer text."],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["This is a second raster fragment of the native editable footer text."],
+      "object_ids": ["component_0013"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "d40e86c73dfe490bba9834be61428ffa70fa52b7760b1217ab3664abd3f568fe",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "3a43bd9cf1335dab20757d6468a660bb3fae16b63f8f68c80fb8ef432a989a06",
+  "schema_version": 1
+}

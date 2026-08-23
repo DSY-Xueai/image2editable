@@ -1,0 +1,28 @@
+{
+  "actions": [
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0001"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0002"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts this independently movable chart bar"], "object_ids": ["component_0005"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0015"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0017"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts the complete line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["duplicate metrics are caused by original pixels remaining beneath the eight newly retried grid-line and axis-marker components"],
+      "object_ids": ["component_0001", "component_0002", "component_0003", "component_0009", "component_0012", "component_0013", "component_0015", "component_0017"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "91296ccc34080d922648919bb2a183de92d645d35fc305379299679e9397b055",
+  "schema_version": 1,
+  "graph_sha256": "08c0a6dbd836efb6210a6484b0338574e740f2ec895e3cf780c96035df7a9a39"
+}

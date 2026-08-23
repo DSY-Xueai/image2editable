@@ -1,0 +1,139 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "source.png",
+        "numbered-masks.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "quality-report.json"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "4a1ff5e015b1a7eb6166b4750a156cf51710107c9d7d38873801f7a760ea348d",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "6a8a7e80d18f263d92b01346935289488906cc79501503c304009b1af5f9dede",
+  "schema_version": 1
+}

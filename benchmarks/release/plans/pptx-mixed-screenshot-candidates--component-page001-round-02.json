@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "be91c362b75e8cb3b4a94984a80257a33a7bed9bdce58cbb3b6cf8eed74d4033",
+  "actions": [
+    {
+      "action": "shrink",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      },
+      "confidence": 0.98,
+      "evidence": [
+        "Quality report shows a narrow duplicate table-outline boundary."
+      ]
+    },
+    {
+      "action": "shrink",
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      },
+      "confidence": 0.98,
+      "evidence": [
+        "Quality report shows a one-pixel duplicate and shadow boundary on the restored left table region."
+      ]
+    },
+    {
+      "action": "shrink",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.006
+      },
+      "confidence": 0.98,
+      "evidence": [
+        "Quality report shows a broad alpha halo and duplicate pixels on the page background."
+      ]
+    }
+  ],
+  "graph_sha256": "7503bb59a081db29baa3fce27935b8418011c2e5d65a2813a44018a8b5e8924f"
+}

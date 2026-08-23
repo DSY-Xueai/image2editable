@@ -50,6 +50,40 @@ def _component(index: int = 0, *, x: int = 40, y: int = 20,
     }
 
 
+@pytest.mark.parametrize(
+    ("rotation", "box", "expected_box", "inverse_turns"),
+    [
+        (90, [1, 2, 3, 4], [2, 1, 4, 3], 3),
+        (180, [1, 1, 3, 2], [4, 3, 3, 2], 2),
+        (270, [1, 2, 3, 4], [2, 2, 4, 3], 1),
+    ],
+)
+def test_restore_rotated_ocr_analysis_maps_items_and_mask_to_display(
+    rotation: int,
+    box: list[int],
+    expected_box: list[int],
+    inverse_turns: int,
+) -> None:
+    source_size = (8, 6)
+    upright_size = source_size[::-1] if rotation in {90, 270} else source_size
+    upright_mask = np.zeros((upright_size[1], upright_size[0]), dtype=np.uint8)
+    upright_mask[1:3, 1:4] = 255
+
+    items, mask = image_to_ppt._restore_rotated_ocr_analysis(
+        [{"text": "vertical", "box": box}],
+        upright_mask,
+        rotation=rotation,
+        source_size=source_size,
+    )
+
+    assert items == [{
+        "text": "vertical",
+        "box": expected_box,
+        "rotation": rotation,
+    }]
+    assert np.array_equal(mask, np.rot90(upright_mask, k=inverse_turns))
+
+
 def _ocr_item(text: str, confidence: float, scale: int) -> dict:
     return {
         "box": [5 * scale, 4 * scale, 35 * scale, 9 * scale],
@@ -121,6 +155,86 @@ def test_targeted_ocr_recovers_consistent_candidate_with_source_style_and_mask(
     assert np.all(result["text_mask"][24:33, 45:80] == 255)
 
 
+def test_targeted_ocr_rotates_views_and_matches_existing_vertical_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    crop_sizes = []
+    known = [{
+        **_ocr_item("NX", 0.99, 1),
+        "box": [77, 25, 9, 35],
+        "rotation": 90,
+    }]
+
+    def fake_detect(path, **kwargs):
+        with Image.open(path) as crop:
+            crop_sizes.append(crop.size)
+            scale = crop.width // 30
+            return [_ocr_item("NX", 0.96, scale)], np.zeros(
+                (crop.height, crop.width), dtype=np.uint8
+            )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        known,
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+        ocr_rotation=90,
+    )
+
+    assert crop_sizes == [(60, 100), (90, 150)]
+    assert result["items"] == known
+    assert result["recovered_items"] == []
+    assert result["diagnostics"] == []
+
+
+def test_targeted_ocr_sizes_rotated_text_against_display_page_width(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    style_calls = []
+
+    def fake_detect(path, **kwargs):
+        with Image.open(path) as crop:
+            scale = crop.width // 30
+            return [_ocr_item("NX", 0.96, scale)], np.zeros(
+                (crop.height, crop.width), dtype=np.uint8
+            )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    monkeypatch.setattr(
+        image_to_ppt.text_detection,
+        "_estimate_style",
+        lambda pixels, box, *, reference_width: (
+            style_calls.append(reference_width)
+            or {"font_size": 18.0, "color": "#ffffff", "bold": False}
+        ),
+    )
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        [],
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+        ocr_rotation=90,
+    )
+
+    assert len(result["recovered_items"]) == 1
+    assert style_calls == [120]
+
+
 def test_targeted_ocr_sizes_recovered_text_against_page_width(
     tmp_path: Path,
     monkeypatch,
@@ -165,6 +279,144 @@ def test_estimate_style_default_reference_width_preserves_full_image_behavior() 
     )
 
     assert default == explicit
+
+
+@pytest.mark.parametrize("terminal", [".", "!", "?"])
+def test_build_text_result_preserves_terminal_semantic_punctuation(
+    terminal: str,
+) -> None:
+    items, _ = image_to_ppt.text_detection._build_text_result(
+        np.zeros((120, 400, 3), dtype=np.uint8),
+        [{
+            "box": (20, 20, 180, 50),
+            "text": f"EDITABLE{terminal}",
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == f"EDITABLE{terminal}"
+
+
+def test_build_text_result_recovers_adjacent_large_heading_period() -> None:
+    pixels = np.full((120, 300, 3), (8, 13, 22), dtype=np.uint8)
+    pixels[30:60, 30:150] = (240, 244, 248)
+    pixels[56:68, 184:196] = (240, 244, 248)
+
+    items, mask = image_to_ppt.text_detection._build_text_result(
+        pixels,
+        [{
+            "box": (20, 20, 160, 50),
+            "text": "EDITABLE",
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == "EDITABLE."
+    assert items[0]["box"] == [20, 20, 176, 50]
+    assert mask[60, 190] == 255
+
+
+@pytest.mark.parametrize(
+    ("text", "dot_top"),
+    [("Editable", 56), ("EDITABLE", 30)],
+)
+def test_build_text_result_does_not_invent_heading_period(
+    text: str,
+    dot_top: int,
+) -> None:
+    pixels = np.full((120, 300, 3), (8, 13, 22), dtype=np.uint8)
+    pixels[30:60, 30:150] = (240, 244, 248)
+    pixels[dot_top:dot_top + 12, 184:196] = (240, 244, 248)
+
+    items, _ = image_to_ppt.text_detection._build_text_result(
+        pixels,
+        [{
+            "box": (20, 20, 160, 50),
+            "text": text,
+            "confidence": 0.99,
+        }],
+        0.7,
+        6,
+    )
+
+    assert items[0]["text"] == text
+    assert items[0]["box"] == [20, 20, 160, 50]
+
+
+def test_adjust_font_size_uses_bbox_for_large_uppercase_latin_heading() -> None:
+    adjusted = image_to_ppt.text_detection._adjust_font_size(
+        "MAKE IT",
+        34.9,
+        bbox_height=83,
+        reference_width=1600,
+    )
+
+    assert adjusted == 53.8
+    assert image_to_ppt.text_detection._adjust_font_size(
+        "Release Notes",
+        34.9,
+        bbox_height=83,
+        reference_width=1600,
+    ) == 34.9
+    assert image_to_ppt.text_detection._adjust_font_size(
+        "RELEASE",
+        20.0,
+        bbox_height=25,
+        reference_width=1600,
+    ) == 20.0
+
+
+def test_detect_text_uses_explicit_display_width_for_style_estimation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "upright.png"
+    Image.new("RGB", (200, 400), "white").save(source)
+    style_calls = []
+    monkeypatch.setattr(
+        image_to_ppt.text_detection,
+        "_ocr_detect",
+        lambda *args, **kwargs: [{
+            "box": (20, 30, 100, 20),
+            "text": "Vertical text",
+            "confidence": 0.99,
+        }],
+    )
+    monkeypatch.setattr(
+        image_to_ppt.text_detection,
+        "_estimate_style",
+        lambda pixels, box, *, reference_width=None: (
+            style_calls.append(reference_width)
+            or {"font_size": 18.0, "color": "#000000", "bold": False}
+        ),
+    )
+
+    items, _ = image_to_ppt.text_detection.detect_text(
+        source,
+        lang="en",
+        style_reference_width=400,
+    )
+
+    assert len(items) == 1
+    assert style_calls == [400]
+
+
+@pytest.mark.parametrize("reference_width", [0, -1, True, 120.0])
+def test_build_text_result_rejects_invalid_style_width_without_ocr_items(
+    reference_width,
+) -> None:
+    with pytest.raises(ValueError, match="reference_width must be a positive integer"):
+        image_to_ppt.text_detection._build_text_result(
+            np.zeros((12, 120, 3), dtype=np.uint8),
+            [],
+            0.7,
+            6,
+            style_reference_width=reference_width,
+        )
 
 
 @pytest.mark.parametrize("reference_width", [1, 10**9])
@@ -355,6 +607,7 @@ def test_candidate_text_normalization_preserves_semantic_punctuation(
         (("NX", 0.96, "NY", 0.95), 1),
         (("NX", 0.96, "NY", 0.84), 0),
         ((".", 0.99, "/", 0.99), 1),
+        (("IXED SIZE", 0.99, "IIXED SIZE", 0.99), 1),
     ],
 )
 def test_targeted_ocr_only_diagnoses_high_confidence_text_conflicts(
@@ -416,6 +669,38 @@ def test_targeted_ocr_only_diagnoses_high_confidence_text_conflicts(
         ]
 
 
+def test_targeted_ocr_recovers_more_complete_contained_view(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    readings = iter(("LETTER", "LETTER PORTRAIT"))
+
+    def fake_detect(path, **kwargs):
+        scale = 2 if Image.open(path).width == 100 else 3
+        return [_ocr_item(next(readings), 0.99, scale)], np.zeros(
+            (30 * scale, 50 * scale), dtype=np.uint8
+        )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        [{**_ocr_item("RAIT", 0.99, 1), "box": [68, 24, 12, 9]}],
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+    )
+
+    assert [item["text"] for item in result["recovered_items"]] == [
+        "LETTER PORTRAIT"
+    ]
+    assert result["diagnostics"] == []
+
+
 def test_targeted_ocr_deduplicates_known_overlapping_text(
     tmp_path: Path,
     monkeypatch,
@@ -450,6 +735,40 @@ def test_targeted_ocr_deduplicates_known_overlapping_text(
     assert result["diagnostics"] == []
 
 
+def test_targeted_ocr_upgrades_known_text_with_terminal_punctuation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    known = [{
+        **_ocr_item("EDITABLE", 0.99, 1),
+        "box": [44, 23, 37, 11],
+    }]
+
+    def fake_detect(path, **kwargs):
+        scale = 2 if Image.open(path).width == 100 else 3
+        return [_ocr_item("EDITABLE.", 0.99, scale)], np.zeros(
+            (30 * scale, 50 * scale), dtype=np.uint8
+        )
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        known,
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+    )
+
+    assert [item["text"] for item in result["recovered_items"]] == ["EDITABLE."]
+    assert [item["text"] for item in result["items"]] == ["EDITABLE."]
+    assert result["diagnostics"] == []
+
+
 def test_targeted_ocr_treats_highly_overlapping_ocr_variant_as_known() -> None:
     item = {
         "normalized_text": "planningmaybetoofine",
@@ -461,6 +780,85 @@ def test_targeted_ocr_treats_highly_overlapping_ocr_variant_as_known() -> None:
     }]
 
     assert image_to_ppt._matches_known_text(item, known)
+
+
+def test_targeted_ocr_does_not_silently_match_rotated_ocr_typo() -> None:
+    item = {
+        "text": "Fixed geometi",
+        "normalized_text": "fixedgeometi",
+        "box": [1532, 640, 33, 176],
+        "rotation": 90,
+    }
+    known = [{
+        "text": "Fixed geometry and metadata",
+        "box": [1530, 640, 37, 377],
+        "rotation": 90,
+    }]
+
+    assert not image_to_ppt._matches_known_text(item, known)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "known_text"),
+    [
+        ("Fixed geometi", "Fixed geometry and metadata"),
+        ("target servera", "Target serverb"),
+        ("api version v1", "API version v2"),
+        ("retention period 30", "Retention period 90"),
+        ("enable archived records", "Disable archived records"),
+    ],
+)
+def test_rotated_text_never_uses_generic_fuzzy_matching(
+    candidate: str,
+    known_text: str,
+) -> None:
+    item = {
+        "text": candidate,
+        "normalized_text": image_to_ppt._normalized_candidate_text(candidate),
+        "box": [10, 10, 100, 30],
+        "rotation": 90,
+    }
+    known = [{
+        "text": known_text,
+        "box": [10, 10, 100, 30],
+        "rotation": 90,
+    }]
+
+    assert not image_to_ppt._matches_known_text(item, known)
+
+
+@pytest.mark.parametrize(
+    ("candidate", "known_text"),
+    [
+        ("planning beta execution", "Planning alpha execution details"),
+        ("risk management owner", "Risk management framework and owner"),
+        ("include archived records", "Exclude archived records from this export"),
+        ("enable archived records", "Disable archived records for this export"),
+        ("enable archived records", "Policy: disable archived records"),
+        ("retention period 30", "Retention period 90 days for archived records"),
+        ("api version v1", "API version v2 migration guidance"),
+        ("target servera", "Target serverb and backups"),
+        ("risk higher", "Risk highest priority items"),
+        ("access public", "Access publish settings"),
+    ],
+)
+def test_targeted_ocr_keeps_semantically_different_rotated_long_text(
+    candidate: str,
+    known_text: str,
+    ) -> None:
+    item = {
+        "text": candidate,
+        "normalized_text": image_to_ppt._normalized_candidate_text(candidate),
+        "box": [10, 10, 30, 100],
+        "rotation": 90,
+    }
+    known = [{
+        "text": known_text,
+        "box": [9, 0, 32, 200],
+        "rotation": 90,
+    }]
+
+    assert not image_to_ppt._matches_known_text(item, known)
 
 
 def test_targeted_ocr_keeps_different_text_inside_larger_known_box() -> None:
@@ -1081,6 +1479,7 @@ def _prepare_rerun_fixture(
     wrong_component_shape: bool = False,
     forbid_cache_cleanup: bool = False,
     replace_mask_after_first_worker: bool = False,
+    unchanged_text_mask: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1090,11 +1489,14 @@ def _prepare_rerun_fixture(
     stale_parent = work_dir / "semantic-masks/stale.png"
     outside_component = tmp_path / "outside-component.png"
 
+    initial_text_mask = np.zeros((70, 120), dtype=np.uint8)
+    if unchanged_text_mask:
+        initial_text_mask[18:39, 39:86] = 255
     monkeypatch.setattr(
         image_to_ppt,
         "detect_text",
         lambda *args, **kwargs: (
-            [], np.zeros((70, 120), dtype=np.uint8)
+            [], initial_text_mask.copy()
         ),
     )
     monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
@@ -1384,6 +1786,22 @@ def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
         removal_mask = np.asarray(removal.convert("L")) > 0
     assert np.all(removal_mask[18:39, 39:86])
     assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
+
+
+def test_prepare_reuses_visual_assets_when_targeted_ocr_keeps_exact_masks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+    )
+
+    assert process_text_counts == [0]
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
 
 
 def test_text_delta_mask_changed_after_first_worker_uses_full_visual_fallback(
@@ -1817,6 +2235,8 @@ def test_prepared_page_v2_loads_with_empty_initial_diagnostics(
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = 2
+    for item in manifest["text_items"]:
+        item.pop("rotation")
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("text_cleanup_mask")
     manifest["assets"].pop("foreground_evidence_mask")

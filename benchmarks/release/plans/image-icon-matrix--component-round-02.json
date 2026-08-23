@@ -1,0 +1,30 @@
+{
+  "actions": [
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0010"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0011"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0015"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0016"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0017"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0020"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0028"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0029"], "parameters": {}},
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["duplicate and page-residual metrics are caused by original pixels remaining beneath these twelve independent visuals after composite removal"],
+      "object_ids": ["component_0007", "component_0008", "component_0009", "component_0010", "component_0011", "component_0012", "component_0015", "component_0016", "component_0017", "component_0020", "component_0028", "component_0029"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "548bb6845b6e9e36f9724d123f96c0ae29c5dcbf558f3b399a274420bef0957b",
+  "schema_version": 1,
+  "graph_sha256": "c61d3f6cf8f70811dd6c319ab4cfac7dc731df60b69e5d2ef2e566b11c2add60"
+}

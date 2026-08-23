@@ -379,6 +379,95 @@ def test_filter_noise_keeps_high_confidence_technical_labels() -> None:
     assert [box["text"] for box in text_detect._filter_noise(boxes)] == labels
 
 
+def test_filter_noise_keeps_spaced_semantic_separators() -> None:
+    labels = [
+        "LETTER PORTRAIT / MIXED SIZE",
+        "ALPHA - BETA",
+        "ALPHA / BETA / GAMMA",
+        "842 x 595 pt / project-generated / CC0-1.0",
+    ]
+    boxes = [
+        {"box": (0, index * 20, 240, 16), "text": label, "confidence": 0.95}
+        for index, label in enumerate(labels)
+    ]
+
+    assert [box["text"] for box in text_detect._filter_noise(boxes)] == labels
+
+
+def test_filter_noise_rejects_ambiguous_spaced_separators() -> None:
+    labels = [
+        "MCOULE ST:SETMP",
+        "ALPHA /",
+        "/ BETA",
+        "ALPHA // BETA",
+        "ALPHA / BETA:V2",
+        "ALPHA / BETA. GAMMA",
+        "ALPHA / beta-.gamma",
+        "A / B",
+    ]
+    boxes = [
+        {"box": (0, index * 20, 180, 16), "text": label, "confidence": 0.95}
+        for index, label in enumerate(labels)
+    ]
+    boxes.append(
+        {
+            "box": (0, len(boxes) * 20, 240, 16),
+            "text": "LETTER PORTRAIT / MIXED SIZE",
+            "confidence": 0.4,
+        }
+    )
+
+    assert text_detect._filter_noise(boxes) == []
+
+
+def test_build_text_result_preserves_internal_semantic_separator(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        text_detect,
+        "_estimate_style",
+        lambda *_: {"font_size": 24.0, "color": (0, 0, 0), "bold": True},
+    )
+    image = np.full((80, 280, 3), 255, dtype=np.uint8)
+    raw_boxes = [
+        {
+            "box": (10, 10, 250, 32),
+            "text": "LETTER PORTRAIT / MIXED SIZE",
+            "confidence": 0.99,
+        }
+    ]
+
+    text_items, _ = text_detect._build_text_result(image, raw_boxes, 0.7, 2)
+
+    assert [item["text"] for item in text_items] == [
+        "LETTER PORTRAIT / MIXED SIZE"
+    ]
+
+
+def test_build_text_result_preserves_mixed_technical_separator(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        text_detect,
+        "_estimate_style",
+        lambda *_: {"font_size": 12.6, "color": "#3f576f", "bold": False},
+    )
+    image = np.full((80, 700, 3), 255, dtype=np.uint8)
+    raw_boxes = [
+        {
+            "box": (10, 10, 581, 42),
+            "text": "842 x 595 pt / project-generated / CC0-1.0",
+            "confidence": 0.9892293214797974,
+        }
+    ]
+
+    text_items, _ = text_detect._build_text_result(image, raw_boxes, 0.7, 2)
+
+    assert [item["text"] for item in text_items] == [
+        "842 x 595 pt / project-generated / CC0-1.0"
+    ]
+
+
 def test_filter_noise_rejects_malformed_or_low_confidence_labels() -> None:
     boxes = [
         {"box": (0, 0, 120, 16), "text": "MCOULE ST:SETMP", "confidence": 0.95},
@@ -968,8 +1057,16 @@ def test_resource_safe_sam_candidate_batch_runs_one_worker(
     )
     monkeypatch.setattr(worker_resources.subprocess, "run", fake_run)
     monkeypatch.setenv("SAM_BATCH_RESOURCE_TEST", "kept")
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
+    capability_calls = []
+    monkeypatch.setattr(
+        image_to_ppt,
+        "sam_candidate_batch_output_supported",
+        lambda work_dir: capability_calls.append(work_dir) or True,
+    )
 
-    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
+    prompted, automatic = image_to_ppt._generate_sam_candidate_stage_isolated(
         image,
         text_mask,
         [proposal],
@@ -977,6 +1074,7 @@ def test_resource_safe_sam_candidate_batch_runs_one_worker(
     )
 
     assert events == ["trim", "spawn"]
+    assert capability_calls == [tmp_path]
     assert len(calls) == 1
     command, kwargs = calls[0]
     worker_path = (
@@ -1212,6 +1310,8 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     Image.fromarray(source).save(image_path)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    if not image_to_ppt.sam_candidate_batch_output_supported(work_dir):
+        pytest.skip("SAM candidate batch publication is unsupported")
     text_mask_path = work_dir / "source-text-mask.png"
     Image.fromarray(np.zeros(source.shape[:2], dtype=np.uint8)).save(
         text_mask_path

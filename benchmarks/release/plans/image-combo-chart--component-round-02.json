@@ -1,0 +1,39 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["round-two isolation retains the complete independently movable third chart bar"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["round-two isolation retains the complete line-chart parent without duplicate child proposals"],
+      "object_ids": ["parent_0011"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["round-two isolation retains the independent red legend swatch without raster text"],
+      "object_ids": ["component_0024"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["signed ownership after composite removal requires strict background reconstruction around the remaining independent visuals"],
+      "object_ids": ["component_0007", "parent_0011", "component_0024"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "63525789c84f9e8bb6165c2784f1f913722a97a83de0508005e30ec754cb84db",
+  "schema_version": 1,
+  "graph_sha256": "de5c4a9f64eb16a79b6ed7954a3dcbc49508b3d13b1328a3a3ed7060939b19fc"
+}

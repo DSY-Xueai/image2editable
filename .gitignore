@@ -68,3 +68,11 @@ docs/*
 !docs/images/
 docs/images/*
 !docs/images/*.png
+
+# Fixed release benchmark inputs
+!benchmarks/release/inputs/*.png
+!benchmarks/release/inputs/*.pdf
+!benchmarks/release/inputs/*.pptx
+
+/benchmark-results/
+/benchmark/private/

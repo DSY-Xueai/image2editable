@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import traceback
 import types
 import weakref
 from pathlib import Path
@@ -20,11 +21,442 @@ from scripts import (
     bg_model,
     fg_extract,
     lama_inpaint,
+    object_detect,
     sam_worker,
     text_detect,
     visual_worker,
     visual_segment,
 )
+
+
+GROUNDING_DINO_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+
+
+def test_grounding_dino_loads_processor_and_model_from_exact_local_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    class LoadedModel:
+        def to(self, device: str) -> "LoadedModel":
+            assert device == "cpu"
+            return self
+
+        def eval(self) -> "LoadedModel":
+            return self
+
+    class Loader:
+        def __init__(self, name: str, result: object) -> None:
+            self.name = name
+            self.result = result
+
+        def from_pretrained(self, model_id: str, **kwargs: object) -> object:
+            calls.append((self.name, model_id, kwargs))
+            return self.result
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader("processor", object()),
+        AutoModelForZeroShotObjectDetection=Loader("model", LoadedModel()),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+    snapshot = tmp_path / "grounding-dino"
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda name: snapshot if name == "grounding_dino" else None,
+    )
+
+    object_detect._LazyGroundingDino(None)._load()
+
+    expected = {
+        "revision": GROUNDING_DINO_REVISION,
+        "local_files_only": True,
+    }
+    assert calls == [
+        ("processor", str(snapshot), expected),
+        ("model", str(snapshot), expected),
+    ]
+
+
+@pytest.mark.parametrize("missing_component", ["processor", "model"])
+def test_grounding_dino_missing_cache_fails_without_network_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_component: str,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class LoadedModel:
+        def to(self, device: str) -> "LoadedModel":
+            return self
+
+        def eval(self) -> "LoadedModel":
+            return self
+
+    class Loader:
+        def __init__(self, name: str, result: object) -> None:
+            self.name = name
+            self.result = result
+
+        def from_pretrained(self, model_id: str, **kwargs: object) -> object:
+            assert model_id == str(tmp_path / "grounding-dino")
+            calls.append((self.name, kwargs))
+            if self.name == missing_component:
+                raise OSError(f"missing {self.name}")
+            return self.result
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader("processor", object()),
+        AutoModelForZeroShotObjectDetection=Loader("model", LoadedModel()),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda name: tmp_path / "grounding-dino",
+    )
+
+    with pytest.raises(
+        object_detect.VisualSegmentationError,
+        match=r"Grounding DINO.*image2editable models install runtime",
+    ):
+        object_detect._LazyGroundingDino(None)._load()
+
+    expected = {
+        "revision": GROUNDING_DINO_REVISION,
+        "local_files_only": True,
+    }
+    expected_calls = [("processor", expected)]
+    if missing_component == "model":
+        expected_calls.append(("model", expected))
+    assert calls == expected_calls
+
+
+def test_grounding_dino_invalid_local_snapshot_error_is_path_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "secret-grounding-dino-snapshot"
+
+    class Loader:
+        def from_pretrained(self, model_path: str, **_kwargs: object) -> object:
+            raise ValueError(f"invalid config at {model_path}")
+
+    fake_transformers = types.SimpleNamespace(
+        AutoProcessor=Loader(),
+        AutoModelForZeroShotObjectDetection=Loader(),
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False)
+    )
+    monkeypatch.setattr(
+        object_detect.importlib,
+        "import_module",
+        lambda name: fake_torch if name == "torch" else fake_transformers,
+    )
+    monkeypatch.setattr(
+        object_detect,
+        "resolve_runtime_model_path",
+        lambda _name: snapshot,
+    )
+
+    with pytest.raises(object_detect.VisualSegmentationError) as caught:
+        object_detect._LazyGroundingDino(None)._load()
+
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert str(snapshot) not in rendered
+    assert caught.value.__suppress_context__ is True
+
+
+def test_grounding_dino_product_and_skill_mirrors_match() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "scripts" / "object_detect.py").read_bytes() == (
+        root / "skills" / "image-to-ppt" / "scripts" / "object_detect.py"
+    ).read_bytes()
+
+
+class _ChangedStat:
+    def __init__(self, status: os.stat_result) -> None:
+        self._status = status
+
+    def __getattr__(self, name: str) -> object:
+        if name == "st_ino":
+            return self._status.st_ino + 1
+        return getattr(self._status, name)
+
+
+class _FakeDarwinRename:
+    def __init__(self, result: int = 0, error_number: int = 0) -> None:
+        self.result = result
+        self.error_number = error_number
+        self.calls = []
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args: object) -> int:
+        self.calls.append(args)
+        visual_segment.ctypes.set_errno(self.error_number)
+        return self.result
+
+
+def _darwin_publish_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: int = 0,
+    error_number: int = 0,
+    symbol: bool = True,
+    parent_statuses: list[object] | None = None,
+) -> tuple[Path, Path, _FakeDarwinRename, dict[str, object]]:
+    staging = tmp_path / ".action.tmp"
+    staging.mkdir()
+    (staging / "staged.txt").write_text("staged", encoding="utf-8")
+    target = tmp_path / "action"
+    rename = _FakeDarwinRename(result, error_number)
+    library = types.SimpleNamespace()
+    if symbol:
+        library.renameatx_np = rename
+    events: dict[str, object] = {
+        "cdll": [], "open": [], "fstat": [], "close": [],
+    }
+    parent_status = tmp_path.lstat()
+    statuses = parent_statuses or [parent_status, parent_status]
+
+    def load_library(name: object, *, use_errno: bool = False) -> object:
+        events["cdll"].append((name, use_errno))
+        return library
+
+    def open_parent(path: object, flags: int) -> int:
+        events["open"].append((Path(path), flags))
+        return 37
+
+    def fstat_parent(descriptor: int) -> object:
+        calls = events["fstat"]
+        calls.append(descriptor)
+        return statuses[min(len(calls) - 1, len(statuses) - 1)]
+
+    monkeypatch.setattr(
+        visual_segment, "sys", types.SimpleNamespace(platform="darwin"),
+        raising=False,
+    )
+    monkeypatch.setattr(visual_segment.ctypes, "CDLL", load_library)
+    monkeypatch.setattr(visual_segment.os, "O_DIRECTORY", 0x100, raising=False)
+    monkeypatch.setattr(visual_segment.os, "O_NOFOLLOW", 0x200, raising=False)
+    monkeypatch.setattr(visual_segment.os, "O_CLOEXEC", 0x400, raising=False)
+    monkeypatch.setattr(visual_segment.os, "open", open_parent)
+    monkeypatch.setattr(visual_segment.os, "fstat", fstat_parent)
+    monkeypatch.setattr(
+        visual_segment.os, "close", lambda descriptor: events["close"].append(descriptor),
+    )
+    return staging, target, rename, events
+
+
+def test_publish_action_directory_uses_darwin_renameatx_np(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch,
+    )
+
+    visual_segment._publish_action_directory(staging, target)
+
+    assert events["cdll"] == [(None, True)]
+    assert events["open"] == [(tmp_path, os.O_RDONLY | 0x100 | 0x200 | 0x400)]
+    assert events["fstat"] == [37, 37]
+    assert events["close"] == [37]
+    assert rename.calls == [(37, b".action.tmp", 37, b"action", 4)]
+    assert rename.argtypes == [
+        visual_segment.ctypes.c_int,
+        visual_segment.ctypes.c_char_p,
+        visual_segment.ctypes.c_int,
+        visual_segment.ctypes.c_char_p,
+        visual_segment.ctypes.c_uint,
+    ]
+    assert rename.restype is visual_segment.ctypes.c_int
+
+
+@pytest.mark.parametrize("error_number", [errno.EEXIST, errno.ENOTEMPTY])
+def test_publish_action_directory_maps_darwin_existing_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, result=-1, error_number=error_number,
+    )
+    target.mkdir()
+    (target / "existing.txt").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert (target / "existing.txt").read_text(encoding="utf-8") == "existing"
+    assert (staging / "staged.txt").read_text(encoding="utf-8") == "staged"
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_preserves_darwin_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, result=-1, error_number=errno.EACCES,
+    )
+
+    with pytest.raises(OSError) as raised:
+        visual_segment._publish_action_directory(staging, target)
+
+    assert raised.value.errno == errno.EACCES
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_rejects_missing_darwin_symbol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, _, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, symbol=False,
+    )
+
+    with pytest.raises(RuntimeError, match="renameatx_np"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert events["open"] == []
+    assert staging.is_dir()
+    assert not target.exists()
+
+
+def test_publish_action_directory_rejects_darwin_symlink_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    real_staging, _, rename, events = _darwin_publish_fixture(
+        real_parent, monkeypatch,
+    )
+    lexical_parent = tmp_path / "linked"
+    staging = lexical_parent / real_staging.name
+    target = lexical_parent / "action"
+    parent_status = real_parent.lstat()
+    symlink_status = types.SimpleNamespace(
+        st_mode=stat.S_IFLNK,
+        st_dev=parent_status.st_dev,
+        st_ino=parent_status.st_ino,
+        st_file_attributes=0,
+    )
+    real_resolve = Path.resolve
+    real_lstat = Path.lstat
+
+    def resolved_parent(path: Path, *args: object, **kwargs: object) -> Path:
+        if path == lexical_parent:
+            return real_parent
+        return real_resolve(path, *args, **kwargs)
+
+    def linked_status(path: Path) -> object:
+        if path == lexical_parent:
+            return symlink_status
+        if path == staging:
+            return real_lstat(real_staging)
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "resolve", resolved_parent)
+    monkeypatch.setattr(Path, "lstat", linked_status)
+
+    with pytest.raises(RuntimeError, match="parent is unsafe"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["open"] == []
+
+
+def test_publish_action_directory_rechecks_darwin_staging_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch,
+    )
+    real_lstat = Path.lstat
+    staging_checks = 0
+
+    def changed_staging(path: Path) -> object:
+        nonlocal staging_checks
+        status = real_lstat(path)
+        if path == staging:
+            staging_checks += 1
+            if staging_checks == 2:
+                return _ChangedStat(status)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", changed_staging)
+
+    with pytest.raises(RuntimeError, match="staging identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["close"] == [37]
+
+
+@pytest.mark.parametrize("changed_after_call", [False, True])
+def test_publish_action_directory_rechecks_darwin_parent_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_after_call: bool,
+) -> None:
+    parent_status = tmp_path.lstat()
+    statuses = (
+        [parent_status, _ChangedStat(parent_status)]
+        if changed_after_call
+        else [_ChangedStat(parent_status)]
+    )
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path, monkeypatch, parent_statuses=statuses,
+    )
+
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert len(rename.calls) == (1 if changed_after_call else 0)
+    assert events["close"] == [37]
+
+
+def test_publish_action_directory_binds_darwin_parent_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_status = tmp_path.lstat()
+    replaced_status = _ChangedStat(parent_status)
+    staging, target, rename, events = _darwin_publish_fixture(
+        tmp_path,
+        monkeypatch,
+        parent_statuses=[replaced_status, replaced_status],
+    )
+    real_lstat = Path.lstat
+
+    def replaced_parent(path: Path) -> object:
+        status = real_lstat(path)
+        if path == tmp_path and events["fstat"]:
+            return _ChangedStat(status)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", replaced_parent)
+
+    with pytest.raises(RuntimeError, match="parent identity changed"):
+        visual_segment._publish_action_directory(staging, target)
+
+    assert rename.calls == []
+    assert events["close"] == [37]
 
 
 def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
@@ -452,34 +884,45 @@ def test_multi_slide_original_physical_ratio_rejects_clear_pixel_mismatch(
     assert not output.exists()
 
 
-def test_multi_slide_original_rejects_mixed_ratios_before_writing(
+def test_multi_slide_original_contains_mixed_ratios_on_first_page_canvas(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "mixed.pptx"
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (400, 200), "red").save(first)
+    Image.new("RGB", (400, 300), "blue").save(second)
 
-    with pytest.raises(ValueError, match="same aspect ratio"):
-        assemble_pptx_multi(
-            [
-                {
-                    "background_original_path": "first.png",
-                    "components": [],
-                    "text_items": [],
-                    "img_width": 400,
-                    "img_height": 200,
-                },
-                {
-                    "background_original_path": "second.png",
-                    "components": [],
-                    "text_items": [],
-                    "img_width": 400,
-                    "img_height": 300,
-                },
-            ],
-            output,
-            slide_size="original",
-        )
+    assemble_pptx_multi(
+        [
+            {
+                "background_original_path": str(first),
+                "components": [],
+                "text_items": [],
+                "img_width": 400,
+                "img_height": 200,
+            },
+            {
+                "background_original_path": str(second),
+                "components": [],
+                "text_items": [],
+                "img_width": 400,
+                "img_height": 300,
+            },
+        ],
+        output,
+        slide_size="original",
+    )
 
-    assert not output.exists()
+    presentation = Presentation(output)
+    first_background = presentation.slides[0].shapes[0]
+    second_background = presentation.slides[1].shapes[0]
+    assert presentation.slide_width / presentation.slide_height == pytest.approx(2.0)
+    assert first_background.left == 0
+    assert first_background.width == presentation.slide_width
+    assert second_background.left > 0
+    assert second_background.width < presentation.slide_width
+    assert second_background.height == presentation.slide_height
 
 
 def test_batch_variants_combines_original_slides_without_repreparing(
@@ -1124,16 +1567,32 @@ def _run_candidate_batch_worker_main(
     sam_worker.main()
 
 
+def _generate_supported_sam_candidate_stage(
+    image,
+    text_mask,
+    proposals,
+    work_dir: Path,
+):
+    if not image_to_ppt.sam_candidate_batch_output_supported(work_dir):
+        pytest.skip("SAM candidate batch publication is unsupported")
+    with pytest.MonkeyPatch.context() as capability_patch:
+        capability_patch.setattr(
+            image_to_ppt,
+            "sam_candidate_batch_output_supported",
+            lambda target: True,
+        )
+        return image_to_ppt._generate_sam_candidate_stage_isolated(
+            image,
+            text_mask,
+            proposals,
+            work_dir,
+        )
+
+
 def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    batch_helper = getattr(
-        image_to_ppt,
-        "_generate_sam_candidate_batch_isolated",
-        None,
-    )
-    assert batch_helper is not None
     image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
     image[:, :, 1] = 37
     text_mask = image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8)
@@ -1235,7 +1694,9 @@ def test_candidate_batch_worker_loads_sam_once_and_preserves_candidate_semantics
 
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
-    prompted, automatic = batch_helper(image, text_mask, [proposal], tmp_path)
+    prompted, automatic = _generate_supported_sam_candidate_stage(
+        image, text_mask, [proposal], tmp_path,
+    )
 
     expected_prompted = generate_prompted(image, [proposal], generator, text_mask)
     expected_automatic = generate_automatic(
@@ -1270,6 +1731,8 @@ def test_candidate_batch_main_matches_legacy_candidate_records(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     fixture = _candidate_batch_worker_fixture(tmp_path / "batch")
     prompted_mask = image_to_ppt.np.zeros((6, 8), dtype=bool)
     prompted_mask[1:5, 1:7] = True
@@ -1393,12 +1856,6 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
     monkeypatch,
     malformation: str,
 ) -> None:
-    batch_helper = getattr(
-        image_to_ppt,
-        "_generate_sam_candidate_batch_isolated",
-        None,
-    )
-    assert batch_helper is not None
     payload = {
         "schema_version": 1,
         "operations": [
@@ -1438,7 +1895,7 @@ def test_candidate_batch_caller_rejects_the_entire_malformed_result(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        batch_helper(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1480,7 +1937,7 @@ def test_candidate_batch_caller_rejects_invalid_candidate_metadata(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1512,7 +1969,7 @@ def test_candidate_batch_caller_accepts_negative_finite_sam_score(
         crop_box=(0, 0, 8, 6),
     )
 
-    prompted, automatic = image_to_ppt._generate_sam_candidate_batch_isolated(
+    prompted, automatic = _generate_supported_sam_candidate_stage(
         image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
         image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
         [proposal],
@@ -1548,7 +2005,7 @@ def test_candidate_batch_caller_validates_all_records_before_constructing_any(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1902,7 +2359,7 @@ def test_candidate_batch_caller_bounds_candidates_before_decoding_masks(
     )
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1931,7 +2388,7 @@ def test_candidate_batch_caller_bounds_result_before_parsing(
     monkeypatch.setattr(image_to_ppt, "run_isolated_worker", fake_run)
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -1961,7 +2418,7 @@ def test_candidate_batch_caller_rejects_oversized_mask_before_decoding(
     )
 
     with pytest.raises(RuntimeError, match="SAM candidate batch"):
-        image_to_ppt._generate_sam_candidate_batch_isolated(
+        _generate_supported_sam_candidate_stage(
             image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((6, 8), dtype=image_to_ppt.np.uint8),
             [],
@@ -2480,8 +2937,59 @@ def test_candidate_batch_worker_rejects_parent_replacement_during_publish(
         sam_worker._write_batch_result(result_binding, payload, operations)
 
     assert not result_path.exists()
-    assert not (moved_parent / "result.json").exists()
+    assert json.loads((moved_parent / "result.json").read_text(encoding="utf-8")) == payload
     assert next(owned_parent.glob(".result.json.*.tmp")).read_bytes() == attack
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux hard-link publication preserves the source inode",
+)
+def test_candidate_batch_worker_does_not_delete_replaced_published_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owned_parent = tmp_path / "owned"
+    owned_parent.mkdir()
+    moved_parent = tmp_path / "moved"
+    image = image_to_ppt.np.zeros((6, 8, 3), dtype=image_to_ppt.np.uint8)
+    operations = [
+        {"id": "prompted", "kind": "prompted", "image": image},
+        {"id": "automatic", "kind": "automatic", "image": image},
+    ]
+    payload = _candidate_batch_payload()
+    result_path = owned_parent / "result.json"
+    root_status = owned_parent.lstat()
+    result_binding = {
+        "path": result_path,
+        "parent": owned_parent,
+        "parent_identity": (root_status.st_dev, root_status.st_ino),
+    }
+    attack = b"replacement result must survive cleanup"
+    actual_verify = sam_worker._verify_batch_result_parent
+    verify_calls = 0
+
+    def replace_published_entry_and_parent(binding):
+        nonlocal verify_calls
+        verify_calls += 1
+        if verify_calls == 3:
+            result_path.unlink()
+            result_path.write_bytes(attack)
+            owned_parent.replace(moved_parent)
+            owned_parent.mkdir()
+        actual_verify(binding)
+
+    monkeypatch.setattr(
+        sam_worker,
+        "_verify_batch_result_parent",
+        replace_published_entry_and_parent,
+    )
+
+    with pytest.raises(RuntimeError, match="directory changed"):
+        sam_worker._write_batch_result(result_binding, payload, operations)
+
+    assert (moved_parent / "result.json").read_bytes() == attack
+    assert not result_path.exists()
 
 
 def test_candidate_batch_worker_cleans_partial_stream_when_limit_is_exceeded(
@@ -2603,39 +3111,6 @@ def test_candidate_batch_other_posix_never_creates_partial_final(
     assert not hasattr(sam_worker, "_unlink_owned_posix_result")
 
 
-@pytest.mark.parametrize(
-    ("clone_error", "message"),
-    [(0, None), (errno.EEXIST, "already exists"), (errno.ENOTSUP, "not supported")],
-)
-def test_candidate_batch_darwin_fclone_is_descriptor_bound_and_no_clobber(
-    monkeypatch,
-    clone_error: int,
-    message: str | None,
-) -> None:
-    calls = []
-    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        sam_worker,
-        "_fclonefileat_batch_result",
-        lambda source_fd, parent_fd, name, flags: (
-            calls.append((source_fd, parent_fd, name, flags)) or clone_error
-        ),
-        raising=False,
-    )
-
-    if message is None:
-        sam_worker._publish_batch_result(17, 19, {"path": Path("result.json")})
-    else:
-        with pytest.raises(RuntimeError, match=message):
-            sam_worker._publish_batch_result(
-                17,
-                19,
-                {"path": Path("result.json")},
-            )
-
-    assert calls == [(17, 19, b"result.json", 0)]
-
-
 def test_candidate_batch_darwin_without_anonymous_source_fails_before_path_creation(
     tmp_path: Path,
     monkeypatch,
@@ -2731,6 +3206,21 @@ def test_candidate_batch_windows_temp_denies_external_writers(tmp_path: Path) ->
         sam_worker._close_batch_result_parent(parent_handle)
 
     assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows long-path contract")
+def test_candidate_batch_windows_supports_extended_length_temp_path(
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / ("deep-" + "x" * 120)
+    work_dir.mkdir()
+    result = work_dir / f".sam-batch-capability-{'a' * 32}.json"
+    temporary = result.with_name(f".{result.name}.{'b' * 32}.tmp")
+    assert len(str(temporary.resolve())) > 260
+
+    assert sam_worker.sam_candidate_batch_output_supported(work_dir) is True
+
+    assert list(work_dir.iterdir()) == []
 
 
 def test_candidate_batch_cleanup_failure_preserves_primary_error_and_closes_handles(
@@ -2941,11 +3431,12 @@ def test_candidate_batch_stage_supported_uses_one_batch_worker(
         )
     ]
     batch_calls = []
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
         lambda work_dir: True,
-        raising=False,
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -2969,7 +3460,7 @@ def test_candidate_batch_stage_supported_uses_one_batch_worker(
     assert batch_calls == [(image, text_mask, [proposal], tmp_path)]
 
 
-def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
+def test_candidate_batch_stage_darwin_unsupported_uses_single_workers_in_order(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2986,23 +3477,26 @@ def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
             image_to_ppt.np.eye(6, 8, dtype=bool), 0.7, "sam"
         )
     ]
-    legacy_calls = []
+    batch_calls = []
+    single_calls = []
+    events = []
+    monkeypatch.setattr(sam_worker.sys, "platform", "darwin")
+    actual_capability = image_to_ppt.sam_candidate_batch_output_supported
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
-        lambda work_dir: False,
-        raising=False,
+        lambda work_dir: events.append("capability")
+        or actual_capability(work_dir),
     )
     monkeypatch.setattr(
         image_to_ppt,
         "_generate_sam_candidate_batch_isolated",
-        lambda *args: pytest.fail("batch worker must not run"),
+        lambda *args: batch_calls.append(args) or events.append("batch"),
     )
 
     def fake_legacy(actual_image, actual_mask, actual_proposals, work_dir, *, mode):
-        legacy_calls.append(
-            (actual_image, actual_mask, actual_proposals, work_dir, mode)
-        )
+        single_calls.append(mode)
+        events.append(mode)
         return prompted if mode == "prompted" else automatic
 
     monkeypatch.setattr(
@@ -3019,25 +3513,27 @@ def test_candidate_batch_stage_unsupported_uses_two_legacy_workers_in_order(
     )
 
     assert actual == (prompted, automatic)
-    assert legacy_calls == [
-        (image, text_mask, proposals, tmp_path, "prompted"),
-        (image, None, None, tmp_path, "automatic"),
-    ]
+    assert batch_calls == []
+    assert single_calls == ["prompted", "automatic"]
+    assert events == ["capability", "prompted", "automatic"]
 
 
 def test_candidate_batch_stage_does_not_fallback_after_batch_failure(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    if not image_to_ppt.sam_candidate_batch_output_supported(tmp_path):
+        pytest.skip("SAM candidate batch publication is unsupported")
     monkeypatch.setattr(
         image_to_ppt,
         "sam_candidate_batch_output_supported",
         lambda work_dir: True,
     )
+    failure = RuntimeError("batch failed")
     monkeypatch.setattr(
         image_to_ppt,
         "_generate_sam_candidate_batch_isolated",
-        lambda *args: (_ for _ in ()).throw(RuntimeError("batch failed")),
+        lambda *args: (_ for _ in ()).throw(failure),
     )
     monkeypatch.setattr(
         image_to_ppt,
@@ -3045,13 +3541,15 @@ def test_candidate_batch_stage_does_not_fallback_after_batch_failure(
         lambda *args, **kwargs: pytest.fail("failed batch must not be retried"),
     )
 
-    with pytest.raises(RuntimeError, match="batch failed"):
+    with pytest.raises(RuntimeError, match="batch failed") as raised:
         image_to_ppt._generate_sam_candidate_stage_isolated(
             image_to_ppt.np.zeros((2, 2, 3), dtype=image_to_ppt.np.uint8),
             image_to_ppt.np.zeros((2, 2), dtype=image_to_ppt.np.uint8),
             [],
             tmp_path,
         )
+
+    assert raised.value is failure
 
 
 @pytest.mark.parametrize("platform", ["darwin", "freebsd14"])
@@ -3531,6 +4029,10 @@ def test_candidate_batch_process_routes_initial_and_residual_stage(
     Image.fromarray(image).save(image_path)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
+    if batch_supported and not image_to_ppt.sam_candidate_batch_output_supported(
+        work_dir
+    ):
+        pytest.skip("SAM candidate batch publication is unsupported")
     text_mask_path = work_dir / "source-text-mask.png"
     Image.fromarray(image_to_ppt.np.zeros((10, 20), dtype=image_to_ppt.np.uint8)).save(
         text_mask_path
@@ -4037,6 +4539,35 @@ def test_centered_textbox_keeps_detected_horizontal_bounds(tmp_path: Path) -> No
 
     assert abs(text_box.left / 914400 - 2.6666) < 0.01
     assert abs(text_box.width / 914400 - 5.3332) < 0.01
+
+
+def test_rotated_textbox_keeps_displayed_bounds_and_center(tmp_path: Path) -> None:
+    bg_path = tmp_path / "bg.png"
+    Image.new("RGB", (100, 50), "white").save(bg_path)
+    out_path = tmp_path / "out.pptx"
+
+    assemble_pptx(
+        background_path=bg_path,
+        components=[],
+        text_items=[{
+            "box": [20, 10, 10, 30],
+            "text": "Rotated",
+            "font_size": 18,
+            "rotation": 90,
+        }],
+        img_width=100,
+        img_height=50,
+        output_path=out_path,
+    )
+
+    text_box = Presentation(out_path).slides[0].shapes[1]
+    center_x = (text_box.left + text_box.width / 2) / 914400
+    center_y = (text_box.top + text_box.height / 2) / 914400
+
+    assert text_box.rotation == 90
+    assert abs(text_box.width / text_box.height - 3.0) < 0.01
+    assert abs(center_x - 10 / 3) < 0.01
+    assert abs(center_y - 3.75) < 0.01
 
 
 def test_widescreen_canvas_places_component_without_aspect_change(
@@ -8260,6 +8791,7 @@ def _prepare_component_layers_fixture(
     resource_isolation: bool = False,
     before_visual_worker=None,
     before_prepare=None,
+    ocr_rotation: int = 0,
 ) -> tuple[dict, Path]:
     source_path = tmp_path / "outside-source.png"
     Image.new("RGB", (16, 10), "white").save(source_path)
@@ -8271,6 +8803,11 @@ def _prepare_component_layers_fixture(
         assert Path(path).resolve().is_relative_to(work_dir.resolve())
         assert lang == "en"
         assert bool(kwargs.get("isolated")) is resource_isolation
+        assert kwargs.get("style_reference_width") == (
+            16 if ocr_rotation else None
+        )
+        with Image.open(path) as ocr_image:
+            ocr_size = ocr_image.size
         return (
             [{
                 "box": [1, 1, 3, 2],
@@ -8282,7 +8819,9 @@ def _prepare_component_layers_fixture(
                 "align": 1,
                 "confidence": 0.99,
             }],
-            image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8),
+            image_to_ppt.np.zeros(
+                (ocr_size[1], ocr_size[0]), dtype=image_to_ppt.np.uint8
+            ),
         )
 
     def fake_slide(path: Path, target: Path, text_analysis: dict) -> dict:
@@ -8408,6 +8947,7 @@ def _prepare_component_layers_fixture(
         work_dir,
         lang="en",
         resource_isolation=resource_isolation,
+        ocr_rotation=ocr_rotation,
     )
     assert calls == {"ocr": 1, "visual": 1}
     return prepared, work_dir
@@ -8530,7 +9070,7 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     cleanup_path = Path(prepared["_text_cleanup_mask_path"])
     assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
     assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
@@ -8564,7 +9104,20 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
         else:
             assert_asset(value)
     for component in manifest["components"]:
-            assert_asset(component["asset"])
+        assert_asset(component["asset"])
+
+
+def test_prepare_component_layers_rotates_ocr_and_restores_display_coordinates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(
+        tmp_path, monkeypatch, ocr_rotation=90
+    )
+
+    assert prepared["text_items"][0]["box"] == [13, 1, 2, 3]
+    assert prepared["text_items"][0]["rotation"] == 90
+    assert not list(work_dir.glob(".ocr-upright-*.png"))
 
 
 def test_load_component_layers_rejects_foreground_evidence_not_matching_semantics(
@@ -8796,6 +9349,39 @@ def test_prepare_component_layers_ocr_cleanup_does_not_mask_primary_error(
         )
 
 
+def test_prepare_component_layers_temporary_ocr_cleanup_does_not_mask_primary_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (8, 4), "red").save(source_path)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("OCR primary failure")
+        ),
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    original_unlink = Path.unlink
+
+    def fail_temporary_ocr_unlink(path, *args, **kwargs):
+        if Path(path).name.startswith(".ocr-upright-"):
+            raise OSError("temporary OCR cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_temporary_ocr_unlink)
+
+    with pytest.raises(RuntimeError, match="OCR primary failure"):
+        image_to_ppt.prepare_component_layers(
+            source_path,
+            tmp_path / "prepared",
+            lang="en",
+            resource_isolation=False,
+            ocr_rotation=90,
+        )
+
+
 def test_prepare_component_layers_visual_cleanup_does_not_mask_primary_error(
     tmp_path: Path,
     monkeypatch,
@@ -9003,8 +9589,10 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 5
+    assert manifest["schema_version"] == 6
     manifest["schema_version"] = 1
+    for item in manifest["text_items"]:
+        item.pop("rotation")
     manifest.pop("initial_diagnostics")
     manifest["assets"].pop("semantic_masks")
     manifest["assets"].pop("text_cleanup_mask")

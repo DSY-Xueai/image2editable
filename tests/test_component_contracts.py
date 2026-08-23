@@ -11,7 +11,7 @@ validate_agent_provider = component_contracts.validate_agent_provider
 
 
 def test_component_agent_provider_contract_is_frozen() -> None:
-    assert AGENT_PROVIDERS == frozenset({"host", "local"})
+    assert AGENT_PROVIDERS == frozenset({"host", "local", "local-service"})
     assert MAX_REPAIR_ROUNDS == 5
     assert "pending_gate" in component_contracts.COMPONENT_STATES
     assert "component-isolation.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
@@ -440,6 +440,16 @@ def test_component_plan_accepts_multiple_background_rebuilds() -> None:
         "object_ids": ["visual2"],
         "parameters": {"margin_ratio": 0.02},
     })
+
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
+def test_component_plan_allows_background_rebuild_for_frozen_text() -> None:
+    request, graph = _plan_contract_fixture()
+    plan = _plan(request, "rebuild_background", ["text"])
+    plan["actions"][0]["parameters"] = {"margin_ratio": 0.01}
 
     assert component_contracts.validate_component_plan(
         plan, request=request, graph=graph,

@@ -1,0 +1,15 @@
+{
+  "actions": [
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0001"],"parameters":{}},
+    {"action":"split","confidence":0.99,"evidence":["connected-component analysis of the bound round-01 mask finds exactly 159 proposals; split creates temporary retry targets without accepting text or border fragments as final visuals"],"object_ids":["component_0002"],"parameters":{"parts":159}},
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0003"],"parameters":{}},
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0004"],"parameters":{}}
+  ],
+  "graph_sha256":"5dd21b4c7a110486a1a1a3e670c8ad2e07418254fa56418dfad9af10c8543432",
+  "kind":"component_plan",
+  "page_id":"page_001",
+  "provider":"host",
+  "repair_round":1,
+  "request_sha256":"9f5397311c9d4eeddb255f0af5fb47443a6dea04d7dd574c51003f04f1c2e7e0",
+  "schema_version":1
+}

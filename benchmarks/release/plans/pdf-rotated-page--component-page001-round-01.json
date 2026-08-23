@@ -1,0 +1,121 @@
+{
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The parent is the complete rounded teal header beneath the complete native title."
+      ],
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The right-card parent is the complete independently movable card while its labels remain native text."
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The middle-card outer parent retains the source-backed boundary around the separately owned inner body."
+      ],
+      "object_ids": [
+        "parent_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "The left-card outer parent retains the source-backed boundary around the separately owned inner body."
+      ],
+      "object_ids": [
+        "parent_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "This parent is the left-card inner body, disjoint in effective ownership from the retained outer boundary."
+      ],
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "This parent is the middle-card inner body, disjoint in effective ownership from the retained outer boundary."
+      ],
+      "object_ids": [
+        "parent_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "The whole-page composite would flatten and duplicate every retained visual and native text region."
+      ],
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "The cross-card composite duplicates the independently retained card layers."
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This raster title and header partition duplicates the complete native title and retained header parent."
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This raster footer strip duplicates complete native editable text_0011."
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "90aeacec51e5688f7717d7edbe06bef9284b8da4c0601c67b807c5033f469533",
+  "schema_version": 1,
+  "graph_sha256": "a78fa1ba70c29425abe47066370149c51e4891f5c21e2b3befb67208665eca17"
+}

@@ -1,0 +1,200 @@
+{
+  "actions": [
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "source evidence isolates the left non-overlapping third of the table header"
+      ],
+      "object_ids": [
+        "split_0001"
+      ],
+      "parameters": {
+        "box": [
+          0.04375,
+          0.22777777777777777,
+          0.325,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 1"
+      ],
+      "object_ids": [
+        "split_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 2"
+      ],
+      "object_ids": [
+        "split_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 3"
+      ],
+      "object_ids": [
+        "split_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 4"
+      ],
+      "object_ids": [
+        "split_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 5"
+      ],
+      "object_ids": [
+        "split_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 6"
+      ],
+      "object_ids": [
+        "split_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 7"
+      ],
+      "object_ids": [
+        "split_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 8"
+      ],
+      "object_ids": [
+        "split_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 9"
+      ],
+      "object_ids": [
+        "split_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 10"
+      ],
+      "object_ids": [
+        "split_0011"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 11"
+      ],
+      "object_ids": [
+        "split_0012"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "round-three isolation shows complete non-overlapping data row 12"
+      ],
+      "object_ids": [
+        "split_0013"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "source evidence isolates the middle non-overlapping third of the table header"
+      ],
+      "object_ids": [
+        "split_0014"
+      ],
+      "parameters": {
+        "box": [
+          0.325,
+          0.22777777777777777,
+          0.646875,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "source evidence isolates the right non-overlapping third of the table header"
+      ],
+      "object_ids": [
+        "split_0015"
+      ],
+      "parameters": {
+        "box": [
+          0.646875,
+          0.22777777777777777,
+          0.940625,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "3c57fc215fbb395a9ac285077ffb9b895e58d1114b255dcb17fbde596c2932e4",
+  "schema_version": 1,
+  "graph_sha256": "037f19abd951cfad966fc8343077a2220f0a360fe78ef37be3a70ac34d02927a"
+}

@@ -7,8 +7,14 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
+from scripts.runtime_model_paths import (
+    RuntimeModelPathError,
+    resolve_runtime_model_path,
+)
+from scripts.visual_segment import VisualSegmentationError
 
-MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+
+MODEL_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
 OBJECT_PROMPT = (
     "person. portrait. player. card. panel. flag. icon. information icon. logo. badge. trophy. "
     "medal. wreath. table. chart. frame. border. line. decoration."
@@ -31,8 +37,7 @@ class ObjectProposal:
 
 
 class _LazyGroundingDino:
-    def __init__(self, model_id: str, device: str | None) -> None:
-        self.model_id = model_id
+    def __init__(self, device: str | None) -> None:
         self.device = device
         self.processor = None
         self.model = None
@@ -40,21 +45,29 @@ class _LazyGroundingDino:
     def _load(self) -> None:
         if self.model is not None:
             return
+        try:
+            model_path = resolve_runtime_model_path("grounding_dino")
+        except RuntimeModelPathError as exc:
+            raise VisualSegmentationError(str(exc)) from None
         torch = importlib.import_module("torch")
         transformers = importlib.import_module("transformers")
         self.device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
         try:
             self.processor = transformers.AutoProcessor.from_pretrained(
-                self.model_id, local_files_only=True
+                str(model_path),
+                revision=MODEL_REVISION,
+                local_files_only=True,
             )
             model = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(
-                self.model_id, local_files_only=True
+                str(model_path),
+                revision=MODEL_REVISION,
+                local_files_only=True,
             )
-        except OSError:
-            self.processor = transformers.AutoProcessor.from_pretrained(self.model_id)
-            model = transformers.AutoModelForZeroShotObjectDetection.from_pretrained(
-                self.model_id
-            )
+        except Exception:
+            raise VisualSegmentationError(
+                "Grounding DINO local snapshot could not be loaded; run "
+                "`image2editable models install runtime` or check GROUNDING_DINO_MODEL"
+            ) from None
         self.model = model.to(self.device).eval()
 
     def detect(
@@ -106,11 +119,8 @@ class _LazyGroundingDino:
         ]
 
 
-def create_object_detector(
-    model_id: str = MODEL_ID,
-    device: str | None = None,
-):
-    detector = _LazyGroundingDino(model_id, device)
+def create_object_detector(device: str | None = None):
+    detector = _LazyGroundingDino(device)
     detector._load()
     return detector
 

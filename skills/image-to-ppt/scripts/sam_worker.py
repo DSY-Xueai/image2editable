@@ -929,6 +929,15 @@ def _close_batch_result_parent(parent_handle) -> None:
         os.close(parent_handle)
 
 
+def _windows_extended_path(path: Path) -> str:
+    value = os.path.abspath(path)
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
 def _create_batch_result_file(
     result_binding: dict,
     parent_handle,
@@ -959,7 +968,7 @@ def _create_batch_result_file(
                 f".{result_path.name}.{secrets.token_hex(16)}.tmp"
             )
             handle = kernel32.CreateFileW(
-                str(temporary_path),
+                _windows_extended_path(temporary_path),
                 0x80000000 | 0x40000000 | 0x00010000,
                 0x00000001 | 0x00000004,
                 None,
@@ -1532,6 +1541,7 @@ def _write_bound_json_result(
             raise RuntimeError("SAM batch result temp identity changed")
         _verify_batch_result_binding(result_binding)
         _publish_batch_result(file_descriptor, parent_handle, result_binding)
+        _verify_batch_result_parent(result_binding)
         published = True
     except BaseException as exc:
         primary_error = exc

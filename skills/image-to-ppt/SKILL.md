@@ -9,11 +9,18 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 ## 环境
 
-- 使用 Python 3.10–3.12；上限来自 `simple-lama-inpainting 0.1.2` 的 NumPy/Pillow 依赖约束。
+- 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
 - 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
-- 安装 `simple-lama-inpainting==0.1.2`。`LAMA_MODEL` 可指向本地 TorchScript 模型；未设置时，wrapper 首次运行可把模型下载到本地 cache。
-- 开始转换前运行 `image2editable doctor`。若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。** 我确认后安装所选项、再次运行 `doctor`，通过后继续转换。
-- 优先使用当前平台已正确安装、且通过 `doctor` 与下列设备预检的硬件加速环境，不要仅为 WSL 建议离开已经可用的环境：
+- LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
+- 若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。**
+- 完整仓库或已安装 `image2editable` 产品包时，OCR 就绪后先让我确认，再依次运行 `image2editable models install runtime` 和 `image2editable doctor`。前者下载并校验固定的 SAM、LaMa、DINO runtime receipt；取消时不得下载。
+- 需要随包 Local Agent 时，再依次运行 `python -m pip install ".[agent-local]"`、`image2editable models install agent` 和 `image2editable doctor --agent-local`；模型下载仍须先获得我的确认。
+- 纯 standalone 环境中，独立 skill 不假设该包存在，也不运行 `image2editable doctor`。开始转换前，必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径；`SAM2_MODEL`、`LAMA_MODEL` 必须指向文件，`GROUNDING_DINO_MODEL` 必须指向目录，并运行最小只读预检：
+
+  ```bash
+  python -c "import os; from pathlib import Path; names=('SAM2_MODEL','LAMA_MODEL','GROUNDING_DINO_MODEL'); raw={name: os.environ.get(name, '') for name in names}; paths={name: Path(value) for name, value in raw.items()}; assert all(raw.values()) and all(path.is_absolute() for path in paths.values()) and paths['SAM2_MODEL'].is_file() and paths['LAMA_MODEL'].is_file() and paths['GROUNDING_DINO_MODEL'].is_dir(); print('runtime model paths: ok')"
+  ```
+- 优先使用当前平台已正确安装的硬件加速环境；产品环境须通过 `doctor`，所有环境须通过下列设备预检。不要仅为 WSL 建议离开已经可用的环境：
 
   ```bash
   python -c "import sys, torch; print({'platform': sys.platform, 'cuda': torch.cuda.is_available(), 'rocm': torch.version.hip})"
@@ -23,7 +30,7 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 - macOS 保持当前受支持的设备选择；在完成真实 Apple Silicon 回归前，不把 MPS 自动设为新默认。
 - CPU 仍运行完整模型和相同质量门禁，包括 SAM 2.1 large，不替换为轻量分割模型，但推理会显著较慢。
 
-首次运行时把 Grounding DINO tiny、SAM 2.1 large 和默认 LaMa 模型下载到用户本地 cache。源码和权重不存放在此 skill 中。大/深遮罩需要 LaMa；依赖缺失或初始化失败时明确失败，不降级到容易产生条带拖影的 OpenCV 修复。
+推理不会下载模型或回退 Hugging Face cache。产品环境先安装并验证 runtime 模型；独立 skill 必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径，其中前两者校验固定文件身份，DINO 目录视为操作者显式信任的 override。源码和权重不存放在此 skill 中。大/深遮罩需要 LaMa；依赖缺失或初始化失败时明确失败，不降级到容易产生条带拖影的 OpenCV 修复。
 
 ## 命令行
 
@@ -67,9 +74,11 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
 
-Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。两种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
+Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。三种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
 
-只有我已经部署本地视觉模型服务时才选择 `local`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口；项目不下载、推荐或默认绑定模型。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Host。
+`local` 由内置 Qwen 完成候选判断和组件计划，必须先安装 agent-local 依赖、固定模型和完整性凭据；任一预检或推理失败都停止，不回退到其他 Provider。
+
+只有我已经部署本地视觉模型服务时才选择 `local-service`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Local 或 Host。
 
 每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分决策。
 
@@ -80,6 +89,8 @@ image2editable convert input.pdf -o output.pptx --agent-provider local
 image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider local
 image2editable run execute runs/pptx-job
 ```
+
+使用已部署的 OpenAI 兼容服务时，把上述命令中的 Provider 改为 `--agent-provider local-service`。
 
 Host 运行先准备并推进到 `awaiting_agent`：
 

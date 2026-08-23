@@ -70,7 +70,7 @@ def _write_inherited_boxes_pdf(path: Path) -> None:
 
 def _write_direct_media_inherited_crop_pdf(path: Path) -> None:
     writer = PdfWriter()
-    page = writer.add_blank_page(width=200, height=400)
+    writer.add_blank_page(width=200, height=400)
     pages = writer.get_object(writer._pages)
     pages[NameObject("/CropBox")] = RectangleObject([10, 20, 190, 380])
     pages[NameObject("/Rotate")] = NumberObject(90)
@@ -899,6 +899,18 @@ def test_standard_a4_plan_uses_standard_dpi() -> None:
     assert plan.effective_dpi == 200.0
     assert (plan.pixel_width, plan.pixel_height) == (1653, 2339)
     assert plan.reasons == ()
+
+
+def test_standard_large_slide_uses_working_resolution_before_detail() -> None:
+    module = _pdf_input()
+
+    standard = module.plan_pdf_render(1600, 900, "standard")
+    detail = module.plan_pdf_render(1600, 900, "detail")
+
+    assert (standard.pixel_width, standard.pixel_height) == (2560, 1440)
+    assert standard.reasons == ("standard_long_edge_ceiling",)
+    assert detail.pixel_width > standard.pixel_width
+    assert detail.pixel_height > standard.pixel_height
 
 
 def test_standard_small_page_raises_short_edge_to_floor() -> None:

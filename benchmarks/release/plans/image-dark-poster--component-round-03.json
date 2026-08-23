@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "844f7b6bfff73ec76bce61baeb2ab8360eccba4e5b80a827ee13080712de526a",
+  "graph_sha256": "ee10e7bfaa7cb366d21305aa075a5fc361c73cb93e011e7d64f7397782d8e1ca",
+  "actions": [
+    {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the dark outer canvas with no violations"]},
+    {"action": "absorb_residual", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["signed unexplained mask contains only exact dark-background holes adjacent to the outer canvas, including 86 pixels around the release label"]},
+    {"action": "accept", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the recovered dark circular interior with no violations"]},
+    {"action": "absorb_residual", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["signed unexplained mask contains exact dark-background edge holes adjacent to the recovered circular interior"]},
+    {"action": "accept", "object_ids": ["component_0004"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique blue-ring fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0005"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique blue-ring fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this complete outer-ring arc with no violations"]},
+    {"action": "accept", "object_ids": ["component_0007"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this complete outer-ring arc with no violations"]},
+    {"action": "accept", "object_ids": ["component_0010"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique red-ring intersection fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0012"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 graph retains this ring-and-line crossing owner and the isolation evidence shows no overlap"]}
+  ]
+}

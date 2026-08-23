@@ -1,0 +1,91 @@
+{
+  "actions": [
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["full-page composite duplicates the independent cards and timeline nodes"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["PILOT card reports alpha_halo and duplicate_pixels along its border"],
+      "object_ids": ["component_0002"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["SCALE card reports alpha_halo and duplicate_pixels along its border"],
+      "object_ids": ["component_0003"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["DISCOVER card reports alpha_halo and duplicate_pixels along its border"],
+      "object_ids": ["component_0004"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["PROTOTYPE card reports alpha_halo and duplicate_pixels along its border"],
+      "object_ids": ["component_0005"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["timeline node 02 outer layer has no quality violations"],
+      "object_ids": ["component_0009"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["timeline node 04 reports duplicate edge pixels"],
+      "object_ids": ["component_0010"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["timeline node 01 has no quality violations"],
+      "object_ids": ["component_0011"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["timeline node 03 reports duplicate edge pixels"],
+      "object_ids": ["component_0012"],
+      "parameters": {"margin_ratio": 0.02}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["timeline node 02 fill has no quality violations"],
+      "object_ids": ["component_0013"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.98,
+      "evidence": ["the full timeline line remains unexplained after duplicate fragments were discarded"],
+      "object_ids": ["component_0008"],
+      "parameters": {
+        "box": [0.09, 0.515, 0.91, 0.545],
+        "independent": true
+      }
+    }
+  ],
+  "graph_sha256": "f59d0a9919f6e6a8f9009c80a707fe0728a4e0219513565119dad4ba2d2f5f4a",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "45380d7d09a120e8d41d85a1964ac852aa897d7702759e6671b5f42fd5910f5c",
+  "schema_version": 1
+}

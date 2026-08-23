@@ -294,36 +294,32 @@ def export_visual_components(
 
 def _component_graph_api():
     try:
+        from .component_contracts import (
+            is_render_active_component,
+            validate_component_graph,
+        )
+        from .component_quality import validate_pixel_ownership
+    except ModuleNotFoundError as error:
+        if error.name not in {
+            f"{__package__}.component_contracts",
+            f"{__package__}.component_quality",
+        }:
+            raise
         from image2editable.component_contracts import (
             is_render_active_component,
             validate_component_graph,
         )
         from image2editable.component_quality import validate_pixel_ownership
-    except ModuleNotFoundError as error:
-        if error.name not in {
-            "image2editable",
-            "image2editable.component_contracts",
-            "image2editable.component_quality",
-        }:
+    except ImportError as error:
+        if error.name is not None:
             raise
-        try:
-            from .component_contracts import (  # type: ignore[no-redef]
-                is_render_active_component,
-                validate_component_graph,
-            )
-            from .component_quality import (  # type: ignore[no-redef]
-                validate_pixel_ownership,
-            )
-        except ImportError as relative_error:
-            if relative_error.name is not None:
-                raise
-            from component_contracts import (  # type: ignore[no-redef]
-                is_render_active_component,
-                validate_component_graph,
-            )
-            from component_quality import (  # type: ignore[no-redef]
-                validate_pixel_ownership,
-            )
+        from component_contracts import (  # type: ignore[no-redef]
+            is_render_active_component,
+            validate_component_graph,
+        )
+        from component_quality import (  # type: ignore[no-redef]
+            validate_pixel_ownership,
+        )
     return (
         is_render_active_component,
         validate_component_graph,

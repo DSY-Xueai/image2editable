@@ -135,6 +135,7 @@ def build_reconstruction_donor_from_result(
         data = json.loads(result_file.read_text(encoding="utf-8"))
     native_graph = None
     native_graph_path = None
+    native_background_payload = None
     native_reconstructed_payload = None
     native_text_mask_payload = None
     native_mask_payloads: dict[str, bytes] = {}
@@ -168,11 +169,13 @@ def build_reconstruction_donor_from_result(
         )
         if source_ref["sha256"] != expected_source_sha:
             raise ValueError("component result source hash mismatch")
-        for name in ("reconstructed", "text_mask"):
+        for name in ("background", "reconstructed", "text_mask"):
             ref = accepted_refs.get(name)
             if not _is_run_ref(ref):
                 raise ValueError("component result accepted assets are invalid")
-            if name == "reconstructed":
+            if name == "background":
+                native_background_payload = accepted_payloads[name]
+            elif name == "reconstructed":
                 native_reconstructed_payload = accepted_payloads[name]
             else:
                 native_text_mask_payload = accepted_payloads[name]
@@ -269,17 +272,28 @@ def build_reconstruction_donor_from_result(
     raster_text_preserved = False
     if native_root is not None and native_graph is not None:
         if (
-            native_reconstructed_payload is None
+            native_background_payload is None
+            or native_reconstructed_payload is None
             or native_text_mask_payload is None
         ):
             raise ValueError("component result reconstruction assets are missing")
+        background = Image.open(
+            io.BytesIO(native_background_payload)
+        ).convert("RGB")
         reconstructed = Image.open(
             io.BytesIO(native_reconstructed_payload)
         ).convert("RGBA")
         text_mask = Image.open(io.BytesIO(native_text_mask_payload)).convert("L")
-        if reconstructed.size != text_mask.size:
+        if background.size != reconstructed.size or reconstructed.size != text_mask.size:
             raise ValueError("component result asset dimensions differ")
         width, height = reconstructed.size
+        donor_slide.shapes.add_picture(
+            io.BytesIO(native_background_payload),
+            0,
+            0,
+            donor_presentation.slide_width,
+            donor_presentation.slide_height,
+        )
         active_nodes = [
             node for node in native_graph["nodes"]
             if node["state"] == "frozen" and node["kind"] != "text"
@@ -373,12 +387,24 @@ def build_reconstruction_donor_from_result(
             ]
         for item in text_items:
             left, top, right, bottom = item["box"]
+            left_emu = int(left / width * donor_presentation.slide_width)
+            top_emu = int(top / height * donor_presentation.slide_height)
+            width_emu = int((right - left) / width * donor_presentation.slide_width)
+            height_emu = int((bottom - top) / height * donor_presentation.slide_height)
+            rotation = item.get("rotation", 0)
+            if rotation in {90, 270}:
+                center_x = left_emu + width_emu / 2
+                center_y = top_emu + height_emu / 2
+                width_emu, height_emu = height_emu, width_emu
+                left_emu = int(center_x - width_emu / 2)
+                top_emu = int(center_y - height_emu / 2)
             text_shape = donor_slide.shapes.add_textbox(
-                int(left / width * donor_presentation.slide_width),
-                int(top / height * donor_presentation.slide_height),
-                int((right - left) / width * donor_presentation.slide_width),
-                int((bottom - top) / height * donor_presentation.slide_height),
+                left_emu,
+                top_emu,
+                width_emu,
+                height_emu,
             )
+            text_shape.rotation = rotation
             _style_reconstruction_textbox(text_shape, item)
         data["components"] = component_manifest
         data["text_items"] = text_items
@@ -543,5 +569,8 @@ def _validated_text_items(items: object, width: int, height: int) -> list[dict]:
         ):
             raise ValueError("component result text item box is invalid")
         x, y, w, h = box
+        rotation = item.get("rotation", 0)
+        if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+            raise ValueError("component result text rotation is invalid")
         validated.append({**item, "box": [x, y, x + w, y + h]})
     return validated

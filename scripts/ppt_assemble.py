@@ -284,15 +284,6 @@ def assemble_pptx_multi(
         if original_aspect_ratio is None:
             first_width = slides_data[0]["img_width"]
             first_height = slides_data[0]["img_height"]
-            first_ratio = first_width / first_height
-            for data in slides_data[1:]:
-                if not math.isclose(
-                    data["img_width"] / data["img_height"],
-                    first_ratio,
-                    rel_tol=1e-4,
-                    abs_tol=1e-6,
-                ):
-                    raise ValueError("original slides must have the same aspect ratio")
             original_transform = compute_slide_transform(
                 first_width,
                 first_height,
@@ -759,9 +750,20 @@ def _add_textbox(
         content_offset_y,
     )
 
+    rotation = item.get("rotation", 0)
+    if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+        raise ValueError("text rotation must be one of 0, 90, 180, or 270")
+    if rotation in {90, 270}:
+        center_x = left + width / 2
+        center_y = top + height / 2
+        width, height = height, width
+        left = center_x - width / 2
+        top = center_y - height / 2
+
     box = slide.shapes.add_textbox(
         Inches(left), Inches(top), Inches(width), Inches(height)
     )
+    box.rotation = rotation
     tf = box.text_frame
     tf.word_wrap = False
     tf.margin_left = 0

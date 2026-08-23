@@ -1,0 +1,32 @@
+{
+  "actions": [
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["quality-report shows a narrow duplicate table-outline boundary"],
+      "object_ids": ["component_0002"],
+      "parameters": {"margin_ratio": 0.002}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["quality-report shows a one-pixel duplicate and shadow boundary on the restored left table region"],
+      "object_ids": ["parent_0003"],
+      "parameters": {"margin_ratio": 0.001}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["quality-report shows a broad alpha halo and duplicate pixels on the page background"],
+      "object_ids": ["parent_0005"],
+      "parameters": {"margin_ratio": 0.006}
+    }
+  ],
+  "graph_sha256": "082f48152160fe3681c21b4de258f0e9f08002a4bba2e409540a8a6eab01f3ea",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "ae7916c0af4d56b3c574dbd1a54d2b70d4e0847c84fdb43a3725a647c56978b8",
+  "schema_version": 1
+}

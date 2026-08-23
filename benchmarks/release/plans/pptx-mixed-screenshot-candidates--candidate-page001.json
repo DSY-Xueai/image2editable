@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "candidate_decision",
+  "page_id": "page_001",
+  "candidate_id": "candidate_001",
+  "source_shape_id": "2",
+  "source_object_sha256": "3362dd457e443599faf0e3f1254e3c5ff1a570e3c3362e5d3e09e77ba0b010a5",
+  "image_sha256": "594d8f1eeeb94746e8aaa5730a3fa291855423f2eaea48ba30b1eeb577ed4e9d",
+  "decision": "replace",
+  "confidence": 0.99,
+  "category": "full_slide_screenshot",
+  "evidence": [
+    "Image covers the full slide and contains the complete rasterized table layout."
+  ]
+}

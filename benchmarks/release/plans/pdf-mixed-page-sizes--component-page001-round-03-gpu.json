@@ -1,0 +1,60 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The rebuilt complete header has zero component violations and remains the source-backed underlay for native text_0001."
+      ],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "The unexplained mask's long one-pixel top line and rounded corner are source-backed boundary pixels contiguous with the complete header owner."
+      ],
+      "object_ids": ["parent_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0005",
+        "parent_0009",
+        "The right-card outer shell and inner body are separately source-backed layers whose intentional containment is resolved by ownership."
+      ],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0005",
+        "parent_0009",
+        "The right-card inner body has zero pixel violations and is intentionally nested inside its independently retained outer shell."
+      ],
+      "object_ids": ["parent_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "The remaining short source-backed right-card boundary strokes in unexplained-mask.png are directly adjacent to the retained outer-shell owner."
+      ],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "e69a4282dcaa82840fa8b812767c96d293a6ab93789cf4b8ba69a05d3fbc70e3",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "d9920601d4e00a6500c682a71ac89244dfbeaa9dd418c4260cb1389b324b4448",
+  "schema_version": 1
+}

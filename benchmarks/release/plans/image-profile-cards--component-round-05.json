@@ -1,0 +1,60 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.98,
+      "evidence": ["left avatar remains a complete circle and now carries the authenticated LL text binding"],
+      "object_ids": ["component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.98,
+      "evidence": ["rebuild only the frozen LL text underlay after binding it to the avatar so the initials remain independently editable"],
+      "object_ids": ["text_0002"],
+      "parameters": {"margin_ratio": 0.01}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": ["the signed title-region residual is a connected hole in the page background rather than an independently movable foreground object"],
+      "object_ids": ["component_0001"],
+      "parameters": {}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.98,
+      "evidence": ["restore the authenticated middle-card pill visual that remains in the signed unexplained mask"],
+      "object_ids": ["component_0013"],
+      "parameters": {"box": [0.54, 0.766667, 0.605625, 0.812222], "independent": true}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.98,
+      "evidence": ["restore the authenticated right-card pill visual that remains in the signed unexplained mask"],
+      "object_ids": ["component_0014"],
+      "parameters": {"box": [0.8525, 0.766667, 0.918125, 0.812222], "independent": true}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.98,
+      "evidence": ["restore the authenticated right-card pill visual that remains in the signed unexplained mask"],
+      "object_ids": ["component_0015"],
+      "parameters": {"box": [0.77875, 0.766667, 0.844375, 0.812222], "independent": true}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.98,
+      "evidence": ["clean only the frozen title and pill text underlays after restoring their visual regions"],
+      "object_ids": ["text_0001", "text_0014", "text_0016", "text_0017"],
+      "parameters": {"margin_ratio": 0.004}
+    }
+  ],
+  "graph_sha256": "7de108e05efd29881d90895763871dab6c4411d4eeacf8d88ec4a996bc207cf9",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "5c360d1e928f44476dd1f329bbabcd03cfa09dee32b25f2c1ed49837e402e168",
+  "schema_version": 1
+}

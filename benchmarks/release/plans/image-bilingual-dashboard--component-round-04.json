@@ -1,0 +1,220 @@
+{
+  "actions": [
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining alpha and duplicate ownership is confined to the outer edge"
+      ],
+      "object_ids": [
+        "parent_0001"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "expand",
+      "confidence": 0.99,
+      "evidence": [
+        "future composite-fragment removal exposes a chart edge at most 5.2px outside this independently movable component"
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "margin_ratio": 0.007
+      }
+    },
+    {
+      "action": "expand",
+      "confidence": 0.99,
+      "evidence": [
+        "future composite-fragment removal exposes a sidebar edge at most 4px outside this independently movable component"
+      ],
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "margin_ratio": 0.006
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining duplicate shadow is confined to a one-pixel boundary"
+      ],
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation proves this composite page fragment duplicates independently movable card visuals; discarding it one round early exposes any remaining border pixels to the final signed residual evidence"
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "expand",
+      "confidence": 0.99,
+      "evidence": [
+        "future composite-fragment removal exposes a card edge at most 5.2px outside this independently movable component"
+      ],
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.007
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining card alpha halo is confined to the edge"
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {
+        "margin_ratio": 0.002
+      }
+    },
+    {
+      "action": "expand",
+      "confidence": 0.99,
+      "evidence": [
+        "future composite-fragment removal exposes a card edge at most 5px outside this independently movable component"
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {
+        "margin_ratio": 0.007
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar shadow is confined to one pixel"
+      ],
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and shadow duplication is edge-local"
+      ],
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and duplicate ownership is edge-local"
+      ],
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": [
+        "remaining progress-bar alpha and duplicate ownership is edge-local"
+      ],
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {
+        "margin_ratio": 0.001
+      }
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation confirms the navigation highlight remains independently movable"
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation confirms the navigation outline remains independently movable"
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation confirms the metric delta remains independently movable"
+      ],
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation confirms the metric delta remains independently movable"
+      ],
+      "object_ids": [
+        "component_0020"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "component-isolation confirms the metric delta remains independently movable"
+      ],
+      "object_ids": [
+        "component_0021"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "b44b12d56f2d5e1782b18e2bf25551e823861fcc2ba6a072cffa40006e766b86",
+  "schema_version": 1,
+  "graph_sha256": "156aa56efb75c83f695e8acd7a998ba86e82738ab64b50a57ffef06cfbc105a9"
+}

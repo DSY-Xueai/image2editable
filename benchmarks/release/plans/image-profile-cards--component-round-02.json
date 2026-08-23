@@ -1,0 +1,95 @@
+{
+  "actions": [
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["page background has alpha-halo and duplicate pixels along foreground boundaries"],
+      "object_ids": ["component_0001"],
+      "parameters": {"margin_ratio": 0.006}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.98,
+      "evidence": ["right-card border fragment duplicates the complete right-card surface"],
+      "object_ids": ["component_0003"],
+      "parameters": {}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["left-card surface has boundary alpha-halo and duplicate pixels"],
+      "object_ids": ["component_0004"],
+      "parameters": {"margin_ratio": 0.004}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["right-card surface has boundary alpha-halo and duplicate pixels"],
+      "object_ids": ["component_0005"],
+      "parameters": {"margin_ratio": 0.004}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["middle-card surface has boundary alpha-halo and duplicate pixels"],
+      "object_ids": ["component_0006"],
+      "parameters": {"margin_ratio": 0.004}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["left avatar has a duplicated boundary shadow"],
+      "object_ids": ["component_0007"],
+      "parameters": {"margin_ratio": 0.003}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["middle avatar has a duplicated boundary shadow"],
+      "object_ids": ["component_0009"],
+      "parameters": {"margin_ratio": 0.003}
+    },
+    {
+      "action": "shrink",
+      "confidence": 0.98,
+      "evidence": ["right avatar has boundary alpha-halo and duplicate pixels"],
+      "object_ids": ["component_0011"],
+      "parameters": {"margin_ratio": 0.003}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["title-region candidate is almost entirely duplicated by frozen OCR and the page background"],
+      "object_ids": ["component_0012"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.98,
+      "evidence": ["pill candidate duplicates the complete middle-card surface and frozen OCR"],
+      "object_ids": ["component_0013"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.98,
+      "evidence": ["pill candidate duplicates the complete right-card surface and frozen OCR"],
+      "object_ids": ["component_0014"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.98,
+      "evidence": ["pill candidate duplicates the complete right-card surface and frozen OCR"],
+      "object_ids": ["component_0015"],
+      "parameters": {}
+    }
+  ],
+  "graph_sha256": "693812a69fa3f0eddc189a8ad685b9f6f42b483eebc6d284ff30e9b249c4f118",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "bda05a24a8a66e34dcfad4233912061339af707dbeb3153616387c0bf0a30ef1",
+  "schema_version": 1
+}

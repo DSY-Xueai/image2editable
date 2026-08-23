@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "01_zh_courseware",
+      "kind": "image",
+      "path": "01-zh-courseware.png",
+      "pages": 1,
+      "bytes": 981020,
+      "sha256": "b8a4df5baf6978e0e353494a9d3ff3c991d1105daaf084b52dff36fabbe2c2f8"
+    },
+    {
+      "id": "02_typography",
+      "kind": "image",
+      "path": "02-typography.png",
+      "pages": 1,
+      "bytes": 49720,
+      "sha256": "e649cadfd47ee8dc270eb35aa36d6af018e710461e5458686decaaf83006aaca"
+    },
+    {
+      "id": "03_flowchart",
+      "kind": "image",
+      "path": "03-flowchart.png",
+      "pages": 1,
+      "bytes": 29426,
+      "sha256": "5d6c1ff4700a0fb80c566dc7b790f8517a5bd71d5637f4e1ab23e1ea544eb998"
+    },
+    {
+      "id": "04_table_chart",
+      "kind": "image",
+      "path": "04-table-chart.png",
+      "pages": 1,
+      "bytes": 31684,
+      "sha256": "5a5ed76087edbfe029f0f68c94a5080880e0d33b6bac3b6d0edb503109d409ec"
+    },
+    {
+      "id": "05_photo_overlay",
+      "kind": "image",
+      "path": "05-photo-overlay.png",
+      "pages": 1,
+      "bytes": 2711637,
+      "sha256": "d9c1c57ff0e200139cd575f860ed9a5c893c2ae59c57b11d642f6d0bc067c181"
+    },
+    {
+      "id": "06_transparency_shadow",
+      "kind": "image",
+      "path": "06-transparency-shadow.png",
+      "pages": 1,
+      "bytes": 65416,
+      "sha256": "590a5cf4796d575b6e1b71543e82d5624c64be12eac88b1e3c304e587671c1ba"
+    },
+    {
+      "id": "07_compressed",
+      "kind": "image",
+      "path": "07-compressed.jpg",
+      "pages": 1,
+      "bytes": 104769,
+      "sha256": "9f055966531e0fa4bbb403e368224db1e5b73d685fc48bc6d30faede65fabad1"
+    },
+    {
+      "id": "08_portrait",
+      "kind": "image",
+      "path": "08-portrait.png",
+      "pages": 1,
+      "bytes": 27976,
+      "sha256": "4891659393a0c3bfdf8cfa5be58b46c9de7cc12830f7f0fec0e7dd4dc9d4a41d"
+    },
+    {
+      "id": "09_document",
+      "kind": "pdf",
+      "path": "09-document.pdf",
+      "pages": 3,
+      "bytes": 1392855,
+      "sha256": "3518c9250d8bc00b66fb4648ddd7398658de60debe2374bdd01cd051ba669658"
+    },
+    {
+      "id": "10_mixed",
+      "kind": "pptx",
+      "path": "10-mixed.pptx",
+      "pages": 3,
+      "bytes": 2740810,
+      "sha256": "a5432c5f9ea30ed3c8626c03b80f855113d2665ba7ab142f7c361d624fd7ddf5"
+    }
+  ],
+  "routes": [
+    {
+      "id": "images",
+      "cases": [
+        "01_zh_courseware",
+        "02_typography",
+        "03_flowchart",
+        "04_table_chart",
+        "05_photo_overlay",
+        "06_transparency_shadow",
+        "07_compressed",
+        "08_portrait"
+      ],
+      "pages": 8
+    },
+    {
+      "id": "pdf",
+      "cases": [
+        "09_document"
+      ],
+      "pages": 3
+    },
+    {
+      "id": "mixed_pptx",
+      "cases": [
+        "10_mixed"
+      ],
+      "pages": 3
+    }
+  ],
+  "corpus_sha256": "5aec7fb2cf751e42fe0c1c51c49bac613af85fae1727ba66de517a7a0c1718a0"
+}

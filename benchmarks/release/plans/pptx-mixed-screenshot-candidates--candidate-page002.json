@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "kind": "candidate_decision",
+  "page_id": "page_002",
+  "candidate_id": "candidate_001",
+  "source_shape_id": "2",
+  "source_object_sha256": "7fa090a9f03eef6ec086214c8c9639197369193d850c72d51faa241b617c5c18",
+  "image_sha256": "cc2d8482b48fd32f9920cf0092da88ad16d345821db0d0f98b11103b09871900",
+  "decision": "replace",
+  "confidence": 0.99,
+  "category": "full_slide_screenshot",
+  "evidence": [
+    "Image covers the full slide and contains the complete rasterized capability matrix."
+  ]
+}

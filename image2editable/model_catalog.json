@@ -3,7 +3,7 @@
   "models": [
     {
       "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-      "revision": "main",
+      "revision": "89644892e4d85e24eaac8bacfd4f463576704203",
       "stability": "experimental",
       "minimum_vram_gib": 8,
       "minimum_available_vram_gib": 6.5,

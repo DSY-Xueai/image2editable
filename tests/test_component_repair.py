@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import io
 import json
 import hashlib
 import hmac
@@ -10,8 +11,10 @@ from pathlib import Path
 import queue
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import zlib
 
 import pytest
 import cv2
@@ -588,6 +591,37 @@ def test_visual_fill_rebuilds_smooth_canvas_hole_from_outside_ring(
     assert float(np.abs(rebuilt[hole].astype(int) - source[hole]).mean()) <= 2.0
 
 
+def test_visual_fill_aligns_generated_hole_boundary_with_owned_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import component_underlay
+
+    source = np.full((24, 32, 3), 100, dtype=np.uint8)
+    hole = np.zeros(source.shape[:2], dtype=bool)
+    hole[9:13, 14:18] = True
+    damaged = source.copy()
+    damaged[hole] = 180
+
+    monkeypatch.setattr(
+        component_underlay.cv2,
+        "inpaint",
+        lambda image, mask, radius, method: np.where(
+            mask[:, :, None] > 0, 140, image
+        ).astype(np.uint8),
+    )
+    repaired, metrics = component_underlay._choose_visual_fill(
+        rgb=damaged,
+        source_rgb=source,
+        semantic_mask=hole,
+        donor_mask=~hole,
+        visual_hole=hole,
+    )
+
+    assert np.array_equal(repaired[~hole], damaged[~hole])
+    assert metrics["boundary_color_mae"] <= 6.0
+    assert metrics["gradient_jump_p95"] <= 12.0
+
+
 def test_gradient_continuation_keeps_text_hole_boundary_smooth() -> None:
     from scripts import component_underlay
 
@@ -771,6 +805,249 @@ def test_component_repair_rejects_unheld_execution_lease(page_session: dict) -> 
         initialize_component_repair_state(
             store, "page_001", request_path=request_path,
             initial_component_count=2, _lease=lease,
+        )
+
+
+def test_execution_lease_authorizes_only_its_held_run(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with pytest.raises(RuntimeError, match="not held"):
+        lease.assert_authorizes(run)
+
+    with lease:
+        lease.assert_authorizes(run)
+        with pytest.raises(RuntimeError, match="different Run"):
+            lease.assert_authorizes(other)
+
+    with pytest.raises(RuntimeError, match="not held"):
+        lease.assert_authorizes(run)
+
+
+@pytest.mark.parametrize(
+    ("lease_path", "run_root"),
+    [
+        ("execution.lock", None),
+        ("not-execution.lock", "run"),
+    ],
+)
+def test_execution_lease_rejects_unbound_or_nonstandard_run_lock(
+    tmp_path: Path, lease_path: str, run_root: str | None,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(
+        run / lease_path,
+        run_root=run if run_root is not None else None,
+    )
+
+    with lease:
+        with pytest.raises(RuntimeError, match="different Run"):
+            lease.assert_authorizes(run)
+
+
+def test_execution_lease_rejects_replaced_lock_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        if os.name == "nt":
+            original_lstat = Path.lstat
+
+            class ReplacedPathStatus:
+                def __init__(self, status: os.stat_result) -> None:
+                    self._status = status
+
+                def __getattr__(self, name: str) -> object:
+                    if name == "st_ino":
+                        return self._status.st_ino + 1
+                    return getattr(self._status, name)
+
+            def replaced_lstat(path: Path) -> object:
+                result = original_lstat(path)
+                if path == lease.path:
+                    return ReplacedPathStatus(result)
+                return result
+
+            monkeypatch.setattr(Path, "lstat", replaced_lstat)
+        else:
+            replacement = run / "replacement.lock"
+            replacement.write_bytes(b"replacement")
+            os.replace(replacement, lease.path)
+
+        with pytest.raises(RuntimeError):
+            lease.assert_authorizes(run)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_missing_posix_parent_descriptor(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        descriptor = lease._parent_descriptor
+        assert descriptor is not None
+        lease._parent_descriptor = None
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_descriptor = descriptor
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_unlocked_posix_parent_descriptor(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        assert lease._parent_descriptor is not None
+        assert lease._parent_locked
+        lease._parent_locked = False
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_locked = True
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows parent validator delegation required",
+)
+def test_execution_lease_rejects_unlocked_parent_descriptor_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import image2editable.execution as execution
+
+    run = tmp_path / "run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        monkeypatch.setattr(execution, "_validate_open_parent", lambda *_: None)
+        lease._parent_descriptor = -1
+        try:
+            with pytest.raises(RuntimeError, match="parent is not held"):
+                lease.assert_authorizes(run)
+        finally:
+            lease._parent_descriptor = None
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX parent descriptor required",
+)
+def test_execution_lease_rejects_replaced_posix_parent_path(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    moved_run = tmp_path / "moved-run"
+    run.mkdir()
+    lease = ExecutionLease(run / "execution.lock", run_root=run)
+
+    with lease:
+        run.rename(moved_run)
+        run.mkdir()
+        with pytest.raises(RuntimeError, match="parent identity changed"):
+            lease.assert_authorizes(run)
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="POSIX execution lease covers publication",
+)
+def test_component_request_reuses_held_execution_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+
+    def reject_nested_publication_lease(path: Path) -> object:
+        raise AssertionError(f"nested publication lease acquired: {path}")
+
+    monkeypatch.setattr(
+        component_repair,
+        "_run_publication_lease",
+        reject_nested_publication_lease,
+    )
+
+    with ExecutionLease(
+        run_root / "execution.lock", run_root=run_root,
+    ) as lease:
+        request_path = build_component_agent_request(
+            page_session, repair_round=1, _lease=lease,
+        )
+
+    assert request_path.is_file()
+
+
+def test_direct_component_request_uses_publication_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered: list[Path] = []
+
+    class TrackingPublicationLease:
+        def __init__(self, reconstruction: Path) -> None:
+            self.reconstruction = reconstruction
+
+        def __enter__(self) -> None:
+            entered.append(self.reconstruction)
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        component_repair,
+        "_run_publication_lease",
+        TrackingPublicationLease,
+    )
+
+    request_path = build_component_agent_request(page_session, repair_round=1)
+
+    assert request_path.is_file()
+    assert entered == [Path(page_session["reconstruction_dir"])]
+
+
+def test_component_request_rejects_execution_lease_for_different_run(
+    page_session: dict, tmp_path: Path,
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    with ExecutionLease(
+        other / "execution.lock", run_root=other,
+    ) as lease:
+        with pytest.raises(RuntimeError, match="different Run"):
+            build_component_agent_request(
+                page_session, repair_round=1, _lease=lease,
+            )
+
+
+def test_component_request_rejects_released_execution_lease(
+    page_session: dict,
+) -> None:
+    reconstruction = Path(page_session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+    lease = ExecutionLease(run_root / "execution.lock", run_root=run_root)
+    with lease:
+        pass
+
+    with pytest.raises(RuntimeError, match="not held"):
+        build_component_agent_request(
+            page_session, repair_round=1, _lease=lease,
         )
 
 
@@ -981,7 +1258,75 @@ def test_recoverable_plan_rejection_reopens_same_local_round_and_preserves_plans
     assert repeated["plan_ref"] == corrected["plan_ref"]
     assert repeated["recovered"] is True
     assert rejected_path.read_bytes() == rejected_payload
+
     assert (store.root / corrected["plan_ref"]["path"]).is_file()
+
+
+def test_recoverable_split_rejection_exposes_bound_correction_context(
+    page_session: dict,
+) -> None:
+    from image2editable.store import RunStore
+
+    page_session["provider"] = "local"
+    request_path = build_component_agent_request(page_session, repair_round=1)
+    store = RunStore(request_path.parents[5])
+    store.write_json("job_manifest.json", {
+        "schema_version": 1, "pages": ["page_001"],
+        "options": {"agent_provider": "local"},
+    })
+    initialize_component_repair_state(
+        store, "page_001", request_path=request_path, initial_component_count=2,
+    )
+    advance_component_repair(store, "page_001")
+    first_plan = {
+        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
+        "provider": "local", "repair_round": 1,
+        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+        "actions": [_action("absorb_residual", ["candidate_b"])],
+    }
+    record_local_component_plan(store, "page_001", plan=first_plan)
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=recorded["current_round"]["request_ref"],
+        plan_ref=recorded["current_round"]["plan_ref"],
+    )
+    first_context = runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    )
+    assert first_context["forbidden_action_pairs"] == [
+        ["absorb_residual", "candidate_b"]
+    ]
+
+    split_plan = {**first_plan, "actions": [
+        _action("split", ["candidate_b"], {"parts": 2})
+    ]}
+    record_local_component_plan(store, "page_001", plan=split_plan)
+    recorded = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    component_repair.reject_recoverable_component_plan(
+        store,
+        "page_001",
+        repair_round=1,
+        request_ref=recorded["current_round"]["request_ref"],
+        plan_ref=recorded["current_round"]["plan_ref"],
+        reason="invalid_split_target",
+    )
+
+    context = runtime._local_plan_correction_context(
+        RunStore(store.root), "page_001", request_path
+    )
+    assert context["rejected_plan"] == split_plan
+    assert context["forbidden_action_pairs"] == [
+        ["absorb_residual", "candidate_b"],
+        ["split", "candidate_b"],
+    ]
+    assert "exact requested number of connected proposals" in context["instruction"]
 
 
 def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
@@ -1065,6 +1410,23 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
     ).exists()
     assert rejected_path.read_bytes() == rejected_payload
 
+    rejected_sha256 = hashlib.sha256(rejected_payload).hexdigest()
+    short_rejected_path = store.root / (
+        "host-component-plan-page_001-01-retry-"
+        f"{rejected_sha256[:12]}.json"
+    )
+    short_rejected_path.write_bytes(rejected_payload)
+    rejection_path = (
+        Path(page_session["reconstruction_dir"])
+        / f"component-plan-rejection-{reopened['revision']:08d}.json"
+    )
+    rejection = json.loads(rejection_path.read_text(encoding="utf-8"))
+    rejection["rejected_plan_ref"] = {
+        "path": short_rejected_path.relative_to(store.root).as_posix(),
+        "sha256": rejected_sha256,
+    }
+    rejection_path.write_text(json.dumps(rejection), encoding="utf-8")
+
     import image2editable.host_agent as host_agent
 
     handshake = host_agent.next_host_agent_item(store.root)
@@ -1083,12 +1445,14 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
             "The previous plan was rejected because an absorb_residual target had "
             "no containment or 3px adjacency with the signed residual. Modify or "
             "remove the related absorb_residual action; do not change request_sha256."
-        ),
-        "rejected_plan": rejected_plan,
-    }
+            ),
+            "rejected_plan": rejected_plan,
+            "forbidden_action_pairs": [["absorb_residual", "candidate_b"]],
+        }
     assert retry_request["request_sha256"] == request_sha256
     assert retry_request["repair_round"] == 1
     assert rejected_path.read_bytes() == rejected_payload
+    short_rejected_path.unlink()
 
     corrected_plan = copy.deepcopy(rejected_plan)
     corrected_plan["actions"] = [_action("discard", ["candidate_b"])]
@@ -1109,6 +1473,11 @@ def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
         record_host_plan(store.root, corrected_source)
     retry_paths = list(store.root.glob("host-component-plan-*-retry-*.json"))
     assert len(retry_paths) == 1
+    retry_sha256 = hashlib.sha256(retry_paths[0].read_bytes()).hexdigest()
+    assert retry_paths[0].name == (
+        f"host-component-plan-page_001-01-retry-{retry_sha256[:12]}.json"
+    )
+    assert request_sha256 not in retry_paths[0].name
 
     corrected = record_host_plan(store.root, corrected_source)
 
@@ -1308,7 +1677,7 @@ def test_page_only_background_residual_enters_next_round(
     }
     record_local_component_plan(store, "page_001", plan=plan)
     execution_dir = request_path.parents[2] / "execution-01"
-    next_graph = execute_component_actions(
+    execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
         sam_runner=None, input_dir=request_path.parent, output_dir=execution_dir,
     )
@@ -1396,7 +1765,7 @@ def test_page_residual_owner_selects_adjacent_pending_component(
     Image.fromarray(residual, mode="L").save(residual_path)
     nodes = []
     for component_id, box in (
-        ("adjacent", (5, 10, 7, 13)),
+        ("adjacent", (5, 10, 8, 13)),
         ("separate", (25, 25, 30, 30)),
     ):
         mask = np.zeros_like(residual)
@@ -1420,6 +1789,47 @@ def test_page_residual_owner_selects_adjacent_pending_component(
     )
 
     assert owners == {"adjacent"}
+
+
+def test_page_residual_owner_selects_one_actionable_component_per_region(
+    tmp_path: Path,
+) -> None:
+    from image2editable.store import RunStore
+
+    store = RunStore(tmp_path / "run")
+    graph_root = store.root / "evidence"
+    masks_root = graph_root / "masks"
+    masks_root.mkdir(parents=True)
+    residual = np.zeros((40, 40), dtype=np.uint8)
+    residual[18:22, 18:22] = 255
+    residual_path = graph_root / "unexplained-mask.png"
+    Image.fromarray(residual, mode="L").save(residual_path)
+    nodes = []
+    for component_id, box in (
+        ("near_small", (14, 18, 17, 22)),
+        ("near_large", (12, 16, 17, 24)),
+    ):
+        mask = np.zeros_like(residual)
+        x1, y1, x2, y2 = box
+        mask[y1:y2, x1:x2] = 255
+        mask_path = masks_root / f"{component_id}.png"
+        Image.fromarray(mask, mode="L").save(mask_path)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": list(box), "z_index": len(nodes), "text_ids": [],
+        })
+    quality = {"unexplained_mask_ref": {
+        "path": residual_path.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}
+
+    owners = component_repair._page_residual_owner_ids(
+        store, quality=quality, graph={"nodes": nodes}, graph_root=graph_root,
+    )
+
+    assert owners == {"near_small"}
 
 
 def test_page_residual_owner_selects_smallest_containing_visual_component(
@@ -1688,6 +2098,19 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     from image2editable.host_agent import record_host_plan
     from image2editable.store import RunStore
 
+    initial_graph_path = page_session["evidence"]["component-graph.json"]
+    initial_graph = json.loads(initial_graph_path.read_text(encoding="utf-8"))
+    initial_masks = {
+        "candidate_b": np.array([[255, 255], [0, 255]], dtype=np.uint8),
+        "frozen_a": np.full((2, 2), 255, dtype=np.uint8),
+    }
+    for node in initial_graph["nodes"]:
+        mask_path = initial_graph_path.parent / node["mask"]
+        Image.fromarray(initial_masks[node["id"]]).save(mask_path)
+        node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    initial_graph_path.write_text(json.dumps(initial_graph), encoding="utf-8")
+    _refresh_test_presentation_manifest(page_session)
+
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
@@ -1752,6 +2175,16 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         "path": foreground_evidence.relative_to(store.root).as_posix(),
         "sha256": hashlib.sha256(foreground_evidence.read_bytes()).hexdigest(),
     }
+    background_responsibility = execution_dir / "background-responsibility.png"
+    Image.fromarray(np.array([[0, 0], [0, 255]], dtype=np.uint8)).save(
+        background_responsibility
+    )
+    quality_input_refs["background_responsibility"] = {
+        "path": background_responsibility.relative_to(store.root).as_posix(),
+        "sha256": hashlib.sha256(
+            background_responsibility.read_bytes()
+        ).hexdigest(),
+    }
     manifest_path = store.root / quality_input_refs["presentation_manifest"]["path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     first = manifest["components"][0]
@@ -1796,6 +2229,7 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     observed_visual = {}
     observed_layers = []
     observed_foreground = {}
+    observed_responsibility = {}
     import scripts.visual_segment as visual_segment
     real_visual_difference = visual_segment.visual_difference
 
@@ -1814,6 +2248,9 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
         observed_layers.extend(kwargs["presentation_layers"])
         observed_foreground["mask"] = kwargs["material_foreground"]
         observed_foreground["output"] = kwargs["unexplained_output_path"]
+        observed_responsibility["mask"] = kwargs[
+            "background_responsibility"
+        ]
         return _quality_report_with_unexplained(
             _strict_quality_report("candidate_b", True), **kwargs
         )
@@ -1839,6 +2276,11 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     )
     assert observed_layers[0]["metrics"] == first["metrics"]
     assert np.all(observed_foreground["mask"] == 255)
+    assert observed_responsibility["mask"].dtype == np.bool_
+    assert np.array_equal(
+        observed_responsibility["mask"],
+        np.array([[False, False], [False, True]]),
+    )
     assert observed_foreground["output"] == execution_dir / "unexplained-mask.png"
     quality_state = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
@@ -1850,7 +2292,9 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     assert set(quality_artifact["input_refs"]) == {
         "source", "background", "reconstructed", "text_mask", "native_check",
         "presentation_manifest", "foreground_evidence",
+        "background_responsibility",
     }
+    quality_input_refs_before_commit = copy.deepcopy(quality_artifact["input_refs"])
     assert quality_artifact["contained_parent_pairs"] == []
     assert advance_component_repair(store, "page_001")["status"] == "freeze_committed"
     ready = advance_component_repair(store, "page_001")
@@ -1860,10 +2304,28 @@ def test_execution_quality_consumes_exact_presentation_underlay_and_freezes(
     assert state["delivery_checks"] == {"pptx_reopen": "unknown"}
     assert state["result_ref"] is not None
     result = store.read_json("pages/page_001/reconstruction/component_result.json")
-    assert set(result["accepted_asset_refs"]) == {
-        "source", "background", "reconstructed", "text_mask", "native_check",
-        "presentation_manifest", "foreground_evidence",
-    }
+    persisted_quality = store.read_json(
+        quality_state["current_round"]["quality_ref"]["path"]
+    )
+    assert persisted_quality["input_refs"] == quality_input_refs_before_commit
+    expected_accepted_refs = dict(quality_input_refs_before_commit)
+    expected_accepted_refs.pop("background_responsibility")
+    assert result["accepted_asset_refs"] == expected_accepted_refs
+    assert "background_responsibility" in persisted_quality["input_refs"]
+
+    from image2editable import legacy
+
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    slide = legacy._accepted_slide_data(
+        store, request_path.parents[2], {"text_items": []}, result
+    )
+    assembly_dir = Path(slide["_assembly_assets_dir"])
+    try:
+        assert {item["component_id"] for item in slide["components"]} == {
+            "candidate_b", "frozen_a",
+        }
+    finally:
+        shutil.rmtree(assembly_dir)
 
 
 def test_page_only_violation_stops_when_quality_does_not_improve(
@@ -2192,6 +2654,52 @@ def _real_next_round_session(page_session: dict, store, quality_path: Path) -> d
     return session
 
 
+def test_next_legacy_request_reuses_execution_lease(
+    page_session: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _ = _failed_diagnostic_round_one(page_session, monkeypatch)
+    state = store.read_json(
+        "pages/page_001/reconstruction/component_state.json"
+    )
+    quality_ref = state["current_round"]["quality_ref"]
+    quality_path = store.root / quality_ref["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    native_ref = quality["input_refs"]["native_check"]
+    native_path = store.root / native_ref["path"]
+    native_check = json.loads(native_path.read_text(encoding="utf-8"))
+    native_check["text_items"] = []
+    native_path.write_text(json.dumps(native_check), encoding="utf-8")
+    native_ref["sha256"] = hashlib.sha256(native_path.read_bytes()).hexdigest()
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    quality_ref["sha256"] = hashlib.sha256(quality_path.read_bytes()).hexdigest()
+    store.write_json(
+        "pages/page_001/reconstruction/component_state.json", state,
+    )
+    received_leases = []
+    real_build_request = legacy.build_component_agent_request
+
+    def build_request(
+        session: dict,
+        *,
+        repair_round: int,
+        _lease: ExecutionLease | None = None,
+    ) -> Path:
+        received_leases.append(_lease)
+        if _lease is None:
+            return real_build_request(session, repair_round=repair_round)
+        return real_build_request(
+            session, repair_round=repair_round, _lease=_lease,
+        )
+
+    monkeypatch.setattr(legacy, "build_component_agent_request", build_request)
+    with ExecutionLease(
+        store.root / "execution.lock", run_root=store.root,
+    ) as lease:
+        legacy._publish_next_legacy_request(store, "page_001", 2, lease)
+
+    assert received_leases == [lease]
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -2324,6 +2832,52 @@ def test_previous_quality_allows_failed_candidate_to_be_replaced(
     )
 
     assert "candidate_b" in reports
+
+
+def test_previous_quality_allows_bound_background_responsibility(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["input_refs"]["background_responsibility"] = dict(
+        quality["input_refs"]["foreground_evidence"]
+    )
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["candidate_b", "frozen_a"],
+    )
+
+    assert "candidate_b" in reports
+
+
+def test_previous_quality_allows_prior_failed_candidate_to_be_merged(
+    page_session: dict,
+) -> None:
+    store, quality_path = _failed_underlay_round_one(page_session)
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    session = _real_next_round_session(page_session, store, quality_path)
+    request_path = build_component_agent_request(session, repair_round=2)
+    request = load_component_agent_request(request_path)
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["expected_component_ids"] = ["frozen_a"]
+    quality["report"] = _strict_quality_report("frozen_a", True)
+    state["failed_ids"] = ["merge_0001"]
+
+    reports = component_repair._previous_component_reports(
+        quality,
+        state={**state, "repair_round": 2},
+        request=request,
+        active_component_ids=["frozen_a", "merge_0001"],
+    )
+
+    assert reports["frozen_a"]["accepted"] is True
 
 
 def test_previous_quality_identity_allows_unapproved_pair_reactivation(
@@ -2558,7 +3112,6 @@ def test_intact_parent_gate_controls_fallback_result(
         store, "page_001", graph_path=graph_path,
         quality_input_refs=quality_input_refs,
     )
-    state = store.read_json("pages/page_001/reconstruction/component_state.json")
     monkeypatch.setattr(
         component_repair, "evaluate_component_quality_round",
         lambda *args, **kwargs: _quality_report_with_unexplained(
@@ -2574,6 +3127,13 @@ def test_intact_parent_gate_controls_fallback_result(
     if accepted:
         assert final_state["fallback"]["status"] == "parent_preserved"
         assert final_state["frozen"]["candidate_b"] == final_state["parent_assets"]["candidate_b"]["sha256"]
+        quality = store.read_json(final_state["fallback_quality_ref"]["path"])
+        component_result = store.read_json(
+            "pages/page_001/reconstruction/component_result.json"
+        )
+        assert "background_responsibility" not in quality["input_refs"]
+        assert "foreground_evidence" in quality["input_refs"]
+        assert component_result["accepted_asset_refs"] == quality["input_refs"]
     else:
         assert final_state["fallback"]["status"] == "warning"
 
@@ -3311,6 +3871,7 @@ def _execute_composite_quality_round(
     before_quality=None,
     initial_diagnostics: list[dict] | None = None,
     presentation_metrics_by_id: dict[str, dict] | None = None,
+    background_responsibility: np.ndarray | bytes | None = None,
 ) -> tuple[dict, dict]:
     request = load_component_agent_request(request_path)
     plan = {
@@ -3336,6 +3897,13 @@ def _execute_composite_quality_round(
         foreground = execution_dir / "foreground-evidence.png"
         Image.fromarray(np.zeros(shape, dtype=np.uint8)).save(foreground)
         quality_paths["foreground_evidence"] = foreground
+    if background_responsibility is not None:
+        responsibility = execution_dir / "background-responsibility.png"
+        if isinstance(background_responsibility, bytes):
+            responsibility.write_bytes(background_responsibility)
+        else:
+            Image.fromarray(background_responsibility).save(responsibility)
+        quality_paths["background_responsibility"] = responsibility
     native = execution_dir / "native-check.json"
     native.write_text(json.dumps({
         "schema_version": 1, "page_id": "page_001",
@@ -3410,6 +3978,179 @@ def _execute_composite_quality_round(
         .read_text(encoding="utf-8")
     )
     return quality["report"], advance_component_repair(store, "page_001")
+
+
+def test_background_responsibility_artifact_must_be_binary(
+    page_session: dict,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    with pytest.raises(
+        ValueError, match="background responsibility is invalid"
+    ):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=np.array(
+                [[0, 1], [0, 255]], dtype=np.uint8
+            ),
+        )
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", zlib.crc32(chunk_type + payload) & 0xFFFFFFFF)
+    )
+
+
+def _png_payload(mode: str, values: list[int], size: tuple[int, int]) -> bytes:
+    image = Image.new(mode, size)
+    image.putdata(values)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_binary_grayscale_png_decoder_returns_boolean_mask() -> None:
+    decoded = component_repair._decode_binary_grayscale_png(
+        _png_payload("L", [0, 255, 255, 0], (2, 2)),
+        (2, 2),
+        label="test background responsibility",
+    )
+
+    assert isinstance(decoded, np.ndarray)
+    assert decoded.dtype == np.bool_
+    assert np.array_equal(
+        decoded,
+        np.array([[False, True], [True, False]], dtype=bool),
+    )
+
+
+def _adam7_binary_png() -> bytes:
+    ihdr = struct.pack(">IIBBBBB", 2, 2, 8, 0, 0, 0, 1)
+    scanlines = bytes((0, 0, 0, 255, 0, 255, 0))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(scanlines))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _png_with_ihdr_field(payload: bytes, offset: int, value: int) -> bytes:
+    changed = bytearray(payload)
+    changed[16 + offset] = value
+    changed[29:33] = struct.pack(
+        ">I", zlib.crc32(changed[12:29]) & 0xFFFFFFFF
+    )
+    return bytes(changed)
+
+
+def _invalid_background_responsibility_png(case: str) -> bytes:
+    binary = _png_payload("L", [0, 255, 255, 0], (2, 2))
+    if case == "signature":
+        return b"not-png!" + binary[8:]
+    if case == "ihdr_length":
+        return binary[:8] + struct.pack(">I", 12) + binary[12:]
+    if case == "rgb":
+        return _png_payload(
+            "RGB",
+            [(0, 0, 0), (255, 255, 255), (255, 255, 255), (0, 0, 0)],
+            (2, 2),
+        )
+    if case == "palette":
+        image = Image.new("P", (2, 2))
+        image.putpalette([0, 0, 0, 255, 255, 255] + [0] * 762)
+        image.putdata([0, 1, 1, 0])
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+    if case == "1_bit":
+        return _png_payload("1", [0, 255, 255, 0], (2, 2))
+    if case == "16_bit":
+        array = np.array([[0, 65535], [65535, 0]], dtype=np.uint16)
+        output = io.BytesIO()
+        Image.fromarray(array, mode="I;16").save(output, format="PNG")
+        return output.getvalue()
+    if case == "compression":
+        return _png_with_ihdr_field(binary, 10, 1)
+    if case == "filter":
+        return _png_with_ihdr_field(binary, 11, 1)
+    if case == "interlaced":
+        return _adam7_binary_png()
+    if case == "wrong_shape":
+        return _png_payload("L", [0, 255, 255], (3, 1))
+    if case == "non_binary":
+        return _png_payload("L", [0, 1, 1, 0], (2, 2))
+    raise AssertionError(case)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "signature",
+        "ihdr_length",
+        "rgb",
+        "palette",
+        "1_bit",
+        "16_bit",
+        "compression",
+        "filter",
+        "interlaced",
+        "wrong_shape",
+        "non_binary",
+    ],
+)
+def test_background_responsibility_requires_strict_binary_grayscale_png(
+    page_session: dict,
+    case: str,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    with pytest.raises(
+        ValueError, match="background responsibility is invalid"
+    ):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=(
+                _invalid_background_responsibility_png(case)
+            ),
+        )
+
+
+def test_background_responsibility_artifact_is_hash_bound(
+    page_session: dict,
+) -> None:
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    def tamper() -> None:
+        path = request_path.parents[2] / (
+            "execution-01/background-responsibility.png"
+        )
+        path.write_bytes(path.read_bytes() + b"tampered")
+
+    with pytest.raises(RuntimeError, match="artifact hash mismatch"):
+        _execute_composite_quality_round(
+            store,
+            request_path,
+            load_component_agent_graph(request_path),
+            action=_action("accept", ["candidate_b"]),
+            shape=(2, 2),
+            background_responsibility=np.array(
+                [[0, 0], [0, 255]], dtype=np.uint8
+            ),
+            before_quality=tamper,
+        )
 
 
 def _start_quality_mutation_round(page_session: dict):
@@ -3789,6 +4530,37 @@ def test_contained_pair_approval_does_not_survive_without_mask_binding() -> None
 
     assert component_repair._carried_contained_parent_pairs(
         previous, {("inner", "outer"), ("new_inner", "new_outer")}
+    ) == set()
+
+
+def test_contained_pair_approval_survives_with_unchanged_frozen_masks() -> None:
+    previous = {
+        "approved_contained_parent_pairs": [["inner", "outer"]],
+    }
+    graph = {"nodes": [
+        {
+            "id": "inner", "kind": "component", "state": "frozen",
+            "mask_sha256": "1" * 64,
+        },
+        {
+            "id": "outer", "kind": "component", "state": "frozen",
+            "mask_sha256": "2" * 64,
+        },
+    ]}
+
+    assert component_repair._carried_contained_parent_pairs(
+        previous,
+        {("inner", "outer")},
+        graph=graph,
+        frozen={"inner": "1" * 64, "outer": "2" * 64},
+    ) == {("inner", "outer")}
+
+    graph["nodes"][0]["mask_sha256"] = "3" * 64
+    assert component_repair._carried_contained_parent_pairs(
+        previous,
+        {("inner", "outer")},
+        graph=graph,
+        frozen={"inner": "1" * 64, "outer": "2" * 64},
     ) == set()
 
 
@@ -4522,11 +5294,14 @@ assert mask.shape == (2, 2)
 def test_split_without_connected_proposals_fails_without_output(tmp_path: Path) -> None:
     image, graph, input_dir = _action_case(tmp_path)
     output = tmp_path / "round-02"
-    with pytest.raises(VisualSegmentationError, match="connected proposals"):
+    with pytest.raises(
+        RecoverableComponentPlanError, match="connected proposals"
+    ) as error:
         execute_component_actions(
             image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
             input_dir=input_dir, output_dir=output,
         )
+    assert error.value.reason == "invalid_split_target"
     assert not output.exists()
 
 
@@ -4540,11 +5315,14 @@ def test_split_rejects_extra_connected_proposals_instead_of_losing_pixels(tmp_pa
     left["mask_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     left["bbox"] = [1, 1, 11, 11]
     output = tmp_path / "round-extra-parts"
-    with pytest.raises(VisualSegmentationError, match="exact connected proposals"):
+    with pytest.raises(
+        RecoverableComponentPlanError, match="exact connected proposals"
+    ) as error:
         execute_component_actions(
             image, graph, [_action("split", ["left"], {"parts": 2})], sam_runner=None,
             input_dir=input_dir, output_dir=output,
         )
+    assert error.value.reason == "invalid_split_target"
     assert not output.exists()
 
 
@@ -6106,6 +6884,36 @@ def _publish_round(session: dict, repair_round: int, started: object, result: ob
         result.put("published")
 
 
+def _publish_round_with_execution_lease(
+    session: dict,
+    repair_round: int,
+    ready: object,
+    release: object,
+    result: object,
+) -> None:
+    real_build = component_repair._build_component_agent_request_locked
+
+    def hold_build(*args: object, **kwargs: object) -> Path:
+        ready.set()
+        release.wait(10)
+        return real_build(*args, **kwargs)
+
+    component_repair._build_component_agent_request_locked = hold_build
+    reconstruction = Path(session["reconstruction_dir"])
+    run_root = reconstruction.parents[2]
+    try:
+        with ExecutionLease(
+            run_root / "execution.lock", run_root=run_root,
+        ) as lease:
+            component_repair.build_component_agent_request(
+                session, repair_round=repair_round, _lease=lease,
+            )
+    except Exception as error:
+        result.put(("error", type(error).__name__, str(error)))
+    else:
+        result.put(("published",))
+
+
 def _hold_publication_lease(reconstruction: str, ready: object, release: object) -> None:
     with component_repair._run_publication_lease(Path(reconstruction)):
         component_repair._load_integrity_key(Path(reconstruction))
@@ -6731,6 +7539,52 @@ def test_run_publication_lease_blocks_key_rotation_during_inflight_publish(
     assert contender.exitcode == 0
     assert result.get(timeout=2) == "rejected"
     assert not anchor.exists()
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows execution and publication locks differ",
+)
+def test_windows_execution_lease_publication_blocks_direct_process(
+    page_session: dict,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    holder_result = context.Queue()
+    holder = context.Process(
+        target=_publish_round_with_execution_lease,
+        args=(page_session, 1, ready, release, holder_result),
+    )
+    started = context.Event()
+    contender_result = context.Queue()
+    contender = context.Process(
+        target=_publish_round,
+        args=(page_session, 2, started, contender_result),
+    )
+    started_processes = []
+    try:
+        holder.start()
+        started_processes.append(holder)
+        assert ready.wait(10)
+        contender.start()
+        started_processes.append(contender)
+        assert started.wait(10)
+        contender.join(0.5)
+        assert contender.is_alive()
+        with pytest.raises(queue.Empty):
+            contender_result.get_nowait()
+    finally:
+        release.set()
+        for process in started_processes:
+            process.join(10)
+            if process.is_alive():
+                process.terminate()
+                process.join(10)
+
+    assert holder.exitcode == 0
+    assert contender.exitcode == 0
+    assert holder_result.get(timeout=2) == ("published",)
+    assert contender_result.get(timeout=2) == "published"
 
 
 def test_build_detects_parent_replaced_between_check_and_open(

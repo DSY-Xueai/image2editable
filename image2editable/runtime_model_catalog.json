@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "models": {
+    "sam2_large": {
+      "kind": "file",
+      "url": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt",
+      "size": 898083611,
+      "sha256": "2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318",
+      "relative_path": "sam2.1_hiera_large.pt"
+    },
+    "big_lama": {
+      "kind": "file",
+      "url": "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt",
+      "size": 205803670,
+      "sha256": "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c",
+      "relative_path": "big-lama.pt"
+    },
+    "grounding_dino": {
+      "kind": "huggingface_snapshot",
+      "model_id": "IDEA-Research/grounding-dino-tiny",
+      "revision": "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+    }
+  }
+}

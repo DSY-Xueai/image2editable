@@ -1,0 +1,56 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.96,
+      "evidence": ["PILOT card remains the complete independent card after edge refinement"],
+      "object_ids": ["component_0002"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.96,
+      "evidence": ["SCALE card remains the complete independent card after edge refinement"],
+      "object_ids": ["component_0003"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.96,
+      "evidence": ["DISCOVER card remains the complete independent card after edge refinement"],
+      "object_ids": ["component_0004"],
+      "parameters": {"independent": true}
+    },
+    {
+      "action": "merge",
+      "confidence": 0.99,
+      "evidence": ["the two complementary PROTOTYPE card masks form one movable card surface"],
+      "object_ids": ["component_0005", "component_0007"],
+      "parameters": {}
+    },
+    {
+      "action": "merge",
+      "confidence": 0.99,
+      "evidence": ["the outer ring and orange fill are complementary layers of timeline node 02"],
+      "object_ids": ["component_0009", "component_0013"],
+      "parameters": {}
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": ["the discarded page surface caused the full cream background to become unexplained"],
+      "object_ids": ["component_0001"],
+      "parameters": {
+        "box": [0.0, 0.0, 1.0, 1.0],
+        "independent": true
+      }
+    }
+  ],
+  "graph_sha256": "43b2663e9ba6f77750016e251a7826754f4d92bfbe7112f5f46836e14ec028ed",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "2939a66f1b89fd86cc4d0f8eb811dbb3ddb0005e0749d89c221a4fba7bbf2e56",
+  "schema_version": 1
+}

@@ -569,7 +569,7 @@ def _text_ink_mask(
             ) > ink_threshold
         )
         dense_region = local_region & dense_text[y1:y2, x1:x2]
-        candidate[dense_region] = local_ink[y1:y2, x1:x2][dense_region]
+        candidate[dense_region] &= local_ink[y1:y2, x1:x2][dense_region]
         candidate[structural_line[y1:y2, x1:x2] & local_region] = 0
         count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
         for component_label in range(1, count):

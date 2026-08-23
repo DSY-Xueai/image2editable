@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "a137c70bcbb21e7c9478b4fe74c293a0153f1b09489fbec8675bdeb5633a76d1",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": ["parent_0005"],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": ["The complete lower-left circle has zero missing pixels; its halo and text residual are generated-background defects addressed by the same-round rebuild."]
+    },
+    {
+      "action": "accept",
+      "object_ids": ["parent_0010"],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": ["The complete horizontal rule has zero component violations and complete source-backed ownership."]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": ["parent_0005", "parent_0010"],
+      "parameters": {"margin_ratio": 0.005},
+      "confidence": 0.99,
+      "evidence": ["The page-wide unexplained residual and text rectangles come from the generated background; rebuilding it is required while retaining both independently verified objects."]
+    }
+  ],
+  "graph_sha256": "0724cb513611ccf7d1dbc2c97be6803852d7f25639f59a6228464ae650c71752"
+}

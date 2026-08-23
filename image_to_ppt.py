@@ -33,7 +33,7 @@ import tempfile
 import traceback
 import unicodedata
 from difflib import SequenceMatcher
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import cv2
 import numpy as np
@@ -180,7 +180,12 @@ def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
         length_ratio = min(len(known_text), len(item_text)) / max(
             1, len(known_text), len(item_text)
         )
-        similar_text = similar_geometry and (
+        rotation = item.get("rotation")
+        same_rotated_orientation = (
+            rotation in {90, 180, 270}
+            and rotation == known.get("rotation")
+        )
+        similar_text = not same_rotated_orientation and similar_geometry and (
             text_similarity >= 0.88
             or (
                 max(len(known_text), len(item_text)) >= 20
@@ -188,9 +193,55 @@ def _matches_known_text(item: dict, known_items: list[dict]) -> bool:
                 and text_similarity >= 0.50
             )
         )
-        if overlap >= 0.80 and (same_text or contained_text or similar_text):
+        if len(item_text) <= len(known_text):
+            shorter_text, longer_text = item_text, known_text
+        else:
+            shorter_text, longer_text = known_text, item_text
+        same_rotated_line = (
+            width_ratio >= 0.75
+            and abs(known_center[0] - item_center[0])
+            <= max(known_width, item_width) * 0.25
+            if rotation in {90, 270}
+            else height_ratio >= 0.70
+            and abs(known_center[1] - item_center[1])
+            <= max(known_height, item_height) * 0.25
+        )
+        rotated_long_fragment = (
+            same_rotated_orientation
+            and max(len(known_text), len(item_text)) >= 20
+            and length_ratio <= 0.75
+            and (
+                longer_text.startswith(shorter_text)
+                or longer_text.endswith(shorter_text)
+            )
+            and same_rotated_line
+        )
+        if overlap >= 0.80 and (
+            same_text
+            or (contained_text and similar_geometry)
+            or similar_text
+            or rotated_long_fragment
+        ):
             return True
         if overlap >= 0.50 and same_text:
+            return True
+    return False
+
+
+def _extends_known_text_with_terminal_punctuation(
+    item: dict,
+    known_items: list[dict],
+) -> bool:
+    item_text = item["normalized_text"]
+    base_text = item_text.rstrip(".!?")
+    if not base_text or base_text == item_text:
+        return False
+    item_box = [int(value) for value in item["box"]]
+    for known in known_items:
+        if _normalized_candidate_text(known.get("text", "")) != base_text:
+            continue
+        known_box = [int(value) for value in known.get("box", [0, 0, 0, 0])]
+        if _box_intersection_ratio(known_box, item_box) >= 0.80:
             return True
     return False
 
@@ -246,6 +297,7 @@ def _targeted_candidate_ocr_sweep(
     *,
     lang: str,
     isolated: bool,
+    ocr_rotation: int = 0,
 ) -> dict:
     """Recheck bounded visual candidates without retaining page-size copies."""
     source_path = Path(image_path).resolve()
@@ -253,6 +305,8 @@ def _targeted_candidate_ocr_sweep(
     mask = np.asarray(known_mask, dtype=np.uint8)
     with Image.open(source_path) as source:
         page_width, page_height = source.size
+    if type(ocr_rotation) is not int or ocr_rotation not in {0, 90, 180, 270}:
+        raise ValueError("ocr_rotation must be one of 0, 90, 180, or 270")
     if mask.shape != (page_height, page_width):
         raise ValueError("targeted OCR text mask must match the source image")
 
@@ -309,6 +363,11 @@ def _targeted_candidate_ocr_sweep(
             with Image.open(source_path) as source:
                 for component_index, box in selected:
                     x, y, width, height = box
+                    ocr_width, ocr_height = (
+                        (height, width)
+                        if ocr_rotation in {90, 270}
+                        else (width, height)
+                    )
                     views = []
                     candidate_pixels = []
                     for target_scale, edge_limit in zip(
@@ -317,15 +376,15 @@ def _targeted_candidate_ocr_sweep(
                     ):
                         bounded_scale = min(
                             target_scale,
-                            edge_limit / width,
-                            edge_limit / height,
+                            edge_limit / ocr_width,
+                            edge_limit / ocr_height,
                             math.sqrt(
                                 _TARGETED_OCR_SINGLE_CROP_PIXELS
                                 / max(width * height, 1)
                             ),
                         )
-                        view_width = max(1, int(round(width * bounded_scale)))
-                        view_height = max(1, int(round(height * bounded_scale)))
+                        view_width = max(1, int(round(ocr_width * bounded_scale)))
+                        view_height = max(1, int(round(ocr_height * bounded_scale)))
                         candidate_pixels.append(view_width * view_height)
                         views.append((bounded_scale, view_width, view_height))
                     if used_pixels + sum(candidate_pixels) > total_pixel_limit:
@@ -333,21 +392,33 @@ def _targeted_candidate_ocr_sweep(
 
                     with source.crop((x, y, x + width, y + height)) as raw_crop:
                         with raw_crop.convert("RGB") as base_crop:
-                            for view_index, (scale, view_width, view_height) in enumerate(views):
-                                crop_path = crop_root / (
-                                    f"candidate-{component_index:04d}-view-{view_index + 1}.png"
-                                )
-                                with base_crop.resize(
-                                    (view_width, view_height), Image.Resampling.LANCZOS
-                                ) as resized:
-                                    resized.save(crop_path)
-                                used_pixels += view_width * view_height
-                                pending_views.append({
-                                    "component_index": component_index,
-                                    "component_box": box,
-                                    "scale": scale,
-                                    "path": crop_path,
-                                })
+                            if ocr_rotation:
+                                transpose = {
+                                    90: Image.Transpose.ROTATE_90,
+                                    180: Image.Transpose.ROTATE_180,
+                                    270: Image.Transpose.ROTATE_270,
+                                }[ocr_rotation]
+                                ocr_crop = base_crop.transpose(transpose)
+                            else:
+                                ocr_crop = base_crop.copy()
+                            try:
+                                for view_index, (scale, view_width, view_height) in enumerate(views):
+                                    crop_path = crop_root / (
+                                        f"candidate-{component_index:04d}-view-{view_index + 1}.png"
+                                    )
+                                    with ocr_crop.resize(
+                                        (view_width, view_height), Image.Resampling.LANCZOS
+                                    ) as resized:
+                                        resized.save(crop_path)
+                                    used_pixels += view_width * view_height
+                                    pending_views.append({
+                                        "component_index": component_index,
+                                        "component_box": box,
+                                        "scale": scale,
+                                        "path": crop_path,
+                                    })
+                            finally:
+                                ocr_crop.close()
 
             view_results = detect_text_batch(
                 [view["path"] for view in pending_views],
@@ -358,18 +429,38 @@ def _targeted_candidate_ocr_sweep(
             )
             recognized_by_component = {}
             for view, (items, _) in zip(pending_views, view_results):
-                x, y, _, _ = view["component_box"]
+                x, y, component_width, component_height = view["component_box"]
                 scale = view["scale"]
                 mapped_items = []
                 for item in text_detection._merge_adjacent_text_items(items):
                     raw_box = item.get("box")
                     if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
                         continue
-                    mapped_box = [
-                        max(0, int(round(x + raw_box[0] / scale))),
-                        max(0, int(round(y + raw_box[1] / scale))),
+                    upright_box = [
+                        int(round(raw_box[0] / scale)),
+                        int(round(raw_box[1] / scale)),
                         max(1, int(round(raw_box[2] / scale))),
                         max(1, int(round(raw_box[3] / scale))),
+                    ]
+                    ux, uy, uw, uh = upright_box
+                    if ocr_rotation == 90:
+                        local_box = [component_width - uy - uh, ux, uh, uw]
+                    elif ocr_rotation == 180:
+                        local_box = [
+                            component_width - ux - uw,
+                            component_height - uy - uh,
+                            uw,
+                            uh,
+                        ]
+                    elif ocr_rotation == 270:
+                        local_box = [uy, component_height - ux - uw, uh, uw]
+                    else:
+                        local_box = upright_box
+                    mapped_box = [
+                        max(0, x + local_box[0]),
+                        max(0, y + local_box[1]),
+                        local_box[2],
+                        local_box[3],
                     ]
                     mapped_box[2] = min(mapped_box[2], page_width - mapped_box[0])
                     mapped_box[3] = min(mapped_box[3], page_height - mapped_box[1])
@@ -382,12 +473,15 @@ def _targeted_candidate_ocr_sweep(
                             mapped_box, view["component_box"],
                         ) >= 0.50
                     ):
-                        mapped_items.append({
+                        mapped_item = {
                             "text": str(item.get("text", "")).strip(),
                             "normalized_text": normalized,
                             "confidence": confidence,
                             "box": mapped_box,
-                        })
+                        }
+                        if ocr_rotation:
+                            mapped_item["rotation"] = ocr_rotation
+                        mapped_items.append(mapped_item)
                 recognized_by_component.setdefault(
                     view["component_index"], []
                 ).append(sorted(
@@ -418,13 +512,43 @@ def _targeted_candidate_ocr_sweep(
                     min(pair[0]["box"][0], pair[1]["box"][0]),
                 ))
                 for pair_index, (left, right) in enumerate(pairs, start=1):
-                    if _matches_known_text(left, known_items) or _matches_known_text(
-                        right, known_items
-                    ):
+                    known_match = _matches_known_text(
+                        left, known_items
+                    ) or _matches_known_text(right, known_items)
+                    punctuation_upgrade = (
+                        _extends_known_text_with_terminal_punctuation(left, known_items)
+                        or _extends_known_text_with_terminal_punctuation(right, known_items)
+                    )
+                    if known_match and not punctuation_upgrade:
                         continue
-                    if left["normalized_text"] == right["normalized_text"]:
+                    same_text = left["normalized_text"] == right["normalized_text"]
+                    left_words = unicodedata.normalize(
+                        "NFKC", left["text"]
+                    ).casefold().split()
+                    right_words = unicodedata.normalize(
+                        "NFKC", right["text"]
+                    ).casefold().split()
+                    contained_text = (
+                        min(len(left["normalized_text"]), len(right["normalized_text"]))
+                        >= 4
+                        and (
+                            len(left_words) < len(right_words)
+                            and left_words in (
+                                right_words[:len(left_words)],
+                                right_words[-len(left_words):],
+                            )
+                            or len(right_words) < len(left_words)
+                            and right_words in (
+                                left_words[:len(right_words)],
+                                left_words[-len(right_words):],
+                            )
+                        )
+                    )
+                    if same_text or contained_text:
                         consistent.append(max(
-                            (left, right), key=lambda item: item["confidence"]
+                            (left, right), key=lambda item: (
+                                len(item["normalized_text"]), item["confidence"]
+                            )
                         ))
                         continue
                     left_box, right_box = left["box"], right["box"]
@@ -471,17 +595,42 @@ def _targeted_candidate_ocr_sweep(
                 right = min(page_width, x + width + 6)
                 bottom = min(page_height, y + height + 6)
                 with source.crop((left, top, right, bottom)).convert("RGB") as crop:
-                    pixels = np.asarray(crop).copy()
-                local_box = (x - left, y - top, width, height)
+                    display_box = (x - left, y - top, width, height)
+                    if ocr_rotation:
+                        transpose = {
+                            90: Image.Transpose.ROTATE_90,
+                            180: Image.Transpose.ROTATE_180,
+                            270: Image.Transpose.ROTATE_270,
+                        }[ocr_rotation]
+                        with crop.transpose(transpose) as upright_crop:
+                            pixels = np.asarray(upright_crop).copy()
+                        dx, dy, dw, dh = display_box
+                        if ocr_rotation == 90:
+                            local_box = (dy, crop.width - dx - dw, dh, dw)
+                        elif ocr_rotation == 180:
+                            local_box = (
+                                crop.width - dx - dw,
+                                crop.height - dy - dh,
+                                dw,
+                                dh,
+                            )
+                        else:
+                            local_box = (crop.height - dy - dh, dx, dh, dw)
+                    else:
+                        pixels = np.asarray(crop).copy()
+                        local_box = display_box
                 style = text_detection._estimate_style(
                     pixels,
                     local_box,
                     reference_width=page_width,
                 )
                 font_size = text_detection._adjust_font_size(
-                    item["text"], style["font_size"]
+                    item["text"],
+                    style["font_size"],
+                    bbox_height=height,
+                    reference_width=page_width,
                 )
-                recovered.append({
+                recovered_item = {
                 "box": item["box"],
                 "text": item["text"],
                 "font_size": font_size,
@@ -496,13 +645,18 @@ def _targeted_candidate_ocr_sweep(
                 "font": text_detection._select_font(item["text"], font_size),
                 "align": 1,
                 "confidence": item["confidence"],
-                })
-    all_items = _deduplicate_overlapping_text_items(
-        text_detection._merge_adjacent_text_items(
-        [dict(item) for item in known_items] + recovered
+                }
+                if ocr_rotation:
+                    recovered_item["rotation"] = ocr_rotation
+                recovered.append(recovered_item)
+    combined_items = [dict(item) for item in known_items] + recovered
+    if ocr_rotation:
+        all_items = _deduplicate_overlapping_text_items(combined_items)
+    else:
+        all_items = _deduplicate_overlapping_text_items(
+            text_detection._merge_adjacent_text_items(combined_items)
         )
-    )
-    all_items = text_detection._refine_alignment(all_items, page_width)
+        all_items = text_detection._refine_alignment(all_items, page_width)
     updated_mask = text_detection._build_text_mask(
         (page_height, page_width), all_items, padding=6
     )
@@ -2501,7 +2655,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 5
+_PREPARED_PAGE_SCHEMA_VERSION = 6
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -2550,6 +2704,7 @@ _PREPARED_TEXT_FIELDS = {
     "align",
     "confidence",
 }
+_PREPARED_TEXT_FIELDS_V6 = _PREPARED_TEXT_FIELDS | {"rotation"}
 
 
 def _is_link_or_reparse(status: os.stat_result) -> bool:
@@ -2602,7 +2757,9 @@ def _prepared_owned_file(
     relative_only: bool = False,
 ) -> Path:
     supplied = Path(value)
-    if relative_only and supplied.is_absolute():
+    if relative_only and (
+        supplied.is_absolute() or PureWindowsPath(str(value)).is_absolute()
+    ):
         raise ValueError(f"{label} asset path must be relative")
     if ".." in supplied.parts:
         raise ValueError(f"{label} asset path must not contain '..'")
@@ -3060,8 +3217,13 @@ def _validate_prepared_payload(manifest: dict) -> None:
     text_items = manifest["text_items"]
     if not isinstance(text_items, list):
         raise ValueError("prepared page text_items are invalid")
+    expected_text_fields = (
+        _PREPARED_TEXT_FIELDS_V6
+        if manifest["schema_version"] >= 6
+        else _PREPARED_TEXT_FIELDS
+    )
     for item in text_items:
-        if not isinstance(item, dict) or set(item) != _PREPARED_TEXT_FIELDS:
+        if not isinstance(item, dict) or set(item) != expected_text_fields:
             raise ValueError("prepared page text item fields are invalid")
         _validate_prepared_box(item["box"], image_width, image_height, "text item")
         font_size = item["font_size"]
@@ -3087,6 +3249,13 @@ def _validate_prepared_payload(manifest: dict) -> None:
             or isinstance(confidence, bool)
             or not math.isfinite(confidence)
             or not 0 <= confidence <= 1
+            or (
+                manifest["schema_version"] >= 6
+                and (
+                    not _is_prepared_int(item["rotation"])
+                    or item["rotation"] not in {0, 90, 180, 270}
+                )
+            )
         ):
             raise ValueError("prepared page text item values are invalid")
 
@@ -3243,7 +3412,10 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
         "resource_isolation": slide_data["_resource_isolation"],
         "initial_component_count": len(components),
         "components": components,
-        "text_items": slide_data["text_items"],
+        "text_items": [
+            {**item, "rotation": item.get("rotation", 0)}
+            for item in slide_data["text_items"]
+        ],
         "initial_diagnostics": slide_data.get("_initial_diagnostics", []),
         "dimensions": dimensions,
         "assets": assets,
@@ -3305,7 +3477,7 @@ def _load_component_layer_state(
     if not isinstance(manifest, dict):
         raise ValueError("prepared page state fields are invalid")
     schema_version = manifest.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5}:
+    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, 6}:
         raise ValueError("prepared page schema_version is invalid")
     legacy_fields = _PREPARED_PAGE_FIELDS - {"initial_diagnostics"}
     expected_fields = (
@@ -3579,14 +3751,29 @@ def _reuse_disjoint_text_delta(
                 if stored.size != (metadata["w"], metadata["h"]):
                     return False
                 stored.convert("RGBA").load()
-        scope = _text_delta_recompute_scope(
-            old_mask=old_cleanup_mask,
-            new_mask=new_cleanup_mask,
-            graph=payload["graph"],
-            graph_dir=work_dir,
-            source_sha256=manifest["assets"]["source_image"]["sha256"],
-            cache_identity=payload["identity"],
+        _, cached_text_content = _read_prepared_asset_bytes(
+            work_dir,
+            manifest["assets"]["ocr_mask"],
+            "first visual OCR mask",
         )
+        with Image.open(io.BytesIO(cached_text_content)) as stored_text_mask:
+            cached_text_mask = np.asarray(
+                stored_text_mask.convert("L"), dtype=np.uint8
+            ).copy()
+        if (
+            np.array_equal(old_cleanup_mask, new_cleanup_mask)
+            and np.array_equal(cached_text_mask, new_text_mask)
+        ):
+            scope = set()
+        else:
+            scope = _text_delta_recompute_scope(
+                old_mask=old_cleanup_mask,
+                new_mask=new_cleanup_mask,
+                graph=payload["graph"],
+                graph_dir=work_dir,
+                source_sha256=manifest["assets"]["source_image"]["sha256"],
+                cache_identity=payload["identity"],
+            )
         if scope != set():
             return False
         element_masks = []
@@ -3671,12 +3858,65 @@ def _reuse_disjoint_text_delta(
     return True
 
 
+def _restore_rotated_ocr_analysis(
+    text_items: list[dict],
+    text_mask: np.ndarray,
+    *,
+    rotation: int,
+    source_size: tuple[int, int],
+) -> tuple[list[dict], np.ndarray]:
+    """Map upright OCR results back onto the rendered page coordinates."""
+    if type(rotation) is not int or rotation not in {90, 180, 270}:
+        raise ValueError("OCR result rotation must be 90, 180, or 270")
+    source_width, source_height = source_size
+    expected_upright_shape = (
+        (source_width, source_height)
+        if rotation in {90, 270}
+        else (source_height, source_width)
+    )
+    if text_mask.shape != expected_upright_shape:
+        raise ValueError("upright OCR mask dimensions do not match the source")
+
+    restored_items = []
+    for item in text_items:
+        x, y, width, height = (int(value) for value in item["box"])
+        if rotation == 90:
+            mapped_box = [source_width - y - height, x, height, width]
+        elif rotation == 180:
+            mapped_box = [
+                source_width - x - width,
+                source_height - y - height,
+                width,
+                height,
+            ]
+        else:
+            mapped_box = [y, source_height - x - width, height, width]
+        left, top, mapped_width, mapped_height = mapped_box
+        if (
+            left < 0
+            or top < 0
+            or mapped_width <= 0
+            or mapped_height <= 0
+            or left + mapped_width > source_width
+            or top + mapped_height > source_height
+        ):
+            raise ValueError("rotated OCR text box is outside the source")
+        restored_items.append({**item, "box": mapped_box, "rotation": rotation})
+
+    inverse_turns = {90: 3, 180: 2, 270: 1}[rotation]
+    restored_mask = np.ascontiguousarray(np.rot90(text_mask, k=inverse_turns))
+    if restored_mask.shape != (source_height, source_width):
+        raise ValueError("restored OCR mask dimensions do not match the source")
+    return restored_items, restored_mask
+
+
 def prepare_component_layers(
     image_path: str | Path,
     work_dir: str | Path,
     *,
     lang: str,
     resource_isolation: bool,
+    ocr_rotation: int = 0,
 ) -> dict:
     """Persist recoverable OCR and visual layers for Agent review."""
     source = _resolve_image_path(image_path)
@@ -3686,8 +3926,12 @@ def prepare_component_layers(
     if source != owned_source:
         shutil.copyfile(source, owned_source)
 
+    if type(ocr_rotation) is not int or ocr_rotation not in {0, 90, 180, 270}:
+        raise ValueError("ocr_rotation must be one of 0, 90, 180, or 270")
+
     text_mask = None
     cleanup_mask_path = None
+    temporary_ocr_source = None
     exception_boundary = sys.exc_info()[1]
     primary_exception = None
     primary_traceback = None
@@ -3697,11 +3941,41 @@ def prepare_component_layers(
             if resource_isolation
             else {}
         )
-        text_items, text_mask = detect_text(owned_source, lang=lang, **ocr_kwargs)
+        ocr_source = owned_source
+        with Image.open(owned_source) as source_image:
+            source_size = source_image.size
+            if ocr_rotation:
+                ocr_kwargs["style_reference_width"] = source_size[0]
+                transpose = {
+                    90: Image.Transpose.ROTATE_90,
+                    180: Image.Transpose.ROTATE_180,
+                    270: Image.Transpose.ROTATE_270,
+                }[ocr_rotation]
+                with tempfile.NamedTemporaryFile(
+                    dir=owned_work_dir,
+                    prefix=".ocr-upright-",
+                    suffix=".png",
+                    delete=False,
+                ) as temporary:
+                    temporary_ocr_source = Path(temporary.name)
+                    upright = source_image.transpose(transpose)
+                    try:
+                        upright.save(temporary, format="PNG")
+                    finally:
+                        upright.close()
+                ocr_source = temporary_ocr_source
+        text_items, text_mask = detect_text(ocr_source, lang=lang, **ocr_kwargs)
         text_items, text_mask = _filter_probable_icon_text_analysis(
             text_items,
             text_mask,
         )
+        if ocr_rotation:
+            text_items, text_mask = _restore_rotated_ocr_analysis(
+                text_items,
+                text_mask,
+                rotation=ocr_rotation,
+                source_size=source_size,
+            )
         text_mask_path = (owned_work_dir / "source-text-mask.png").resolve()
         Image.fromarray(text_mask, mode="L").save(text_mask_path)
         text_analysis = {
@@ -3714,13 +3988,29 @@ def prepare_component_layers(
         raise
     finally:
         text_mask = None
-        _run_cleanup_preserving_exception(
-            close_ocr_engines,
-            "OCR",
-            primary_exception,
-            primary_traceback,
-            exception_boundary,
-        )
+        cleanup_primary_exception = primary_exception
+        cleanup_primary_traceback = primary_traceback
+        try:
+            _run_cleanup_preserving_exception(
+                close_ocr_engines,
+                "OCR",
+                primary_exception,
+                primary_traceback,
+                exception_boundary,
+            )
+        except BaseException as exc:
+            cleanup_primary_exception = exc
+            cleanup_primary_traceback = exc.__traceback__
+            raise
+        finally:
+            if temporary_ocr_source is not None:
+                _run_cleanup_preserving_exception(
+                    lambda: temporary_ocr_source.unlink(missing_ok=True),
+                    "temporary OCR source",
+                    cleanup_primary_exception,
+                    cleanup_primary_traceback,
+                    exception_boundary,
+                )
 
     if resource_isolation and text_items and all("box" in item for item in text_items):
         source_image = None
@@ -3852,6 +4142,7 @@ def prepare_component_layers(
             owned_work_dir,
             lang=lang,
             isolated=resource_isolation,
+            ocr_rotation=ocr_rotation,
         )
         initial_diagnostics = sweep["diagnostics"]
         if not sweep["recovered_items"]:

@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 import math
 
 
-AGENT_PROVIDERS = frozenset({"host", "local"})
+AGENT_PROVIDERS = frozenset({"host", "local", "local-service"})
 MAX_REPAIR_ROUNDS = 5
 MAX_COMPONENT_PROMPT_POINTS = 256
 COMPONENT_STATES = frozenset(
@@ -289,6 +289,11 @@ def _validate_quality_input_refs(value: object) -> dict:
     if not isinstance(value, dict) or frozenset(value) not in {
         frozenset(legacy_fields),
         frozenset({*legacy_fields, "foreground_evidence"}),
+        frozenset({
+            *legacy_fields,
+            "foreground_evidence",
+            "background_responsibility",
+        }),
     }:
         raise ValueError("component quality input refs are invalid")
     for reference in value.values():
@@ -312,7 +317,7 @@ def _validate_artifact_ref(value: object, field: str) -> dict:
 def validate_agent_provider(value: object) -> str:
     if type(value) is not str or value not in AGENT_PROVIDERS:
         raise ValueError(
-            "Invalid agent_provider; expected one of: host, local"
+            "Invalid agent_provider; expected one of: host, local, local-service"
         )
     return value
 
@@ -624,6 +629,13 @@ def _validate_action_graph_roles(action: str, object_ids: list[str], graph: dict
             raise ValueError("absorb_into_parent cannot absorb text kind")
         if any(node.get("state") != "pending" for node in selected[1:]):
             raise ValueError("absorb_into_parent requires pending absorbed components")
+        return
+    if action == "rebuild_background":
+        if any(
+            node.get("kind") == "text" and node.get("state") != "frozen"
+            for node in selected
+        ):
+            raise ValueError("rebuild_background requires frozen text objects")
         return
     if any(node.get("kind") == "text" for node in selected):
         raise ValueError("component action cannot target text kind")

@@ -1,0 +1,55 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The rebuilt complete header has zero component violations and the native title underlay check passes."
+      ],
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "The unexplained mask contains only thin source-backed top-edge and rounded-corner pixels contiguous with the complete header owner."
+      ],
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The rebuilt left-card owner has zero component violations."
+      ],
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "absorb_residual",
+      "confidence": 0.99,
+      "evidence": [
+        "The remaining source-backed card-corner residual is directly adjacent to the complete left-card owner."
+      ],
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 3,
+  "request_sha256": "cdb9e49479d45fd0df6e6105a89bed7784c75cff1df9c0480d20ee0c5d5cc045",
+  "schema_version": 1,
+  "graph_sha256": "55bcee943e98c561c30b6fbf36ff5801c313676b8d410175a2b728de8f7cfe41"
+}

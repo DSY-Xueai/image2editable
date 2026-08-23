@@ -78,7 +78,7 @@ $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 
 ### Local CLI
 
-需自行先在本机部署并启动**具备视觉理解能力**的模型服务。服务需提供 **OpenAI 兼容的 `/v1/chat/completions` 接口**，支持图像输入和 JSON 响应；可使用 vLLM、LM Studio，或已启用 OpenAI 兼容接口的 Ollama。
+先安装 Local CLI。需要完全离线运行时，可继续安装内置 Qwen；已有视觉模型服务时，也可以使用 OpenAI 兼容接口。
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
@@ -88,13 +88,13 @@ pip install .
 
 #### 安装 OCR
 
-完整转换需要至少一种 OCR。中文和复杂版面推荐 PaddleOCR；也可以使用 Tesseract。安装完成后运行 `image2editable doctor`，检查通过后再开始转换。
+完整转换需要至少一种 OCR。中文和复杂版面推荐 PaddleOCR；也可以使用 Tesseract。安装 OCR 后，继续安装下方运行时模型，再检查环境。
 
 ##### 方案一：PaddleOCR（推荐）
 
 ```bash
-# 安装 CPU 版的 PaddlePaddle，不需要配置 CUDA，第一次使用建议选这个
-python -m pip install paddleocr paddlepaddle
+# 固定已验证的 CPU 路线；不需要配置 CUDA
+python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
 ```
 
 💡 PaddlePaddle GPU 版的安装方式可以查看[官方安装说明](https://www.paddlepaddle.org.cn/install/quick)。当前默认使用的是 CPU 版，不确定时直接按上面的命令安装即可。
@@ -116,9 +116,19 @@ tesseract --version
 python -m pip install pytesseract
 ```
 
+#### 安装运行时模型
+
+OCR 安装完成后运行：
+
+```bash
+image2editable models install runtime
+```
+
+该命令需要确认后才会下载固定版本的 SAM 2.1 Large、Big-LaMa 和 Grounding DINO，并校验下载结果、记录模型完整性；取消不会下载。
+
 #### 检查环境 ✅
 
-OCR 安装完成后，检查转换需要的 Python、OCR、SAM 和 LaMa 等依赖：
+OCR 和运行时模型安装完成后，检查转换需要的 Python、OCR、模型文件、完整性记录和核心依赖：
 
 ```bash
 image2editable doctor
@@ -126,7 +136,25 @@ image2editable doctor
 
 输出中出现 `"ready": true`，就可以开始转换。
 
-#### 配置本地模型服务
+#### 可选：安装 Local Agent
+
+需要使用随包 Local Agent 时，再执行：
+
+```bash
+python -m pip install ".[agent-local]"
+image2editable models install agent
+image2editable doctor --agent-local
+```
+
+模型安装命令同样需要确认；最后一条命令会额外验证 Local Agent 依赖和 Qwen 模型完整性记录。
+
+检查通过后，使用内置 Qwen 转换：
+
+```bash
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+```
+
+#### 可选：配置本地模型服务
 
 首次配置时，在项目根目录使用下面这个命令复制模板并**填写自己的服务信息**。
 
@@ -136,14 +164,14 @@ Copy-Item .env.example .env
 
 再编辑 `.env`：`IMAGE2EDITABLE_LOCAL_BASE_URL` 填**服务地址**，`IMAGE2EDITABLE_LOCAL_MODEL` 填**服务端实际暴露的模型名**；服务不需要密钥时让 `IMAGE2EDITABLE_LOCAL_API_KEY` 留空。
 
-配置完成后，使用 `--agent-provider local` 调用本地服务：
+配置完成后，使用 `--agent-provider local-service` 调用本地服务：
 
 ```bash
 # 图片 → 可编辑 PPTX
-image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local-service
 
 # PDF → 可编辑 PPTX
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local-service
 ```
 
 | 参数               | 默认值   | 用途                                                         |
@@ -151,7 +179,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provid
 | `sources`          | 必填     | 要转换的输入：图片、图片目录、单个 PDF 或单个 PPTX。文档类输入不能与其他来源混用。 |
 | `-o, --output`     | 输入同名 | 指定输出文件；`--slide-size both` 时用作输出基名。           |
 | `--lang`           | `ch`     | 指定 OCR 识别语言，常用值为 `ch` 或 `en`。                   |
-| `--agent-provider` | `host`   | 选择处理方式：`host` 交由当前 Agent/Skill 协作，`local` 使用已安装的本地视觉模型。 |
+| `--agent-provider` | `host`   | 选择处理方式：`host` 交由当前 Agent/Skill 协作，`local` 使用已安装的 Qwen，`local-service` 使用 OpenAI 兼容的本地服务。 |
 | `--slide-size`     | `both`   | 控制版式：`original` 保持输入比例，`16:9` 生成宽屏，`both` 同时生成两种尺寸。 |
 | `--run-dir`        | 自动生成 | 指定运行目录，便于查看进度、继续未完成的任务或排查问题。     |
 
@@ -166,7 +194,8 @@ sources = ["input.pdf"]
 | 方式 | 适合 | 工作方式 |
 |------|--------|----------|
 | Host Agent | 已在 Codex、Claude Code 等宿主中工作，并希望由 Agent 协助判断页面结构。 | Skill 将诊断资料交给当前宿主 Agent；**CLI 不会直接调用某个固定云端 AI API**。 |
-| Local Agent | 已自行部署本地视觉模型服务，希望在自己的设备上处理图片或 PDF 。 | 使用配置的 OpenAI 兼容本地服务。 |
+| Local Agent | 已安装随包 Qwen，希望完全在自己的设备上处理。 | 使用固定版本和完整性凭据绑定的内置 Qwen，不回退到外部服务。 |
+| Local Service | 已自行部署视觉模型服务。 | 使用 `local-service` 调用配置的 OpenAI 兼容接口，不回退到内置 Qwen 或 Host。 |
 
 ## 项目结构
 
@@ -185,7 +214,7 @@ image2editable/
 ├── tests/                     # 自动化测试
 ├── third_party/
 │   └── licenses/              # 第三方许可证资料
-├── .env.example               # Local Agent 配置示例
+├── .env.example               # Local Service 配置示例
 ├── .gitignore
 ├── CITATION.cff               # 引用信息
 ├── image_to_ppt.py            # 旧版图片专用技术路线，非当前推荐入口

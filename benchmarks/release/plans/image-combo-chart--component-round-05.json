@@ -1,0 +1,25 @@
+{
+  "actions": [
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 15 adjacent pixels to this owner"], "object_ids": ["component_0003"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 16 adjacent pixels to this owner"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 22 adjacent pixels to this owner"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 97 adjacent pixels to this owner"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 105 adjacent pixels to this owner"], "object_ids": ["component_0012"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains this independently movable visual"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 89 adjacent pixels to this owner"], "object_ids": ["component_0013"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality retains the complete line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 44 adjacent pixels to this owner"], "object_ids": ["parent_0011"], "parameters": {}}
+  ],
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "ee8d55529a57e0655b12a21461721682ad0f2bcbbf319f81ceb1588f8e895549",
+  "schema_version": 1,
+  "graph_sha256": "c2314df7ae210ffd1ae3d81d324cd8f306bd97a0c075e5353e2aa333cb3341a1"
+}

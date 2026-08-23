@@ -79,7 +79,7 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 
 ### Local CLI
 
-Deploy and start a local service with **vision capability** first. The service must expose an **OpenAI-compatible `/v1/chat/completions` API**, accept image input, and return JSON. vLLM, LM Studio, or Ollama with its OpenAI-compatible interface enabled can be used.
+Install the Local CLI first. For fully offline execution, install the bundled Qwen as described below. If you already run a vision-model service, you can instead use its OpenAI-compatible API.
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
@@ -89,13 +89,13 @@ pip install .
 
 #### Install OCR
 
-A complete conversion needs at least one OCR engine. PaddleOCR is recommended for Chinese and complex layouts; Tesseract is also supported. After installation, run `image2editable doctor` and start converting only after the check passes.
+A complete conversion needs at least one OCR engine. PaddleOCR is recommended for Chinese and complex layouts; Tesseract is also supported. After installing OCR, install the runtime models below, then check the environment.
 
 ##### Option 1: PaddleOCR (recommended)
 
 ```bash
-# Install the CPU build of PaddlePaddle; no CUDA setup is needed for this option
-python -m pip install paddleocr paddlepaddle
+# Use the verified pinned CPU route; no CUDA setup is needed for this option
+python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
 ```
 
 💡 See the [official installation guide](https://www.paddlepaddle.org.cn/install/quick) for PaddlePaddle GPU packages. The CPU build is the current default; use the command above if you are unsure.
@@ -117,9 +117,19 @@ If the command prints a version number, install the Python package:
 python -m pip install pytesseract
 ```
 
+#### Install runtime models
+
+After installing OCR, run:
+
+```bash
+image2editable models install runtime
+```
+
+The command asks for confirmation before downloading pinned versions of SAM 2.1 Large, Big-LaMa, and Grounding DINO and validating the local runtime receipt. Cancelling does not download anything.
+
 #### Check the environment ✅
 
-After installing OCR, check the Python, OCR, SAM, LaMa, and other conversion dependencies:
+After installing OCR and the runtime models, check Python, OCR, model receipts, and the core dependencies:
 
 ```bash
 image2editable doctor
@@ -127,7 +137,25 @@ image2editable doctor
 
 You can start converting when the output contains `"ready": true`.
 
-#### Configure the local model service
+#### Optional: install the Local Agent
+
+Run these commands only when you need the bundled Local Agent:
+
+```bash
+python -m pip install ".[agent-local]"
+image2editable models install agent
+image2editable doctor --agent-local
+```
+
+The model installation also asks for confirmation. The final command additionally validates the Local Agent dependencies and Qwen receipt.
+
+After the check passes, convert with the bundled Qwen:
+
+```bash
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+```
+
+#### Optional: configure a local model service
 
 For first-time setup, copy the template in the project root and **fill in your own service settings**.
 
@@ -137,14 +165,14 @@ Copy-Item .env.example .env
 
 Edit `.env`: set `IMAGE2EDITABLE_LOCAL_BASE_URL` to the **service address** and `IMAGE2EDITABLE_LOCAL_MODEL` to the **model name exposed by the service**. Leave `IMAGE2EDITABLE_LOCAL_API_KEY` empty when the service does not require a key.
 
-After configuration, use `--agent-provider local` to call the local service:
+After configuration, use `--agent-provider local-service` to call the local service:
 
 ```bash
 # Image → editable PPTX
-image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.png -o output.pptx --slide-size 16:9 --agent-provider local-service
 
 # PDF → editable PPTX
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
+image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local-service
 ```
 
 | Option | Default | Purpose |
@@ -152,7 +180,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provid
 | `sources` | Required | Input to convert: image(s), an image directory, one PDF, or one PPTX. Document inputs cannot be mixed with other sources. |
 | `-o, --output` | Derived from input name | Sets the output file. With `--slide-size both`, it is used as the output base name. |
 | `--lang` | `ch` | OCR language; common values are `ch` and `en`. |
-| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, while `local` uses the configured local vision service. |
+| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, `local` uses the installed Qwen, and `local-service` uses an OpenAI-compatible local service. |
 | `--slide-size` | `both` | Selects output layout: `original` keeps the input ratio, `16:9` makes widescreen slides, and `both` creates both. |
 | `--run-dir` | Generated automatically | Sets a run directory so you can inspect progress, resume an unfinished task, or troubleshoot. |
 
@@ -167,7 +195,8 @@ sources = ["input.pdf"]
 | Mode | Best for | How it works |
 |------|----------|--------------|
 | Host Agent | Users already working in Codex, Claude Code, or a similar host and who want Agent assistance with page-structure decisions. | The Skill gives diagnostic material to the current host Agent; **the CLI does not call a fixed cloud AI API directly**. |
-| Local Agent | Users who have deployed their own local vision-model service and want to process images or PDFs on their own device. | Uses the configured OpenAI-compatible local service. |
+| Local Agent | Users who installed the bundled Qwen and want fully local processing. | Uses the pinned, receipt-bound Qwen and never falls back to an external service. |
+| Local Service | Users who already run their own vision-model service. | Uses `local-service` with the configured OpenAI-compatible API and never falls back to Qwen or Host. |
 
 ## Project layout
 
@@ -186,7 +215,7 @@ image2editable/
 ├── tests/                     # Automated tests
 ├── third_party/
 │   └── licenses/              # Third-party license materials
-├── .env.example               # Local Agent configuration example
+├── .env.example               # Local Service configuration example
 ├── .gitignore
 ├── CITATION.cff               # Citation information
 ├── image_to_ppt.py            # Legacy image-only pipeline; not the recommended entry point

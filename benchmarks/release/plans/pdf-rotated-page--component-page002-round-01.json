@@ -1,0 +1,154 @@
+{
+  "actions": [
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0003 is the complete orange rotated page header; its native title remains separately frozen as text_0001."
+      ],
+      "object_ids": [
+        "parent_0003"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0004 is the complete third rounded card behind native text_0004, text_0007, and text_0010."
+      ],
+      "object_ids": [
+        "parent_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0005 is the complete second rounded card behind native text_0002, text_0006, and text_0009."
+      ],
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0006 is the complete first rounded card behind native text_0003, text_0005, and text_0008."
+      ],
+      "object_ids": [
+        "parent_0006"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "The whole-page composite would flatten the complete page and duplicate all native text and retained visual owners."
+      ],
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This large background composite is not an independently movable foreground object."
+      ],
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This third-card fragment duplicates the complete parent_0004 owner."
+      ],
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This partial orange header duplicates the complete parent_0003 owner and native text_0001."
+      ],
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This split third-card layer duplicates the complete parent_0004 owner."
+      ],
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This text-bearing second-card fragment duplicates parent_0005 and frozen native text."
+      ],
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This footer raster strip duplicates complete native editable text_0011."
+      ],
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This narrow second-card edge fragment duplicates the complete parent_0005 owner."
+      ],
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": [
+        "This footer glyph fragment duplicates complete native editable text_0011."
+      ],
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {}
+    }
+  ],
+  "kind": "component_plan",
+  "page_id": "page_002",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "097b2f4d69270cb29c3420595cce1c7f995e1932831b23c4cab4206939df91fa",
+  "schema_version": 1,
+  "graph_sha256": "d6f21091764360e5d54dd1d4ab62e0a503b032008760d06d30984497f1b4ccdf"
+}

@@ -1,0 +1,2151 @@
+from __future__ import annotations
+
+import copy
+import hashlib
+import importlib
+import inspect
+import json
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+
+import pytest
+from PIL import Image, ImageChops, UnidentifiedImageError
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pypdf import PdfReader, PdfWriter
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RELEASE_ROOT = ROOT / "benchmarks" / "release"
+MANIFEST_PATH = RELEASE_ROOT / "manifest.json"
+CORE_MANIFEST_PATH = RELEASE_ROOT / "core-v0.2-manifest.json"
+
+ROOT_FIELDS = {"schema_version", "cases", "categories"}
+CASE_FIELDS = {
+    "id",
+    "kind",
+    "path",
+    "sha256",
+    "source",
+    "license",
+    "page_count",
+    "categories",
+    "agent_provider",
+    "pptx_mode",
+    "expected_pages",
+}
+PAGE_FIELDS = {
+    "page_id",
+    "expected_status",
+    "min_visual_components",
+    "min_text_boxes",
+    "max_unexplained_pixels",
+    "max_quality_violations",
+}
+
+CASE_SPECS = [
+    (
+        "image-bilingual-dashboard",
+        "image",
+        "inputs/01-bilingual-dashboard.png",
+        1,
+        "bilingual_dashboard",
+        None,
+        12,
+        8,
+    ),
+    (
+        "image-dense-parameter-comparison",
+        "image",
+        "inputs/02-dense-parameter-comparison.png",
+        1,
+        "dense_parameter_comparison",
+        None,
+        15,
+        12,
+    ),
+    (
+        "image-profile-cards",
+        "image",
+        "inputs/03-profile-cards.png",
+        1,
+        "profile_cards",
+        None,
+        10,
+        8,
+    ),
+    (
+        "image-four-stage-timeline",
+        "image",
+        "inputs/04-four-stage-timeline.png",
+        1,
+        "four_stage_timeline",
+        None,
+        10,
+        6,
+    ),
+    (
+        "image-combo-chart",
+        "image",
+        "inputs/05-combo-chart.png",
+        1,
+        "combo_chart",
+        None,
+        8,
+        5,
+    ),
+    (
+        "image-flowchart",
+        "image",
+        "inputs/06-flowchart.png",
+        1,
+        "flowchart",
+        None,
+        10,
+        6,
+    ),
+    (
+        "image-icon-matrix",
+        "image",
+        "inputs/07-icon-matrix.png",
+        1,
+        "icon_matrix",
+        None,
+        12,
+        4,
+    ),
+    (
+        "image-light-text-gradient",
+        "image",
+        "inputs/08-light-text-gradient.png",
+        1,
+        "light_text_gradient",
+        None,
+        3,
+        4,
+    ),
+    (
+        "image-thin-line-network",
+        "image",
+        "inputs/09-thin-line-network.png",
+        1,
+        "thin_line_network",
+        None,
+        12,
+        5,
+    ),
+    (
+        "image-tiny-element-table",
+        "image",
+        "inputs/10-tiny-element-table.png",
+        1,
+        "tiny_element_table",
+        None,
+        15,
+        10,
+    ),
+    (
+        "image-dark-poster",
+        "image",
+        "inputs/11-dark-poster.png",
+        1,
+        "dark_poster",
+        None,
+        5,
+        5,
+    ),
+    (
+        "image-non-16-9-infographic",
+        "image",
+        "inputs/12-non-16-9-infographic.png",
+        1,
+        "non_16_9_infographic",
+        None,
+        12,
+        8,
+    ),
+    (
+        "pdf-mixed-page-sizes",
+        "pdf",
+        "inputs/13-mixed-page-sizes.pdf",
+        2,
+        "pdf_mixed_page_sizes",
+        None,
+        4,
+        11,
+    ),
+    (
+        "pdf-rotated-page",
+        "pdf",
+        "inputs/14-rotated-page.pdf",
+        2,
+        "pdf_rotated_page",
+        None,
+        4,
+        11,
+    ),
+    ("pdf-high-dpi", "pdf", "inputs/15-high-dpi.pdf", 2, "pdf_high_dpi", None, 6, 4),
+    (
+        "pptx-image-only",
+        "pptx",
+        "inputs/16-image-only.pptx",
+        4,
+        "pptx_image_only",
+        "image_only",
+        6,
+        4,
+    ),
+    (
+        "pptx-mixed-native",
+        "pptx",
+        "inputs/17-mixed-native.pptx",
+        4,
+        "pptx_mixed_native",
+        "mixed_native",
+        6,
+        4,
+    ),
+    (
+        "pptx-mixed-screenshot-candidates",
+        "pptx",
+        "inputs/18-mixed-screenshot-candidates.pptx",
+        4,
+        "pptx_mixed_screenshot_candidates",
+        "mixed_screenshot_candidates",
+        6,
+        4,
+    ),
+]
+
+EXPECTED_CATEGORIES = [spec[4] for spec in CASE_SPECS]
+CORE_CASE_IDS = (
+    "image-bilingual-dashboard",
+    "image-combo-chart",
+    "image-flowchart",
+    "image-icon-matrix",
+    "image-thin-line-network",
+    "image-tiny-element-table",
+    "image-dark-poster",
+    "image-non-16-9-infographic",
+    "pdf-rotated-page",
+    "pptx-mixed-screenshot-candidates",
+)
+EXPECTED_README = """# 发布质量语料契约
+
+本目录包含固定的 30 页扩展语料库：18 个输入，包括 12 张图片、3 个双页 PDF、3 个四页 PPTX。v0.2 发布门禁使用 `core-v0.2-manifest.json` 中的 10 个完整 case、14 页，不裁剪多页输入。
+
+## 覆盖范围
+
+图片固定覆盖：中英双语仪表盘、密集参数对比、人物信息卡、四段时间线、柱线组合图、流程图、图标矩阵、浅色文字渐变页、细线网络图、小元素表格、深色海报、非 16:9 信息图。
+
+PDF 分别覆盖双页不同尺寸、旋转、高 DPI。PPTX 分别覆盖 `image_only`、`mixed_native`、`mixed_screenshot_candidates`。
+
+v0.2 核心 14 页由 8 张图片、完整 2 页 `pdf-rotated-page` 和完整 4 页 `pptx-mixed-screenshot-candidates` 组成。`manifest.json` 继续描述 18 case / 30 页扩展语料库，不作为 v0.2 核心完成声明。
+
+## 来源与许可
+
+输入由项目脚本公开生成，manifest 固定记录 `source=project-generated`、`license=CC0-1.0`。所有 case 默认使用已支持的 `agent_provider=host`。
+
+## 字体来源与许可
+
+生成器仅使用仓库内完整、未修改的 Google Fonts `Noto Sans SC` variable TTF；常规文本固定选择 `Regular`，既有粗体文本选择同一文件中的 `Bold` 实例，文件位于 `fonts/NotoSansSC[wght].ttf`。字体按 `fonts/OFL.txt` 中的 SIL Open Font License 1.1 分发，固定来源为 `google/fonts` commit `e1118da94a8cb00cf6d06cdac9ef13eb1e5c6ab7`；字体本身不是 CC0。字体渲染所得 benchmark 输入继续按 CC0-1.0 发布，manifest 中的许可字段不适用于捆绑字体文件。
+
+## 阶段状态
+
+当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。v0.2 核心 14 页 benchmark 已严格通过 3 次独立重复；30 页集合始终称为扩展语料库，尚未全部严格重放，未完成的扩展页面不得计入核心成功率。
+
+严格 Host runner 使用已安装发行包和固定 plans。v0.2 核心命令为：
+
+```bash
+python -m scripts.release_benchmark --manifest benchmarks/release/core-v0.2-manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/benchmark-report.json
+```
+
+完整扩展语料命令为：
+
+```bash
+python -m scripts.release_benchmark --manifest benchmarks/release/manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/extended-benchmark-report.json
+```
+
+runner 固定执行 3 次独立重复；每次都重新校验输入 hash、按真实 request/graph hash 选择 plans，并拒绝非 `validated` 页面、warning、fallback、缺失/异常质量工件。报告只有三次重复的所有 case 都通过时才是 `status: passed`；任一失败会保留失败类型并返回非零退出码。模型缓存和 run 证据留在本机，不进入 Git。
+
+## 通过标准
+
+每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。v0.2 核心 10 个 case、14 页必须三次重复全部通过；真实模型 runner 不放入普通 push CI，而由受保护的发布门禁显式执行并保存报告。核心完成不代表 30 页扩展语料已全部完成。
+"""
+
+EXPECTED_INPUT_NAMES = {Path(spec[2]).name for spec in CASE_SPECS}
+EXPECTED_FONT_PATH = RELEASE_ROOT / "fonts" / "NotoSansSC[wght].ttf"
+EXPECTED_FONT_SHA256 = "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+EXPECTED_IMAGE_SIZES = {
+    "01-bilingual-dashboard.png": (1600, 900),
+    "02-dense-parameter-comparison.png": (1600, 900),
+    "03-profile-cards.png": (1600, 900),
+    "04-four-stage-timeline.png": (1600, 900),
+    "05-combo-chart.png": (1600, 900),
+    "06-flowchart.png": (1600, 900),
+    "07-icon-matrix.png": (1600, 900),
+    "08-light-text-gradient.png": (1600, 900),
+    "09-thin-line-network.png": (1600, 900),
+    "10-tiny-element-table.png": (1600, 900),
+    "11-dark-poster.png": (1600, 900),
+    "12-non-16-9-infographic.png": (1000, 1400),
+}
+
+
+@pytest.fixture(scope="module")
+def fresh_release_corpora(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    builder = importlib.import_module("scripts.build_release_corpus")
+    parent = tmp_path_factory.mktemp("release-corpus")
+    first = parent / "first"
+    second = parent / "second"
+
+    builder.build(first)
+    builder.build(second)
+
+    return first, second
+
+
+def _pptx_inventory(path: Path) -> tuple[tuple[tuple[int, str], ...], ...]:
+    deck = Presentation(path)
+    return tuple(
+        tuple((int(shape.shape_type), shape.text if shape.has_text_frame else "") for shape in slide.shapes)
+        for slide in deck.slides
+    )
+
+
+def _pdf_inventory(path: Path) -> tuple[tuple[float, float, int], ...]:
+    return tuple(
+        (
+            round(float(page.mediabox.width), 3),
+            round(float(page.mediabox.height), 3),
+            page.rotation,
+        )
+        for page in PdfReader(path).pages
+    )
+
+
+def _assert_same_rgb_pixels(first: Image.Image, second: Image.Image) -> None:
+    assert ImageChops.difference(
+        first.convert("RGB"), second.convert("RGB")
+    ).getbbox() is None
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _manifest() -> dict[str, object]:
+    return json.loads(
+        MANIFEST_PATH.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
+def _core_manifest() -> dict[str, object]:
+    return json.loads(
+        CORE_MANIFEST_PATH.read_text(encoding="utf-8"),
+        object_pairs_hook=_reject_duplicate_keys,
+    )
+
+
+def _assert_exact_fields(manifest: dict[str, object]) -> None:
+    assert set(manifest) == ROOT_FIELDS
+    for case in manifest["cases"]:
+        assert set(case) == CASE_FIELDS
+        for page in case["expected_pages"]:
+            assert set(page) == PAGE_FIELDS
+
+
+def _assert_numeric_contract(manifest: dict[str, object]) -> None:
+    assert type(manifest["schema_version"]) is int
+    assert manifest["schema_version"] == 2
+    for case in manifest["cases"]:
+        assert type(case["page_count"]) is int
+        assert case["page_count"] > 0
+        for page in case["expected_pages"]:
+            for field in (
+                "min_visual_components",
+                "min_text_boxes",
+                "max_unexplained_pixels",
+                "max_quality_violations",
+            ):
+                assert type(page[field]) is int
+                assert page[field] >= 0
+
+
+def _assert_release_input(case: dict[str, object], release_root: Path) -> None:
+    path = release_root / case["path"]
+    assert path.is_file(), path
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert case["sha256"] == digest
+    assert digest != "0" * 64
+
+    if case["kind"] == "image":
+        with Image.open(path) as image:
+            assert image.format == "PNG"
+            assert image.n_frames == case["page_count"]
+            image.verify()
+    elif case["kind"] == "pdf":
+        assert len(PdfReader(path).pages) == case["page_count"]
+    elif case["kind"] == "pptx":
+        assert len(Presentation(path).slides) == case["page_count"]
+    else:
+        raise AssertionError(f"unsupported release input kind: {case['kind']}")
+
+
+def test_release_manifest_has_exact_root_schema_and_categories() -> None:
+    manifest = _manifest()
+
+    _assert_exact_fields(manifest)
+    _assert_numeric_contract(manifest)
+    assert manifest["schema_version"] == 2
+    assert manifest["categories"] == EXPECTED_CATEGORIES
+    assert len(manifest["cases"]) == 18
+    assert len({case["id"] for case in manifest["cases"]}) == 18
+
+
+def test_release_manifest_defines_eighteen_inputs_and_thirty_pages() -> None:
+    manifest = _manifest()
+    cases = manifest["cases"]
+
+    assert [
+        (
+            case["id"],
+            case["kind"],
+            case["path"],
+            case["page_count"],
+            case["categories"][0],
+            case["pptx_mode"],
+        )
+        for case in cases
+    ] == [spec[:6] for spec in CASE_SPECS]
+    assert {
+        kind: sum(case["kind"] == kind for case in cases)
+        for kind in ("image", "pdf", "pptx")
+    } == {
+        "image": 12,
+        "pdf": 3,
+        "pptx": 3,
+    }
+    assert sum(case["page_count"] for case in cases) == 30
+
+
+def test_core_v020_manifest_is_exact_subset_of_extended_corpus() -> None:
+    extended = _manifest()
+    core = _core_manifest()
+    selected = {case["id"]: case for case in extended["cases"]}
+
+    _assert_exact_fields(core)
+    _assert_numeric_contract(core)
+    assert [case["id"] for case in core["cases"]] == list(CORE_CASE_IDS)
+    assert core["cases"] == [selected[case_id] for case_id in CORE_CASE_IDS]
+    assert core["categories"] == [
+        case["categories"][0] for case in core["cases"]
+    ]
+    assert len(core["cases"]) == 10
+    assert sum(case["page_count"] for case in core["cases"]) == 14
+    kinds = [case["kind"] for case in core["cases"]]
+    assert {kind: kinds.count(kind) for kind in ("image", "pdf", "pptx")} == {
+        "image": 8,
+        "pdf": 1,
+        "pptx": 1,
+    }
+
+
+def test_core_v020_pptx_contract_matches_authored_page_routes_and_objects() -> None:
+    core = _core_manifest()
+    case = next(
+        item
+        for item in core["cases"]
+        if item["id"] == "pptx-mixed-screenshot-candidates"
+    )
+
+    assert [
+        (
+            page["expected_status"],
+            page["min_visual_components"],
+            page["min_text_boxes"],
+        )
+        for page in case["expected_pages"]
+    ] == [
+        ("replaced", 4, 39),
+        ("replaced", 24, 14),
+        ("replaced", 3, 4),
+        ("preserved", 1, 1),
+    ]
+
+
+def test_core_v020_pptx_replay_plans_match_authored_requests() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(
+            (RELEASE_ROOT / "plans").glob("pptx-mixed-screenshot-candidates--*.json")
+        )
+    ]
+    candidate_plans = [plan for plan in plans if plan.get("kind") == "candidate_decision"]
+    component_plans = [plan for plan in plans if plan.get("kind") == "component_plan"]
+
+    assert len(candidate_plans) == 3
+    assert all(runner._valid_candidate_plan(plan) for plan in candidate_plans)
+    assert [
+        (plan["page_id"], plan["image_sha256"], plan["source_object_sha256"])
+        for plan in candidate_plans
+    ] == [
+        ("page_001", "594d8f1eeeb94746e8aaa5730a3fa291855423f2eaea48ba30b1eeb577ed4e9d", "3362dd457e443599faf0e3f1254e3c5ff1a570e3c3362e5d3e09e77ba0b010a5"),
+        ("page_002", "cc2d8482b48fd32f9920cf0092da88ad16d345821db0d0f98b11103b09871900", "7fa090a9f03eef6ec086214c8c9639197369193d850c72d51faa241b617c5c18"),
+        ("page_003", "65eafdda6be280feceee856cda45b76a68e2e9cf1f82646abed7c1dadacab798", "0030b760342c417d22d0b35e2ece11c7adfc1c65dde72018bd93ed61f8e63c02"),
+    ]
+    assert len(component_plans) == 12
+    assert all(runner._valid_component_plan(plan) for plan in component_plans)
+    assert [
+        (plan["page_id"], plan["repair_round"], plan["request_sha256"], plan["graph_sha256"])
+        for plan in component_plans
+    ] == [
+        ("page_001", 1, "622e4e59ab0f62ba295eefd16d240b38618069bdf4e52d7ebafe0fabbff53835", "42f08c104547a45dc2694e2306a2afc76c3ec26f06495d59ce3638267b733626"),
+        ("page_001", 2, "be91c362b75e8cb3b4a94984a80257a33a7bed9bdce58cbb3b6cf8eed74d4033", "7503bb59a081db29baa3fce27935b8418011c2e5d65a2813a44018a8b5e8924f"),
+        ("page_001", 3, "2f77692e4c7e1a7ac49ce64332557edaffb274590d1f69bcadbca7bc1884b32f", "988a6c1018a55752c3346e1b23821da6f4738cba39e72e10d271e7affc57389d"),
+        ("page_001", 4, "bee399fb3b3cc507f5b4f72af3161ff780bea96866c4a0d553a8ff8ffe812bef", "0817bea4220685dc3411d32cde1a66051552ec6647ed08970ba28576baa68bc8"),
+        ("page_001", 5, "cdb6ae30d30f97ae328f6fc2dddfc024867e5796ae67aa0de2a8ebad20f4ee11", "5550e55d4ecca889d7c9c9ed3a17133aaadc23d2b3170d971883054d4baefdef"),
+        ("page_002", 1, "ca36339fa03baf2b2f37ea555f343bb043d09b4a99fd493aab5f95d99c468738", "b2bbc450e787024447be02bb1845d2159ae39f879ae107fe6f80417d91d010ea"),
+        ("page_002", 2, "46e259990f740395e5f5ab195b5b2ae5880ce8a2bf54bf717a4a518c1298c905", "c61d3f6cf8f70811dd6c319ab4cfac7dc731df60b69e5d2ef2e566b11c2add60"),
+        ("page_002", 3, "2246b47bdae30acf5e093153ad725ea31269383e33d5051079bf6417bd324953", "aa1dade15edf9d8b05859fb2101cece20dabdf2e4e93875f9daaf7e5f0a8ce74"),
+        ("page_003", 1, "1ee94fe181e144b956a566a94bfc51be655f5455cb99905a65b06a8c427da9d4", "6502588807cbdafb0640f45f0ee254acd941f67a0d84aa75de2723fd602fce3e"),
+        ("page_003", 2, "fd761a1c2bda39e2a20ec8a32f2da4bad9d79daa49b24ca290f4fe62e781e95c", "0724cb513611ccf7d1dbc2c97be6803852d7f25639f59a6228464ae650c71752"),
+        ("page_003", 3, "324b7c47bf5801b5f9aa222c7f7eb778ca68aaf01780f1974f4c9878b86feca7", "f2966eb0ca1a6a18ba5a1a6d30af2f741779e777293b906cd1c27e48b619801b"),
+        ("page_003", 4, "a28a036e789f0327319d7a35fc35b08160c7fdb43058cb8edaee336dcdf61dab", "55b9fdab2d7b56beb271b4157286004b56c470c6db1ab297bc988186d8dc6342"),
+    ]
+def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
+    cases = _manifest()["cases"]
+    real_statuses = {
+        "pptx-mixed-screenshot-candidates": [
+            "replaced",
+            "replaced",
+            "replaced",
+            "preserved",
+        ]
+    }
+    real_thresholds = {
+        "pptx-mixed-screenshot-candidates": [
+            (4, 39),
+            (24, 14),
+            (3, 4),
+            (1, 1),
+        ]
+    }
+
+    for case, spec in zip(cases, CASE_SPECS, strict=True):
+        identifier, _, _, page_count, category, _, min_visual, min_text_boxes = spec
+        assert re.fullmatch(r"[0-9a-f]{64}", case["sha256"])
+        assert case["source"] == "project-generated"
+        assert case["license"] == "CC0-1.0"
+        assert case["categories"] == [category]
+        assert case["agent_provider"] == "host"
+        assert len(case["expected_pages"]) == page_count
+
+        for page_number, page in enumerate(case["expected_pages"], start=1):
+            expected_status = real_statuses.get(
+                identifier, ["validated"] * page_count
+            )[page_number - 1]
+            page_min_visual, page_min_text = real_thresholds.get(
+                identifier, [(min_visual, min_text_boxes)] * page_count
+            )[page_number - 1]
+            assert page == {
+                "page_id": f"{identifier}-page-{page_number:03d}",
+                "expected_status": expected_status,
+                "min_visual_components": page_min_visual,
+                "min_text_boxes": page_min_text,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+
+
+def test_release_manifest_pptx_modes_are_exact_and_only_apply_to_pptx() -> None:
+    cases = _manifest()["cases"]
+    pptx_cases = [case for case in cases if case["kind"] == "pptx"]
+
+    assert {case["pptx_mode"] for case in pptx_cases} == {
+        "image_only",
+        "mixed_native",
+        "mixed_screenshot_candidates",
+    }
+    assert all(case["pptx_mode"] is None for case in cases if case["kind"] != "pptx")
+
+
+@pytest.mark.parametrize(
+    ("needle", "duplicate"),
+    [
+        ('  "schema_version": 2,', '  "schema_version": 2,\n  "schema_version": 2,'),
+        (
+            '      "id": "image-bilingual-dashboard",',
+            '      "id": "image-bilingual-dashboard",\n'
+            '      "id": "image-bilingual-dashboard",',
+        ),
+        (
+            '          "page_id": "image-bilingual-dashboard-page-001",',
+            '          "page_id": "image-bilingual-dashboard-page-001",\n'
+            '          "page_id": "image-bilingual-dashboard-page-001",',
+        ),
+    ],
+)
+def test_release_manifest_rejects_duplicate_keys_in_every_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    needle: str,
+    duplicate: str,
+) -> None:
+    original = MANIFEST_PATH.read_text(encoding="utf-8")
+    mutant = original.replace(needle, duplicate, 1)
+    assert mutant != original
+    mutant_path = tmp_path / "manifest.json"
+    mutant_path.write_text(mutant, encoding="utf-8")
+    monkeypatch.setitem(globals(), "MANIFEST_PATH", mutant_path)
+
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        _manifest()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True),
+        ("page_count", True),
+        ("page_count", 0),
+        ("min_visual_components", True),
+        ("min_visual_components", -1),
+        ("min_text_boxes", True),
+        ("min_text_boxes", -1),
+        ("max_unexplained_pixels", False),
+        ("max_unexplained_pixels", -1),
+        ("max_quality_violations", False),
+        ("max_quality_violations", -1),
+    ],
+)
+def test_release_manifest_rejects_bool_and_out_of_range_integers(
+    field: str, value: object
+) -> None:
+    mutant = copy.deepcopy(_manifest())
+    if field == "schema_version":
+        mutant[field] = value
+    elif field == "page_count":
+        mutant["cases"][0][field] = value
+    else:
+        mutant["cases"][0]["expected_pages"][0][field] = value
+
+    with pytest.raises(AssertionError):
+        _assert_numeric_contract(mutant)
+
+
+def test_release_manifest_object_order_is_not_schema() -> None:
+    mutant = copy.deepcopy(_manifest())
+    mutant["cases"][0]["expected_pages"][0] = dict(
+        reversed(mutant["cases"][0]["expected_pages"][0].items())
+    )
+    mutant["cases"][0] = dict(reversed(mutant["cases"][0].items()))
+    mutant = dict(reversed(mutant.items()))
+
+    _assert_exact_fields(mutant)
+
+
+def test_release_readme_documents_phase_one_and_future_strict_run() -> None:
+    readme = (RELEASE_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert readme == EXPECTED_README
+
+
+def test_release_binary_inputs_have_git_attributes() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    ignores = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    assert "benchmarks/release/inputs/*.png binary" in attributes
+    assert "benchmarks/release/inputs/*.pdf binary" in attributes
+    assert "benchmarks/release/inputs/*.pptx binary" in attributes
+    assert "benchmarks/release/fonts/*.ttf binary" in attributes
+    assert "!benchmarks/release/inputs/*.png" in ignores
+    assert "!benchmarks/release/inputs/*.pdf" in ignores
+    assert "!benchmarks/release/inputs/*.pptx" in ignores
+
+
+def test_rgb_pixel_comparison_rejects_red_vs_blue_mutation() -> None:
+    red = Image.new("RGB", (2, 2), "red")
+    blue = Image.new("RGB", (2, 2), "blue")
+
+    with pytest.raises(AssertionError):
+        _assert_same_rgb_pixels(red, blue)
+
+
+def test_release_builder_uses_only_bundled_regular_noto_sans_sc() -> None:
+    builder = importlib.import_module("scripts.build_release_corpus")
+
+    assert builder.FONT_PATH == EXPECTED_FONT_PATH
+    assert builder.FONT_VARIATION == "Regular"
+    assert builder.FONT_PATH.is_file()
+    assert builder.FONT_PATH.with_name("OFL.txt").is_file()
+    assert hashlib.sha256(builder.FONT_PATH.read_bytes()).hexdigest() == EXPECTED_FONT_SHA256
+    source = inspect.getsource(builder._font)
+    assert "FONT_PATH" in source
+    assert "Windows\\Fonts" not in source
+    assert "DejaVuSans" not in source
+    assert "load_default" not in source
+
+
+def test_release_builder_fails_fast_when_bundled_font_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builder = importlib.import_module("scripts.build_release_corpus")
+    monkeypatch.setattr(builder, "FONT_PATH", tmp_path / "missing.ttf")
+
+    with pytest.raises(FileNotFoundError):
+        builder._font(24)
+
+
+def test_bundled_font_has_distinct_cjk_glyphs_without_notdef() -> None:
+    builder = importlib.import_module("scripts.build_release_corpus")
+    font = builder._font(48)
+
+    def fingerprint(character: str) -> tuple[tuple[int, int, int, int], bytes]:
+        return font.getbbox(character), bytes(font.getmask(character))
+
+    notdef = fingerprint("\U0010ffff")
+    replacement = fingerprint("\ufffd")
+    glyphs = [fingerprint(character) for character in "运营仪表盘"]
+
+    assert all(glyph not in {notdef, replacement} for glyph in glyphs)
+    assert len(set(glyphs)) == len(glyphs)
+
+
+def test_release_builder_requires_a_new_output_root(tmp_path: Path) -> None:
+    builder = importlib.import_module("scripts.build_release_corpus")
+    existing = tmp_path / "existing"
+    existing.mkdir()
+
+    with pytest.raises(FileExistsError):
+        builder.build(existing)
+
+
+def test_release_builder_main_accepts_one_positional_output(tmp_path: Path) -> None:
+    builder = importlib.import_module("scripts.build_release_corpus")
+    output = tmp_path / "from-main"
+
+    assert builder.main([str(output)]) is None
+    assert {path.name for path in output.iterdir()} == EXPECTED_INPUT_NAMES
+
+
+def test_release_builder_creates_exact_eighteen_inputs_twice(
+    fresh_release_corpora: tuple[Path, Path],
+) -> None:
+    first, second = fresh_release_corpora
+
+    assert {path.name for path in first.iterdir()} == EXPECTED_INPUT_NAMES
+    assert {path.name for path in second.iterdir()} == EXPECTED_INPUT_NAMES
+
+
+def test_fresh_release_pngs_are_valid_and_pixel_equivalent(
+    fresh_release_corpora: tuple[Path, Path],
+) -> None:
+    first, second = fresh_release_corpora
+
+    for name, expected_size in EXPECTED_IMAGE_SIZES.items():
+        with (
+            Image.open(first / name) as first_image,
+            Image.open(second / name) as second_image,
+            Image.open(RELEASE_ROOT / "inputs" / name) as canonical_image,
+        ):
+            assert first_image.format == "PNG"
+            assert second_image.format == "PNG"
+            assert canonical_image.format == "PNG"
+            assert first_image.size == expected_size
+            assert second_image.size == expected_size
+            assert canonical_image.size == expected_size
+            _assert_same_rgb_pixels(first_image, second_image)
+
+
+def test_fresh_release_pdfs_have_two_real_pages_and_equivalent_geometry(
+    fresh_release_corpora: tuple[Path, Path],
+) -> None:
+    first, second = fresh_release_corpora
+
+    for name in ("13-mixed-page-sizes.pdf", "14-rotated-page.pdf", "15-high-dpi.pdf"):
+        assert _pdf_inventory(first / name) == _pdf_inventory(second / name)
+        assert _pdf_inventory(first / name) == _pdf_inventory(
+            RELEASE_ROOT / "inputs" / name
+        )
+        assert len(_pdf_inventory(first / name)) == 2
+
+    mixed_sizes = _pdf_inventory(first / "13-mixed-page-sizes.pdf")
+    assert mixed_sizes[0][:2] != mixed_sizes[1][:2]
+    assert _pdf_inventory(first / "14-rotated-page.pdf")[1][2] == 90
+
+    high_dpi_reader = PdfReader(first / "15-high-dpi.pdf")
+    image_sizes = [
+        (int(image.image.width), int(image.image.height))
+        for page in high_dpi_reader.pages
+        for image in page.images
+    ]
+    assert len(image_sizes) == 2
+    assert all(max(size) >= 2400 for size in image_sizes)
+
+
+def test_fresh_release_pptx_modes_have_expected_object_inventory(
+    fresh_release_corpora: tuple[Path, Path],
+) -> None:
+    first, second = fresh_release_corpora
+    names = (
+        "16-image-only.pptx",
+        "17-mixed-native.pptx",
+        "18-mixed-screenshot-candidates.pptx",
+    )
+
+    for name in names:
+        deck = Presentation(first / name)
+        assert len(deck.slides) == 4
+        assert deck.slide_width * 9 == deck.slide_height * 16
+        assert deck.core_properties.created == datetime(2020, 1, 1)
+        assert deck.core_properties.modified == datetime(2020, 1, 1)
+        assert _pptx_inventory(first / name) == _pptx_inventory(second / name)
+        assert _pptx_inventory(first / name) == _pptx_inventory(
+            RELEASE_ROOT / "inputs" / name
+        )
+        with ZipFile(first / name) as archive:
+            members = archive.infolist()
+            assert [member.filename for member in members] == sorted(
+                member.filename for member in members
+            )
+            assert all(member.date_time == (1980, 1, 1, 0, 0, 0) for member in members)
+            assert all(member.compress_type == ZIP_DEFLATED for member in members)
+
+    image_only = Presentation(first / "16-image-only.pptx")
+    assert all(
+        len(slide.shapes) == 1
+        and slide.shapes[0].shape_type == MSO_SHAPE_TYPE.PICTURE
+        for slide in image_only.slides
+    )
+
+    mixed_native = Presentation(first / "17-mixed-native.pptx")
+    native_shapes = [shape for slide in mixed_native.slides for shape in slide.shapes]
+    assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in native_shapes)
+    assert sum(shape.has_text_frame for shape in native_shapes) >= 8
+    assert sum(shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE for shape in native_shapes) >= 8
+
+    screenshot_candidates = Presentation(first / "18-mixed-screenshot-candidates.pptx")
+    for slide in screenshot_candidates.slides:
+        assert any(shape.shape_type == MSO_SHAPE_TYPE.PICTURE for shape in slide.shapes)
+        assert any(shape.has_text_frame and shape.text for shape in slide.shapes)
+        assert any(shape.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE for shape in slide.shapes)
+
+
+def test_release_input_rejects_invalid_image_with_matching_hash(tmp_path: Path) -> None:
+    case = copy.deepcopy(_manifest()["cases"][0])
+    case["path"] = "invalid.png"
+    path = tmp_path / case["path"]
+    path.write_bytes(b"not an image")
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(UnidentifiedImageError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_valid_image_with_wrong_hash(tmp_path: Path) -> None:
+    case = copy.deepcopy(_manifest()["cases"][0])
+    case["path"] = "wrong-hash.png"
+    path = tmp_path / case["path"]
+    Image.new("RGB", (2, 2), "red").save(path)
+    case["sha256"] = "f" * 64
+
+    with pytest.raises(AssertionError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_jpeg_renamed_as_png(tmp_path: Path) -> None:
+    case = copy.deepcopy(_manifest()["cases"][0])
+    case["path"] = "renamed.png"
+    path = tmp_path / case["path"]
+    Image.new("RGB", (2, 2), "red").save(path, format="JPEG")
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with Image.open(path) as image:
+        assert image.format == "JPEG"
+
+    with pytest.raises(AssertionError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_multiframe_apng(tmp_path: Path) -> None:
+    case = copy.deepcopy(_manifest()["cases"][0])
+    case["path"] = "two-frame.png"
+    path = tmp_path / case["path"]
+    first = Image.new("RGBA", (2, 2), "red")
+    second = Image.new("RGBA", (2, 2), "blue")
+    first.save(
+        path,
+        format="PNG",
+        save_all=True,
+        append_images=[second],
+        duration=100,
+        loop=0,
+    )
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with Image.open(path) as image:
+        assert image.format == "PNG"
+        assert image.n_frames == 2
+
+    with pytest.raises(AssertionError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_image_that_opens_but_fails_verify(
+    tmp_path: Path,
+) -> None:
+    case = copy.deepcopy(_manifest()["cases"][0])
+    case["path"] = "truncated.png"
+    path = tmp_path / case["path"]
+    Image.new("RGB", (2, 2), "red").save(path)
+    path.write_bytes(path.read_bytes()[:-10])
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises((OSError, SyntaxError)):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_wrong_pdf_page_count_with_matching_hash(
+    tmp_path: Path,
+) -> None:
+    case = copy.deepcopy(_manifest()["cases"][12])
+    case["path"] = "one-page.pdf"
+    path = tmp_path / case["path"]
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    with path.open("wb") as stream:
+        writer.write(stream)
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(AssertionError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_input_rejects_wrong_pptx_slide_count_with_matching_hash(
+    tmp_path: Path,
+) -> None:
+    case = copy.deepcopy(_manifest()["cases"][15])
+    case["path"] = "one-slide.pptx"
+    path = tmp_path / case["path"]
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[6])
+    deck.save(path)
+    case["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(AssertionError):
+        _assert_release_input(case, tmp_path)
+
+
+def test_release_inputs_exist_and_match_manifest_sha256() -> None:
+    cases = _manifest()["cases"]
+
+    for case in cases:
+        _assert_release_input(case, RELEASE_ROOT)
+
+
+def _write_benchmark_plan(path: Path, value: dict[str, object]) -> None:
+    path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+
+def _candidate_response() -> dict[str, object]:
+    return {
+        "candidate": {
+            "candidate_id": "candidate_001",
+            "page_id": "page_001",
+            "source_shape_id": "2",
+            "source_object_sha256": "1" * 64,
+            "image_sha256": "2" * 64,
+        }
+    }
+
+
+def _candidate_plan() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "candidate_decision",
+        "page_id": "page_001",
+        "candidate_id": "candidate_001",
+        "source_shape_id": "2",
+        "source_object_sha256": "1" * 64,
+        "image_sha256": "2" * 64,
+        "decision": "replace",
+        "confidence": 0.99,
+        "category": "full_slide_screenshot",
+        "evidence": ["full-slide raster bound to the candidate hashes"],
+    }
+
+
+def _component_request() -> dict[str, object]:
+    return {
+        "kind": "component_request",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+    }
+
+
+def _bound_component_request(run_dir: Path) -> tuple[dict[str, object], dict[str, object]]:
+    request_dir = run_dir / "pages/page_001/reconstruction/agent/round-01"
+    request_dir.mkdir(parents=True)
+    graph = b'{"nodes":[]}\n'
+    graph_sha256 = hashlib.sha256(graph).hexdigest()
+    (request_dir / "component-graph.json").write_bytes(graph)
+    request = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "graph_sha256": graph_sha256,
+        "evidence": {
+            "component-graph.json": {
+                "path": "component-graph.json",
+                "sha256": graph_sha256,
+            }
+        },
+    }
+    payload = (
+        json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+        + b"\n"
+    )
+    request_path = request_dir / "component_agent_request.json"
+    request_path.write_bytes(payload)
+    response = {
+        "kind": "component_request",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": hashlib.sha256(payload).hexdigest(),
+        "request_path": str(request_path.resolve()),
+    }
+    plan = {
+        **_component_plan(),
+        "request_sha256": response["request_sha256"],
+        "graph_sha256": graph_sha256,
+    }
+    return response, plan
+
+
+def _component_plan() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "component_plan",
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+        "actions": [
+            {
+                "action": "accept",
+                "object_ids": ["component_0001"],
+                "parameters": {},
+                "confidence": 0.99,
+                "evidence": ["component boundary matches the source"],
+            }
+        ],
+    }
+
+
+def _runner_case() -> dict[str, object]:
+    return {
+        "id": "pptx-mixed-screenshot-candidates",
+        "kind": "pptx",
+        "path": "inputs/18-mixed-screenshot-candidates.pptx",
+        "agent_provider": "host",
+    }
+
+
+def _install_runner_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    component_plan: dict[str, object] | None = None,
+) -> Path:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json",
+        _candidate_plan(),
+    )
+    if component_plan is not None:
+        _write_benchmark_plan(
+            plans / "pptx-mixed-screenshot-candidates--component.json",
+            component_plan,
+        )
+    monkeypatch.setattr(runner, "PLAN_ROOT", plans)
+    return plans
+
+
+def test_release_runner_locks_the_complete_host_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    run_next_count = 0
+    run_execute_count = 0
+    agent_next_count = 0
+    expected_component_plan: dict[str, object] | None = None
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal agent_next_count, expected_component_plan, run_next_count, run_execute_count
+        assert cwd == tmp_path / "workspace"
+        calls.append(arguments)
+        command = arguments[:2]
+        if arguments[0] == "prepare":
+            run_dir = Path(arguments[arguments.index("--run-dir") + 1])
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps({"run_dir": str(run_dir.resolve()), "status": "prepared"}),
+                "",
+            )
+        if command == ["run", "next"]:
+            run_next_count += 1
+            value = _candidate_response() if run_next_count == 1 else {"candidate": None}
+        elif command == ["decision", "record"]:
+            value = {"status": "recorded"}
+        elif command == ["run", "execute"]:
+            run_execute_count += 1
+            value = (
+                {"status": "awaiting_agent"}
+                if run_execute_count == 1
+                else {
+                    "status": "completed",
+                    "page_results": [
+                        {"page_id": "page_001", "status": "validated"}
+                    ],
+                }
+            )
+        elif command == ["agent", "next"]:
+            agent_next_count += 1
+            if agent_next_count == 1:
+                challenge = (
+                    tmp_path
+                    / "workspace/pptx-mixed-screenshot-candidates/run/host-challenge/challenge.png"
+                )
+                challenge.parent.mkdir(parents=True)
+                image = Image.new("RGB", (240, 120), "white")
+                for left in (24, 97, 170):
+                    for x in range(left, left + 45):
+                        for y in range(20, 65):
+                            image.putpixel((x, y), (217, 72, 95))
+                image.save(challenge)
+                value = {
+                    "kind": "capability_handshake",
+                    "challenge_id": "5" * 64,
+                    "image_path": str(challenge.resolve()),
+                    "required_capabilities": [
+                        "vision",
+                        "local_file_read",
+                        "tool_use",
+                        "structured_json",
+                    ],
+                }
+            else:
+                run_dir = Path(arguments[2])
+                value, expected_component_plan = _bound_component_request(run_dir)
+                _write_benchmark_plan(
+                    plans / "pptx-mixed-screenshot-candidates--component.json",
+                    expected_component_plan,
+                )
+        elif command == ["agent", "record"]:
+            submitted = json.loads(
+                Path(arguments[arguments.index("--plan") + 1]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            if submitted["kind"] == "host_capability_response":
+                assert submitted == {
+                    "schema_version": 1,
+                    "kind": "host_capability_response",
+                    "challenge_id": "5" * 64,
+                    "observed": {"shape": "square", "color": "#d9485f", "count": 3},
+                }
+                value = {
+                    "capabilities": [
+                        "vision",
+                        "local_file_read",
+                        "tool_use",
+                        "structured_json",
+                    ],
+                    "status": "capabilities_recorded",
+                }
+            else:
+                assert expected_component_plan is not None
+                assert submitted == {
+                    key: value
+                    for key, value in expected_component_plan.items()
+                    if key != "graph_sha256"
+                }
+                plan_path = Path(arguments[2]) / "recorded-component-plan.json"
+                plan_path.write_bytes(
+                    Path(arguments[arguments.index("--plan") + 1]).read_bytes()
+                )
+                value = {
+                    "plan_path": str(plan_path.resolve()),
+                    "recovered": False,
+                    "status": "recorded",
+                }
+        else:
+            raise AssertionError(arguments)
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    result = runner.run_case(
+        _runner_case(),
+        workspace=tmp_path / "workspace",
+        command=fake_command,
+    )
+
+    run_dir = str((tmp_path / "workspace" / "pptx-mixed-screenshot-candidates" / "run").resolve())
+    input_path = str((RELEASE_ROOT / "inputs/18-mixed-screenshot-candidates.pptx").resolve())
+    assert calls == [
+        [
+            "prepare",
+            input_path,
+            "--run-dir",
+            run_dir,
+            "--output",
+            str((tmp_path / "workspace" / "pptx-mixed-screenshot-candidates" / "output.pptx").resolve()),
+            "--slide-size",
+            "original",
+            "--agent-provider",
+            "host",
+        ],
+        ["run", "next", run_dir],
+        [
+            "decision",
+            "record",
+            run_dir,
+            "--page",
+            "page_001",
+            "--object",
+            "2",
+            "--decision",
+            "replace",
+            "--confidence",
+            "0.99",
+            "--category",
+            "full_slide_screenshot",
+            "--evidence",
+            "full-slide raster bound to the candidate hashes",
+        ],
+        ["run", "next", run_dir],
+        ["run", "execute", run_dir],
+        ["agent", "next", run_dir],
+        ["agent", "record", run_dir, "--plan", calls[6][-1]],
+        ["agent", "next", run_dir],
+        ["agent", "record", run_dir, "--plan", calls[8][-1]],
+        ["run", "execute", run_dir],
+    ]
+    assert result.case_id == "pptx-mixed-screenshot-candidates"
+    assert result.run_dir == run_dir
+    assert result.pages == [{"page_id": "page_001", "status": "validated"}]
+    assert type(result.duration_ms) is int and result.duration_ms >= 0
+
+
+def test_release_runner_rejects_invalid_capability_png_size(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    image_path = tmp_path / "challenge.png"
+    Image.new("RGB", (241, 120), "white").save(image_path)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._observe_capability_challenge(image_path, tmp_path)
+
+
+def test_release_runner_rejects_out_of_bounds_capability_png(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    image_path = tmp_path / "challenge.png"
+    image = Image.new("RGB", (240, 120), "white")
+    for left in (24, 97, 170):
+        for x in range(left, left + 45):
+            for y in range(20, 65):
+                image.putpixel((x, y), (217, 72, 95))
+    image.save(image_path)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._observe_capability_challenge(image_path, run_dir)
+
+
+def test_release_runner_requires_bound_component_request_path(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._component_binding(_component_request(), tmp_path)
+
+
+def test_release_runner_preserves_preexisting_host_plan_file(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+    sentinel = workspace / ".host-plan-001.json"
+    sentinel.write_text("owner data", encoding="utf-8")
+    submitted: list[Path] = []
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        path = Path(arguments[arguments.index("--plan") + 1])
+        assert path.parent == run_dir.parent
+        assert path != sentinel
+        assert path.is_file()
+        submitted.append(path)
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_bytes(path.read_bytes())
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    runner._record_host_document(
+        fake_command,
+        {"kind": "component_plan"},
+        run_dir,
+        workspace,
+        1,
+    )
+
+    assert sentinel.read_text(encoding="utf-8") == "owner data"
+    assert len(submitted) == 1
+    assert not submitted[0].exists()
+
+
+def test_release_runner_rejects_replaced_host_submission_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+    replacement = b'{"kind":"replacement"}\n'
+    submitted: list[Path] = []
+
+    def replacing_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        path = Path(arguments[arguments.index("--plan") + 1])
+        path.unlink()
+        path.write_bytes(replacement)
+        submitted.append(path)
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_bytes(replacement)
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._record_host_document(
+            replacing_command,
+            {"kind": "component_plan"},
+            run_dir,
+            workspace,
+            1,
+        )
+
+    assert len(submitted) == 1
+    assert submitted[0].read_bytes() == replacement
+
+
+def test_release_runner_rejects_mismatched_recorded_host_plan(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / "case/run"
+    run_dir.mkdir(parents=True)
+
+    def mismatched_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        artifact = run_dir / "recorded-plan.json"
+        artifact.write_text('{"kind":"different"}\n', encoding="utf-8")
+        response = {
+            "plan_path": str(artifact.resolve()),
+            "recovered": False,
+            "status": "recorded",
+        }
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(response), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._record_host_document(
+            mismatched_command,
+            {"kind": "component_plan"},
+            run_dir,
+            workspace,
+            1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [(9, "secret stdout"), (0, "not json"), (0, '{"candidate":NaN}')],
+)
+def test_release_runner_normalizes_command_and_json_failures_without_leaks(
+    tmp_path: Path,
+    returncode: int,
+    stdout: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    def broken_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, returncode, stdout, "private stderr")
+
+    with pytest.raises(runner.BenchmarkFailure) as caught:
+        runner.run_case(
+            _runner_case(), workspace=tmp_path / "workspace", command=broken_command
+        )
+
+    message = str(caught.value)
+    assert message in {"command_failed", "invalid_json"}
+    assert "secret stdout" not in message
+    assert "private stderr" not in message
+    assert str(tmp_path.resolve()) not in message
+
+
+def test_release_runner_rejects_missing_component_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    _install_runner_plans(tmp_path, monkeypatch)
+    responses = iter(
+        [
+            {"status": "prepared"},
+            _candidate_response(),
+            {"status": "recorded"},
+            {"candidate": None},
+            {"status": "awaiting_agent"},
+            None,
+        ]
+    )
+
+    def fake_command(arguments: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        value = next(responses)
+        if arguments[0] == "prepare":
+            value["run_dir"] = str(
+                Path(arguments[arguments.index("--run-dir") + 1]).resolve()
+            )
+        elif arguments[:2] == ["agent", "next"]:
+            value, _ = _bound_component_request(Path(arguments[2]))
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="missing_plan"):
+        runner.run_case(
+            _runner_case(), workspace=tmp_path / "workspace", command=fake_command
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"request_sha256": "5" * 64}, "stale_plan"),
+        ({"graph_sha256": "5" * 64}, "stale_plan"),
+        ({"page_id": "page_999"}, "mismatched_plan"),
+        ({"repair_round": 2}, "mismatched_plan"),
+    ],
+)
+def test_release_runner_rejects_stale_or_mismatched_component_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plan = {**_component_plan(), **mutation}
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=plan)
+
+    with pytest.raises(runner.BenchmarkFailure, match=message):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+
+def test_release_runner_rejects_duplicate_and_hardlinked_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(
+        tmp_path, monkeypatch, component_plan=_component_plan()
+    )
+    duplicate = plans / "pptx-mixed-screenshot-candidates--component-copy.json"
+    duplicate.write_bytes(
+        (plans / "pptx-mixed-screenshot-candidates--component.json").read_bytes()
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="duplicate_plan"):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+    duplicate.unlink()
+    hardlink = plans / "pptx-mixed-screenshot-candidates--component-hardlink.json"
+    hardlink.hardlink_to(plans / "pptx-mixed-screenshot-candidates--component.json")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_plan"):
+        runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+
+def _write_valid_release_quality(reconstruction: Path) -> None:
+    graph_sha256 = "a" * 64
+    (reconstruction / "component_result.json").write_text(
+        json.dumps(
+            {
+                "final_component_ids": [],
+                "text_items": [],
+                "repair_rounds": 1,
+                "accepted_graph_sha256": graph_sha256,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    quality_path = reconstruction / "execution-01/component-quality.json"
+    quality_path.parent.mkdir()
+    quality_path.write_text(
+        json.dumps(
+            {
+                "page_id": "page_001",
+                "repair_round": 1,
+                "input_graph_sha256": graph_sha256,
+                "report": {
+                    "visual_metrics": {"unexplained_visual_pixels": 0},
+                    "violations": ["pptx_reopen_unknown"],
+                    "component_reports": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _batch_manifest(tmp_path: Path, *, warning: bool = False) -> Path:
+    root = tmp_path / "release"
+    source = root / "inputs/01.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"benchmark-input")
+    case = {
+        "id": "image-one",
+        "kind": "image",
+        "path": "inputs/01.png",
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "page_count": 1,
+        "expected_pages": [
+            {
+                "page_id": "page_001",
+                "expected_status": "validated",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ],
+        "agent_provider": "host",
+    }
+    if warning:
+        case["expected_pages"][0]["warning"] = True
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps({"schema_version": 2, "cases": [case]}), encoding="utf-8")
+    return manifest
+
+
+def test_release_performance_summary_uses_three_passed_repeats() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    attempts = [
+        {"case_id": "a", "repeat": 1, "status": "passed", "duration_ms": 300},
+        {"case_id": "b", "repeat": 1, "status": "passed", "duration_ms": 30},
+        {"case_id": "a", "repeat": 2, "status": "passed", "duration_ms": 100},
+        {"case_id": "b", "repeat": 2, "status": "passed", "duration_ms": 10},
+        {"case_id": "a", "repeat": 3, "status": "passed", "duration_ms": 200},
+        {"case_id": "b", "repeat": 3, "status": "passed", "duration_ms": 20},
+    ]
+
+    assert runner.aggregate_performance(attempts) == {
+        "repeat_total_duration_ms": [330, 110, 220],
+        "median_total_duration_ms": 220,
+        "case_median_duration_ms": {"a": 200, "b": 20},
+    }
+
+
+def _release_baseline() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "benchmark": "v0.2-core-14-page",
+        "manifest_sha256": "a" * 64,
+        "constraints_sha256": "b" * 64,
+        "environment": {
+            "os": "Windows",
+            "architecture": "AMD64",
+            "python": "3.12",
+            "device": "cuda",
+        },
+        "median_total_duration_ms": 100,
+        "case_median_duration_ms": {"image-one": 100},
+    }
+
+
+def _release_report(duration_ms: int = 100) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "passed",
+        "manifest_sha256": "a" * 64,
+        "repeat": 3,
+        "totals": {"cases": 1, "pages": 3, "failed_attempts": 0},
+        "attempts": [],
+        "performance": {
+            "repeat_total_duration_ms": [duration_ms] * 3,
+            "median_total_duration_ms": duration_ms,
+            "case_median_duration_ms": {"image-one": duration_ms},
+        },
+    }
+
+
+def test_release_baseline_comparison_uses_same_environment_and_fifteen_percent_limit() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    baseline = _release_baseline()
+    keywords = {
+        "constraints_sha256": "b" * 64,
+        "environment": baseline["environment"],
+    }
+
+    assert runner.compare_baseline(_release_report(115), baseline, **keywords) == {
+        "status": "passed",
+        "median_total_duration_ms": 115,
+        "limit_ms": 115,
+    }
+    assert runner.compare_baseline(_release_report(116), baseline, **keywords) == {
+        "status": "regressed",
+        "median_total_duration_ms": 116,
+        "limit_ms": 115,
+    }
+
+
+def test_release_baseline_does_not_compare_different_device_or_inputs() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    baseline = _release_baseline()
+    report = _release_report()
+    report["manifest_sha256"] = "c" * 64
+    environment = {**baseline["environment"], "device": "cpu"}
+
+    assert runner.compare_baseline(
+        report,
+        baseline,
+        constraints_sha256="d" * 64,
+        environment=environment,
+    ) == {
+        "status": "not_comparable",
+        "reasons": ["manifest_sha256", "constraints_sha256", "environment"],
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"status": "failed"},
+        {"repeat": 2},
+        {"performance": {"median_total_duration_ms": 100}},
+    ],
+)
+def test_release_baseline_rejects_non_strict_report(mutation: dict[str, object]) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    report = {**_release_report(), **mutation}
+    baseline = _release_baseline()
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_performance_result"):
+        runner.compare_baseline(
+            report,
+            baseline,
+            constraints_sha256="b" * 64,
+            environment=baseline["environment"],
+        )
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    [
+        [],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "failed",
+                "duration_ms": 1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": True,
+                "status": "passed",
+                "duration_ms": 1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": -1,
+            }
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": 1,
+            },
+            {
+                "case_id": "a",
+                "repeat": 1,
+                "status": "passed",
+                "duration_ms": 2,
+            },
+        ],
+        [
+            {
+                "case_id": "a",
+                "repeat": repeat,
+                "status": "passed",
+                "duration_ms": repeat,
+            }
+            for repeat in (1, 2)
+        ],
+    ],
+)
+def test_release_performance_summary_rejects_incomplete_or_failed_attempts(
+    attempts: list[dict[str, object]],
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_performance_result"):
+        runner.aggregate_performance(attempts)
+
+
+def test_release_runner_manifest_repeats_three_times_and_writes_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    calls: list[Path] = []
+
+    def fake_case(case: dict[str, object], *, workspace: Path, command: object) -> runner.BenchmarkCaseResult:
+        calls.append(workspace)
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            case_id=str(case["id"]),
+            run_dir=str(run_dir),
+            pages=[{"page_id": "page_001", "status": "validated"}],
+            duration_ms=7,
+        )
+
+    report_path = tmp_path / "results/report.json"
+    report = runner.run_manifest(
+        manifest,
+        workspace=tmp_path / "runs",
+        report_path=report_path,
+        case_runner=fake_case,
+    )
+    assert report["status"] == "passed"
+    assert report["manifest_sha256"] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert report["repeat"] == 3
+    assert report["totals"] == {"cases": 1, "pages": 3, "failed_attempts": 0}
+    assert report["performance"] == {
+        "repeat_total_duration_ms": [7, 7, 7],
+        "median_total_duration_ms": 7,
+        "case_median_duration_ms": {"image-one": 7},
+    }
+    assert len(calls) == 3
+    assert len(set(calls)) == 3
+    assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_release_runner_maps_namespaced_manifest_page_to_local_run_page(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    _write_valid_release_quality(reconstruction)
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "replaced",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "replaced"}],
+        1,
+    )
+
+    runner._validate_batch_case(case, result)
+
+
+def test_release_runner_accepts_strict_legacy_validated_page_status(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    _write_valid_release_quality(reconstruction)
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "validated",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "validated"}],
+        1,
+    )
+
+    runner._validate_batch_case(case, result)
+
+
+def test_release_runner_rejects_replaced_page_when_validated_is_expected(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "image-one-page-001",
+                "expected_status": "validated",
+                "min_visual_components": 0,
+                "min_text_boxes": 0,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "image-one",
+        str(tmp_path / "run"),
+        [{"page_id": "page_001", "status": "replaced"}],
+        1,
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_page_result"):
+        runner._validate_batch_case(case, result)
+
+
+def test_release_runner_enforces_visual_components_separately_from_text(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    reconstruction = run_dir / "pages/page_001/reconstruction"
+    reconstruction.mkdir(parents=True)
+    result_path = reconstruction / "component_result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": ["visual_001", "visual_002", "visual_003"],
+                "text_items": [
+                    {"_component_id": f"text_{index:03d}"}
+                    for index in range(1, 12)
+                ],
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    case = {
+        "expected_pages": [
+            {
+                "page_id": "pdf-page-001",
+                "expected_status": "replaced",
+                "min_visual_components": 4,
+                "min_text_boxes": 11,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ]
+    }
+    result = runner.BenchmarkCaseResult(
+        "pdf",
+        str(run_dir),
+        [{"page_id": "page_001", "status": "replaced"}],
+        1,
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="quality_gate"):
+        runner._validate_batch_case(case, result)
+
+    duplicate_visual = ["visual_001"] * 4
+    text_items = [
+        {"_component_id": f"text_{index:03d}"} for index in range(1, 12)
+    ]
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": duplicate_visual,
+                "text_items": text_items,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    unique_visual = [
+        "visual_001",
+        "visual_002",
+        "visual_003",
+        "visual_004",
+    ]
+    result_path.write_text(
+        json.dumps(
+            {
+                "final_component_ids": unique_visual,
+                "text_items": [{"_component_id": "text_001"}] * 11,
+                "warning": None,
+                "fallback": {"status": "none", "parent_ids": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result = {
+        "final_component_ids": unique_visual,
+        "text_items": text_items,
+        "warning": None,
+        "fallback": {"status": "none", "parent_ids": []},
+    }
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result.update(
+        {"repair_rounds": 1, "accepted_graph_sha256": "a" * 64}
+    )
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    quality_path = reconstruction / "execution-01/component-quality.json"
+    quality_path.parent.mkdir()
+    quality = {
+        "page_id": "page_001",
+        "repair_round": 1,
+        "input_graph_sha256": "a" * 64,
+        "report": {
+            "visual_metrics": {"unexplained_visual_pixels": 0},
+            "violations": ["pptx_reopen_unknown"],
+            "component_reports": [
+                {"component_id": identifier, "violations": []}
+                for identifier in unique_visual
+            ],
+        },
+    }
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    runner._validate_batch_case(case, result)
+
+    quality_path.unlink()
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    del component_result["warning"]
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    component_result["warning"] = None
+    del component_result["fallback"]
+    result_path.write_text(json.dumps(component_result), encoding="utf-8")
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+    result_path.unlink()
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_quality_result"):
+        runner._validate_batch_case(case, result)
+
+
+def test_release_runner_requires_preserved_pptx_page_and_related_parts_to_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    release_root = tmp_path / "release"
+    source = release_root / "inputs/source.pptx"
+    run_dir = tmp_path / "runs/pptx/run"
+    output = run_dir.parent / "output.pptx"
+    source.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True)
+    slide = (
+        b'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        b'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        b'<p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/>'
+        b'<p:pic/><p:sp><p:txBody><a:p><a:r><a:t>04</a:t></a:r></a:p></p:txBody></p:sp>'
+        b'</p:spTree></p:cSld></p:sld>'
+    )
+    relationships = (
+        b'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        b'<Relationship Id="rId1" Type="image" Target="../media/image1.png"/>'
+        b'</Relationships>'
+    )
+
+    def write_pptx(path: Path, media: bytes) -> None:
+        with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("ppt/slides/slide1.xml", slide)
+            archive.writestr("ppt/slides/_rels/slide1.xml.rels", relationships)
+            archive.writestr("ppt/media/image1.png", media)
+
+    write_pptx(source, b"same-image")
+    write_pptx(output, b"same-image")
+    monkeypatch.setattr(runner, "RELEASE_ROOT", release_root)
+    case = {
+        "kind": "pptx",
+        "path": "inputs/source.pptx",
+        "expected_pages": [
+            {
+                "page_id": "pptx-page-001",
+                "expected_status": "preserved",
+                "min_visual_components": 1,
+                "min_text_boxes": 1,
+                "max_unexplained_pixels": 0,
+                "max_quality_violations": 0,
+            }
+        ],
+    }
+    result = runner.BenchmarkCaseResult(
+        "pptx", str(run_dir), [{"page_id": "page_001", "status": "preserved"}], 1
+    )
+
+    runner._validate_batch_case(case, result)
+
+    write_pptx(output, b"changed-image")
+    with pytest.raises(runner.BenchmarkFailure, match="quality_gate"):
+        runner._validate_batch_case(case, result)
+
+
+def test_release_loader_rejects_float_schema_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _manifest()
+    manifest["schema_version"] = 2.0
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(runner, "RELEASE_ROOT", RELEASE_ROOT)
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_manifest"):
+        runner._load_batch_cases(path)
+
+
+def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path, warning=True)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+
+    def warning_case(case: dict[str, object], *, workspace: Path, command: object) -> runner.BenchmarkCaseResult:
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        (page / "reconstruction/component_result.json").write_text(
+            '{"warning":"fallback","fallback":{"status":"none"}}', encoding="utf-8"
+        )
+        return runner.BenchmarkCaseResult(str(case["id"]), str(run_dir), [{"page_id":"page_001","status":"validated"}], 1)
+
+    report = runner.run_manifest(
+        manifest,
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        case_runner=warning_case,
+    )
+    assert report["status"] == "failed"
+    assert report["totals"]["failed_attempts"] == 3
+    assert "performance" not in report
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_repeat"):
+        runner.run_manifest(
+            manifest,
+            workspace=tmp_path / "other",
+            report_path=tmp_path / "other.json",
+            repeat=2,
+            case_runner=warning_case,
+        )
+
+
+def test_release_runner_manifest_cli_returns_failure_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_manifest(path: Path, **kwargs: object) -> dict[str, object]:
+        captured["path"] = path
+        captured.update(kwargs)
+        return {"status": "failed"}
+
+    monkeypatch.setattr(runner, "run_manifest", fake_manifest)
+    assert (
+        runner.main(
+            [
+                "--manifest",
+                str(manifest),
+                "--workspace",
+                str(tmp_path / "runs"),
+                "--report",
+                str(tmp_path / "report.json"),
+            ]
+        )
+        == 1
+    )
+    assert captured["path"] == manifest
+    assert captured["repeat"] == 3

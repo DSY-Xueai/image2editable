@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import hashlib
+from pathlib import Path
 import weakref
 
 import numpy as np
@@ -1298,6 +1299,82 @@ def test_quality_text_refinement_uses_colored_horizontal_container() -> None:
     assert np.all(refined[10, 90] == 255)
 
 
+def test_quality_text_refinement_does_not_regress_clean_gradient(
+    monkeypatch,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+    import image_to_ppt
+
+    height, width = 80, 180
+    x = np.arange(width, dtype=np.uint8)
+    background = np.empty((height, width, 3), dtype=np.uint8)
+    background[:, :, 0] = 45 + x // 5
+    background[:, :, 1] = 65 + x // 8
+    background[:, :, 2] = 110 + x // 6
+    source = background.copy()
+    cv2.putText(
+        source, "TEXT", (42, 50), cv2.FONT_HERSHEY_SIMPLEX,
+        0.8, (245, 245, 245), 2, cv2.LINE_AA,
+    )
+    text_mask = np.any(source != background, axis=2)
+    regressed = background.copy()
+    regressed[text_mask] = (35, 40, 70)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_repair_text_with_local_planes",
+        lambda *args, **kwargs: regressed,
+    )
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        background,
+        text_mask,
+        [{"box": [40, 25, 90, 32]}],
+    )
+
+    assert np.max(np.abs(
+        refined[text_mask].astype(np.int16)
+        - background[text_mask].astype(np.int16)
+    )) <= 2
+
+
+def test_quality_text_refinement_preserves_subtle_curved_structure(
+    monkeypatch,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+    import image_to_ppt
+
+    background = np.full((100, 180, 3), (80, 100, 160), dtype=np.uint8)
+    cv2.circle(background, (72, 72), 42, (60, 75, 130), -1)
+    source = background.copy()
+    cv2.putText(
+        source, "A", (66, 78), cv2.FONT_HERSHEY_SIMPLEX,
+        0.8, (245, 245, 245), 2, cv2.LINE_AA,
+    )
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[42:88, 42:105] = True
+    regressed = background.copy()
+    regressed[text_mask] = (80, 100, 160)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_repair_text_with_local_planes",
+        lambda *args, **kwargs: regressed,
+    )
+
+    refined = legacy._refine_quality_text_clean(
+        source,
+        background,
+        text_mask,
+        [{"box": [42, 42, 63, 46]}],
+    )
+
+    assert np.array_equal(refined[72, 45], background[72, 45])
+
+
 def test_effective_text_context_reuses_authenticated_clean_image(
     tmp_path: Path,
     monkeypatch,
@@ -1369,6 +1446,61 @@ def test_effective_text_context_excludes_the_full_repaired_text_halo(
     )
 
     assert effective_mask[28, 58]
+
+
+def test_effective_text_context_preserves_cleaned_active_visual_pixels(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import cv2
+    import hashlib
+
+    from image2editable import legacy
+
+    source = np.full((100, 180, 3), (80, 100, 160), dtype=np.uint8)
+    cv2.circle(source, (72, 72), 42, (60, 75, 130), -1)
+    cleaned = source.copy()
+    text_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    text_mask[42:88, 28:105] = 255
+    visual_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    cv2.circle(visual_mask, (72, 72), 40, 255, -1)
+    text_path = tmp_path / "text.png"
+    visual_path = tmp_path / "visual.png"
+    Image.fromarray(text_mask, mode="L").save(text_path)
+    Image.fromarray(visual_mask, mode="L").save(visual_path)
+    graph = {"nodes": [
+        {
+            "id": "visual_0001", "kind": "parent", "parent_id": None,
+            "state": "pending", "mask": visual_path.name,
+            "mask_sha256": hashlib.sha256(visual_path.read_bytes()).hexdigest(),
+            "bbox": [30, 30, 115, 100], "z_index": 0, "text_ids": [],
+        },
+        {
+            "id": "text_0001", "kind": "text", "parent_id": None,
+            "state": "frozen", "mask": text_path.name,
+            "mask_sha256": hashlib.sha256(text_path.read_bytes()).hexdigest(),
+            "bbox": [28, 42, 105, 88], "z_index": 1, "text_ids": [],
+        },
+    ]}
+    regressed = cleaned.copy()
+    regressed[text_mask > 0] = (80, 100, 160)
+    monkeypatch.setattr(
+        legacy,
+        "_refine_quality_text_clean",
+        lambda *args, **kwargs: regressed,
+    )
+
+    _, _, effective_clean = legacy._effective_text_context(
+        source=source,
+        text_clean=cleaned,
+        text_mask=text_mask,
+        text_items=[{"box": [28, 42, 77, 46], "text": "A"}],
+        graph=graph,
+        graph_dir=tmp_path,
+        refine_text_clean=True,
+    )
+
+    assert np.array_equal(effective_clean[72, 31], cleaned[72, 31])
 
 
 def test_quality_text_repair_mask_excludes_visual_outside_text_boxes() -> None:
@@ -1671,6 +1803,41 @@ def test_text_ghost_is_only_attributed_to_the_adjacent_component() -> None:
     assert "text_ghost" not in remote["violations"]
 
 
+def test_text_ink_excludes_flat_fill_pixels_beside_large_glyphs() -> None:
+    import cv2
+    import sys
+
+    skill_path = (
+        Path(__file__).parents[1]
+        / "skills/image-to-ppt/scripts/component_quality.py"
+    )
+    spec = importlib.util.spec_from_file_location("skill_component_quality", skill_path)
+    assert spec is not None and spec.loader is not None
+    skill_quality = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = skill_quality
+    try:
+        spec.loader.exec_module(skill_quality)
+    finally:
+        sys.modules.pop(spec.name, None)
+    fill = np.array((46, 135, 171), dtype=np.uint8)
+    source = np.full((160, 500, 3), fill, dtype=np.uint8)
+    text_mask = np.zeros(source.shape[:2], dtype=bool)
+    text_mask[30:120, 20:480] = True
+    cv2.putText(
+        source, "A4 LANDSCAPE", (30, 100), cv2.FONT_HERSHEY_SIMPLEX,
+        1.5, (255, 255, 255), 5, cv2.LINE_AA,
+    )
+
+    flat_fill = np.all(source == fill, axis=2)
+    glyph = np.any(source != fill, axis=2)
+    for module in (component_quality, skill_quality):
+        text_ink = module._text_ink_mask(
+            source, text_mask, module.calibrate_page(source, text_mask)
+        )
+        assert not np.any(text_ink & flat_fill)
+        assert np.count_nonzero(text_ink & glyph) >= 1000
+
+
 def test_text_box_background_is_not_counted_as_a_text_ghost() -> None:
     case = _synthetic_quality_case()
     text = case["text_mask"]
@@ -1929,6 +2096,109 @@ def test_repair_quality_round_requires_authenticated_masks_and_external_pass_che
     assert {"protected_native_overlap_unknown", "pptx_reopen_unknown"} <= set(unknown["violations"])
 
 
+def test_repair_quality_round_keeps_complete_unowned_line_delta(tmp_path) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    case["source"][10, 10:90] = 20
+    material = np.zeros(case["component_mask"].shape, dtype=bool)
+    material[10, 10:26] = True
+    material[10, 30:46] = True
+    material[10, 50:66] = True
+    unexplained_path = graph_dir / "unexplained-mask.png"
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+        unexplained_output_path=unexplained_path,
+    )
+
+    with Image.open(unexplained_path) as image:
+        unexplained = np.asarray(image) > 0
+    assert np.all(unexplained[10, 10:90])
+    assert report["checks"]["visual_ownership"] == "fail"
+    assert "unexplained_visual_residual" in report["violations"]
+
+
+def test_repair_quality_round_does_not_promote_adjacent_background_texture_delta(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    rows, columns = np.indices(case["component_mask"].shape)
+    texture = np.where((rows + columns) % 2, 48, 64).astype(np.uint8)
+    background_texture = np.zeros(case["component_mask"].shape, dtype=bool)
+    background_texture[13:25, 4:124] = True
+    case["source"][background_texture] = texture[background_texture, None]
+    case["background"][background_texture] = texture[background_texture, None]
+    case["reconstructed"][background_texture] = 96
+    material = np.zeros(case["component_mask"].shape, dtype=bool)
+    material[24, 40:50] = True
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+    )
+
+    assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
+    assert report["checks"]["visual_ownership"] == "pass"
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_repair_quality_round_does_not_promote_benign_or_owned_delta(
+    tmp_path, owned: bool,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    if owned:
+        case["reconstructed"][16, 20:44] = 0
+    else:
+        case["source"][5, 10:23] = 88
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=np.zeros(case["component_mask"].shape, dtype=bool),
+    )
+
+    assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
+    assert report["checks"]["visual_ownership"] == "pass"
+
+
 def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> None:
     case = _synthetic_quality_case()
     graph_dir = tmp_path / "round"
@@ -1970,6 +2240,422 @@ def test_generated_underlay_does_not_inflate_real_visual_ownership(tmp_path) -> 
     )
     assert report["visual_metrics"]["visual_ownership_coverage"] < 1.0
     assert report["visual_metrics"]["unexplained_visual_pixels"] == 0
+
+
+def test_background_responsibility_does_not_flatten_source_backed_raster(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    retained_raster = np.zeros(case["component_mask"].shape, dtype=bool)
+    retained_raster[:10, :] = True
+    retained_raster[86:, :] = True
+    rows, columns = np.indices(retained_raster.shape)
+    texture = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[retained_raster] = texture[retained_raster, None]
+    material = case["component_mask"] | retained_raster
+    responsibility = component_quality._background_responsibility_geometry(
+        retained_raster
+    )
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=material,
+        background_responsibility=responsibility,
+    )
+
+    assert report["checks"]["visual_ownership"] == "fail"
+    assert report["visual_metrics"]["unexplained_visual_pixels"] > 0
+    assert report["visual_metrics"]["largest_unexplained_region_pixels"] > 0
+    assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
+        np.count_nonzero(responsibility)
+    )
+
+
+@pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
+def test_background_geometry_accepts_complete_three_pixel_long_lines(
+    orientation: str,
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=np.uint8)
+    if orientation == "horizontal":
+        candidate[300:303, 200:1400] = 1
+    else:
+        candidate[100:800, 700:703] = 1
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert accepted.dtype == np.bool_
+    assert np.array_equal(accepted, candidate.astype(bool))
+
+
+def test_background_geometry_accepts_long_line_intersection_core() -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[449:452, 200:1400] = True
+    candidate[100:800, 799:802] = True
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate)
+    assert np.all(accepted[449:452, 799:802])
+
+
+def test_background_geometry_short_line_keeps_only_existing_thin_edge() -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[300:303, 500:560] = True
+    core = component_quality.cv2.erode(
+        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate & ~core)
+    assert not np.any(accepted & core)
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (300, 200, 306, 1400),
+        (250, 400, 650, 1200),
+    ],
+)
+def test_background_geometry_rejects_thick_strip_and_rectangle_core(
+    box: tuple[int, int, int, int],
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    y1, x1, y2, x2 = box
+    candidate[y1:y2, x1:x2] = True
+    core = component_quality.cv2.erode(
+        candidate.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, candidate & ~core)
+    assert not np.any(accepted & core)
+
+
+@pytest.mark.parametrize("shape", ["diagonal", "curve"])
+def test_background_geometry_rejects_diagonal_and_curved_core(shape: str) -> None:
+    candidate = np.zeros((900, 1600), dtype=np.uint8)
+    if shape == "diagonal":
+        component_quality.cv2.line(candidate, (300, 150), (1100, 750), 1, 3)
+    else:
+        component_quality.cv2.circle(candidate, (800, 450), 80, 1, 3)
+    support = candidate.astype(bool)
+    core = component_quality.cv2.erode(
+        candidate, np.ones((3, 3), dtype=np.uint8)
+    ) > 0
+    assert np.any(core)
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert np.array_equal(accepted, support & ~core)
+    assert not np.any(accepted & core)
+
+
+def test_background_geometry_runs_component_analysis_exactly_twice(
+    monkeypatch,
+) -> None:
+    candidate = np.zeros((900, 1600), dtype=bool)
+    candidate[::9, ::11] = True
+    delegate = component_quality.cv2.connectedComponentsWithStats
+    calls = 0
+
+    def counting_delegate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return delegate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        component_quality.cv2, "connectedComponentsWithStats", counting_delegate
+    )
+
+    accepted = component_quality._background_responsibility_geometry(candidate)
+
+    assert calls == 2
+    assert np.array_equal(accepted, candidate)
+
+
+@pytest.mark.parametrize("candidate", [np.zeros(8), np.zeros((2, 3, 4))])
+def test_background_geometry_requires_two_dimensions(candidate: np.ndarray) -> None:
+    with pytest.raises(ValueError, match="candidate must be a two-dimensional mask"):
+        component_quality._background_responsibility_geometry(candidate)
+
+
+def test_background_responsibility_owns_complete_three_pixel_grid(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    retained_grid = np.zeros(case["component_mask"].shape, dtype=bool)
+    retained_grid[6:9, 4:120] = True
+    retained_grid[6:90, 116:119] = True
+    rows, columns = np.indices(retained_grid.shape)
+    structure = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[retained_grid] = structure[retained_grid, None]
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        material_foreground=case["component_mask"] | retained_grid,
+        background_responsibility=retained_grid,
+    )
+
+    assert report["checks"]["visual_ownership"] == "pass"
+    assert report["visual_metrics"]["generated_underlay_visual_pixels"] == int(
+        np.count_nonzero(retained_grid)
+    )
+
+
+def test_background_responsibility_rejects_semantic_ownership_with_presentation(
+    tmp_path,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    semantic = np.zeros(case["component_mask"].shape, dtype=bool)
+    semantic[6:9, 4:120] = True
+    Image.fromarray(semantic.astype(np.uint8) * 255).save(mask_path)
+    node = case["graph"]["nodes"][0]
+    node["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    node["bbox"] = [4, 6, 120, 9]
+    rows, columns = np.indices(semantic.shape)
+    texture = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[semantic] = texture[semantic, None]
+    empty = np.zeros(semantic.shape, dtype=bool)
+
+    with pytest.raises(
+        ValueError, match="^background responsibility mask is invalid$"
+    ):
+        evaluate_component_quality_round(
+            case["source"], case["background"], case["reconstructed"],
+            case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+            trusted_root=tmp_path,
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={
+                "protected_native_overlap": "pass", "pptx_reopen": "pass"
+            },
+            initial_component_count=1,
+            expected_component_ids=["component_0001"],
+            material_foreground=semantic,
+            background_responsibility=semantic,
+            presentation_layers=[{
+                "component_id": "component_0001",
+                "ownership_mask": empty,
+                "presentation_alpha_mask": empty,
+                "generated_underlay_mask": empty,
+                "metrics": _underlay_metrics(),
+            }],
+        )
+
+
+@pytest.mark.parametrize("with_responsibility", [False, True])
+def test_presentation_quality_scans_semantic_masks_only_for_responsibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_responsibility: bool,
+) -> None:
+    import image2editable.component_repair as component_repair
+
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    masks_dir = graph_dir / "masks"
+    masks_dir.mkdir(parents=True)
+    shape = case["component_mask"].shape
+    first = case["component_mask"]
+    second = np.zeros(shape, dtype=bool)
+    second[70:80, 100:110] = True
+    nodes = []
+    for index, mask in enumerate((first, second), start=1):
+        component_id = f"component_{index:04d}"
+        mask_path = masks_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(mask_path)
+        ys, xs = np.where(mask)
+        nodes.append({
+            "id": component_id,
+            "kind": "parent",
+            "parent_id": None,
+            "state": "frozen",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+            "bbox": [
+                int(xs.min()), int(ys.min()), int(xs.max()) + 1,
+                int(ys.max()) + 1,
+            ],
+            "z_index": index - 1,
+            "text_ids": [],
+        })
+    graph = {"nodes": nodes}
+    empty = np.zeros(shape, dtype=bool)
+    presentation_layers = [{
+        "component_id": node["id"],
+        "ownership_mask": mask,
+        "presentation_alpha_mask": mask,
+        "generated_underlay_mask": empty,
+        "metrics": _underlay_metrics(),
+    } for node, mask in zip(nodes, (first, second), strict=True)]
+    responsibility = np.zeros(shape, dtype=bool)
+    responsibility[2:5, 4:44] = True
+    rows, columns = np.indices(shape)
+    texture = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[responsibility] = texture[responsibility, None]
+    material_foreground = responsibility if with_responsibility else None
+    background_responsibility = (
+        component_quality._background_responsibility_geometry(responsibility)
+        if with_responsibility
+        else None
+    )
+    calls = {node["id"]: 0 for node in nodes}
+    real_load = component_repair._load_quality_graph_mask
+
+    def count_mask(node, **kwargs):
+        calls[node["id"]] += 1
+        return real_load(node, **kwargs)
+
+    monkeypatch.setattr(component_repair, "_load_quality_graph_mask", count_mask)
+
+    evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        graph, graph_dir=graph_dir, text_mask=case["text_mask"],
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=2,
+        expected_component_ids=[],
+        presentation_layers=presentation_layers,
+        material_foreground=material_foreground,
+        background_responsibility=background_responsibility,
+    )
+
+    assert calls == {
+        "component_0001": 1 if with_responsibility else 0,
+        "component_0002": 1 if with_responsibility else 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "text", "active", "short_line_core", "diagonal_core",
+        "thick_block_core", "source_background_nonexact",
+        "outside_foreground", "reconstruction_delta", "over_budget",
+    ],
+)
+def test_background_responsibility_rejects_pixels_outside_rebuilt_allowed_set(
+    tmp_path, mutation: str,
+) -> None:
+    case = _synthetic_quality_case(scale=2)
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    responsibility = np.zeros(case["component_mask"].shape, dtype=bool)
+    responsibility[6:9, 4:120] = True
+    responsibility[6:90, 116:119] = True
+    material = case["component_mask"] | responsibility
+    rows, columns = np.indices(responsibility.shape)
+    structure = np.where((rows + columns) % 2, 40, 60).astype(np.uint8)
+    for image in (case["source"], case["background"], case["reconstructed"]):
+        image[responsibility] = structure[responsibility, None]
+
+    invalid = np.zeros(responsibility.shape, dtype=bool)
+    if mutation == "text":
+        invalid[42, 60] = True
+    elif mutation == "active":
+        invalid[30, 50] = True
+    elif mutation == "short_line_core":
+        shape = np.zeros(responsibility.shape, dtype=bool)
+        shape[80:83, 8:28] = True
+        invalid[81, 18] = True
+    elif mutation == "diagonal_core":
+        shape = np.zeros(responsibility.shape, dtype=np.uint8)
+        component_quality.cv2.line(shape, (6, 55), (26, 75), 1, 3)
+        shape = shape.astype(bool)
+        core = component_quality.cv2.erode(
+            shape.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)
+        ) > 0
+        core_pixels = np.argwhere(core)
+        y, x = core_pixels[len(core_pixels) // 2]
+        invalid[y, x] = True
+    elif mutation == "thick_block_core":
+        shape = np.zeros(responsibility.shape, dtype=bool)
+        shape[78:84, 40:100] = True
+        invalid[80, 60] = True
+    elif mutation == "source_background_nonexact":
+        invalid[7, 20] = True
+        case["background"][invalid] += 1
+    elif mutation == "outside_foreground":
+        invalid[92, 2] = True
+    elif mutation == "reconstruction_delta":
+        responsibility = np.zeros(responsibility.shape, dtype=bool)
+        invalid[80:83, 8:104] = True
+        case["reconstructed"][invalid] = 20
+    else:
+        responsibility = np.zeros(responsibility.shape, dtype=bool)
+        responsibility[2:14:2, 2:126] = True
+        material |= responsibility
+        for image in (
+            case["source"], case["background"], case["reconstructed"]
+        ):
+            image[responsibility] = structure[responsibility, None]
+
+    if mutation in {"short_line_core", "diagonal_core", "thick_block_core"}:
+        material |= shape
+        for image in (
+            case["source"], case["background"], case["reconstructed"]
+        ):
+            image[shape] = structure[shape, None]
+    if mutation != "over_budget":
+        responsibility |= invalid
+
+    with pytest.raises(
+        ValueError, match="^background responsibility mask is invalid$"
+    ):
+        evaluate_component_quality_round(
+            case["source"], case["background"], case["reconstructed"],
+            case["graph"], graph_dir=graph_dir, text_mask=case["text_mask"],
+            trusted_root=tmp_path,
+            visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+            page_checks={
+                "protected_native_overlap": "pass", "pptx_reopen": "pass",
+            },
+            initial_component_count=1,
+            expected_component_ids=["component_0001"],
+            material_foreground=material,
+            background_responsibility=responsibility,
+        )
 
 
 def test_repair_quality_round_rejects_reliable_text_without_editable_object(tmp_path) -> None:
@@ -2026,6 +2712,68 @@ def test_repair_quality_round_requires_one_editable_item_per_text_node(tmp_path)
     )
 
     assert "editable_text_once" in report["violations"]
+
+
+@pytest.mark.parametrize(
+    ("underlay", "text_box", "expected"),
+    [
+        ("missing", [22, 18, 20, 8], "native_text_underlay"),
+        ("covered", [22, 18, 20, 8], None),
+        ("page_background", [2, 2, 14, 8], None),
+    ],
+)
+def test_repair_quality_round_requires_visual_underlay_beneath_native_text(
+    tmp_path, underlay: str, text_box: list[int], expected: str | None,
+) -> None:
+    case = _synthetic_quality_case()
+    graph_dir = tmp_path / "round"
+    mask_path = graph_dir / "masks/component_0001.png"
+    mask_path.parent.mkdir(parents=True)
+    Image.fromarray(case["component_mask"].astype(np.uint8) * 255).save(mask_path)
+    case["graph"]["nodes"][0]["mask_sha256"] = hashlib.sha256(
+        mask_path.read_bytes()
+    ).hexdigest()
+    x, y, width, height = text_box
+    case["graph"]["nodes"].append({
+        "id": "text_0001", "kind": "text", "parent_id": None,
+        "state": "frozen", "mask": "masks/text_0001.png",
+        "mask_sha256": "b" * 64,
+        "bbox": [x, y, x + width, y + height], "z_index": 1,
+        "text_ids": [],
+    })
+    text_mask = case["text_mask"].copy()
+    if underlay == "page_background":
+        text_mask[:] = False
+        text_mask[4:8, 5:13] = True
+    ownership = case["component_mask"].copy()
+    generated = np.zeros(ownership.shape, dtype=bool)
+    if underlay == "covered":
+        generated |= text_mask
+
+    report = evaluate_component_quality_round(
+        case["source"], case["background"], case["reconstructed"],
+        case["graph"], graph_dir=graph_dir, text_mask=text_mask,
+        trusted_root=tmp_path,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=1,
+        expected_component_ids=["component_0001"],
+        text_items=[{"text": "A", "box": text_box}],
+        presentation_layers=[{
+            "component_id": "component_0001",
+            "ownership_mask": ownership,
+            "presentation_alpha_mask": ownership | generated,
+            "generated_underlay_mask": generated,
+            "metrics": _underlay_metrics(),
+        }],
+    )
+
+    if expected is None:
+        assert report["checks"]["native_text_underlay"] == "pass"
+        assert "native_text_underlay" not in report["violations"]
+    else:
+        assert report["checks"]["native_text_underlay"] == "fail"
+        assert expected in report["violations"]
 
 
 def test_repair_quality_owner_map_includes_frozen_components(tmp_path) -> None:

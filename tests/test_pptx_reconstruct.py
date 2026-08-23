@@ -387,7 +387,7 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
         "text_items": [{
             "text": "优点", "box": [1, 1, 2, 1], "font_size": 14.5,
             "font": "Microsoft YaHei", "bold": True,
-            "color": "#F5FAF6", "align": 1,
+            "color": "#F5FAF6", "align": 1, "rotation": 90,
         }],
     }
     result_path = run / "pages/page_001/reconstruction/component_result.json"
@@ -406,7 +406,11 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
     with Image.open(work / "component-component_0001.png") as component:
         assert component.getchannel("A").getpixel((1, 1)) == 255
     presentation = Presentation(donor)
+    background_shape = presentation.slides[0].shapes[0]
+    assert background_shape.shape_type == 13
+    assert background_shape.image.blob == background.read_bytes()
     text_frame = presentation.slides[0].shapes[-1].text_frame
+    assert presentation.slides[0].shapes[-1].rotation == 90
     paragraph = text_frame.paragraphs[0]
     run_text = paragraph.runs[0]
     assert text_frame.word_wrap is False
@@ -542,8 +546,9 @@ def test_native_donor_preserves_component_fill_and_editable_text_style(tmp_path)
 
     native_presentation = Presentation(native_donor)
     native_shapes = list(native_presentation.slides[0].shapes)
-    assert [shape.shape_type for shape in native_shapes[:2]] == [1, 13]
-    assert [shape.name for shape in native_shapes[:2]] == [
+    assert [shape.shape_type for shape in native_shapes[:3]] == [13, 1, 13]
+    assert native_shapes[0].image.blob == background.read_bytes()
+    assert [shape.name for shape in native_shapes[1:3]] == [
         "image2editable:component_0001",
         "image2editable:component_0002",
     ]
