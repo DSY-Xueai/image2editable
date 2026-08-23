@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -1334,6 +1335,7 @@ def test_release_runner_preserves_preexisting_host_plan_file(
 
 def test_release_runner_rejects_replaced_host_submission_without_deleting_it(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = importlib.import_module("scripts.release_benchmark")
     workspace = tmp_path / "workspace"
@@ -1341,14 +1343,35 @@ def test_release_runner_rejects_replaced_host_submission_without_deleting_it(
     run_dir.mkdir(parents=True)
     replacement = b'{"kind":"replacement"}\n'
     submitted: list[Path] = []
+    original_metadata: dict[Path, os.stat_result] = {}
+    original_lstat = Path.lstat
+    original_read_regular_file = runner._read_regular_file
+
+    def reused_identity_lstat(path: Path) -> os.stat_result:
+        if path in original_metadata:
+            return original_metadata[path]
+        return original_lstat(path)
+
+    def read_replacement(
+        path: Path, limit: int, *, require_single_link: bool
+    ) -> bytes:
+        if path in original_metadata:
+            return path.read_bytes()
+        return original_read_regular_file(
+            path, limit, require_single_link=require_single_link
+        )
+
+    monkeypatch.setattr(Path, "lstat", reused_identity_lstat)
+    monkeypatch.setattr(runner, "_read_regular_file", read_replacement)
 
     def replacing_command(
         arguments: list[str], *, cwd: Path
     ) -> subprocess.CompletedProcess[str]:
         path = Path(arguments[arguments.index("--plan") + 1])
+        original_metadata[path] = original_lstat(path)
+        submitted.append(path)
         path.unlink()
         path.write_bytes(replacement)
-        submitted.append(path)
         artifact = run_dir / "recorded-plan.json"
         artifact.write_bytes(replacement)
         response = {

@@ -539,9 +539,15 @@ def _record_host_document(
         if submission is not None and submission_identity is not None:
             try:
                 metadata = submission.lstat()
-                if (metadata.st_dev, metadata.st_ino) == submission_identity:
+                if (
+                    (metadata.st_dev, metadata.st_ino) == submission_identity
+                    and _read_regular_file(
+                        submission, _PLAN_LIMIT, require_single_link=True
+                    )
+                    == payload
+                ):
                     submission.unlink()
-            except FileNotFoundError:
+            except (OSError, ValueError):
                 pass
 
 

@@ -111,7 +111,7 @@ def test_full_page_candidate_uses_shared_cv_component_layers(
         evidence=["full-slide screenshot"],
     )
 
-    from test_runtime_execution import _install_component_e2e_boundaries
+    from .test_runtime_execution import _install_component_e2e_boundaries
     _, initial_calls, _ = _install_component_e2e_boundaries(
         monkeypatch, component_count=2
     )
@@ -145,7 +145,7 @@ def test_test1_two_page_component_state_to_shadow_output(
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
-    from test_runtime_execution import _install_component_e2e_boundaries
+    from .test_runtime_execution import _install_component_e2e_boundaries
     _install_component_e2e_boundaries(monkeypatch)
     for page_id in ("page_001", "page_002"):
         page = run_dir / "pages" / page_id
@@ -223,7 +223,7 @@ def test_test1_two_page_component_state_to_shadow_output(
     assert waiting["status"] == "awaiting_agent"
     assert not (run_dir / "final" / "output.pptx").exists()
 
-    from test_host_agent import _capability_response
+    from .test_host_agent import _capability_response
     handshake = runtime.next_host_agent_item(run_dir)
     runtime.record_host_agent_plan(
         run_dir,
@@ -267,7 +267,7 @@ def test_only_approved_page_is_initialized_before_host_boundary(
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
-    from test_runtime_execution import _install_component_e2e_boundaries
+    from .test_runtime_execution import _install_component_e2e_boundaries
     _install_component_e2e_boundaries(monkeypatch)
     page = run_dir / "pages" / "page_001"
     candidate = json.loads((page / "agent_request.json").read_text())["candidates"][0]
@@ -315,13 +315,13 @@ def test_pptx_initialization_failure_records_failed_run(
 def test_full_page_second_round_reuses_bound_source_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from test_host_agent import _capability_response
+    from .test_host_agent import _capability_response
 
     source = Path(__file__).parents[1] / "test1.pptx"
     if not source.is_file():
         pytest.skip("real test1.pptx fixture is not present")
     run_dir = prepare_pptx_job(source, run_dir=tmp_path / "run")
-    from test_runtime_execution import _install_component_e2e_boundaries
+    from .test_runtime_execution import _install_component_e2e_boundaries
     _install_component_e2e_boundaries(monkeypatch)
     candidate = json.loads(
         (run_dir / "pages/page_001/agent_request.json").read_text(
