@@ -254,6 +254,8 @@ EXPECTED_README = """# v0.2 核心 14 页 benchmark
 
 当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
 
+如果只需要定位一次耗时较长的失败，可以把 diagnostic repeats 选为 `1`。这会运行相同的真实模型、页面检查和质量门禁，但只生成 `report_kind: probe` 的单次诊断报告，不计算性能，也不生成候选 plan。问题修复后仍需把 repeats 选回 `3`，完成三次严格 diagnostic。
+
 Release Gate 只上传 JSON 报告，以及 diagnostic 产生的候选 plan JSON。模型文件、模型缓存、输入副本、运行 workspace 和生成的 PPTX 都不会上传为 benchmark 工件，也不会提交到 Git。
 
 ## 严格通过标准
@@ -1453,6 +1455,106 @@ def test_release_runner_normalizes_command_and_json_failures_without_leaks(
     assert str(tmp_path.resolve()) not in message
 
 
+def test_release_runner_reports_safe_command_failure_coordinates(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    secret = str((tmp_path / "private-input.png").resolve())
+    stderr = (
+        "Traceback (most recent call last):\n"
+        f'  File "{secret}", line 7, in private_function\n'
+        "  File \"C:\\runner\\site-packages\\image2editable\\"
+        "component_repair.py\", line 1112, in advance_round\n"
+        f"RuntimeError: failed while reading {secret}\n"
+    )
+
+    def broken_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 9, "secret stdout", stderr)
+
+    with pytest.raises(runner.BenchmarkFailure, match="command_failed") as caught:
+        runner._call(
+            broken_command,
+            ["run", "execute", str(tmp_path / "run")],
+            cwd=tmp_path,
+        )
+
+    assert caught.value.details == {
+        "stage": "run_execute",
+        "returncode": 9,
+        "exception_type": "RuntimeError",
+        "frame": {
+            "module": "image2editable.component_repair",
+            "line": 1112,
+        },
+    }
+    serialized = json.dumps(caught.value.details)
+    assert secret not in serialized
+    assert "failed while reading" not in serialized
+    assert "secret stdout" not in serialized
+
+
+def test_release_runner_rejects_forged_stderr_diagnostic_names(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    secret = "MODEL_SECRET"
+    stderr = (
+        f'  File "C:\\private\\image2editable\\{secret}.py", '
+        f"line 7, in {secret}\n"
+        f"Prompt{secret}Error: private\n"
+    )
+
+    def broken_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 9, "", stderr)
+
+    with pytest.raises(runner.BenchmarkFailure, match="command_failed") as caught:
+        runner._call(
+            broken_command,
+            ["run", "execute", str(tmp_path / "run")],
+            cwd=tmp_path,
+        )
+
+    assert caught.value.details == {"stage": "run_execute", "returncode": 9}
+    assert secret not in json.dumps(caught.value.details)
+
+
+def test_release_runner_reports_safe_invocation_and_invalid_json_stages(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+
+    def invocation_failure(arguments: list[str], *, cwd: Path) -> None:
+        raise FileNotFoundError(str(tmp_path / "private-command.exe"))
+
+    with pytest.raises(runner.BenchmarkFailure, match="command_failed") as caught:
+        runner._call(
+            invocation_failure,
+            ["prepare", str(tmp_path / "private-input.png")],
+            cwd=tmp_path,
+        )
+    assert caught.value.details == {
+        "stage": "prepare",
+        "exception_type": "FileNotFoundError",
+    }
+
+    def invalid_json(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(arguments, 0, "private not-json", "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_json") as caught:
+        runner._call(
+            invalid_json,
+            ["agent", "next", str(tmp_path / "run")],
+            cwd=tmp_path,
+        )
+    assert caught.value.details == {"stage": "agent_next", "returncode": 0}
+
+
 def test_release_runner_rejects_missing_component_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1509,6 +1611,97 @@ def test_release_runner_rejects_stale_or_mismatched_component_plan(
         runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
 
 
+def test_release_runner_reports_safe_component_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "page_id": "page_999"},
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="mismatched_plan") as caught:
+        runner._select_component_plan(
+            "pptx-mixed-screenshot-candidates", _component_request()
+        )
+
+    assert caught.value.details == {
+        "stage": "component_plan_identity",
+        "page_id": "page_001",
+        "repair_round": 1,
+        "expected_identities": [{"page_id": "page_999", "repair_round": 1}],
+    }
+
+
+def test_release_runner_reports_safe_candidate_identity_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json",
+        {**_candidate_plan(), "source_shape_id": "999"},
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="mismatched_plan") as caught:
+        runner._select_candidate_plan(
+            "pptx-mixed-screenshot-candidates",
+            _candidate_response()["candidate"],
+        )
+
+    assert caught.value.details == {
+        "stage": "candidate_plan_identity",
+        "page_id": "page_001",
+        "candidate_id": "candidate_001",
+        "source_shape_id": "2",
+        "expected_identities": [
+            {
+                "page_id": "page_001",
+                "candidate_id": "candidate_001",
+                "source_shape_id": "999",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "mutation"),
+    [
+        ("candidate", {"page_id": "C:\\private\\input.png"}),
+        ("candidate", {"candidate_id": "https://private.example/secret"}),
+        ("candidate", {"source_shape_id": "document text"}),
+        ("component", {"page_id": "C:\\private\\input.png"}),
+    ],
+)
+def test_release_runner_rejects_untrusted_protocol_identifiers_without_echo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    mutation: dict[str, object],
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=_component_plan())
+    value = (
+        {**_candidate_response()["candidate"], **mutation}
+        if kind == "candidate"
+        else {**_component_request(), **mutation}
+    )
+    select = (
+        runner._select_candidate_plan
+        if kind == "candidate"
+        else runner._select_component_plan
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response") as caught:
+        select("pptx-mixed-screenshot-candidates", value)
+
+    serialized = json.dumps(caught.value.details)
+    assert next(iter(mutation.values())) not in serialized
+
+
 def test_release_runner_reports_safe_component_stale_plan_bindings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1561,6 +1754,70 @@ def test_release_runner_reports_safe_candidate_stale_plan_bindings(
             {"source_object_sha256": "5" * 64, "image_sha256": "2" * 64}
         ],
     }
+
+
+def test_release_runner_reports_repeated_component_request_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    execute_count = 0
+    bound_response: dict[str, object] | None = None
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal bound_response, execute_count
+        command = arguments[:2]
+        if arguments[0] == "prepare":
+            run_dir = Path(arguments[arguments.index("--run-dir") + 1])
+            value = {"run_dir": str(run_dir.resolve()), "status": "prepared"}
+        elif command == ["run", "execute"]:
+            execute_count += 1
+            value = {"status": "awaiting_agent"}
+        elif command == ["agent", "next"]:
+            if bound_response is None:
+                bound_response, plan = _bound_component_request(Path(arguments[2]))
+                plan_path = plans / "pptx-mixed-screenshot-candidates--component.json"
+                _write_benchmark_plan(plan_path, plan)
+            value = dict(bound_response)
+        elif command == ["agent", "record"]:
+            submitted = Path(arguments[arguments.index("--plan") + 1])
+            artifact = Path(arguments[2]) / "recorded-component-plan.json"
+            artifact.write_bytes(submitted.read_bytes())
+            value = {
+                "plan_path": str(artifact.resolve()),
+                "recovered": False,
+                "status": "recorded",
+            }
+        else:
+            raise AssertionError(arguments)
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    case = {**_runner_case(), "kind": "image"}
+    with pytest.raises(runner.BenchmarkFailure, match="stale_plan") as caught:
+        runner.run_case(
+            case,
+            workspace=tmp_path / "workspace",
+            command=fake_command,
+            allow_stale_bindings=True,
+        )
+
+    assert execute_count == 2
+    assert caught.value.details is not None
+    assert set(caught.value.details) == {
+        "stage",
+        "page_id",
+        "repair_round",
+        "request_sha256",
+        "graph_sha256",
+    }
+    assert caught.value.details["stage"] == "component_request_repeated"
+    assert caught.value.details["page_id"] == "page_001"
+    assert caught.value.details["repair_round"] == 1
+    assert re.fullmatch(r"[0-9a-f]{64}", caught.value.details["request_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", caught.value.details["graph_sha256"])
 
 
 def test_release_runner_diagnostic_rebinds_only_component_hashes(
@@ -2082,6 +2339,97 @@ def test_release_diagnostic_writes_stable_rebound_plans_without_official_pass(
         )
     )
     assert stored == rebound
+
+
+def test_release_probe_runs_once_without_performance_or_plan_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("package==1\n", encoding="utf-8")
+    calls: list[Path] = []
+
+    def probe_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_stale_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        assert allow_stale_bindings is True
+        calls.append(workspace)
+        plan_observer(
+            "image-one--component-round-01.json",
+            {
+                **_component_plan(),
+                "request_sha256": "7" * 64,
+                "graph_sha256": "8" * 64,
+            },
+        )
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            9,
+        )
+
+    plans_output = tmp_path / "probe-plans"
+    report = runner.run_diagnostic_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "probe.json",
+        plans_output=plans_output,
+        constraints_path=constraints,
+        repeat=1,
+        case_runner=probe_case,
+    )
+
+    assert report["report_kind"] == "probe"
+    assert report["status"] == "probe_complete"
+    assert report["repeat"] == 1
+    assert report["totals"] == {
+        "cases": 1,
+        "attempts": 1,
+        "pages": 1,
+        "failed_attempts": 0,
+    }
+    assert "performance" not in report
+    assert calls == [tmp_path / "runs/repeat-01"]
+    assert not plans_output.exists()
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_repeat"):
+        runner.run_shard_manifest(
+            manifest,
+            case_ids=["image-one"],
+            workspace=tmp_path / "official-runs",
+            report_path=tmp_path / "official.json",
+            constraints_path=constraints,
+            repeat=1,
+            case_runner=probe_case,
+        )
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_repeat"):
+        runner.run_diagnostic_manifest(
+            manifest,
+            case_ids=["image-one"],
+            workspace=tmp_path / "invalid-runs",
+            report_path=tmp_path / "invalid.json",
+            plans_output=tmp_path / "invalid-plans",
+            constraints_path=constraints,
+            repeat=2,
+            case_runner=probe_case,
+        )
 
 
 def test_release_diagnostic_rejects_unstable_rebound_plan_across_repeats(
@@ -2866,6 +3214,43 @@ def test_release_runner_cli_routes_explicit_modes(
     assert captured[0][2]["repeat"] == 3
     assert captured[1][2]["plans_output"] == tmp_path / "plans"
     assert captured[2][2]["shard_report_paths"] == shard_reports
+
+
+def test_release_runner_cli_routes_one_repeat_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    captured: list[dict[str, object]] = []
+
+    def fake_probe(path: Path, **kwargs: object) -> dict[str, object]:
+        assert path == manifest
+        captured.append(kwargs)
+        return {"status": "probe_complete"}
+
+    monkeypatch.setattr(runner, "run_diagnostic_manifest", fake_probe)
+    assert (
+        runner.main(
+            [
+                "--mode",
+                "diagnostic-shard",
+                "--manifest",
+                str(manifest),
+                "--workspace",
+                str(tmp_path / "probe-runs"),
+                "--report",
+                str(tmp_path / "probe.json"),
+                "--plans-output",
+                str(tmp_path / "plans"),
+                "--case-id",
+                "image-one",
+                "--repeat",
+                "1",
+            ]
+        )
+        == 0
+    )
+    assert captured[0]["repeat"] == 1
 
 
 def test_release_runner_cli_requires_mode_specific_arguments(tmp_path: Path) -> None:

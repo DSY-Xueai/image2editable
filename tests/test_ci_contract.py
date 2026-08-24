@@ -511,6 +511,13 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
                     "type": "boolean",
                     "default": False,
                 },
+                "core_benchmark_diagnostic_repeats": {
+                    "description": "Diagnostic repeats: 1=probe, 3=strict",
+                    "required": True,
+                    "type": "choice",
+                    "default": "3",
+                    "options": ["3", "1"],
+                },
                 "run_core_benchmark": {
                     "description": "Run protected v0.2 core 14-page benchmark",
                     "required": True,
@@ -757,6 +764,7 @@ def test_release_gate_core_benchmark_uses_protected_balanced_windows_shards() ->
             '--workspace "${{ runner.temp }}/core-v0.2-diagnostic/workspace" '
             '--report "${{ runner.temp }}/core-v0.2-diagnostic/report.json" '
             '--plans-output "${{ runner.temp }}/core-v0.2-diagnostic/plans" '
+            '--repeat "${{ inputs.core_benchmark_diagnostic_repeats }}" '
             "${{ matrix.case_args }}"
         )
     ]

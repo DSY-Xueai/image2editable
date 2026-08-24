@@ -13,6 +13,14 @@ on:
         required: true
         type: boolean
         default: false
+      core_benchmark_diagnostic_repeats:
+        description: "Diagnostic repeats: 1=probe, 3=strict"
+        required: true
+        type: choice
+        default: "3"
+        options:
+          - "3"
+          - "1"
       run_core_benchmark:
         description: Run protected v0.2 core 14-page benchmark
         required: true
@@ -243,6 +251,7 @@ jobs:
           --workspace "${{ runner.temp }}/core-v0.2-diagnostic/workspace"
           --report "${{ runner.temp }}/core-v0.2-diagnostic/report.json"
           --plans-output "${{ runner.temp }}/core-v0.2-diagnostic/plans"
+          --repeat "${{ inputs.core_benchmark_diagnostic_repeats }}"
           ${{ matrix.case_args }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: ${{ always() }}

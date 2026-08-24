@@ -18,6 +18,8 @@
 
 当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
 
+如果只需要定位一次耗时较长的失败，可以把 diagnostic repeats 选为 `1`。这会运行相同的真实模型、页面检查和质量门禁，但只生成 `report_kind: probe` 的单次诊断报告，不计算性能，也不生成候选 plan。问题修复后仍需把 repeats 选回 `3`，完成三次严格 diagnostic。
+
 Release Gate 只上传 JSON 报告，以及 diagnostic 产生的候选 plan JSON。模型文件、模型缓存、输入副本、运行 workspace 和生成的 PPTX 都不会上传为 benchmark 工件，也不会提交到 Git。
 
 ## 严格通过标准

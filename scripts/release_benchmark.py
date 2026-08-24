@@ -29,6 +29,46 @@ PLAN_ROOT = RELEASE_ROOT / "plans"
 RUNTIME_CONSTRAINTS = ROOT / "constraints" / "runtime.txt"
 _IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_PAGE_ID = re.compile(r"page_[0-9]{3}")
+_CANDIDATE_ID = re.compile(r"candidate_[0-9]{3}")
+_SOURCE_SHAPE_ID = re.compile(r"[1-9][0-9]{0,9}")
+_SAFE_EXCEPTION_TYPES = frozenset(
+    {
+        "AssertionError",
+        "AttributeError",
+        "EOFError",
+        "FileExistsError",
+        "FileNotFoundError",
+        "ImportError",
+        "IndexError",
+        "IsADirectoryError",
+        "KeyError",
+        "MemoryError",
+        "ModuleNotFoundError",
+        "NotADirectoryError",
+        "NotImplementedError",
+        "OSError",
+        "OverflowError",
+        "PermissionError",
+        "RecursionError",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "UnicodeDecodeError",
+        "ValueError",
+        "ZeroDivisionError",
+    }
+)
+_TRACEBACK_HEADER = "Traceback (most recent call last):"
+_TRACEBACK_FRAME = re.compile(
+    r'^\s*File "[^"\r\n]*[\\/]image2editable[\\/]'
+    r'([A-Za-z_][A-Za-z0-9_]{0,63})\.py", line ([1-9][0-9]*), in '
+    r'(?:[A-Za-z_][A-Za-z0-9_]*|<module>)\s*$',
+    re.MULTILINE,
+)
+_TRACEBACK_EXCEPTION = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]{0,63})(?::.*)?",
+)
 _PLAN_LIMIT = 1024 * 1024
 _JSON_LIMIT = 4 * 1024 * 1024
 _CANDIDATE_FIELDS = {
@@ -100,6 +140,15 @@ class PlanSelection:
 
 Command = Callable[..., subprocess.CompletedProcess[str]]
 
+_COMMAND_STAGES = {
+    ("prepare",): "prepare",
+    ("decision", "record"): "decision_record",
+    ("agent", "record"): "agent_record",
+    ("run", "next"): "run_next",
+    ("run", "execute"): "run_execute",
+    ("agent", "next"): "agent_next",
+}
+
 
 def run_command(
     arguments: list[str], *, cwd: Path
@@ -116,19 +165,89 @@ def run_command(
     )
 
 
+def _command_stage(arguments: list[str]) -> str:
+    for length in (2, 1):
+        stage = _COMMAND_STAGES.get(tuple(arguments[:length]))
+        if stage is not None:
+            return stage
+    return "unknown"
+
+
+def _safe_exception_type(value: object) -> str | None:
+    if isinstance(value, str) and value in _SAFE_EXCEPTION_TYPES:
+        return value
+    return None
+
+
+def _safe_process_diagnostics(
+    arguments: list[str], completed: subprocess.CompletedProcess[str]
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "stage": _command_stage(arguments),
+        "returncode": (
+            completed.returncode if type(completed.returncode) is int else -1
+        ),
+    }
+    stderr = completed.stderr
+    if not isinstance(stderr, str) or _TRACEBACK_HEADER not in stderr:
+        return details
+    traceback = stderr.rsplit(_TRACEBACK_HEADER, 1)[1]
+    lines = [line.strip() for line in traceback.splitlines() if line.strip()]
+    if lines:
+        exception = _TRACEBACK_EXCEPTION.fullmatch(lines[-1])
+        exception_type = (
+            _safe_exception_type(exception.group(1))
+            if exception is not None
+            else None
+        )
+        if exception_type is not None:
+            details["exception_type"] = exception_type
+    frames = list(_TRACEBACK_FRAME.finditer(traceback))
+    for frame in reversed(frames):
+        module, line_value = frame.groups()
+        line = int(line_value)
+        try:
+            source_lines = (ROOT / "image2editable" / f"{module}.py").read_bytes().splitlines()
+        except OSError:
+            continue
+        if 1 <= line <= len(source_lines):
+            details["frame"] = {
+                "module": f"image2editable.{module}",
+                "line": line,
+            }
+            break
+    return details
+
+
 def _call(command: Command, arguments: list[str], *, cwd: Path) -> dict[str, object]:
     try:
         completed = command(arguments, cwd=cwd)
     except (KeyboardInterrupt, SystemExit):
         raise
-    except Exception:
-        raise BenchmarkFailure("command_failed") from None
+    except Exception as error:
+        details = {"stage": _command_stage(arguments)}
+        exception_type = _safe_exception_type(type(error).__name__)
+        if exception_type is not None:
+            details["exception_type"] = exception_type
+        raise BenchmarkFailure("command_failed", details) from None
     if completed.returncode != 0:
-        raise BenchmarkFailure("command_failed")
+        raise BenchmarkFailure(
+            "command_failed", _safe_process_diagnostics(arguments, completed)
+        )
     try:
         return _strict_json(completed.stdout, _JSON_LIMIT)
     except Exception:
-        raise BenchmarkFailure("invalid_json") from None
+        raise BenchmarkFailure(
+            "invalid_json",
+            {
+                "stage": _command_stage(arguments),
+                "returncode": (
+                    completed.returncode
+                    if type(completed.returncode) is int
+                    else -1
+                ),
+            },
+        ) from None
 
 
 def _is_reparse(metadata: os.stat_result) -> bool:
@@ -172,6 +291,10 @@ def _case_plans(case_id: str) -> list[dict[str, object]]:
 
 def _sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _matches(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
 def _canonical_manifest_payload(payload: bytes) -> bytes:
@@ -222,10 +345,9 @@ def _valid_candidate_plan(plan: dict[str, object]) -> bool:
         and plan.get("schema_version") == 1
         and type(plan.get("schema_version")) is int
         and plan.get("kind") == "candidate_decision"
-        and all(
-            isinstance(plan.get(field), str) and bool(plan[field])
-            for field in ("page_id", "candidate_id", "source_shape_id")
-        )
+        and _matches(_PAGE_ID, plan.get("page_id"))
+        and _matches(_CANDIDATE_ID, plan.get("candidate_id"))
+        and _matches(_SOURCE_SHAPE_ID, plan.get("source_shape_id"))
         and _sha256(plan.get("source_object_sha256"))
         and _sha256(plan.get("image_sha256"))
         and plan.get("decision") in {"replace", "preserve", "ambiguous"}
@@ -243,8 +365,7 @@ def _valid_component_plan(plan: dict[str, object]) -> bool:
         and plan.get("schema_version") == 1
         and type(plan.get("schema_version")) is int
         and plan.get("kind") == "component_plan"
-        and isinstance(plan.get("page_id"), str)
-        and bool(plan["page_id"])
+        and _matches(_PAGE_ID, plan.get("page_id"))
         and plan.get("provider") == "host"
         and type(plan.get("repair_round")) is int
         and 1 <= plan["repair_round"] <= 5
@@ -272,8 +393,11 @@ def _resolve_candidate_plan(
     *,
     allow_stale_binding: bool = False,
 ) -> PlanSelection:
-    if allow_stale_binding and (
-        not _sha256(candidate.get("source_object_sha256"))
+    if (
+        not _matches(_PAGE_ID, candidate.get("page_id"))
+        or not _matches(_CANDIDATE_ID, candidate.get("candidate_id"))
+        or not _matches(_SOURCE_SHAPE_ID, candidate.get("source_shape_id"))
+        or not _sha256(candidate.get("source_object_sha256"))
         or not _sha256(candidate.get("image_sha256"))
     ):
         raise BenchmarkFailure("invalid_response")
@@ -295,7 +419,23 @@ def _resolve_candidate_plan(
         )
     ]
     if not identity:
-        raise BenchmarkFailure("mismatched_plan")
+        raise BenchmarkFailure(
+            "mismatched_plan",
+            {
+                "stage": "candidate_plan_identity",
+                "page_id": candidate.get("page_id"),
+                "candidate_id": candidate.get("candidate_id"),
+                "source_shape_id": candidate.get("source_shape_id"),
+                "expected_identities": [
+                    {
+                        "page_id": plan["page_id"],
+                        "candidate_id": plan["candidate_id"],
+                        "source_shape_id": plan["source_shape_id"],
+                    }
+                    for _, plan in entries
+                ],
+            },
+        )
     if allow_stale_binding and len(identity) != 1:
         raise BenchmarkFailure("duplicate_plan")
     matches = [
@@ -353,8 +493,11 @@ def _resolve_component_plan(
     *,
     allow_stale_binding: bool = False,
 ) -> PlanSelection:
-    if allow_stale_binding and (
-        not _sha256(request.get("request_sha256"))
+    if (
+        not _matches(_PAGE_ID, request.get("page_id"))
+        or type(request.get("repair_round")) is not int
+        or not 1 <= request["repair_round"] <= 5
+        or not _sha256(request.get("request_sha256"))
         or not _sha256(request.get("graph_sha256"))
     ):
         raise BenchmarkFailure("invalid_response")
@@ -374,7 +517,21 @@ def _resolve_component_plan(
         and plan.get("repair_round") == request.get("repair_round")
     ]
     if not identity:
-        raise BenchmarkFailure("mismatched_plan")
+        raise BenchmarkFailure(
+            "mismatched_plan",
+            {
+                "stage": "component_plan_identity",
+                "page_id": request.get("page_id"),
+                "repair_round": request.get("repair_round"),
+                "expected_identities": [
+                    {
+                        "page_id": plan["page_id"],
+                        "repair_round": plan["repair_round"],
+                    }
+                    for _, plan in entries
+                ],
+            },
+        )
     if allow_stale_binding and len(identity) != 1:
         raise BenchmarkFailure("duplicate_plan")
     matches = [
@@ -465,9 +622,10 @@ def _component_binding(response: dict[str, object], run_dir: Path) -> dict[str, 
     except Exception:
         raise BenchmarkFailure("invalid_response") from None
     if not (
-        isinstance(binding.get("page_id"), str)
+        _matches(_PAGE_ID, binding.get("page_id"))
         and binding.get("provider") == "host"
         and type(binding.get("repair_round")) is int
+        and 1 <= binding["repair_round"] <= 5
         and _sha256(binding.get("request_sha256"))
         and _sha256(binding.get("graph_sha256"))
     ):
@@ -804,7 +962,17 @@ def run_case(
                 )
             )
             if identity in used_candidates:
-                raise BenchmarkFailure("stale_plan")
+                raise BenchmarkFailure(
+                    "stale_plan",
+                    {
+                        "stage": "candidate_request_repeated",
+                        "page_id": plan["page_id"],
+                        "candidate_id": plan["candidate_id"],
+                        "source_shape_id": plan["source_shape_id"],
+                        "source_object_sha256": plan["source_object_sha256"],
+                        "image_sha256": plan["image_sha256"],
+                    },
+                )
             used_candidates.add(identity)
             _record_candidate(command, plan, run_dir, workspace)
 
@@ -815,7 +983,13 @@ def run_case(
         response = _call(command, ["agent", "next", str(run_dir)], cwd=workspace)
         if response.get("kind") == "capability_handshake":
             if sequence != 0:
-                raise BenchmarkFailure("stale_plan")
+                raise BenchmarkFailure(
+                    "stale_plan",
+                    {
+                        "stage": "capability_handshake_repeated",
+                        "sequence": sequence,
+                    },
+                )
             sequence += 1
             _record_host_document(
                 command,
@@ -838,7 +1012,16 @@ def run_case(
             )
         )
         if identity in used_requests:
-            raise BenchmarkFailure("stale_plan")
+            raise BenchmarkFailure(
+                "stale_plan",
+                {
+                    "stage": "component_request_repeated",
+                    "page_id": request["page_id"],
+                    "repair_round": request["repair_round"],
+                    "request_sha256": request["request_sha256"],
+                    "graph_sha256": request["graph_sha256"],
+                },
+            )
         used_requests.add(identity)
         selection = _resolve_component_plan(
             case_id,
@@ -1416,7 +1599,7 @@ def run_diagnostic_manifest(
     case_runner: Callable[..., BenchmarkCaseResult] = run_case,
     command: Command = run_command,
 ) -> dict[str, object]:
-    if type(repeat) is not int or repeat != 3:
+    if type(repeat) is not int or repeat not in (1, 3):
         raise BenchmarkFailure("invalid_repeat")
     plans_output = plans_output.resolve()
     if plans_output.exists():
@@ -1490,10 +1673,15 @@ def run_diagnostic_manifest(
             attempts.append(attempt)
 
     failed = sum(attempt["status"] != "passed" for attempt in attempts)
+    probe = repeat == 1
     report = {
         "schema_version": 1,
-        "report_kind": "diagnostic",
-        "status": "diagnostic_complete" if failed == 0 else "failed",
+        "report_kind": "probe" if probe else "diagnostic",
+        "status": (
+            "probe_complete" if probe and failed == 0
+            else "diagnostic_complete" if failed == 0
+            else "failed"
+        ),
         "manifest_sha256": manifest_sha256,
         "constraints_sha256": constraints_hash,
         "environment": environment,
@@ -1507,7 +1695,7 @@ def run_diagnostic_manifest(
             "failed_attempts": failed,
         },
     }
-    if failed == 0:
+    if failed == 0 and not probe:
         report["performance"] = aggregate_performance(attempts)
 
     report_path = report_path.resolve()
@@ -1520,7 +1708,7 @@ def run_diagnostic_manifest(
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(payload)
 
-    if failed == 0:
+    if failed == 0 and not probe:
         try:
             plans_output.mkdir()
             for filename, plan in sorted(rebound_plans.items()):
@@ -1827,6 +2015,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--shard-report", action="append", type=Path)
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--constraints", type=Path)
+    parser.add_argument("--repeat", type=int)
     arguments = parser.parse_args(argv)
     if arguments.mode == "official-shard":
         if (
@@ -1836,6 +2025,7 @@ def main(argv: list[str] | None = None) -> int:
             or arguments.shard_report is not None
             or arguments.baseline is not None
             or arguments.constraints is not None
+            or arguments.repeat is not None
         ):
             parser.error("invalid official-shard arguments")
     elif arguments.mode == "diagnostic-shard":
@@ -1855,6 +2045,7 @@ def main(argv: list[str] | None = None) -> int:
         or not arguments.shard_report
         or arguments.baseline is None
         or arguments.constraints is None
+        or arguments.repeat is not None
     ):
         parser.error("invalid aggregate arguments")
     try:
@@ -1868,15 +2059,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             success_status = "passed"
         elif arguments.mode == "diagnostic-shard":
+            repeat = 3 if arguments.repeat is None else arguments.repeat
             report = run_diagnostic_manifest(
                 arguments.manifest,
                 case_ids=arguments.case_ids,
                 workspace=arguments.workspace,
                 report_path=arguments.report,
                 plans_output=arguments.plans_output,
-                repeat=3,
+                repeat=repeat,
             )
-            success_status = "diagnostic_complete"
+            success_status = "probe_complete" if repeat == 1 else "diagnostic_complete"
         else:
             report = aggregate_shard_reports(
                 arguments.manifest,
