@@ -45,7 +45,7 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 
 - 这是把**已有页面**重建为可继续编辑 PPT 的工具，不是根据文章或大纲生成全新演示文稿。
 - **⚠️ 复杂视觉元素通常会以可移动图片组件保留**，不能保证其内部元素都能恢复为原生 PowerPoint 形状。
-- **🔒 Host Agent 模式可能把诊断图交由当前宿主服务处理**；处理敏感文件时，请选择 Local Agent。
+- **🔒 Host Agent 模式可能把诊断图交由当前宿主服务处理**；处理敏感文件时，请改用自己控制的本地模型服务（`local-service`）。
 
 ## 快速上手
 
@@ -78,7 +78,7 @@ $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 
 ### Local CLI
 
-先安装 Local CLI。需要完全离线运行时，可继续安装内置 Qwen；已有视觉模型服务时，也可以使用 OpenAI 兼容接口。
+先安装 Local CLI。下面的步骤用于在本机准备 OCR、运行时模型和转换环境；如果选择 `local-service`，再按下方说明配置自己的视觉模型服务。
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
@@ -136,25 +136,9 @@ image2editable doctor
 
 输出中出现 `"ready": true`，就可以开始转换。
 
-#### 可选：安装 Local Agent
+#### 配置本地模型服务
 
-需要使用随包 Local Agent 时，再执行：
-
-```bash
-python -m pip install ".[agent-local]"
-image2editable models install agent
-image2editable doctor --agent-local
-```
-
-模型安装命令同样需要确认；最后一条命令会额外验证 Local Agent 依赖和 Qwen 模型完整性记录。
-
-检查通过后，使用内置 Qwen 转换：
-
-```bash
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
-```
-
-#### 可选：配置本地模型服务
+使用 `local-service` 时，需要先启动自己的视觉模型服务。服务需支持图像输入和 JSON 响应，并提供 OpenAI 兼容的 `/v1/chat/completions` 接口。
 
 首次配置时，在项目根目录使用下面这个命令复制模板并**填写自己的服务信息**。
 
@@ -179,7 +163,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provid
 | `sources`          | 必填     | 要转换的输入：图片、图片目录、单个 PDF 或单个 PPTX。文档类输入不能与其他来源混用。 |
 | `-o, --output`     | 输入同名 | 指定输出文件；`--slide-size both` 时用作输出基名。           |
 | `--lang`           | `ch`     | 指定 OCR 识别语言，常用值为 `ch` 或 `en`。                   |
-| `--agent-provider` | `host`   | 选择处理方式：`host` 交由当前 Agent/Skill 协作，`local` 使用已安装的 Qwen，`local-service` 使用 OpenAI 兼容的本地服务。 |
+| `--agent-provider` | `host`   | 选择处理方式：`host` 交由当前 Agent/Skill 协作，`local-service` 使用 OpenAI 兼容的本地服务。 |
 | `--slide-size`     | `both`   | 控制版式：`original` 保持输入比例，`16:9` 生成宽屏，`both` 同时生成两种尺寸。 |
 | `--run-dir`        | 自动生成 | 指定运行目录，便于查看进度、继续未完成的任务或排查问题。     |
 
@@ -194,8 +178,7 @@ sources = ["input.pdf"]
 | 方式 | 适合 | 工作方式 |
 |------|--------|----------|
 | Host Agent | 已在 Codex、Claude Code 等宿主中工作，并希望由 Agent 协助判断页面结构。 | Skill 将诊断资料交给当前宿主 Agent；**CLI 不会直接调用某个固定云端 AI API**。 |
-| Local Agent | 已安装随包 Qwen，希望完全在自己的设备上处理。 | 使用固定版本和完整性凭据绑定的内置 Qwen，不回退到外部服务。 |
-| Local Service | 已自行部署视觉模型服务。 | 使用 `local-service` 调用配置的 OpenAI 兼容接口，不回退到内置 Qwen 或 Host。 |
+| Local Service | 已自行部署视觉模型服务，希望在自己的设备上处理。 | 使用 `local-service` 调用配置的 OpenAI 兼容接口，不回退到 Host。 |
 
 ## 项目结构
 
@@ -231,7 +214,7 @@ image2editable/
 
 - **⚠️ 复杂页面建议人工复核。** 艺术字、密集表格、渐变和复杂插画可能无法逐像素还原；请在交付前检查文字、组件位置和页面布局。
 - 图片中的文字越清晰、背景越规整，重建通常越可靠；艺术字、密集表格、渐变和复杂插画不保证逐像素一致。
-- **💳 Host Agent 会消耗模型的 Token / 上下文额度。** 复杂页面可能经过多轮诊断与重修，实际消耗取决于所用 Agent、模型和页面复杂度。Local 模式不使用项目方 Token，但会消耗用户本地模型服务的推理资源，CPU 可运行但速度可能较慢。
+- **💳 Host Agent 会消耗模型的 Token / 上下文额度。** 复杂页面可能经过多轮诊断与重修，实际消耗取决于所用 Agent、模型和页面复杂度。Local Service 模式不使用项目方 Token，但会消耗用户本地模型服务的推理资源，CPU 可运行但速度可能较慢。
 - **⏱️ 多页 PDF、复杂页面和高分辨率图片耗时较长。** 每页都会经过 OCR、视觉拆分、重建与质量检查，最多可进行 5 轮重修；Host 模式还需要等待 Agent 完成视觉判断。
 
 ## 支持的输入与常用选项

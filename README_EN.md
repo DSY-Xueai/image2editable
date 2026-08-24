@@ -45,7 +45,7 @@ After conversion, you can edit recovered text, move separated visual elements, a
 
 - This is a tool for rebuilding **existing pages** into editable PowerPoint files. It does not create a new presentation from an article or outline.
 - **⚠️ Complex visuals are usually kept as movable image components.** Their internal elements are not guaranteed to become native PowerPoint shapes.
-- **🔒 Host Agent mode may send diagnostic images to the current host service.** Choose Local Agent for sensitive files.
+- **🔒 Host Agent mode may send diagnostic images to the current host service.** For sensitive files, use a local model service you control (`local-service`).
 
 ## Quick start
 
@@ -79,7 +79,7 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 
 ### Local CLI
 
-Install the Local CLI first. For fully offline execution, install the bundled Qwen as described below. If you already run a vision-model service, you can instead use its OpenAI-compatible API.
+Install the Local CLI first. The steps below prepare OCR, runtime models, and the local conversion environment; if you choose `local-service`, configure your own vision-model service as described below.
 
 ```bash
 git clone https://github.com/DSY-Xueai/image2editable.git
@@ -137,25 +137,9 @@ image2editable doctor
 
 You can start converting when the output contains `"ready": true`.
 
-#### Optional: install the Local Agent
+#### Configure a local model service
 
-Run these commands only when you need the bundled Local Agent:
-
-```bash
-python -m pip install ".[agent-local]"
-image2editable models install agent
-image2editable doctor --agent-local
-```
-
-The model installation also asks for confirmation. The final command additionally validates the Local Agent dependencies and Qwen receipt.
-
-After the check passes, convert with the bundled Qwen:
-
-```bash
-image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provider local
-```
-
-#### Optional: configure a local model service
+When using `local-service`, start your own vision-model service first. It must accept image input and return JSON through an OpenAI-compatible `/v1/chat/completions` endpoint.
 
 For first-time setup, copy the template in the project root and **fill in your own service settings**.
 
@@ -180,7 +164,7 @@ image2editable convert input.pdf -o output.pptx --slide-size 16:9 --agent-provid
 | `sources` | Required | Input to convert: image(s), an image directory, one PDF, or one PPTX. Document inputs cannot be mixed with other sources. |
 | `-o, --output` | Derived from input name | Sets the output file. With `--slide-size both`, it is used as the output base name. |
 | `--lang` | `ch` | OCR language; common values are `ch` and `en`. |
-| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, `local` uses the installed Qwen, and `local-service` uses an OpenAI-compatible local service. |
+| `--agent-provider` | `host` | Selects the processing mode: `host` works with the current Agent/Skill, and `local-service` uses an OpenAI-compatible local service. |
 | `--slide-size` | `both` | Selects output layout: `original` keeps the input ratio, `16:9` makes widescreen slides, and `both` creates both. |
 | `--run-dir` | Generated automatically | Sets a run directory so you can inspect progress, resume an unfinished task, or troubleshoot. |
 
@@ -195,8 +179,7 @@ sources = ["input.pdf"]
 | Mode | Best for | How it works |
 |------|----------|--------------|
 | Host Agent | Users already working in Codex, Claude Code, or a similar host and who want Agent assistance with page-structure decisions. | The Skill gives diagnostic material to the current host Agent; **the CLI does not call a fixed cloud AI API directly**. |
-| Local Agent | Users who installed the bundled Qwen and want fully local processing. | Uses the pinned, receipt-bound Qwen and never falls back to an external service. |
-| Local Service | Users who already run their own vision-model service. | Uses `local-service` with the configured OpenAI-compatible API and never falls back to Qwen or Host. |
+| Local Service | Users who already run their own vision-model service and want to process files on their own machine. | Uses `local-service` with the configured OpenAI-compatible API and never falls back to Host. |
 
 ## Project layout
 
@@ -232,7 +215,7 @@ image2editable/
 
 - **⚠️ Review complex pages manually.** Decorative text, dense tables, gradients, and complex illustrations may not be restored pixel for pixel. Check text, component positions, and layout before delivery.
 - Clear text and regular backgrounds generally reconstruct more reliably. Decorative text, dense tables, gradients, and complex illustrations are not guaranteed to match pixel for pixel.
-- **💳 Host Agent consumes the current model's token/context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity. Local mode does not use project tokens, but consumes inference resources from the local model service. CPU inference may be slow.
+- **💳 Host Agent consumes the current model's token/context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity. Local Service does not use project tokens, but consumes inference resources from the local model service. CPU inference may be slow.
 - **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five repair rounds. Host mode also waits for Agent visual decisions.
 
 ## Supported inputs and common options

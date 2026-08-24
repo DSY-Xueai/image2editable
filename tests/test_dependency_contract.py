@@ -200,15 +200,17 @@ def test_host_pptx_routes_screenshot_decisions_before_execute() -> None:
     )
 
 
-def test_local_and_local_service_provider_docs_are_unambiguous() -> None:
+def test_local_service_provider_docs_are_unambiguous() -> None:
     chinese = README.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")
     skill = SKILL.read_text(encoding="utf-8")
 
-    assert "`local` 使用已安装的 Qwen" in chinese
+    assert "可选：安装 Local Agent" not in chinese
+    assert "Qwen" not in chinese
     assert "`local-service` 使用 OpenAI 兼容的本地服务" in chinese
     assert "--agent-provider local-service" in chinese
-    assert "`local` uses the installed Qwen" in english
+    assert "Optional: install the Local Agent" not in english
+    assert "Qwen" not in english
     assert "`local-service` uses an OpenAI-compatible local service" in english
     assert "--agent-provider local-service" in english
     assert "`local` 由内置 Qwen" in skill
@@ -513,9 +515,6 @@ def test_readmes_document_offline_models_after_ocr_and_before_doctor() -> None:
         "python -m pip install pytesseract",
         "image2editable models install runtime",
         "\nimage2editable doctor\n",
-        'python -m pip install ".[agent-local]"',
-        "image2editable models install agent",
-        "image2editable doctor --agent-local",
     )
 
     for text in (readme_text, readme_en_text):
@@ -538,13 +537,13 @@ def test_readmes_document_offline_models_after_ocr_and_before_doctor() -> None:
     assert "##### 方案一：PaddleOCR（推荐）" in readme_text
     assert "##### 方案二：Tesseract" in readme_text
     assert readme_text.index("#### 检查环境 ✅") < readme_text.index(
-        "#### 可选：配置本地模型服务"
+        "#### 配置本地模型服务"
     )
     assert "#### Install OCR" in readme_en_text
     assert "##### Option 1: PaddleOCR (recommended)" in readme_en_text
     assert "##### Option 2: Tesseract" in readme_en_text
     assert readme_en_text.index("#### Check the environment ✅") < readme_en_text.index(
-        "#### Optional: configure a local model service"
+        "#### Configure a local model service"
     )
 
 
