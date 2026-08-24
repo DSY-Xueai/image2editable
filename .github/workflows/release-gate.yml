@@ -8,6 +8,11 @@ on:
         required: true
         type: boolean
         default: false
+      run_core_benchmark_diagnostic:
+        description: Run protected v0.2 core benchmark diagnostic
+        required: true
+        type: boolean
+        default: false
       run_core_benchmark:
         description: Run protected v0.2 core 14-page benchmark
         required: true
@@ -160,13 +165,27 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: python "${{ github.workspace }}/scripts/runtime_model_smoke.py"
 
-  core-benchmark:
-    name: Protected v0.2 core 14-page benchmark / Windows / Python 3.12
-    if: ${{ inputs.run_core_benchmark }}
+  core-benchmark-diagnostic:
+    name: Protected core diagnostic / ${{ matrix.shard }} / Windows / Python 3.12
+    if: ${{ inputs.run_core_benchmark_diagnostic }}
     environment: core-benchmark
     needs: build-distribution
     runs-on: windows-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: mixed-long
+            case_args: --case-id pptx-mixed-screenshot-candidates
+          - shard: pdf-network
+            case_args: --case-id pdf-rotated-page --case-id image-thin-line-network
+          - shard: visual-heavy
+            case_args: --case-id image-icon-matrix --case-id image-dark-poster
+          - shard: charts
+            case_args: --case-id image-flowchart --case-id image-combo-chart
+          - shard: remaining
+            case_args: --case-id image-bilingual-dashboard --case-id image-tiny-element-table --case-id image-non-16-9-infographic
     steps:
       - name: Require protected core-benchmark approval
         shell: pwsh
@@ -215,16 +234,156 @@ jobs:
         run: image2editable models install runtime --yes
       - name: Run doctor
         run: image2editable doctor
-      - name: Run v0.2 core 14-page benchmark
+      - name: Run diagnostic core benchmark shard
         working-directory: ${{ runner.temp }}
         run: >-
           python "${{ github.workspace }}/scripts/release_benchmark.py"
+          --mode diagnostic-shard
           --manifest "${{ github.workspace }}/benchmarks/release/core-v0.2-manifest.json"
-          --workspace "${{ runner.temp }}/core-v0.2-benchmark/workspace"
-          --report "${{ runner.temp }}/core-v0.2-benchmark/report.json"
+          --workspace "${{ runner.temp }}/core-v0.2-diagnostic/workspace"
+          --report "${{ runner.temp }}/core-v0.2-diagnostic/report.json"
+          --plans-output "${{ runner.temp }}/core-v0.2-diagnostic/plans"
+          ${{ matrix.case_args }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: ${{ always() }}
         with:
-          name: core-v0.2-benchmark-report
+          name: core-v0.2-diagnostic-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/core-v0.2-diagnostic/report.json
+            ${{ runner.temp }}/core-v0.2-diagnostic/plans/*.json
+          if-no-files-found: error
+
+  core-benchmark:
+    name: Protected core benchmark / ${{ matrix.shard }} / Windows / Python 3.12
+    if: ${{ inputs.run_core_benchmark }}
+    environment: core-benchmark
+    needs: build-distribution
+    runs-on: windows-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: mixed-long
+            case_args: --case-id pptx-mixed-screenshot-candidates
+          - shard: pdf-network
+            case_args: --case-id pdf-rotated-page --case-id image-thin-line-network
+          - shard: visual-heavy
+            case_args: --case-id image-icon-matrix --case-id image-dark-poster
+          - shard: charts
+            case_args: --case-id image-flowchart --case-id image-combo-chart
+          - shard: remaining
+            case_args: --case-id image-bilingual-dashboard --case-id image-tiny-element-table --case-id image-non-16-9-infographic
+    steps:
+      - name: Require protected core-benchmark approval
+        shell: pwsh
+        env:
+          IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED: ${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}
+        run: >-
+          if ($env:IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED -ne 'approved') {
+            throw 'IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED must be approved'
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: distribution
+          path: ${{ runner.temp }}/distribution
+      - name: Locate the built wheel
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          wheels = list((Path(os.environ["RUNNER_TEMP"]) / "distribution").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"expected exactly one wheel, found {len(wheels)}")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              print(f"WHEEL_PATH={wheels[0]}", file=env_file)
+      - name: Bootstrap pinned build runtime
+        run: python -m pip install --constraint constraints/runtime.txt --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision setuptools==84.0.0
+      - name: Install built wheel
+        run: python -m pip install --constraint constraints/runtime.txt --no-build-isolation --no-binary antlr4-python3-runtime "${{ env.WHEEL_PATH }}[test]"
+      - name: Install PaddleOCR runtime
+        run: |
+          python -m pip install --constraint constraints/runtime.txt "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Tesseract OCR
+        run: |
+          choco install tesseract --version=5.3.1.20230401 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install --constraint constraints/runtime.txt pytesseract==0.3.13
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:ProgramFiles\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Check installed dependencies
+        run: python -m pip check
+      - name: Install runtime models
+        run: image2editable models install runtime --yes
+      - name: Run doctor
+        run: image2editable doctor
+      - name: Run strict core benchmark shard
+        working-directory: ${{ runner.temp }}
+        run: >-
+          python "${{ github.workspace }}/scripts/release_benchmark.py"
+          --mode official-shard
+          --manifest "${{ github.workspace }}/benchmarks/release/core-v0.2-manifest.json"
+          --workspace "${{ runner.temp }}/core-v0.2-benchmark/workspace"
+          --report "${{ runner.temp }}/core-v0.2-benchmark/report.json"
+          ${{ matrix.case_args }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: core-v0.2-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/core-v0.2-benchmark/report.json
+          if-no-files-found: error
+
+  core-benchmark-aggregate:
+    name: Aggregate protected v0.2 core benchmark
+    if: ${{ inputs.run_core_benchmark }}
+    needs: core-benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: core-v0.2-shard-*
+          path: ${{ runner.temp }}/core-v0.2-shards
+          merge-multiple: false
+      - name: Aggregate strict core benchmark shards
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+          checkout = Path(os.environ["GITHUB_WORKSPACE"])
+          temp = Path(os.environ["RUNNER_TEMP"])
+          reports = sorted((temp / "core-v0.2-shards").glob("core-v0.2-shard-*/report.json"))
+          if len(reports) != 5:
+              raise SystemExit(f"expected exactly five shard reports, found {len(reports)}")
+          command = [
+              sys.executable,
+              str(checkout / "scripts/release_benchmark.py"),
+              "--mode",
+              "aggregate",
+              "--manifest",
+              str(checkout / "benchmarks/release/core-v0.2-manifest.json"),
+              "--report",
+              str(temp / "core-v0.2-official/report.json"),
+              "--baseline",
+              str(checkout / "benchmarks/release/BASELINE.json"),
+              "--constraints",
+              str(checkout / "constraints/runtime.txt"),
+          ]
+          for report in reports:
+              command.extend(["--shard-report", str(report)])
+          subprocess.run(command, cwd=temp, check=True)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: core-v0.2-benchmark-report
+          path: ${{ runner.temp }}/core-v0.2-official/report.json
           if-no-files-found: error

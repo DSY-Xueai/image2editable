@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import platform
 import posixpath
 import re
 from statistics import median
@@ -25,6 +26,7 @@ from scripts.benchmark_conversion import _read_regular_file, _strict_json
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ROOT = ROOT / "benchmarks" / "release"
 PLAN_ROOT = RELEASE_ROOT / "plans"
+RUNTIME_CONSTRAINTS = ROOT / "constraints" / "runtime.txt"
 _IDENTIFIER = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _PLAN_LIMIT = 1024 * 1024
@@ -74,7 +76,11 @@ _CHALLENGE_COLORS = ("#2f6fed", "#d9485f", "#2b8a3e", "#9c36b5")
 
 
 class BenchmarkFailure(RuntimeError):
-    pass
+    def __init__(
+        self, error_type: str, details: dict[str, object] | None = None
+    ) -> None:
+        super().__init__(error_type)
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,13 @@ class BenchmarkCaseResult:
     run_dir: str
     pages: list[dict[str, object]]
     duration_ms: int
+
+
+@dataclass(frozen=True)
+class PlanSelection:
+    filename: str
+    plan: dict[str, object]
+    rebound_plan: dict[str, object] | None
 
 
 Command = Callable[..., subprocess.CompletedProcess[str]]
@@ -125,7 +138,7 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     )
 
 
-def _case_plans(case_id: str) -> list[dict[str, object]]:
+def _case_plan_entries(case_id: str) -> list[tuple[str, dict[str, object]]]:
     try:
         root_status = PLAN_ROOT.lstat()
         if (
@@ -135,9 +148,12 @@ def _case_plans(case_id: str) -> list[dict[str, object]]:
             raise ValueError
         paths = sorted(PLAN_ROOT.glob(f"{case_id}--*.json"))
         plans = [
-            _strict_json(
-                _read_regular_file(path, _PLAN_LIMIT, require_single_link=True),
-                _PLAN_LIMIT,
+            (
+                path.name,
+                _strict_json(
+                    _read_regular_file(path, _PLAN_LIMIT, require_single_link=True),
+                    _PLAN_LIMIT,
+                ),
             )
             for path in paths
         ]
@@ -148,6 +164,10 @@ def _case_plans(case_id: str) -> list[dict[str, object]]:
     except Exception:
         raise BenchmarkFailure("invalid_plan") from None
     return plans
+
+
+def _case_plans(case_id: str) -> list[dict[str, object]]:
+    return [plan for _, plan in _case_plan_entries(case_id)]
 
 
 def _sha256(value: object) -> bool:
@@ -161,6 +181,19 @@ def _canonical_manifest_payload(payload: bytes) -> bytes:
 def canonical_text_sha256(path: Path) -> str:
     payload = _read_regular_file(path, _JSON_LIMIT, require_single_link=True)
     return hashlib.sha256(_canonical_manifest_payload(payload)).hexdigest()
+
+
+def benchmark_environment() -> dict[str, str]:
+    try:
+        import torch
+    except Exception:
+        raise BenchmarkFailure("invalid_environment") from None
+    return {
+        "os": platform.system(),
+        "architecture": platform.machine(),
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+    }
 
 
 def manifest_sha256(path: Path) -> str:
@@ -233,17 +266,29 @@ def _valid_component_plan(plan: dict[str, object]) -> bool:
     )
 
 
-def _select_candidate_plan(
-    case_id: str, candidate: dict[str, object]
-) -> dict[str, object]:
-    plans = [plan for plan in _case_plans(case_id) if plan.get("kind") == "candidate_decision"]
-    if any(not _valid_candidate_plan(plan) for plan in plans):
+def _resolve_candidate_plan(
+    case_id: str,
+    candidate: dict[str, object],
+    *,
+    allow_stale_binding: bool = False,
+) -> PlanSelection:
+    if allow_stale_binding and (
+        not _sha256(candidate.get("source_object_sha256"))
+        or not _sha256(candidate.get("image_sha256"))
+    ):
+        raise BenchmarkFailure("invalid_response")
+    entries = [
+        (filename, plan)
+        for filename, plan in _case_plan_entries(case_id)
+        if plan.get("kind") == "candidate_decision"
+    ]
+    if any(not _valid_candidate_plan(plan) for _, plan in entries):
         raise BenchmarkFailure("invalid_plan")
-    if not plans:
+    if not entries:
         raise BenchmarkFailure("missing_plan")
     identity = [
-        plan
-        for plan in plans
+        (filename, plan)
+        for filename, plan in entries
         if all(
             plan.get(field) == candidate.get(field)
             for field in ("page_id", "candidate_id", "source_shape_id")
@@ -251,48 +296,129 @@ def _select_candidate_plan(
     ]
     if not identity:
         raise BenchmarkFailure("mismatched_plan")
+    if allow_stale_binding and len(identity) != 1:
+        raise BenchmarkFailure("duplicate_plan")
     matches = [
-        plan
-        for plan in identity
+        (filename, plan)
+        for filename, plan in identity
         if all(
             plan.get(field) == candidate.get(field)
             for field in ("source_object_sha256", "image_sha256")
         )
     ]
     if not matches:
-        raise BenchmarkFailure("stale_plan")
+        if allow_stale_binding:
+            filename, plan = identity[0]
+            rebound = {
+                **plan,
+                "source_object_sha256": candidate["source_object_sha256"],
+                "image_sha256": candidate["image_sha256"],
+            }
+            return PlanSelection(filename, plan, rebound)
+        raise BenchmarkFailure(
+            "stale_plan",
+            {
+                "stage": "candidate_plan",
+                "page_id": candidate.get("page_id"),
+                "candidate_id": candidate.get("candidate_id"),
+                "source_shape_id": candidate.get("source_shape_id"),
+                "actual_source_object_sha256": candidate.get(
+                    "source_object_sha256"
+                ),
+                "actual_image_sha256": candidate.get("image_sha256"),
+                "expected_bindings": [
+                    {
+                        "source_object_sha256": plan["source_object_sha256"],
+                        "image_sha256": plan["image_sha256"],
+                    }
+                    for _, plan in identity
+                ],
+            },
+        )
     if len(matches) != 1:
         raise BenchmarkFailure("duplicate_plan")
-    return matches[0]
+    filename, plan = matches[0]
+    return PlanSelection(filename, plan, None)
 
 
-def _select_component_plan(
-    case_id: str, request: dict[str, object]
+def _select_candidate_plan(
+    case_id: str, candidate: dict[str, object]
 ) -> dict[str, object]:
-    plans = [plan for plan in _case_plans(case_id) if plan.get("kind") == "component_plan"]
-    if any(not _valid_component_plan(plan) for plan in plans):
+    return _resolve_candidate_plan(case_id, candidate).plan
+
+
+def _resolve_component_plan(
+    case_id: str,
+    request: dict[str, object],
+    *,
+    allow_stale_binding: bool = False,
+) -> PlanSelection:
+    if allow_stale_binding and (
+        not _sha256(request.get("request_sha256"))
+        or not _sha256(request.get("graph_sha256"))
+    ):
+        raise BenchmarkFailure("invalid_response")
+    entries = [
+        (filename, plan)
+        for filename, plan in _case_plan_entries(case_id)
+        if plan.get("kind") == "component_plan"
+    ]
+    if any(not _valid_component_plan(plan) for _, plan in entries):
         raise BenchmarkFailure("invalid_plan")
-    if not plans:
+    if not entries:
         raise BenchmarkFailure("missing_plan")
     identity = [
-        plan
-        for plan in plans
+        (filename, plan)
+        for filename, plan in entries
         if plan.get("page_id") == request.get("page_id")
         and plan.get("repair_round") == request.get("repair_round")
     ]
     if not identity:
         raise BenchmarkFailure("mismatched_plan")
+    if allow_stale_binding and len(identity) != 1:
+        raise BenchmarkFailure("duplicate_plan")
     matches = [
-        plan
-        for plan in identity
+        (filename, plan)
+        for filename, plan in identity
         if plan.get("request_sha256") == request.get("request_sha256")
         and plan.get("graph_sha256") == request.get("graph_sha256")
     ]
     if not matches:
-        raise BenchmarkFailure("stale_plan")
+        if allow_stale_binding:
+            filename, plan = identity[0]
+            rebound = {
+                **plan,
+                "request_sha256": request["request_sha256"],
+                "graph_sha256": request["graph_sha256"],
+            }
+            return PlanSelection(filename, plan, rebound)
+        raise BenchmarkFailure(
+            "stale_plan",
+            {
+                "stage": "component_plan",
+                "page_id": request.get("page_id"),
+                "repair_round": request.get("repair_round"),
+                "actual_request_sha256": request.get("request_sha256"),
+                "actual_graph_sha256": request.get("graph_sha256"),
+                "expected_bindings": [
+                    {
+                        "request_sha256": plan["request_sha256"],
+                        "graph_sha256": plan["graph_sha256"],
+                    }
+                    for _, plan in identity
+                ],
+            },
+        )
     if len(matches) != 1:
         raise BenchmarkFailure("duplicate_plan")
-    return matches[0]
+    filename, plan = matches[0]
+    return PlanSelection(filename, plan, None)
+
+
+def _select_component_plan(
+    case_id: str, request: dict[str, object]
+) -> dict[str, object]:
+    return _resolve_component_plan(case_id, request).plan
 
 
 def _component_binding(response: dict[str, object], run_dir: Path) -> dict[str, object]:
@@ -597,6 +723,8 @@ def run_case(
     *,
     workspace: Path,
     command: Command = run_command,
+    allow_stale_bindings: bool = False,
+    plan_observer: Callable[[str, dict[str, object], bool], None] | None = None,
 ) -> BenchmarkCaseResult:
     case_id = case.get("id")
     kind = case.get("kind")
@@ -653,7 +781,18 @@ def run_case(
                 break
             if not isinstance(candidate, dict):
                 raise BenchmarkFailure("invalid_response")
-            plan = _select_candidate_plan(case_id, candidate)
+            selection = _resolve_candidate_plan(
+                case_id,
+                candidate,
+                allow_stale_binding=allow_stale_bindings,
+            )
+            plan = selection.rebound_plan or selection.plan
+            if allow_stale_bindings and plan_observer is not None:
+                plan_observer(
+                    selection.filename,
+                    plan,
+                    selection.rebound_plan is not None,
+                )
             identity = tuple(
                 plan[field]
                 for field in (
@@ -701,7 +840,18 @@ def run_case(
         if identity in used_requests:
             raise BenchmarkFailure("stale_plan")
         used_requests.add(identity)
-        plan = _select_component_plan(case_id, request)
+        selection = _resolve_component_plan(
+            case_id,
+            request,
+            allow_stale_binding=allow_stale_bindings,
+        )
+        plan = selection.rebound_plan or selection.plan
+        if allow_stale_bindings and plan_observer is not None:
+            plan_observer(
+                selection.filename,
+                plan,
+                selection.rebound_plan is not None,
+            )
         sequence += 1
         _record_component(command, plan, run_dir, workspace, sequence)
         summary = _call(command, ["run", "execute", str(run_dir)], cwd=workspace)
@@ -1137,6 +1287,453 @@ def compare_baseline(
     }
 
 
+def _select_manifest_cases(
+    cases: list[dict[str, object]], case_ids: list[str]
+) -> list[dict[str, object]]:
+    if (
+        not case_ids
+        or any(
+            not isinstance(case_id, str)
+            or _IDENTIFIER.fullmatch(case_id) is None
+            for case_id in case_ids
+        )
+        or len(set(case_ids)) != len(case_ids)
+    ):
+        raise BenchmarkFailure("invalid_case_selection")
+    requested = set(case_ids)
+    selected = [case for case in cases if case["id"] in requested]
+    if len(selected) != len(requested):
+        raise BenchmarkFailure("invalid_case_selection")
+    return selected
+
+
+def _write_json_exclusive(path: Path, value: dict[str, object]) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode(
+        "utf-8"
+    ) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+
+
+def run_shard_manifest(
+    manifest_path: Path,
+    *,
+    case_ids: list[str],
+    workspace: Path,
+    report_path: Path,
+    constraints_path: Path = RUNTIME_CONSTRAINTS,
+    repeat: int = 3,
+    case_runner: Callable[..., BenchmarkCaseResult] = run_case,
+    command: Command = run_command,
+) -> dict[str, object]:
+    if type(repeat) is not int or repeat != 3:
+        raise BenchmarkFailure("invalid_repeat")
+    cases, manifest_sha256 = _load_batch_cases(manifest_path)
+    selected = _select_manifest_cases(cases, case_ids)
+    constraints_hash = canonical_text_sha256(constraints_path)
+    environment = benchmark_environment()
+    workspace = workspace.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    attempts: list[dict[str, object]] = []
+    for index in range(1, repeat + 1):
+        repeat_workspace = workspace / f"repeat-{index:02d}"
+        repeat_workspace.mkdir()
+        for case in selected:
+            started = time.perf_counter()
+            try:
+                result = case_runner(
+                    case, workspace=repeat_workspace, command=command
+                )
+                _validate_batch_case(case, result)
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "passed",
+                    "duration_ms": result.duration_ms,
+                    "pages": result.pages,
+                }
+            except BenchmarkFailure as error:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": str(error),
+                    "duration_ms": max(
+                        0, int((time.perf_counter() - started) * 1000)
+                    ),
+                }
+                if error.details is not None:
+                    attempt["diagnostics"] = error.details
+            except Exception:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": "conversion_failed",
+                    "duration_ms": max(
+                        0, int((time.perf_counter() - started) * 1000)
+                    ),
+                }
+            attempts.append(attempt)
+
+    failed = sum(attempt["status"] != "passed" for attempt in attempts)
+    report = {
+        "schema_version": 1,
+        "report_kind": "shard",
+        "status": "passed" if failed == 0 else "failed",
+        "manifest_sha256": manifest_sha256,
+        "constraints_sha256": constraints_hash,
+        "environment": environment,
+        "repeat": repeat,
+        "selected_case_ids": sorted(case["id"] for case in selected),
+        "attempts": attempts,
+        "totals": {
+            "cases": len(selected),
+            "attempts": len(attempts),
+            "pages": sum(case["page_count"] for case in selected) * repeat,
+            "failed_attempts": failed,
+        },
+    }
+    if failed == 0:
+        report["performance"] = aggregate_performance(attempts)
+    _write_json_exclusive(report_path, report)
+    return report
+
+
+def run_diagnostic_manifest(
+    manifest_path: Path,
+    *,
+    case_ids: list[str],
+    workspace: Path,
+    report_path: Path,
+    plans_output: Path,
+    constraints_path: Path = RUNTIME_CONSTRAINTS,
+    repeat: int = 3,
+    case_runner: Callable[..., BenchmarkCaseResult] = run_case,
+    command: Command = run_command,
+) -> dict[str, object]:
+    if type(repeat) is not int or repeat != 3:
+        raise BenchmarkFailure("invalid_repeat")
+    plans_output = plans_output.resolve()
+    if plans_output.exists():
+        raise BenchmarkFailure("invalid_workspace")
+    cases, manifest_sha256 = _load_batch_cases(manifest_path)
+    selected = _select_manifest_cases(cases, case_ids)
+    constraints_hash = canonical_text_sha256(constraints_path)
+    environment = benchmark_environment()
+    workspace = workspace.resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    observed_plans: dict[str, dict[str, object]] = {}
+    rebound_plans: dict[str, dict[str, object]] = {}
+
+    def observe_plan(
+        filename: str, plan: dict[str, object], rebound: bool = True
+    ) -> None:
+        if Path(filename).name != filename or not filename.endswith(".json"):
+            raise BenchmarkFailure("invalid_plan")
+        existing = observed_plans.get(filename)
+        if existing is None:
+            observed_plans[filename] = plan
+        elif existing != plan:
+            raise BenchmarkFailure("unstable_plan_binding")
+        if rebound:
+            rebound_plans[filename] = plan
+
+    attempts: list[dict[str, object]] = []
+    for index in range(1, repeat + 1):
+        repeat_workspace = workspace / f"repeat-{index:02d}"
+        repeat_workspace.mkdir()
+        for case in selected:
+            started = time.perf_counter()
+            try:
+                result = case_runner(
+                    case,
+                    workspace=repeat_workspace,
+                    command=command,
+                    allow_stale_bindings=True,
+                    plan_observer=observe_plan,
+                )
+                _validate_batch_case(case, result)
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "passed",
+                    "duration_ms": result.duration_ms,
+                    "pages": result.pages,
+                }
+            except BenchmarkFailure as error:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": str(error),
+                    "duration_ms": max(
+                        0, int((time.perf_counter() - started) * 1000)
+                    ),
+                }
+                if error.details is not None:
+                    attempt["diagnostics"] = error.details
+            except Exception:
+                attempt = {
+                    "case_id": case["id"],
+                    "repeat": index,
+                    "status": "failed",
+                    "error_type": "conversion_failed",
+                    "duration_ms": max(
+                        0, int((time.perf_counter() - started) * 1000)
+                    ),
+                }
+            attempts.append(attempt)
+
+    failed = sum(attempt["status"] != "passed" for attempt in attempts)
+    report = {
+        "schema_version": 1,
+        "report_kind": "diagnostic",
+        "status": "diagnostic_complete" if failed == 0 else "failed",
+        "manifest_sha256": manifest_sha256,
+        "constraints_sha256": constraints_hash,
+        "environment": environment,
+        "repeat": repeat,
+        "selected_case_ids": [case["id"] for case in selected],
+        "attempts": attempts,
+        "totals": {
+            "cases": len(selected),
+            "attempts": len(attempts),
+            "pages": sum(case["page_count"] for case in selected) * repeat,
+            "failed_attempts": failed,
+        },
+    }
+    if failed == 0:
+        report["performance"] = aggregate_performance(attempts)
+
+    report_path = report_path.resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2).encode(
+        "utf-8"
+    ) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(report_path, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(payload)
+
+    if failed == 0:
+        try:
+            plans_output.mkdir()
+            for filename, plan in sorted(rebound_plans.items()):
+                plan_payload = json.dumps(
+                    plan, ensure_ascii=False, sort_keys=True, indent=2
+                ).encode("utf-8") + b"\n"
+                descriptor = os.open(plans_output / filename, flags, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(plan_payload)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception:
+            raise BenchmarkFailure("invalid_workspace") from None
+    return report
+
+
+def _load_report(path: Path, error_type: str) -> dict[str, object]:
+    try:
+        report = _strict_json(
+            _read_regular_file(path, _JSON_LIMIT, require_single_link=True),
+            _JSON_LIMIT,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise BenchmarkFailure(error_type) from None
+    if not isinstance(report, dict):
+        raise BenchmarkFailure(error_type)
+    return report
+
+
+def _validated_shard_attempts(
+    report: dict[str, object],
+    *,
+    cases: dict[str, dict[str, object]],
+    manifest_hash: str,
+    constraints_hash: str,
+) -> tuple[list[dict[str, object]], dict[str, str]]:
+    fields = {
+        "schema_version",
+        "report_kind",
+        "status",
+        "manifest_sha256",
+        "constraints_sha256",
+        "environment",
+        "repeat",
+        "selected_case_ids",
+        "attempts",
+        "totals",
+        "performance",
+    }
+    environment_fields = {"os", "architecture", "python", "device"}
+    environment = report.get("environment")
+    selected = report.get("selected_case_ids")
+    attempts = report.get("attempts")
+    totals = report.get("totals")
+    if (
+        set(report) != fields
+        or type(report.get("schema_version")) is not int
+        or report["schema_version"] != 1
+        or report.get("report_kind") != "shard"
+        or report.get("status") != "passed"
+        or report.get("manifest_sha256") != manifest_hash
+        or report.get("constraints_sha256") != constraints_hash
+        or report.get("repeat") != 3
+        or not isinstance(environment, dict)
+        or set(environment) != environment_fields
+        or not all(
+            isinstance(environment[field], str) and bool(environment[field])
+            for field in environment_fields
+        )
+        or not isinstance(selected, list)
+        or not selected
+        or selected != sorted(selected)
+        or len(set(selected)) != len(selected)
+        or any(case_id not in cases for case_id in selected)
+        or not isinstance(attempts, list)
+        or not isinstance(totals, dict)
+    ):
+        raise BenchmarkFailure("invalid_shard_report")
+
+    expected_attempts = {
+        (case_id, repeat) for case_id in selected for repeat in (1, 2, 3)
+    }
+    observed_attempts: set[tuple[str, int]] = set()
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or set(attempt) != {
+            "case_id",
+            "repeat",
+            "status",
+            "duration_ms",
+            "pages",
+        }:
+            raise BenchmarkFailure("invalid_shard_report")
+        case_id = attempt.get("case_id")
+        repeat = attempt.get("repeat")
+        duration = attempt.get("duration_ms")
+        pages = attempt.get("pages")
+        if (
+            case_id not in selected
+            or type(repeat) is not int
+            or repeat not in (1, 2, 3)
+            or attempt.get("status") != "passed"
+            or type(duration) is not int
+            or duration < 0
+            or not isinstance(pages, list)
+        ):
+            raise BenchmarkFailure("invalid_shard_report")
+        identity = (case_id, repeat)
+        if identity in observed_attempts:
+            raise BenchmarkFailure("invalid_shard_report")
+        observed_attempts.add(identity)
+        expected_pages = cases[case_id]["expected_pages"]
+        if len(pages) != len(expected_pages):
+            raise BenchmarkFailure("invalid_shard_report")
+        for page_number, (page, expected) in enumerate(
+            zip(pages, expected_pages), start=1
+        ):
+            if (
+                not isinstance(page, dict)
+                or page.get("page_id") != f"page_{page_number:03d}"
+                or page.get("status") != expected["expected_status"]
+            ):
+                raise BenchmarkFailure("invalid_shard_report")
+    expected_totals = {
+        "cases": len(selected),
+        "attempts": len(expected_attempts),
+        "pages": sum(cases[case_id]["page_count"] for case_id in selected) * 3,
+        "failed_attempts": 0,
+    }
+    if (
+        observed_attempts != expected_attempts
+        or totals != expected_totals
+        or report.get("performance") != aggregate_performance(attempts)
+    ):
+        raise BenchmarkFailure("invalid_shard_report")
+    return attempts, environment
+
+
+def aggregate_shard_reports(
+    manifest_path: Path,
+    *,
+    shard_report_paths: list[Path],
+    constraints_path: Path,
+    baseline_path: Path,
+    report_path: Path,
+) -> dict[str, object]:
+    cases_list, manifest_hash = _load_batch_cases(manifest_path)
+    if (
+        len(cases_list) != 10
+        or sum(case["page_count"] for case in cases_list) != 14
+        or len(shard_report_paths) != 5
+    ):
+        raise BenchmarkFailure("invalid_shard_report")
+    cases = {case["id"]: case for case in cases_list}
+    constraints_hash = canonical_text_sha256(constraints_path)
+    all_attempts: list[dict[str, object]] = []
+    covered: set[str] = set()
+    shared_environment: dict[str, str] | None = None
+    for path in shard_report_paths:
+        shard = _load_report(path, "invalid_shard_report")
+        attempts, environment = _validated_shard_attempts(
+            shard,
+            cases=cases,
+            manifest_hash=manifest_hash,
+            constraints_hash=constraints_hash,
+        )
+        selected = set(shard["selected_case_ids"])
+        if covered & selected:
+            raise BenchmarkFailure("invalid_shard_report")
+        covered.update(selected)
+        if shared_environment is None:
+            shared_environment = environment
+        elif environment != shared_environment:
+            raise BenchmarkFailure("invalid_shard_report")
+        all_attempts.extend(attempts)
+    if covered != set(cases) or shared_environment is None:
+        raise BenchmarkFailure("invalid_shard_report")
+
+    case_order = {case["id"]: index for index, case in enumerate(cases_list)}
+    all_attempts.sort(key=lambda item: (item["repeat"], case_order[item["case_id"]]))
+    performance = aggregate_performance(all_attempts)
+    report = {
+        "schema_version": 1,
+        "report_kind": "official",
+        "status": "passed",
+        "manifest_sha256": manifest_hash,
+        "constraints_sha256": constraints_hash,
+        "environment": shared_environment,
+        "repeat": 3,
+        "attempts": all_attempts,
+        "totals": {
+            "cases": 10,
+            "attempts": 30,
+            "pages": 42,
+            "failed_attempts": 0,
+        },
+        "performance": performance,
+    }
+    baseline = _load_report(baseline_path, "invalid_baseline")
+    comparison = compare_baseline(
+        report,
+        baseline,
+        constraints_sha256=constraints_hash,
+        environment=shared_environment,
+    )
+    if comparison.get("status") != "passed":
+        raise BenchmarkFailure("performance_gate")
+    report["performance_comparison"] = comparison
+    _write_json_exclusive(report_path, report)
+    return report
+
+
 def run_manifest(
     manifest_path: Path,
     *,
@@ -1177,6 +1774,8 @@ def run_manifest(
                     "error_type": str(error),
                     "duration_ms": max(0, int((time.perf_counter() - started) * 1000)),
                 }
+                if error.details is not None:
+                    attempt["diagnostics"] = error.details
             except Exception:
                 attempt = {
                     "case_id": case["id"],
@@ -1215,21 +1814,82 @@ def run_manifest(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=("official-shard", "diagnostic-shard", "aggregate"),
+    )
     parser.add_argument("--manifest", required=True, type=Path)
-    parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--workspace", type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--case-id", action="append", dest="case_ids")
+    parser.add_argument("--plans-output", type=Path)
+    parser.add_argument("--shard-report", action="append", type=Path)
+    parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--constraints", type=Path)
     arguments = parser.parse_args(argv)
+    if arguments.mode == "official-shard":
+        if (
+            arguments.workspace is None
+            or not arguments.case_ids
+            or arguments.plans_output is not None
+            or arguments.shard_report is not None
+            or arguments.baseline is not None
+            or arguments.constraints is not None
+        ):
+            parser.error("invalid official-shard arguments")
+    elif arguments.mode == "diagnostic-shard":
+        if (
+            arguments.workspace is None
+            or not arguments.case_ids
+            or arguments.plans_output is None
+            or arguments.shard_report is not None
+            or arguments.baseline is not None
+            or arguments.constraints is not None
+        ):
+            parser.error("invalid diagnostic-shard arguments")
+    elif (
+        arguments.workspace is not None
+        or arguments.case_ids is not None
+        or arguments.plans_output is not None
+        or not arguments.shard_report
+        or arguments.baseline is None
+        or arguments.constraints is None
+    ):
+        parser.error("invalid aggregate arguments")
     try:
-        report = run_manifest(
-            arguments.manifest,
-            workspace=arguments.workspace,
-            report_path=arguments.report,
-            repeat=3,
-        )
+        if arguments.mode == "official-shard":
+            report = run_shard_manifest(
+                arguments.manifest,
+                case_ids=arguments.case_ids,
+                workspace=arguments.workspace,
+                report_path=arguments.report,
+                repeat=3,
+            )
+            success_status = "passed"
+        elif arguments.mode == "diagnostic-shard":
+            report = run_diagnostic_manifest(
+                arguments.manifest,
+                case_ids=arguments.case_ids,
+                workspace=arguments.workspace,
+                report_path=arguments.report,
+                plans_output=arguments.plans_output,
+                repeat=3,
+            )
+            success_status = "diagnostic_complete"
+        else:
+            report = aggregate_shard_reports(
+                arguments.manifest,
+                shard_report_paths=arguments.shard_report,
+                constraints_path=arguments.constraints,
+                baseline_path=arguments.baseline,
+                report_path=arguments.report,
+            )
+            success_status = "passed"
     except BenchmarkFailure as error:
         print(str(error), file=sys.stderr)
         return 1
-    return 0 if report["status"] == "passed" else 1
+    return 0 if report["status"] == success_status else 1
 
 
 if __name__ == "__main__":

@@ -37,6 +37,31 @@ EXPECTED_RELEASE_MATRIX = {
     for os_name in ("ubuntu-latest", "windows-latest", "macos-latest")
     for version in ("3.10", "3.11", "3.12")
 }
+CORE_SHARD_MATRIX = [
+    {
+        "shard": "mixed-long",
+        "case_args": "--case-id pptx-mixed-screenshot-candidates",
+    },
+    {
+        "shard": "pdf-network",
+        "case_args": "--case-id pdf-rotated-page --case-id image-thin-line-network",
+    },
+    {
+        "shard": "visual-heavy",
+        "case_args": "--case-id image-icon-matrix --case-id image-dark-poster",
+    },
+    {
+        "shard": "charts",
+        "case_args": "--case-id image-flowchart --case-id image-combo-chart",
+    },
+    {
+        "shard": "remaining",
+        "case_args": (
+            "--case-id image-bilingual-dashboard --case-id image-tiny-element-table "
+            "--case-id image-non-16-9-infographic"
+        ),
+    },
+]
 FAST_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML "
     "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch"
@@ -480,6 +505,12 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
                     "type": "boolean",
                     "default": False,
                 },
+                "run_core_benchmark_diagnostic": {
+                    "description": "Run protected v0.2 core benchmark diagnostic",
+                    "required": True,
+                    "type": "boolean",
+                    "default": False,
+                },
                 "run_core_benchmark": {
                     "description": "Run protected v0.2 core 14-page benchmark",
                     "required": True,
@@ -495,6 +526,8 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
     assert set(jobs) == {
         "build-distribution",
         "core-benchmark",
+        "core-benchmark-aggregate",
+        "core-benchmark-diagnostic",
         "installed-package",
         "real-model-smoke",
     }
@@ -670,99 +703,124 @@ def test_release_gate_real_models_are_protected_and_explicitly_opt_in() -> None:
     ]
 
 
-def test_release_gate_core_benchmark_is_protected_strict_and_uploads_report() -> None:
-    job = _release_workflow()["jobs"]["core-benchmark"]
-    assert job["runs-on"] == "windows-latest"
-    assert job["timeout-minutes"] == 360
-    assert _needs(job) == {"build-distribution"}
-    assert job["if"] == "${{ inputs.run_core_benchmark }}"
-    assert job["environment"] == "core-benchmark"
-    assert "strategy" not in job
-    assert [_step_id(step) for step in _steps(job)] == [
-        "Require protected core-benchmark approval",
-        "actions/checkout",
-        "actions/setup-python",
-        "actions/download-artifact",
-        "Locate the built wheel",
-        "Bootstrap pinned build runtime",
-        "Install built wheel",
-        "Install PaddleOCR runtime",
-        "Install Tesseract OCR",
-        "Check installed dependencies",
-        "Install runtime models",
-        "Run doctor",
-        "Run v0.2 core 14-page benchmark",
-        "actions/upload-artifact",
-    ]
-    approval = _named_step(job, "Require protected core-benchmark approval")
-    assert approval["shell"] == "pwsh"
-    assert approval["env"] == {
-        "IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED": (
-            "${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}"
-        )
-    }
-    assert _commands(approval) == [
-        "if ($env:IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED -ne 'approved') {",
-        "  throw 'IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED must be approved'",
-        "}",
-    ]
-    assert _action_step(job, "actions/setup-python")["with"] == {
-        "python-version": "3.12"
-    }
-    assert _action_step(job, "actions/download-artifact")["with"] == {
-        "name": "distribution",
-        "path": "${{ runner.temp }}/distribution",
-    }
-    assert _commands(_named_step(job, "Locate the built wheel")) == (
-        LOCATE_WHEEL_COMMANDS
-    )
-    assert _commands(_named_step(job, "Bootstrap pinned build runtime")) == [
-        BOOTSTRAP_BUILD_RUNTIME_COMMAND
-    ]
-    assert _commands(_named_step(job, "Install built wheel")) == [
-        INSTALL_WHEEL_COMMAND
-    ]
-    assert _commands(_named_step(job, "Install PaddleOCR runtime")) == [
+def test_release_gate_core_benchmark_uses_protected_balanced_windows_shards() -> None:
+    jobs = _release_workflow()["jobs"]
+    for job_name, input_name, run_step in (
         (
-            'python -m pip install --constraint constraints/runtime.txt '
-            '"paddleocr==3.7.0" "paddlepaddle==3.3.1" '
-            '"PaddleX==3.7.2" "PyYAML==6.0.2"'
+            "core-benchmark-diagnostic",
+            "run_core_benchmark_diagnostic",
+            "Run diagnostic core benchmark shard",
         ),
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-    ]
-    assert _commands(_named_step(job, "Install Tesseract OCR")) == [
-        "choco install tesseract --version=5.3.1.20230401 --yes --no-progress",
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-        (
-            "python -m pip install --constraint constraints/runtime.txt "
-            "pytesseract==0.3.13"
-        ),
-        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-        '"$env:ProgramFiles\\Tesseract-OCR" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append',
-    ]
-    assert _commands(_named_step(job, "Check installed dependencies")) == [
-        "python -m pip check"
-    ]
-    assert _commands(_named_step(job, "Install runtime models")) == [
-        "image2editable models install runtime --yes"
-    ]
-    assert _commands(_named_step(job, "Run doctor")) == ["image2editable doctor"]
-    benchmark = _named_step(job, "Run v0.2 core 14-page benchmark")
-    assert benchmark["working-directory"] == "${{ runner.temp }}"
-    assert _commands(benchmark) == [
+        ("core-benchmark", "run_core_benchmark", "Run strict core benchmark shard"),
+    ):
+        job = jobs[job_name]
+        assert job["runs-on"] == "windows-latest"
+        assert job["timeout-minutes"] == 360
+        assert _needs(job) == {"build-distribution"}
+        assert job["if"] == "${{ inputs." + input_name + " }}"
+        assert job["environment"] == "core-benchmark"
+        assert job["strategy"] == {
+            "fail-fast": False,
+            "matrix": {"include": CORE_SHARD_MATRIX},
+        }
+        approval = _named_step(job, "Require protected core-benchmark approval")
+        assert approval["shell"] == "pwsh"
+        assert approval["env"] == {
+            "IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED": (
+                "${{ secrets.IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED }}"
+            )
+        }
+        assert _commands(approval) == [
+            "if ($env:IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED -ne 'approved') {",
+            "  throw 'IMAGE2EDITABLE_CORE_BENCHMARK_APPROVED must be approved'",
+            "}",
+        ]
+        assert _commands(_named_step(job, "Bootstrap pinned build runtime")) == [
+            BOOTSTRAP_BUILD_RUNTIME_COMMAND
+        ]
+        assert _commands(_named_step(job, "Install built wheel")) == [
+            INSTALL_WHEEL_COMMAND
+        ]
+        assert _commands(_named_step(job, "Install runtime models")) == [
+            "image2editable models install runtime --yes"
+        ]
+        assert _commands(_named_step(job, "Run doctor")) == ["image2editable doctor"]
+        assert _named_step(job, run_step)["working-directory"] == "${{ runner.temp }}"
+
+    diagnostic = jobs["core-benchmark-diagnostic"]
+    assert _commands(_named_step(diagnostic, "Run diagnostic core benchmark shard")) == [
         (
             'python "${{ github.workspace }}/scripts/release_benchmark.py" '
+            '--mode diagnostic-shard '
+            '--manifest "${{ github.workspace }}/benchmarks/release/'
+            'core-v0.2-manifest.json" '
+            '--workspace "${{ runner.temp }}/core-v0.2-diagnostic/workspace" '
+            '--report "${{ runner.temp }}/core-v0.2-diagnostic/report.json" '
+            '--plans-output "${{ runner.temp }}/core-v0.2-diagnostic/plans" '
+            "${{ matrix.case_args }}"
+        )
+    ]
+    diagnostic_upload = _action_step(diagnostic, "actions/upload-artifact")
+    assert diagnostic_upload["if"] == "${{ always() }}"
+    assert diagnostic_upload["with"] == {
+        "name": "core-v0.2-diagnostic-${{ matrix.shard }}",
+        "path": (
+            "${{ runner.temp }}/core-v0.2-diagnostic/report.json\n"
+            "${{ runner.temp }}/core-v0.2-diagnostic/plans/*.json\n"
+        ),
+        "if-no-files-found": "error",
+    }
+
+    official = jobs["core-benchmark"]
+    assert _commands(_named_step(official, "Run strict core benchmark shard")) == [
+        (
+            'python "${{ github.workspace }}/scripts/release_benchmark.py" '
+            '--mode official-shard '
             '--manifest "${{ github.workspace }}/benchmarks/release/'
             'core-v0.2-manifest.json" '
             '--workspace "${{ runner.temp }}/core-v0.2-benchmark/workspace" '
-            '--report "${{ runner.temp }}/core-v0.2-benchmark/report.json"'
+            '--report "${{ runner.temp }}/core-v0.2-benchmark/report.json" '
+            "${{ matrix.case_args }}"
         )
     ]
+    official_upload = _action_step(official, "actions/upload-artifact")
+    assert official_upload["if"] == "${{ always() }}"
+    assert official_upload["with"] == {
+        "name": "core-v0.2-shard-${{ matrix.shard }}",
+        "path": "${{ runner.temp }}/core-v0.2-benchmark/report.json",
+        "if-no-files-found": "error",
+    }
+
+
+def test_release_gate_core_aggregate_publishes_only_the_strict_official_report() -> None:
+    job = _release_workflow()["jobs"]["core-benchmark-aggregate"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert _needs(job) == {"core-benchmark"}
+    assert job["if"] == "${{ inputs.run_core_benchmark }}"
+    assert "environment" not in job
+    assert [_step_id(step) for step in _steps(job)] == [
+        "actions/checkout",
+        "actions/setup-python",
+        "actions/download-artifact",
+        "Aggregate strict core benchmark shards",
+        "actions/upload-artifact",
+    ]
+    download = _action_step(job, "actions/download-artifact")
+    assert download["with"] == {
+        "pattern": "core-v0.2-shard-*",
+        "path": "${{ runner.temp }}/core-v0.2-shards",
+        "merge-multiple": False,
+    }
+    aggregate = _named_step(job, "Aggregate strict core benchmark shards")
+    assert aggregate["shell"] == "python"
+    assert "--mode" in aggregate["run"]
+    assert '"aggregate"' in aggregate["run"]
+    assert "BASELINE.json" in aggregate["run"]
+    assert "constraints/runtime.txt" in aggregate["run"]
     upload = _action_step(job, "actions/upload-artifact")
-    assert upload["if"] == "${{ always() }}"
     assert upload["with"] == {
         "name": "core-v0.2-benchmark-report",
-        "path": "${{ runner.temp }}/core-v0.2-benchmark/report.json",
+        "path": "${{ runner.temp }}/core-v0.2-official/report.json",
         "if-no-files-found": "error",
     }
 
@@ -772,11 +830,21 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
     jobs = workflow["jobs"]
     core_job = jobs["core-benchmark"]
     core_upload = _action_step(core_job, "actions/upload-artifact")
+    diagnostic_job = jobs["core-benchmark-diagnostic"]
+    diagnostic_upload = _action_step(diagnostic_job, "actions/upload-artifact")
+    aggregate_job = jobs["core-benchmark-aggregate"]
     for mapping in _all_mappings(workflow):
         assert "continue-on-error" not in mapping
         if not any(
             mapping is allowed
-            for allowed in (jobs["real-model-smoke"], core_job, core_upload)
+            for allowed in (
+                jobs["real-model-smoke"],
+                diagnostic_job,
+                diagnostic_upload,
+                core_job,
+                core_upload,
+                aggregate_job,
+            )
         ):
             assert "if" not in mapping
     for job in jobs.values():
@@ -789,6 +857,7 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
             if step.get("name") in {
                 "Locate the built wheel",
                 "Verify installed model smoke",
+                "Aggregate strict core benchmark shards",
             }:
                 assert step.get("shell") == "python"
             elif step.get("name") == "Require protected core-benchmark approval":

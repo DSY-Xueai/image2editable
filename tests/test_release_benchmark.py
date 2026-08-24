@@ -234,47 +234,39 @@ CORE_CASE_IDS = (
     "pdf-rotated-page",
     "pptx-mixed-screenshot-candidates",
 )
-EXPECTED_README = """# 发布质量语料契约
+EXPECTED_README = """# v0.2 核心 14 页 benchmark
 
-本目录包含固定的 30 页扩展语料库：18 个输入，包括 12 张图片、3 个双页 PDF、3 个四页 PPTX。v0.2 发布门禁使用 `core-v0.2-manifest.json` 中的 10 个完整 case、14 页，不裁剪多页输入。
+这里保存 v0.2 发布门禁使用的固定语料、manifest 和审核过的 Host plans。核心语料由 10 个完整 case、14 页组成：8 张图片、2 页旋转 PDF 和 4 页 mixed screenshot candidates PPTX。多页文件会整份测试，不截取其中几页。
 
-## 覆盖范围
+仓库还保留了用于补充覆盖的生成语料，记录在 `manifest.json` 中；它不属于 v0.2 核心通过条件，也不会被写进核心完成率。
 
-图片固定覆盖：中英双语仪表盘、密集参数对比、人物信息卡、四段时间线、柱线组合图、流程图、图标矩阵、浅色文字渐变页、细线网络图、小元素表格、深色海报、非 16:9 信息图。
+## 覆盖内容
 
-PDF 分别覆盖双页不同尺寸、旋转、高 DPI。PPTX 分别覆盖 `image_only`、`mixed_native`、`mixed_screenshot_candidates`。
+核心图片覆盖中英双语仪表盘、柱线组合图、流程图、图标矩阵、细线网络图、小元素表格、深色海报和非 16:9 信息图。PDF 用来验证旋转页面，PPTX 用来验证 native objects 与 screenshot candidates 混合存在时的处理。
 
-v0.2 核心 14 页由 8 张图片、完整 2 页 `pdf-rotated-page` 和完整 4 页 `pptx-mixed-screenshot-candidates` 组成。`manifest.json` 继续描述 18 case / 30 页扩展语料库，不作为 v0.2 核心完成声明。
+输入由项目脚本生成，manifest 记录 `source=project-generated` 和 `license=CC0-1.0`。每个输入的 bytes 与 SHA-256 都已固定，运行时会重新校验。
 
-## 来源与许可
+## Release Gate 如何运行
 
-输入由项目脚本公开生成，manifest 固定记录 `source=project-generated`、`license=CC0-1.0`。所有 case 默认使用已支持的 `agent_provider=host`。
+真实模型 benchmark 不放进普通 push CI，需要在受保护的 Release Gate 中显式开启。GitHub-hosted Windows 会把 10 个 case 分成 5 组并行运行；每个 case 仍执行 3 次独立重复。分片只缩短等待时间，不减少测试次数，也不放宽任何质量门禁。
 
-## 字体来源与许可
+五份分片报告会由独立的聚合步骤重新校验。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
 
-生成器仅使用仓库内完整、未修改的 Google Fonts `Noto Sans SC` variable TTF；常规文本固定选择 `Regular`，既有粗体文本选择同一文件中的 `Bold` 实例，文件位于 `fonts/NotoSansSC[wght].ttf`。字体按 `fonts/OFL.txt` 中的 SIL Open Font License 1.1 分发，固定来源为 `google/fonts` commit `e1118da94a8cb00cf6d06cdac9ef13eb1e5c6ab7`；字体本身不是 CC0。字体渲染所得 benchmark 输入继续按 CC0-1.0 发布，manifest 中的许可字段不适用于捆绑字体文件。
+当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
 
-## 阶段状态
+Release Gate 只上传 JSON 报告，以及 diagnostic 产生的候选 plan JSON。模型文件、模型缓存、输入副本、运行 workspace 和生成的 PPTX 都不会上传为 benchmark 工件，也不会提交到 Git。
 
-当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。Windows/Python 3.12 的本地基线报告记录了核心 14 页的 3 次独立重复；正式发布仍需通过受保护的 Release Gate。30 页集合始终称为扩展语料库，未完成的扩展页面不得计入核心成功率。
+## 严格通过标准
 
-严格 Host runner 使用已安装发行包和固定 plans。v0.2 核心命令为：
+每页必须达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`。两类对象独立计数；已经转为原生文本的 OCR 内容不能继续留在 raster 中重复计数。
 
-```bash
-python -m scripts.release_benchmark --manifest benchmarks/release/core-v0.2-manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/benchmark-report.json
-```
+所有页面还必须满足预期状态，并同时达到 0 warning、0 fallback、0 unexplained pixels 和 0 quality violations。缺少质量文件、plan 不匹配、任一重复失败或性能回归都会使门禁失败。
 
-完整扩展语料命令为：
+## 字体与重新生成
 
-```bash
-python -m scripts.release_benchmark --manifest benchmarks/release/manifest.json --workspace <fresh-workspace> --report <fresh-workspace>/extended-benchmark-report.json
-```
+生成器使用仓库中的 Google Fonts `Noto Sans SC` variable TTF：`fonts/NotoSansSC[wght].ttf`。字体按 `fonts/OFL.txt` 中的 SIL Open Font License 1.1 分发，固定来源为 `google/fonts` commit `e1118da94a8cb00cf6d06cdac9ef13eb1e5c6ab7`。字体本身不是 CC0；由它渲染出的 benchmark 输入按 CC0-1.0 发布。
 
-runner 固定执行 3 次独立重复；每次都重新校验输入 hash、按真实 request/graph hash 选择 plans，并拒绝非 `validated` 页面、warning、fallback、缺失/异常质量工件。报告只有三次重复的所有 case 都通过时才是 `status: passed`；任一失败会保留失败类型并返回非零退出码。模型缓存和 run 证据留在本机，不进入 Git。
-
-## 通过标准
-
-每页必须分别达到 manifest 中的最小非文本视觉组件数 `min_visual_components` 和最小原生文本框数 `min_text_boxes`；两类对象独立计数，已转为原生文本的 OCR 内容不得重复保留在 raster 中凑视觉组件数。页面还必须为 `validated`，并同时满足 0 warning、0 unexplained pixels、0 quality violations。v0.2 核心 10 个 case、14 页必须三次重复全部通过；真实模型 runner 不放入普通 push CI，而由受保护的发布门禁显式执行并保存报告。核心完成不代表 30 页扩展语料已全部完成。
+可以运行 `python scripts/build_release_corpus.py <output-root>` 在一个不存在的目录中重新生成语料。同一环境的两次 fresh generation 要求 PNG RGB 像素一致；不同平台只承诺格式、尺寸、页数和对象 inventory 等明确语义一致，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。
 """
 
 EXPECTED_INPUT_NAMES = {Path(spec[2]).name for spec in CASE_SPECS}
@@ -1100,6 +1092,7 @@ def test_release_runner_locks_the_complete_host_protocol(
     run_execute_count = 0
     agent_next_count = 0
     expected_component_plan: dict[str, object] | None = None
+    observed_plans: list[tuple[str, bool]] = []
 
     def fake_command(
         arguments: list[str], *, cwd: Path
@@ -1211,6 +1204,10 @@ def test_release_runner_locks_the_complete_host_protocol(
         _runner_case(),
         workspace=tmp_path / "workspace",
         command=fake_command,
+        allow_stale_bindings=True,
+        plan_observer=lambda filename, plan, rebound: observed_plans.append(
+            (filename, rebound)
+        ),
     )
 
     run_dir = str((tmp_path / "workspace" / "pptx-mixed-screenshot-candidates" / "run").resolve())
@@ -1258,6 +1255,10 @@ def test_release_runner_locks_the_complete_host_protocol(
     assert result.run_dir == run_dir
     assert result.pages == [{"page_id": "page_001", "status": "validated"}]
     assert type(result.duration_ms) is int and result.duration_ms >= 0
+    assert observed_plans == [
+        ("pptx-mixed-screenshot-candidates--candidate.json", False),
+        ("pptx-mixed-screenshot-candidates--component.json", False),
+    ]
 
 
 def test_release_runner_rejects_invalid_capability_png_size(tmp_path: Path) -> None:
@@ -1506,6 +1507,156 @@ def test_release_runner_rejects_stale_or_mismatched_component_plan(
 
     with pytest.raises(runner.BenchmarkFailure, match=message):
         runner._select_component_plan("pptx-mixed-screenshot-candidates", _component_request())
+
+
+def test_release_runner_reports_safe_component_stale_plan_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    stale = {**_component_plan(), "request_sha256": "5" * 64}
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=stale)
+
+    with pytest.raises(runner.BenchmarkFailure, match="stale_plan") as caught:
+        runner._select_component_plan(
+            "pptx-mixed-screenshot-candidates", _component_request()
+        )
+
+    assert caught.value.details == {
+        "stage": "component_plan",
+        "page_id": "page_001",
+        "repair_round": 1,
+        "actual_request_sha256": "3" * 64,
+        "actual_graph_sha256": "4" * 64,
+        "expected_bindings": [
+            {"request_sha256": "5" * 64, "graph_sha256": "4" * 64}
+        ],
+    }
+
+
+def test_release_runner_reports_safe_candidate_stale_plan_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    stale = {**_candidate_plan(), "source_object_sha256": "5" * 64}
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json", stale
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="stale_plan") as caught:
+        runner._select_candidate_plan(
+            "pptx-mixed-screenshot-candidates", _candidate_response()["candidate"]
+        )
+
+    assert caught.value.details == {
+        "stage": "candidate_plan",
+        "page_id": "page_001",
+        "candidate_id": "candidate_001",
+        "source_shape_id": "2",
+        "actual_source_object_sha256": "1" * 64,
+        "actual_image_sha256": "2" * 64,
+        "expected_bindings": [
+            {"source_object_sha256": "5" * 64, "image_sha256": "2" * 64}
+        ],
+    }
+
+
+def test_release_runner_diagnostic_rebinds_only_component_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    stale = {**_component_plan(), "request_sha256": "5" * 64}
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=stale)
+
+    selection = runner._resolve_component_plan(
+        "pptx-mixed-screenshot-candidates",
+        _component_request(),
+        allow_stale_binding=True,
+    )
+
+    assert selection.filename == (
+        "pptx-mixed-screenshot-candidates--component.json"
+    )
+    assert selection.plan == stale
+    assert selection.rebound_plan == {
+        **stale,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+    }
+    assert selection.rebound_plan["actions"] == stale["actions"]
+
+
+def test_release_runner_diagnostic_rebinds_only_candidate_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    stale = {**_candidate_plan(), "source_object_sha256": "5" * 64}
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json", stale
+    )
+
+    selection = runner._resolve_candidate_plan(
+        "pptx-mixed-screenshot-candidates",
+        _candidate_response()["candidate"],
+        allow_stale_binding=True,
+    )
+
+    assert selection.filename == "pptx-mixed-screenshot-candidates--candidate.json"
+    assert selection.plan == stale
+    assert selection.rebound_plan == {
+        **stale,
+        "source_object_sha256": "1" * 64,
+        "image_sha256": "2" * 64,
+    }
+    assert selection.rebound_plan["decision"] == stale["decision"]
+
+
+def test_release_runner_diagnostic_rejects_duplicate_identity_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "request_sha256": "5" * 64},
+    )
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--component-copy.json",
+        {**_component_plan(), "request_sha256": "6" * 64},
+    )
+
+    with pytest.raises(runner.BenchmarkFailure, match="duplicate_plan"):
+        runner._resolve_component_plan(
+            "pptx-mixed-screenshot-candidates",
+            _component_request(),
+            allow_stale_binding=True,
+        )
+
+
+def test_release_runner_diagnostic_rejects_invalid_rebound_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "request_sha256": "5" * 64},
+    )
+    request = {**_component_request(), "request_sha256": "not-a-sha256"}
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_response"):
+        runner._resolve_component_plan(
+            "pptx-mixed-screenshot-candidates",
+            request,
+            allow_stale_binding=True,
+        )
 
 
 def test_release_runner_rejects_duplicate_and_hardlinked_plans(
@@ -1810,6 +1961,480 @@ def test_release_runner_manifest_repeats_three_times_and_writes_report(
     assert len(calls) == 3
     assert len(set(calls)) == 3
     assert json.loads(report_path.read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_release_runner_manifest_persists_only_structured_failure_details(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    details = {
+        "stage": "component_plan",
+        "page_id": "page_001",
+        "repair_round": 1,
+        "actual_request_sha256": "3" * 64,
+        "actual_graph_sha256": "4" * 64,
+        "expected_bindings": [
+            {"request_sha256": "5" * 64, "graph_sha256": "6" * 64}
+        ],
+    }
+
+    def stale_case(*_: object, **__: object) -> runner.BenchmarkCaseResult:
+        raise runner.BenchmarkFailure("stale_plan", details)
+
+    report = runner.run_manifest(
+        manifest,
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        case_runner=stale_case,
+    )
+
+    assert report["status"] == "failed"
+    assert [attempt["diagnostics"] for attempt in report["attempts"]] == [
+        details,
+        details,
+        details,
+    ]
+
+
+def test_release_diagnostic_writes_stable_rebound_plans_without_official_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    rebound = {
+        **_component_plan(),
+        "request_sha256": "7" * 64,
+        "graph_sha256": "8" * 64,
+    }
+    environment = {
+        "os": "Windows",
+        "architecture": "AMD64",
+        "python": "3.12",
+        "device": "cpu",
+    }
+    monkeypatch.setattr(runner, "benchmark_environment", lambda: environment)
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("package==1\n", encoding="utf-8")
+    calls: list[tuple[bool, Path]] = []
+
+    def diagnostic_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_stale_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        calls.append((allow_stale_bindings, workspace))
+        plan_observer("image-one--component-round-01.json", rebound)
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            9,
+        )
+
+    plans_output = tmp_path / "rebound-plans"
+    report = runner.run_diagnostic_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        plans_output=plans_output,
+        constraints_path=constraints,
+        case_runner=diagnostic_case,
+    )
+
+    assert report["report_kind"] == "diagnostic"
+    assert report["status"] == "diagnostic_complete"
+    assert report["status"] != "passed"
+    assert report["repeat"] == 3
+    assert report["selected_case_ids"] == ["image-one"]
+    assert report["constraints_sha256"] == runner.canonical_text_sha256(constraints)
+    assert report["environment"] == environment
+    assert report["totals"] == {
+        "cases": 1,
+        "attempts": 3,
+        "pages": 3,
+        "failed_attempts": 0,
+    }
+    assert report["performance"] == {
+        "repeat_total_duration_ms": [9, 9, 9],
+        "median_total_duration_ms": 9,
+        "case_median_duration_ms": {"image-one": 9},
+    }
+    assert len(calls) == 3
+    assert all(allow_stale is True for allow_stale, _ in calls)
+    assert len({workspace for _, workspace in calls}) == 3
+    stored = json.loads(
+        (plans_output / "image-one--component-round-01.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored == rebound
+
+
+def test_release_diagnostic_rejects_unstable_rebound_plan_across_repeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    attempt = 0
+
+    def unstable_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_stale_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        nonlocal attempt
+        attempt += 1
+        plan_observer(
+            "image-one--component-round-01.json",
+            {**_component_plan(), "request_sha256": str(attempt) * 64},
+        )
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            9,
+        )
+
+    plans_output = tmp_path / "rebound-plans"
+    report = runner.run_diagnostic_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        plans_output=plans_output,
+        case_runner=unstable_case,
+    )
+
+    assert report["status"] == "failed"
+    assert report["totals"]["failed_attempts"] == 2
+    assert report["attempts"][1]["error_type"] == "unstable_plan_binding"
+    assert not plans_output.exists()
+
+
+def test_release_diagnostic_checks_exact_bindings_without_exporting_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    monkeypatch.setattr(
+        runner,
+        "benchmark_environment",
+        lambda: {
+            "os": "Windows",
+            "architecture": "AMD64",
+            "python": "3.12",
+            "device": "cpu",
+        },
+    )
+
+    def exact_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_stale_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        plan_observer("image-one--component-round-01.json", _component_plan(), False)
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            9,
+        )
+
+    plans_output = tmp_path / "plans"
+    report = runner.run_diagnostic_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        plans_output=plans_output,
+        case_runner=exact_case,
+    )
+
+    assert report["status"] == "diagnostic_complete"
+    assert plans_output.is_dir()
+    assert list(plans_output.iterdir()) == []
+
+
+def test_release_diagnostic_rejects_existing_plans_output_before_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    plans_output = tmp_path / "plans"
+    plans_output.mkdir()
+
+    with pytest.raises(runner.BenchmarkFailure, match="invalid_workspace"):
+        runner.run_diagnostic_manifest(
+            manifest,
+            case_ids=["image-one"],
+            workspace=tmp_path / "runs",
+            report_path=tmp_path / "report.json",
+            plans_output=plans_output,
+        )
+
+    assert not (tmp_path / "report.json").exists()
+
+
+def test_release_official_shard_runs_only_selected_cases_and_keeps_manifest_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    environment = {
+        "os": "Windows",
+        "architecture": "AMD64",
+        "python": "3.12",
+        "device": "cpu",
+    }
+    monkeypatch.setattr(runner, "benchmark_environment", lambda: environment)
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("package==1\n", encoding="utf-8")
+
+    def shard_case(
+        case: dict[str, object], *, workspace: Path, command: object
+    ) -> runner.BenchmarkCaseResult:
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            11,
+        )
+
+    report = runner.run_shard_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "shard.json",
+        constraints_path=constraints,
+        case_runner=shard_case,
+    )
+
+    assert report["report_kind"] == "shard"
+    assert report["status"] == "passed"
+    assert report["manifest_sha256"] == runner.manifest_sha256(manifest)
+    assert report["constraints_sha256"] == runner.canonical_text_sha256(constraints)
+    assert report["environment"] == environment
+    assert report["selected_case_ids"] == ["image-one"]
+    assert report["totals"] == {
+        "cases": 1,
+        "attempts": 3,
+        "pages": 3,
+        "failed_attempts": 0,
+    }
+
+
+_CORE_SHARDS = [
+    ["pptx-mixed-screenshot-candidates"],
+    ["pdf-rotated-page", "image-thin-line-network"],
+    ["image-icon-matrix", "image-dark-poster"],
+    ["image-flowchart", "image-combo-chart"],
+    [
+        "image-bilingual-dashboard",
+        "image-tiny-element-table",
+        "image-non-16-9-infographic",
+    ],
+]
+
+
+def _write_core_shard_reports(
+    tmp_path: Path,
+    runner: object,
+) -> tuple[list[Path], Path, Path, dict[str, object]]:
+    manifest = _core_manifest()
+    cases = {case["id"]: case for case in manifest["cases"]}
+    manifest_hash = runner.manifest_sha256(CORE_MANIFEST_PATH)
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("package==1\n", encoding="utf-8")
+    constraints_hash = runner.canonical_text_sha256(constraints)
+    environment = {
+        "os": "Windows",
+        "architecture": "AMD64",
+        "python": "3.12",
+        "device": "cpu",
+    }
+    paths = []
+    for shard_index, case_ids in enumerate(_CORE_SHARDS, start=1):
+        attempts = []
+        for repeat in (1, 2, 3):
+            for case_id in case_ids:
+                case = cases[case_id]
+                attempts.append(
+                    {
+                        "case_id": case_id,
+                        "repeat": repeat,
+                        "status": "passed",
+                        "duration_ms": 10,
+                        "pages": [
+                            {
+                                "page_id": f"page_{page_number:03d}",
+                                "status": page["expected_status"],
+                            }
+                            for page_number, page in enumerate(
+                                case["expected_pages"], start=1
+                            )
+                        ],
+                    }
+                )
+        report = {
+            "schema_version": 1,
+            "report_kind": "shard",
+            "status": "passed",
+            "manifest_sha256": manifest_hash,
+            "constraints_sha256": constraints_hash,
+            "environment": environment,
+            "repeat": 3,
+            "selected_case_ids": sorted(case_ids),
+            "attempts": attempts,
+            "totals": {
+                "cases": len(case_ids),
+                "attempts": len(attempts),
+                "pages": sum(cases[case_id]["page_count"] for case_id in case_ids)
+                * 3,
+                "failed_attempts": 0,
+            },
+            "performance": runner.aggregate_performance(attempts),
+        }
+        path = tmp_path / f"shard-{shard_index}.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        paths.append(path)
+    baseline = {
+        "schema_version": 1,
+        "benchmark": "v0.2-core-14-page",
+        "manifest_sha256": manifest_hash,
+        "constraints_sha256": constraints_hash,
+        "environment": environment,
+        "median_total_duration_ms": 1000,
+        "case_median_duration_ms": {case_id: 100 for case_id in cases},
+    }
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+    return paths, constraints, baseline_path, baseline
+
+
+def test_release_aggregate_accepts_exact_five_shard_core_evidence(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    reports, constraints, baseline_path, baseline = _write_core_shard_reports(
+        tmp_path, runner
+    )
+
+    report = runner.aggregate_shard_reports(
+        CORE_MANIFEST_PATH,
+        shard_report_paths=reports,
+        constraints_path=constraints,
+        baseline_path=baseline_path,
+        report_path=tmp_path / "official.json",
+    )
+
+    assert report["report_kind"] == "official"
+    assert report["status"] == "passed"
+    assert report["manifest_sha256"] == baseline["manifest_sha256"]
+    assert report["totals"] == {
+        "cases": 10,
+        "attempts": 30,
+        "pages": 42,
+        "failed_attempts": 0,
+    }
+    assert report["performance_comparison"]["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_manifest",
+        "wrong_constraints",
+        "mixed_environment",
+        "wrong_kind",
+        "failed_attempt",
+        "duplicate_repeat",
+        "wrong_totals",
+        "missing_shard",
+        "duplicate_case_coverage",
+    ],
+)
+def test_release_aggregate_rejects_incomplete_or_mixed_shard_evidence(
+    tmp_path: Path, mutation: str
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    reports, constraints, baseline_path, _ = _write_core_shard_reports(tmp_path, runner)
+    payload = json.loads(reports[0].read_text(encoding="utf-8"))
+    if mutation == "wrong_manifest":
+        payload["manifest_sha256"] = "f" * 64
+    elif mutation == "wrong_constraints":
+        payload["constraints_sha256"] = "f" * 64
+    elif mutation == "mixed_environment":
+        payload["environment"] = {**payload["environment"], "device": "cuda"}
+    elif mutation == "wrong_kind":
+        payload["report_kind"] = "diagnostic"
+    elif mutation == "failed_attempt":
+        payload["attempts"][0]["status"] = "failed"
+    elif mutation == "duplicate_repeat":
+        payload["attempts"][1]["repeat"] = payload["attempts"][0]["repeat"]
+    elif mutation == "wrong_totals":
+        payload["totals"]["pages"] += 1
+    elif mutation == "duplicate_case_coverage":
+        other = json.loads(reports[1].read_text(encoding="utf-8"))
+        other["selected_case_ids"] = payload["selected_case_ids"]
+        reports[1].write_text(json.dumps(other), encoding="utf-8")
+    if mutation != "missing_shard":
+        reports[0].write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        reports.pop()
+
+    with pytest.raises(runner.BenchmarkFailure):
+        runner.aggregate_shard_reports(
+            CORE_MANIFEST_PATH,
+            shard_report_paths=reports,
+            constraints_path=constraints,
+            baseline_path=baseline_path,
+            report_path=tmp_path / "official.json",
+        )
 
 
 def test_release_runner_manifest_identity_is_line_ending_independent(
@@ -2157,31 +2782,115 @@ def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(
         )
 
 
-def test_release_runner_manifest_cli_returns_failure_gate(
+def test_release_runner_cli_routes_explicit_modes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = importlib.import_module("scripts.release_benchmark")
     manifest = _batch_manifest(tmp_path)
-    captured: dict[str, object] = {}
+    captured: list[tuple[str, Path, dict[str, object]]] = []
 
-    def fake_manifest(path: Path, **kwargs: object) -> dict[str, object]:
-        captured["path"] = path
-        captured.update(kwargs)
-        return {"status": "failed"}
+    def fake_shard(path: Path, **kwargs: object) -> dict[str, object]:
+        captured.append(("official-shard", path, kwargs))
+        return {"status": "passed"}
 
-    monkeypatch.setattr(runner, "run_manifest", fake_manifest)
+    def fake_diagnostic(path: Path, **kwargs: object) -> dict[str, object]:
+        captured.append(("diagnostic-shard", path, kwargs))
+        return {"status": "diagnostic_complete"}
+
+    def fake_aggregate(path: Path, **kwargs: object) -> dict[str, object]:
+        captured.append(("aggregate", path, kwargs))
+        return {"status": "passed"}
+
+    monkeypatch.setattr(runner, "run_shard_manifest", fake_shard)
+    monkeypatch.setattr(runner, "run_diagnostic_manifest", fake_diagnostic)
+    monkeypatch.setattr(runner, "aggregate_shard_reports", fake_aggregate)
     assert (
         runner.main(
             [
+                "--mode",
+                "official-shard",
                 "--manifest",
                 str(manifest),
                 "--workspace",
                 str(tmp_path / "runs"),
                 "--report",
                 str(tmp_path / "report.json"),
+                "--case-id",
+                "image-one",
             ]
         )
-        == 1
+        == 0
     )
-    assert captured["path"] == manifest
-    assert captured["repeat"] == 3
+    assert (
+        runner.main(
+            [
+                "--mode",
+                "diagnostic-shard",
+                "--manifest",
+                str(manifest),
+                "--workspace",
+                str(tmp_path / "diagnostic-runs"),
+                "--report",
+                str(tmp_path / "diagnostic.json"),
+                "--plans-output",
+                str(tmp_path / "plans"),
+                "--case-id",
+                "image-one",
+            ]
+        )
+        == 0
+    )
+    shard_reports = [tmp_path / f"shard-{index}.json" for index in range(5)]
+    aggregate_arguments = [
+        "--mode",
+        "aggregate",
+        "--manifest",
+        str(manifest),
+        "--report",
+        str(tmp_path / "official.json"),
+        "--baseline",
+        str(tmp_path / "baseline.json"),
+        "--constraints",
+        str(tmp_path / "constraints.txt"),
+    ]
+    for shard_report in shard_reports:
+        aggregate_arguments.extend(["--shard-report", str(shard_report)])
+    assert runner.main(aggregate_arguments) == 0
+    assert [mode for mode, _, _ in captured] == [
+        "official-shard",
+        "diagnostic-shard",
+        "aggregate",
+    ]
+    assert all(path == manifest for _, path, _ in captured)
+    assert captured[0][2]["case_ids"] == ["image-one"]
+    assert captured[0][2]["repeat"] == 3
+    assert captured[1][2]["plans_output"] == tmp_path / "plans"
+    assert captured[2][2]["shard_report_paths"] == shard_reports
+
+
+def test_release_runner_cli_requires_mode_specific_arguments(tmp_path: Path) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    with pytest.raises(SystemExit):
+        runner.main(
+            [
+                "--manifest",
+                str(tmp_path / "manifest.json"),
+                "--report",
+                str(tmp_path / "report.json"),
+            ]
+        )
+    with pytest.raises(SystemExit):
+        runner.main(
+            [
+                "--mode",
+                "diagnostic-shard",
+                "--manifest",
+                str(tmp_path / "manifest.json"),
+                "--workspace",
+                str(tmp_path / "runs"),
+                "--report",
+                str(tmp_path / "report.json"),
+                "--case-id",
+                "image-one",
+            ]
+        )
