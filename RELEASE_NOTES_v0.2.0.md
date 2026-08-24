@@ -3,7 +3,7 @@
 ## 发布范围
 
 - v0.2 核心门禁是严格的 14 页 benchmark：8 个图片页、`pdf-rotated-page` 的完整 2 页、`pptx-mixed-screenshot-candidates` 的完整 4 页。
-- 核心集合包含 10 个 case；runner 执行 3 次独立重复，共 42 个 page attempt。2026-08-23 在 Windows AMD64、Python 3.12、CUDA 环境通过，`failed_attempts=0`。
+- 核心集合包含 10 个 case；runner 执行 3 次独立重复，共 42 个 page attempt。本地 Windows AMD64、Python 3.12、CUDA 基线报告已通过，`failed_attempts=0`；正式发布仍需通过受保护的 GitHub Release Gate。
 - 三次总耗时中位数为 3,623,083 ms；逐 case 中位数记录在 `benchmarks/release/BASELINE.json`，并绑定核心 manifest 与 `constraints/runtime.txt` 的 SHA-256。
 - 原 30 页集合保留为扩展语料库。本版本不宣称 30 页扩展集合已全部严格重放，扩展未完成页不计入核心成功率。
 
@@ -23,8 +23,8 @@ python -m scripts.release_benchmark \
 ## 运行与发布边界
 
 - `image2editable --version` 从已安装 distribution metadata 读取版本；当前版本为 `0.2.0`。
-- `image2editable doctor` 用于检查本地依赖；`--agent-local` 使用内置 Qwen 路线，旧的 OpenAI-compatible 服务使用明确的 `local-service` 模式。
-- 发行包契约矩阵覆盖 Windows、Linux、macOS 的 Python 3.10–3.12；真实性能基线绑定本次 Windows AMD64/Python 3.12/CUDA 环境。CI 发布门禁在 Ubuntu/Tesseract 上执行契约检查，并由受保护环境执行核心 benchmark。
+- `image2editable doctor` 用于检查本地依赖；用户自行部署的 OpenAI-compatible 视觉模型通过明确的 `local-service` 模式接入。
+- 发行包契约矩阵覆盖 Windows、Linux、macOS 的 Python 3.10–3.12；真实性能基线绑定本次 Windows AMD64/Python 3.12/CUDA 环境。CI 在跨平台 runner 上执行发行包契约检查，并由受保护的 Windows/Python 3.12 环境执行核心 benchmark。
 - 本地模型权重、模型缓存、临时 workspace、benchmark report 和私有运行证据不进入 wheel 或 Git。
 - PowerPoint 原生对象、截图候选和 OCR 文本的边界保持严格校验；不以 warning、fallback 或未解释像素换取通过。
 

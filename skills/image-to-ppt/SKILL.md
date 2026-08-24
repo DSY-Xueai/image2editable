@@ -12,9 +12,9 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 - 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
 - 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
 - LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
-- 若 OCR 不可用，先让我选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `pip install paddleocr paddlepaddle`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `pip install pytesseract`）。**未经我确认，不要安装任何 OCR。**
-- 完整仓库或已安装 `image2editable` 产品包时，OCR 就绪后先让我确认，再依次运行 `image2editable models install runtime` 和 `image2editable doctor`。前者下载并校验固定的 SAM、LaMa、DINO runtime receipt；取消时不得下载。
-- 需要随包 Local Agent 时，再依次运行 `python -m pip install ".[agent-local]"`、`image2editable models install agent` 和 `image2editable doctor --agent-local`；模型下载仍须先获得我的确认。
+- 若 OCR 不可用，先让用户选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `python -m pip install pytesseract`）。**未经用户确认，不要安装任何 OCR。**
+- 完整仓库或已安装 `image2editable` 产品包时，OCR 就绪后先让用户确认，再依次运行 `image2editable models install runtime` 和 `image2editable doctor`。前者下载并校验固定的 SAM、LaMa、DINO runtime receipt；取消时不得下载。
+- 如果用户明确选择 `local`，再依次运行 `python -m pip install ".[agent-local]"`、`image2editable models install agent` 和 `image2editable doctor --agent-local`；模型下载仍须先获得用户确认，仓库不包含模型权重。
 - 纯 standalone 环境中，独立 skill 不假设该包存在，也不运行 `image2editable doctor`。开始转换前，必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径；`SAM2_MODEL`、`LAMA_MODEL` 必须指向文件，`GROUNDING_DINO_MODEL` 必须指向目录，并运行最小只读预检：
 
   ```bash
@@ -74,11 +74,11 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
 
-Host 可能把诊断图交给宿主服务处理，敏感内容应选择完全离线的 Local。三种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
+Host 可能把诊断图交给宿主服务处理，敏感内容应选择用户已准备好的本地模型路径（`local` 或 `local-service`）。三种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
 
-`local` 由内置 Qwen 完成候选判断和组件计划，必须先安装 agent-local 依赖、固定模型和完整性凭据；任一预检或推理失败都停止，不回退到其他 Provider。
+`local` 使用用户自行安装并校验的 Qwen 完成候选判断和组件计划，必须先安装 agent-local 依赖、固定模型和完整性凭据；任一预检或推理失败都停止，不回退到其他 Provider。仓库和发行包不包含模型权重。
 
-只有我已经部署本地视觉模型服务时才选择 `local-service`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Local 或 Host。
+只有用户已经部署本地视觉模型服务时才选择 `local-service`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Local 或 Host。
 
 每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分决策。
 

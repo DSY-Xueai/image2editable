@@ -109,7 +109,6 @@ def _assert_benchmark_readme_contract(readme: str) -> None:
         "## 运行",
         "## 通过标准",
         "## 安全报告",
-        "## 私有语料",
         "## 结果解释",
     ]
     headings = [line for line in visible.splitlines() if line.startswith("#")]
@@ -140,6 +139,8 @@ def _assert_benchmark_readme_contract(readme: str) -> None:
 
     assert "10 个输入、14 页、3 条 routes" in sections["公开语料"]
     assert "8 张图片、3 页 PDF、3 页 mixed PPTX" in sections["公开语料"]
+    assert "维护者用来验证转换质量" in sections["环境前置"]
+    assert "benchmark/private/" not in visible
     assert "只有 `ready=true` 才运行真实 benchmark" in sections["环境前置"]
     assert "runner 不会自动下载模型" in sections["环境前置"]
     assert "输出目录必须尚不存在" in sections["运行"]
@@ -158,15 +159,6 @@ def _assert_benchmark_readme_contract(readme: str) -> None:
         "不包含任何绝对路径、URL、密钥、stderr 或异常正文"
         in sections["安全报告"]
     )
-    assert "benchmark/private/" in sections["私有语料"]
-    assert "不提交" in sections["私有语料"]
-    assert "相同的严格 manifest schema" in sections["私有语料"]
-    assert "固定的三 route 语义" in sections["私有语料"]
-    assert (
-        "重算每个 case 的 bytes 和 SHA-256，以及 corpus_sha256"
-        in sections["私有语料"]
-    )
-    assert "当前没有私有 manifest 生成器" in sections["私有语料"]
     assert "耗时只是本机事实，不代表其他机器或输入" in sections["结果解释"]
 
 

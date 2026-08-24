@@ -213,7 +213,7 @@ def test_local_service_provider_docs_are_unambiguous() -> None:
     assert "Qwen" not in english
     assert "`local-service` uses an OpenAI-compatible local service" in english
     assert "--agent-provider local-service" in english
-    assert "`local` 由内置 Qwen" in skill
+    assert "`local` 使用用户自行安装并校验的 Qwen" in skill
     assert "`local-service`" in skill
     assert "--agent-provider local-service" in skill
 

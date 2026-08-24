@@ -19,4 +19,4 @@ Do not include source images, PDFs, presentations, model caches, API keys, or ot
 
 ## Local Model and Host Data
 
-Local model files and conversion inputs stay on the user's machine and are not included in releases. Host Agent may send diagnostic artifacts to the configured host service. Use Local Agent for sensitive files.
+Local model files and conversion inputs stay on the user's machine and are not included in releases. Host Agent may send diagnostic artifacts to the configured host service. For sensitive files, use a local model service (`local-service`) that you control and verify that its endpoint stays within your environment.

@@ -20,7 +20,7 @@ v0.2 核心 14 页由 8 张图片、完整 2 页 `pdf-rotated-page` 和完整 4 
 
 ## 阶段状态
 
-当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。v0.2 核心 14 页 benchmark 已严格通过 3 次独立重复；30 页集合始终称为扩展语料库，尚未全部严格重放，未完成的扩展页面不得计入核心成功率。
+当前目录已包含全部 18 个输入文件，仓库 canonical bytes 由 manifest 中的真实 `sha256` 绑定。可用 `python scripts/build_release_corpus.py <output-root>` 在不存在的目录重新生成语料；同一环境的两次 fresh generation 要求 PNG RGB 像素一致，fresh 与仓库 canonical 只比较格式、尺寸、页数和对象 inventory 等明确语义。跨平台同样只承诺这些语义等价，不承诺 PNG 像素或 PDF/PPTX 字节完全相同。Windows/Python 3.12 的本地基线报告记录了核心 14 页的 3 次独立重复；正式发布仍需通过受保护的 Release Gate。30 页集合始终称为扩展语料库，未完成的扩展页面不得计入核心成功率。
 
 严格 Host runner 使用已安装发行包和固定 plans。v0.2 核心命令为：
 

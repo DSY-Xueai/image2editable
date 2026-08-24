@@ -6,13 +6,15 @@
 
 ## 环境前置
 
-先按项目根目录 README 准备 Local Agent 依赖、OCR、运行时模型、Agent 模型和本地视觉模型服务，然后运行：
+该目录是维护者用来验证转换质量的公开 benchmark，不是普通用户的日常转换入口。运行前请准备好 OCR、运行时模型和本机可用的视觉模型；runner 不会自动下载模型。
+
+准备完成后运行：
 
 ```bash
 image2editable doctor --agent-local
 ```
 
-只有 `ready=true` 才运行真实 benchmark。runner 不会自动下载模型；若报告缺少模型，按根目录 README 的“安装运行时模型”和“可选：安装 Local Agent”小节执行现有安装命令，再重新检查环境。
+只有 `ready=true` 才运行真实 benchmark。模型缺失或检查未通过时，先在本机完成对应安装，再重新检查环境。
 
 ## 运行
 
@@ -29,10 +31,6 @@ python scripts/benchmark_conversion.py --corpus benchmark/corpus --output-dir be
 ## 安全报告
 
 `benchmark-results/benchmark-report.json` 的主要字段为 `schema_version`、`status`、`corpus_sha256`、`environment`、`routes` 和 `totals`；每条 route 记录类型、输入数、页数、耗时、状态、安全错误类型、warning 页数、输出摘要和性能汇总。报告不包含任何绝对路径、URL、密钥、stderr 或异常正文。
-
-## 私有语料
-
-私有语料放在 `benchmark/private/`，且不提交。runner 要求相同的严格 manifest schema 和固定的三 route 语义，不能随便放入图片直接运行。当前没有私有 manifest 生成器；需要复制公开 manifest 的结构，保持 route ids 与页数契约，并重算每个 case 的 bytes 和 SHA-256，以及 corpus_sha256。
 
 ## 结果解释
 
