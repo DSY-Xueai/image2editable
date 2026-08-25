@@ -252,7 +252,7 @@ EXPECTED_README = """# v0.2 核心 14 页 benchmark
 
 五份分片报告会由独立的聚合步骤重新校验。v0.2 的正式参考环境固定为 GitHub-hosted Windows、AMD64、Python 3.12 和 CPU。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
 
-当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
+当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。若同一轮有多个已审核 plan，runner 会先选择与当前 request/graph 完整匹配的 plan；只有唯一旧 plan 时才允许更新绑定 hash。无论哪种情况，原有 decision、actions、parameters、confidence 和 evidence 都必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
 
 性能基线只能通过 `baseline-candidate` 从五份成功的三次重复 diagnostic 报告生成。该命令会重新检查固定的 CPU 环境、完整 case 和页数、manifest、依赖约束及性能数据；probe、失败报告、CUDA 报告、缺失或重复的 case 都不能生成候选基线。候选文件仍需审核并提交为 `BASELINE.json`，它本身不会把 diagnostic 变成正式通过。
 
@@ -1897,6 +1897,36 @@ def test_release_runner_diagnostic_rejects_duplicate_identity_plans(
         )
 
 
+def test_release_runner_diagnostic_prefers_exact_component_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "request_sha256": "5" * 64,
+                        "graph_sha256": "6" * 64},
+    )
+    exact = {**_component_plan()}
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--component-exact.json",
+        exact,
+    )
+
+    selection = runner._resolve_component_plan(
+        "pptx-mixed-screenshot-candidates",
+        _component_request(),
+        allow_stale_binding=True,
+    )
+
+    assert selection.filename == (
+        "pptx-mixed-screenshot-candidates--component-exact.json"
+    )
+    assert selection.plan == exact
+    assert selection.rebound_plan is None
+
+
 def test_release_runner_diagnostic_rejects_invalid_rebound_hashes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2503,8 +2533,13 @@ def test_release_diagnostic_rejects_unstable_rebound_plan_across_repeats(
     ) -> runner.BenchmarkCaseResult:
         nonlocal attempt
         attempt += 1
+        filename = (
+            "image-one--component-round-01.json"
+            if attempt == 1
+            else "image-one--component-round-01-alt.json"
+        )
         plan_observer(
-            "image-one--component-round-01.json",
+            filename,
             {**_component_plan(), "request_sha256": str(attempt) * 64},
         )
         run_dir = workspace / str(case["id"]) / "run"

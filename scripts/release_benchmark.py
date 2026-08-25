@@ -532,44 +532,44 @@ def _resolve_component_plan(
                 ],
             },
         )
-    if allow_stale_binding and len(identity) != 1:
-        raise BenchmarkFailure("duplicate_plan")
     matches = [
         (filename, plan)
         for filename, plan in identity
         if plan.get("request_sha256") == request.get("request_sha256")
         and plan.get("graph_sha256") == request.get("graph_sha256")
     ]
-    if not matches:
-        if allow_stale_binding:
-            filename, plan = identity[0]
-            rebound = {
-                **plan,
-                "request_sha256": request["request_sha256"],
-                "graph_sha256": request["graph_sha256"],
-            }
-            return PlanSelection(filename, plan, rebound)
-        raise BenchmarkFailure(
-            "stale_plan",
-            {
-                "stage": "component_plan",
-                "page_id": request.get("page_id"),
-                "repair_round": request.get("repair_round"),
-                "actual_request_sha256": request.get("request_sha256"),
-                "actual_graph_sha256": request.get("graph_sha256"),
-                "expected_bindings": [
-                    {
-                        "request_sha256": plan["request_sha256"],
-                        "graph_sha256": plan["graph_sha256"],
-                    }
-                    for _, plan in identity
-                ],
-            },
-        )
-    if len(matches) != 1:
+    if matches:
+        if len(matches) != 1:
+            raise BenchmarkFailure("duplicate_plan")
+        filename, plan = matches[0]
+        return PlanSelection(filename, plan, None)
+    if allow_stale_binding and len(identity) != 1:
         raise BenchmarkFailure("duplicate_plan")
-    filename, plan = matches[0]
-    return PlanSelection(filename, plan, None)
+    if allow_stale_binding:
+        filename, plan = identity[0]
+        rebound = {
+            **plan,
+            "request_sha256": request["request_sha256"],
+            "graph_sha256": request["graph_sha256"],
+        }
+        return PlanSelection(filename, plan, rebound)
+    raise BenchmarkFailure(
+        "stale_plan",
+        {
+            "stage": "component_plan",
+            "page_id": request.get("page_id"),
+            "repair_round": request.get("repair_round"),
+            "actual_request_sha256": request.get("request_sha256"),
+            "actual_graph_sha256": request.get("graph_sha256"),
+            "expected_bindings": [
+                {
+                    "request_sha256": plan["request_sha256"],
+                    "graph_sha256": plan["graph_sha256"],
+                }
+                for _, plan in identity
+            ],
+        },
+    )
 
 
 def _select_component_plan(
@@ -1612,12 +1612,20 @@ def run_diagnostic_manifest(
     workspace.mkdir(parents=True, exist_ok=True)
     observed_plans: dict[str, dict[str, object]] = {}
     rebound_plans: dict[str, dict[str, object]] = {}
+    expected_plan_filenames: set[str] | None = None
+    current_repeat_plan_filenames: set[str] = set()
 
     def observe_plan(
         filename: str, plan: dict[str, object], rebound: bool = True
     ) -> None:
         if Path(filename).name != filename or not filename.endswith(".json"):
             raise BenchmarkFailure("invalid_plan")
+        if (
+            expected_plan_filenames is not None
+            and filename not in expected_plan_filenames
+        ):
+            raise BenchmarkFailure("unstable_plan_binding")
+        current_repeat_plan_filenames.add(filename)
         existing = observed_plans.get(filename)
         if existing is None:
             observed_plans[filename] = plan
@@ -1628,6 +1636,7 @@ def run_diagnostic_manifest(
 
     attempts: list[dict[str, object]] = []
     for index in range(1, repeat + 1):
+        current_repeat_plan_filenames.clear()
         repeat_workspace = workspace / f"repeat-{index:02d}"
         repeat_workspace.mkdir()
         for case in selected:
@@ -1671,6 +1680,16 @@ def run_diagnostic_manifest(
                     ),
                 }
             attempts.append(attempt)
+        repeat_attempts = [
+            attempt for attempt in attempts if attempt["repeat"] == index
+        ]
+        if all(attempt["status"] == "passed" for attempt in repeat_attempts):
+            if expected_plan_filenames is None:
+                expected_plan_filenames = set(current_repeat_plan_filenames)
+            elif current_repeat_plan_filenames != expected_plan_filenames:
+                for attempt in repeat_attempts:
+                    attempt["status"] = "failed"
+                    attempt["error_type"] = "unstable_plan_binding"
 
     failed = sum(attempt["status"] != "passed" for attempt in attempts)
     probe = repeat == 1

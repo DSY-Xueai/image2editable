@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "bd9e5f7dcfc2488fbf66d7be8b00b3e4a79d2e89e370b5b2ffcc157e2bd2abde",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0004 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0011 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0006 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0010 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0012 is a complete independently movable circular visual."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0014 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0017 passes every component quality check after residual ownership."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "parent_0008"
+      ],
+      "parameters": {
+        "box": [
+          0.292,
+          0.91,
+          0.31,
+          0.935
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The only remaining residual is the missed 8 by 21 pixel footer slash inside this authenticated parent region."
+      ]
+    }
+  ],
+  "graph_sha256": "bca23a582625cf508e3f395afee94cbb9c86940b0007a5670e9541dadf377040"
+}
