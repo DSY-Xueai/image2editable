@@ -250,9 +250,11 @@ EXPECTED_README = """# v0.2 核心 14 页 benchmark
 
 真实模型 benchmark 不放进普通 push CI，需要在受保护的 Release Gate 中显式开启。GitHub-hosted Windows 会把 10 个 case 分成 5 组并行运行；每个 case 仍执行 3 次独立重复。分片只缩短等待时间，不减少测试次数，也不放宽任何质量门禁。
 
-五份分片报告会由独立的聚合步骤重新校验。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
+五份分片报告会由独立的聚合步骤重新校验。v0.2 的正式参考环境固定为 GitHub-hosted Windows、AMD64、Python 3.12 和 CPU。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
 
 当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
+
+性能基线只能通过 `baseline-candidate` 从五份成功的三次重复 diagnostic 报告生成。该命令会重新检查固定的 CPU 环境、完整 case 和页数、manifest、依赖约束及性能数据；probe、失败报告、CUDA 报告、缺失或重复的 case 都不能生成候选基线。候选文件仍需审核并提交为 `BASELINE.json`，它本身不会把 diagnostic 变成正式通过。
 
 如果只需要定位一次耗时较长的失败，可以把 diagnostic repeats 选为 `1`。这会运行相同的真实模型、页面检查和质量门禁，但只生成 `report_kind: probe` 的单次诊断报告，不计算性能，也不生成候选 plan。问题修复后仍需把 repeats 选回 `3`，完成三次严格 diagnostic。
 
@@ -499,24 +501,23 @@ def test_core_v020_pptx_replay_plans_match_authored_requests() -> None:
         ("page_002", "cc2d8482b48fd32f9920cf0092da88ad16d345821db0d0f98b11103b09871900", "7fa090a9f03eef6ec086214c8c9639197369193d850c72d51faa241b617c5c18"),
         ("page_003", "65eafdda6be280feceee856cda45b76a68e2e9cf1f82646abed7c1dadacab798", "0030b760342c417d22d0b35e2ece11c7adfc1c65dde72018bd93ed61f8e63c02"),
     ]
-    assert len(component_plans) == 12
+    assert len(component_plans) == 11
     assert all(runner._valid_component_plan(plan) for plan in component_plans)
     assert [
         (plan["page_id"], plan["repair_round"], plan["request_sha256"], plan["graph_sha256"])
         for plan in component_plans
     ] == [
-        ("page_001", 1, "622e4e59ab0f62ba295eefd16d240b38618069bdf4e52d7ebafe0fabbff53835", "42f08c104547a45dc2694e2306a2afc76c3ec26f06495d59ce3638267b733626"),
-        ("page_001", 2, "be91c362b75e8cb3b4a94984a80257a33a7bed9bdce58cbb3b6cf8eed74d4033", "7503bb59a081db29baa3fce27935b8418011c2e5d65a2813a44018a8b5e8924f"),
-        ("page_001", 3, "2f77692e4c7e1a7ac49ce64332557edaffb274590d1f69bcadbca7bc1884b32f", "988a6c1018a55752c3346e1b23821da6f4738cba39e72e10d271e7affc57389d"),
-        ("page_001", 4, "bee399fb3b3cc507f5b4f72af3161ff780bea96866c4a0d553a8ff8ffe812bef", "0817bea4220685dc3411d32cde1a66051552ec6647ed08970ba28576baa68bc8"),
-        ("page_001", 5, "cdb6ae30d30f97ae328f6fc2dddfc024867e5796ae67aa0de2a8ebad20f4ee11", "5550e55d4ecca889d7c9c9ed3a17133aaadc23d2b3170d971883054d4baefdef"),
-        ("page_002", 1, "ca36339fa03baf2b2f37ea555f343bb043d09b4a99fd493aab5f95d99c468738", "b2bbc450e787024447be02bb1845d2159ae39f879ae107fe6f80417d91d010ea"),
-        ("page_002", 2, "46e259990f740395e5f5ab195b5b2ae5880ce8a2bf54bf717a4a518c1298c905", "c61d3f6cf8f70811dd6c319ab4cfac7dc731df60b69e5d2ef2e566b11c2add60"),
-        ("page_002", 3, "2246b47bdae30acf5e093153ad725ea31269383e33d5051079bf6417bd324953", "aa1dade15edf9d8b05859fb2101cece20dabdf2e4e93875f9daaf7e5f0a8ce74"),
-        ("page_003", 1, "1ee94fe181e144b956a566a94bfc51be655f5455cb99905a65b06a8c427da9d4", "6502588807cbdafb0640f45f0ee254acd941f67a0d84aa75de2723fd602fce3e"),
-        ("page_003", 2, "fd761a1c2bda39e2a20ec8a32f2da4bad9d79daa49b24ca290f4fe62e781e95c", "0724cb513611ccf7d1dbc2c97be6803852d7f25639f59a6228464ae650c71752"),
-        ("page_003", 3, "324b7c47bf5801b5f9aa222c7f7eb778ca68aaf01780f1974f4c9878b86feca7", "f2966eb0ca1a6a18ba5a1a6d30af2f741779e777293b906cd1c27e48b619801b"),
-        ("page_003", 4, "a28a036e789f0327319d7a35fc35b08160c7fdb43058cb8edaee336dcdf61dab", "55b9fdab2d7b56beb271b4157286004b56c470c6db1ab297bc988186d8dc6342"),
+        ("page_001", 1, "737a04c2ef3060354a42c80d43f3826be72705d7d120b8efa2a54cc4e53d8904", "7f8b98b6bb2bea386dd1c86326af620e1802ea8b6967f955ed91cedd52f183fe"),
+        ("page_001", 2, "817ad903574bcd773bb9ba3f50cef2d9ae46b7bb5d488c1350063a0d913b2b08", "082f48152160fe3681c21b4de258f0e9f08002a4bba2e409540a8a6eab01f3ea"),
+        ("page_001", 3, "1ab6df6ce74cbd987c590a75e0a9f956aee1b2264d63a0a0e5e7bf77de825870", "833f3b89454baf9ffe281df18c2f7b5ee3729ed667b9ebc3ca0fba8eaefa0906"),
+        ("page_001", 4, "7ff212905be58ab0a835969a3adab19c2f972c128674f81371f919c3ee99e773", "0b3dd3793d96c842d9d53765dd4121ddad8bb82e4577b6ad6ac59570b3fc8621"),
+        ("page_002", 1, "15c78d54f7c7c621acb0322fdf7232a440542f1d9e3f0eb861a98edce8dbe2f6", "01d40e4217e8e456117748af368b159b5aada41dd012c960448d89315522b397"),
+        ("page_002", 2, "1c08eb6365ff2be02eb227a6a00fac3ed3559a9adb0164cf10382a948a95779b", "1e9b5dbb0ef5c58048b2441bddb56ee80a6c179bf7a5c508053bd3f8f3be8dd0"),
+        ("page_002", 3, "6e6030a8cddc86ab517ea8b4408062f4b713eede48e262e78a9bbbd3dd0f7287", "d03e4aa3733b0789bd2096a343185474b36009e75b91081434aae64739b40e94"),
+        ("page_003", 1, "6506835a9bd4dba8b9cbec39cf144b3a291abe89884ed0d9bc5feaf22bbdd7f9", "1e54699168b741b8ec096a21f59e587604253248d174c6d3c0d492d342bd2591"),
+        ("page_003", 2, "dee6f9638a8897884b73cb14b9dfa4d744c9cc22fadb74386251970d84fd0640", "1fe0e99c905f544666770966d9f0d6dfa850d7cb3ff5729620f8b89f67e5c974"),
+        ("page_003", 3, "588844c2d859645b0fb6037d45c1da557e9feb2a6dc37ee067e451e30f03fcd2", "ea9298dbfe3ab64b1dcdec578067afd706e1413fa641c2b51f14d75ee1191687"),
+        ("page_003", 4, "1d162b431b2536aeaeb6c4171d6c9652b3dcfa568c6efc9516b7dd8f1af95751", "52b751278b772dc8573ad6e3552b87468eb467acd9d481e7ac08055b796d6daf"),
     ]
 def test_release_manifest_cases_and_pages_use_exact_strict_fields() -> None:
     cases = _manifest()["cases"]
@@ -2341,6 +2342,58 @@ def test_release_diagnostic_writes_stable_rebound_plans_without_official_pass(
     assert stored == rebound
 
 
+def test_release_diagnostic_sorts_selected_case_ids_for_strict_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    second_case = dict(payload["cases"][0])
+    second_case["id"] = "image-alpha"
+    payload["cases"].append(second_case)
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+
+    def diagnostic_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_stale_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            9,
+        )
+
+    report = runner.run_diagnostic_manifest(
+        manifest,
+        case_ids=["image-one", "image-alpha"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "report.json",
+        plans_output=tmp_path / "plans",
+        case_runner=diagnostic_case,
+    )
+
+    assert report["selected_case_ids"] == ["image-alpha", "image-one"]
+    attempts = report["attempts"]
+    assert {(attempt["case_id"], attempt["repeat"]) for attempt in attempts} == {
+        (case_id, repeat)
+        for case_id in ("image-one", "image-alpha")
+        for repeat in (1, 2, 3)
+    }
+
+
 def test_release_probe_runs_once_without_performance_or_plan_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2702,6 +2755,107 @@ def _write_core_shard_reports(
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
     return paths, constraints, baseline_path, baseline
+
+
+def _write_core_diagnostic_reports(
+    tmp_path: Path,
+    runner: object,
+) -> tuple[list[Path], Path]:
+    paths, constraints, _, _ = _write_core_shard_reports(tmp_path, runner)
+    for path in paths:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        report["report_kind"] = "diagnostic"
+        report["status"] = "diagnostic_complete"
+        path.write_text(json.dumps(report), encoding="utf-8")
+    return paths, constraints
+
+
+def test_release_baseline_candidate_uses_only_complete_cpu_diagnostics(
+    tmp_path: Path,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    reports, constraints = _write_core_diagnostic_reports(tmp_path, runner)
+
+    candidate = runner.create_baseline_candidate(
+        CORE_MANIFEST_PATH,
+        shard_report_paths=reports,
+        constraints_path=constraints,
+        report_path=tmp_path / "baseline-candidate.json",
+    )
+
+    assert candidate == {
+        "schema_version": 1,
+        "benchmark": "v0.2-core-14-page",
+        "manifest_sha256": runner.manifest_sha256(CORE_MANIFEST_PATH),
+        "constraints_sha256": runner.canonical_text_sha256(constraints),
+        "environment": {
+            "os": "Windows",
+            "architecture": "AMD64",
+            "python": "3.12",
+            "device": "cpu",
+        },
+        "median_total_duration_ms": 100,
+        "case_median_duration_ms": {
+            case["id"]: 10 for case in _core_manifest()["cases"]
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "probe",
+        "failed_diagnostic",
+        "cuda",
+        "wrong_manifest",
+        "wrong_constraints",
+        "wrong_totals",
+        "wrong_performance",
+        "missing_report",
+        "duplicate_case_coverage",
+        "existing_output",
+    ],
+)
+def test_release_baseline_candidate_rejects_non_official_evidence(
+    tmp_path: Path, mutation: str
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    reports, constraints = _write_core_diagnostic_reports(tmp_path, runner)
+    payload = json.loads(reports[0].read_text(encoding="utf-8"))
+    report_path = tmp_path / "baseline-candidate.json"
+    if mutation == "probe":
+        payload["report_kind"] = "probe"
+        payload["status"] = "probe_complete"
+    elif mutation == "failed_diagnostic":
+        payload["status"] = "failed"
+    elif mutation == "cuda":
+        payload["environment"] = {**payload["environment"], "device": "cuda"}
+    elif mutation == "wrong_manifest":
+        payload["manifest_sha256"] = "f" * 64
+    elif mutation == "wrong_constraints":
+        payload["constraints_sha256"] = "f" * 64
+    elif mutation == "wrong_totals":
+        payload["totals"]["pages"] += 1
+    elif mutation == "wrong_performance":
+        payload["performance"]["median_total_duration_ms"] += 1
+    elif mutation == "duplicate_case_coverage":
+        other = json.loads(reports[1].read_text(encoding="utf-8"))
+        other["selected_case_ids"] = payload["selected_case_ids"]
+        reports[1].write_text(json.dumps(other), encoding="utf-8")
+    elif mutation == "missing_report":
+        reports.pop()
+    elif mutation == "existing_output":
+        report_path.write_text("{}", encoding="utf-8")
+    if mutation not in {"missing_report", "existing_output"}:
+        reports[0].write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(runner.BenchmarkFailure):
+        runner.create_baseline_candidate(
+            CORE_MANIFEST_PATH,
+            shard_report_paths=reports,
+            constraints_path=constraints,
+            report_path=report_path,
+        )
 
 
 def test_release_aggregate_accepts_exact_five_shard_core_evidence(
@@ -3149,9 +3303,14 @@ def test_release_runner_cli_routes_explicit_modes(
         captured.append(("aggregate", path, kwargs))
         return {"status": "passed"}
 
+    def fake_baseline_candidate(path: Path, **kwargs: object) -> dict[str, object]:
+        captured.append(("baseline-candidate", path, kwargs))
+        return {"status": "created"}
+
     monkeypatch.setattr(runner, "run_shard_manifest", fake_shard)
     monkeypatch.setattr(runner, "run_diagnostic_manifest", fake_diagnostic)
     monkeypatch.setattr(runner, "aggregate_shard_reports", fake_aggregate)
+    monkeypatch.setattr(runner, "create_baseline_candidate", fake_baseline_candidate)
     assert (
         runner.main(
             [
@@ -3204,16 +3363,31 @@ def test_release_runner_cli_routes_explicit_modes(
     for shard_report in shard_reports:
         aggregate_arguments.extend(["--shard-report", str(shard_report)])
     assert runner.main(aggregate_arguments) == 0
+    candidate_arguments = [
+        "--mode",
+        "baseline-candidate",
+        "--manifest",
+        str(manifest),
+        "--report",
+        str(tmp_path / "baseline-candidate.json"),
+        "--constraints",
+        str(tmp_path / "constraints.txt"),
+    ]
+    for shard_report in shard_reports:
+        candidate_arguments.extend(["--shard-report", str(shard_report)])
+    assert runner.main(candidate_arguments) == 0
     assert [mode for mode, _, _ in captured] == [
         "official-shard",
         "diagnostic-shard",
         "aggregate",
+        "baseline-candidate",
     ]
     assert all(path == manifest for _, path, _ in captured)
     assert captured[0][2]["case_ids"] == ["image-one"]
     assert captured[0][2]["repeat"] == 3
     assert captured[1][2]["plans_output"] == tmp_path / "plans"
     assert captured[2][2]["shard_report_paths"] == shard_reports
+    assert captured[3][2]["shard_report_paths"] == shard_reports
 
 
 def test_release_runner_cli_routes_one_repeat_probe(

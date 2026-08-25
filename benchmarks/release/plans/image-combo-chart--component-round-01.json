@@ -18,7 +18,7 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0006"],
+      "object_ids": ["component_0009"],
       "parameters": {}
     },
     {
@@ -46,14 +46,14 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": ["component-isolation shows the independent blue legend swatch without raster text"],
-      "object_ids": ["component_0023"],
+      "object_ids": ["component_0022"],
       "parameters": {}
     },
     {
       "action": "accept",
       "confidence": 0.99,
       "evidence": ["component-isolation shows the independent red legend swatch without raster text"],
-      "object_ids": ["component_0024"],
+      "object_ids": ["component_0023"],
       "parameters": {}
     },
     {
@@ -88,7 +88,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": ["component-isolation shows raster title backing duplicated by native editable text"],
-      "object_ids": ["component_0009"],
+      "object_ids": ["component_0006"],
       "parameters": {}
     },
     {
@@ -164,13 +164,6 @@
     {
       "action": "discard",
       "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0022"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
       "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
       "object_ids": ["component_0025"],
       "parameters": {}
@@ -200,7 +193,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0029"],
+      "object_ids": ["component_0024"],
       "parameters": {}
     }
   ],
@@ -208,7 +201,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "478324fb65c2a1c34092924cfab46131e36207c8507da6b5bc842c4d98f05851",
+  "request_sha256": "e01a4b68bbdb6437a049f502e434733979b9692cbaf8c1c75a690000d5b388c1",
   "schema_version": 1,
-  "graph_sha256": "32d8d38ac2f433987054f290ca7882488d6485e046546161a3f728f939d28df1"
+  "graph_sha256": "bb4830d2dd7665d9eb781ef8c632fa1b03d1a7019ee377935b21e84eab87cbc9"
 }

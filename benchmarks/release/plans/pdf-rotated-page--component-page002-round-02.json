@@ -15,10 +15,32 @@
       "action": "accept",
       "confidence": 0.99,
       "evidence": [
-        "The complete second card has zero component violations and complete source-backed ownership."
+        "The complete third card has zero missing pixels; its alpha halo and duplicate edge pixels are background defects addressed by the same-round rebuild."
+      ],
+      "object_ids": [
+        "parent_0004"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete second card has zero missing pixels; its alpha halo and duplicate edge pixels are background defects addressed by the same-round rebuild."
       ],
       "object_ids": [
         "parent_0005"
+      ],
+      "parameters": {}
+    },
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": [
+        "The complete first card passes every component quality check and has complete source-backed ownership."
+      ],
+      "object_ids": [
+        "parent_0006"
       ],
       "parameters": {}
     },
@@ -30,6 +52,7 @@
       ],
       "object_ids": [
         "parent_0003",
+        "parent_0004",
         "parent_0005"
       ],
       "parameters": {
@@ -41,7 +64,7 @@
   "page_id": "page_002",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "bc885c59950a5038520913b983900b4008ba6566e68cc1b1819062e88ae40dec",
+  "request_sha256": "96e41ef0cea45e280e2b00fd99fa110dbd39121628a27b13b57fd0ea0d03583f",
   "schema_version": 1,
-  "graph_sha256": "aaf0d3d020d2483730e81474b830d542c77b58fa2998b8da5c6881c99e5fab3a"
+  "graph_sha256": "210611d5e31c48aba5420bb0d28d11e92aaa18a58f9731bf3538a8231b3f32c5"
 }

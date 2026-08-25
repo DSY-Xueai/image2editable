@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "85f2627d82e5b71c961f58b13ef07049c07472ab757afb536a3dcf58dcc9d003",
+  "request_sha256": "22574a30024e4e67b428af536b9f581aa66b33ab31e334e09846801928a2fe59",
   "actions": [
     {
       "action": "accept",
@@ -106,25 +106,25 @@
       ]
     },
     {
-      "action": "accept",
+      "action": "discard",
       "object_ids": [
         "component_0003"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This non-overlapping card fill partition completes the corresponding card as a distinct visual layer."
+        "This candidate duplicates the third card structure."
       ]
     },
     {
-      "action": "discard",
+      "action": "accept",
       "object_ids": [
         "component_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This candidate duplicates the first card structure."
+        "This non-overlapping card fill partition completes the first card as a distinct visual layer."
       ]
     },
     {
@@ -194,5 +194,5 @@
       ]
     }
   ],
-  "graph_sha256": "5fe4ea088296df8c1f8a24e83524b1724882fa08974e0431f3c2d93fd58b89f2"
+  "graph_sha256": "6fb163bdf4dc28ece555b23da7b52106377c2528647315434964bb0e973ebaf6"
 }

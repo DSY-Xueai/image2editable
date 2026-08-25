@@ -1,0 +1,32 @@
+{
+  "actions": [
+    {
+      "action": "accept",
+      "confidence": 0.99,
+      "evidence": ["round-four component isolation shows parent_0005 is the complete clean card owner with native text removed"],
+      "object_ids": ["parent_0005"],
+      "parameters": {}
+    },
+    {
+      "action": "discard",
+      "confidence": 0.99,
+      "evidence": ["parent_0009 duplicates the same card region with fragmented edges and text-shaped holes"],
+      "object_ids": ["parent_0009"],
+      "parameters": {}
+    },
+    {
+      "action": "rebuild_background",
+      "confidence": 0.99,
+      "evidence": ["the retained card must be removed from the rebuilt background after the overlapping duplicate is discarded"],
+      "object_ids": ["parent_0005"],
+      "parameters": {"margin_ratio": 0.005}
+    }
+  ],
+  "graph_sha256": "0e541c3a29b8179c04aec157c2d0fbbc893c6588d66b7fdaf1b8bb027cde9326",
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "c787aee3df3879e6670eb85bf043383e754d8870a6718fc0082eda08c5018816",
+  "schema_version": 1
+}

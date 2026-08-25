@@ -4,7 +4,7 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "324b7c47bf5801b5f9aa222c7f7eb778ca68aaf01780f1974f4c9878b86feca7",
+  "request_sha256": "588844c2d859645b0fb6037d45c1da557e9feb2a6dc37ee067e451e30f03fcd2",
   "actions": [
     {
       "action": "accept",
@@ -31,7 +31,7 @@
     {
       "action": "attach_text",
       "object_ids": [
-        "parent_0005",
+        "parent_0004",
         "text_0004"
       ],
       "parameters": {},
@@ -41,5 +41,5 @@
       ]
     }
   ],
-  "graph_sha256": "f2966eb0ca1a6a18ba5a1a6d30af2f741779e777293b906cd1c27e48b619801b"
+  "graph_sha256": "ea9298dbfe3ab64b1dcdec578067afd706e1413fa641c2b51f14d75ee1191687"
 }

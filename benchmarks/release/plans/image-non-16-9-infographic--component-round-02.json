@@ -4,12 +4,12 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "773f1bab0bb13624226433081f0f1e448657ce2017cec1bdeda2313a6ed1ef3f",
+  "request_sha256": "c2fd5328a2ff0e601276ba527814e0c3f2afc32db737e6ac62ee952d5ac9a853",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "component_0003"
+        "component_0004"
       ],
       "parameters": {
         "independent": true
@@ -22,7 +22,7 @@
     {
       "action": "rebuild_background",
       "object_ids": [
-        "component_0003"
+        "component_0004"
       ],
       "parameters": {
         "margin_ratio": 0.005
@@ -264,5 +264,5 @@
       ]
     }
   ],
-  "graph_sha256": "3da2f46992b35ca10568ebb82c413c9044a33506f34860caf58bbb2f7776defe"
+  "graph_sha256": "4687f1e8dddb5f0edf23df71856e13979da35366134001621ce913610ff85711"
 }

@@ -1,211 +1,27 @@
 {
   "actions": [
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0001"
-      ],
-      "parameters": {
-        "independent": true
-      }
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 2192 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0001"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0002"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 622 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0002"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0004"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 6846 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0004"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0006"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 52 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0006"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0008"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 58897 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0008"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0010"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 371 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0010"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0012"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 199 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0012"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0013"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 357 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0013"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "final component quality accepts this semantic table visual"
-      ],
-      "object_ids": [
-        "split_0015"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "absorb_residual",
-      "confidence": 0.99,
-      "evidence": [
-        "signed final residual partition assigns 35 adjacent pixels to this owner"
-      ],
-      "object_ids": [
-        "split_0015"
-      ],
-      "parameters": {}
-    }
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this non-overlapping table-header segment"], "object_ids": ["split_0001"], "parameters": {"independent": true}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 2196 adjacent pixels to this owner"], "object_ids": ["split_0001"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this non-overlapping table-header segment"], "object_ids": ["split_0002"], "parameters": {"independent": true}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 35 adjacent pixels to this owner"], "object_ids": ["split_0002"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0009"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 622 adjacent pixels to this owner"], "object_ids": ["split_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0023"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 199 adjacent pixels to this owner"], "object_ids": ["split_0023"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0029"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 52 adjacent pixels to this owner"], "object_ids": ["split_0029"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0041"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 67317 adjacent pixels to this owner"], "object_ids": ["split_0041"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0053"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 371 adjacent pixels to this owner"], "object_ids": ["split_0053"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0118"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 32 adjacent pixels to this owner"], "object_ids": ["split_0118"], "parameters": {}}
   ],
+  "graph_sha256": "33a724dfb3a50b6d612d795ed12b67f8db5b5c24cbcffa90f06a3bb724cff662",
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 5,
-  "request_sha256": "6a4c7e253803f40b4d2c86d3ed5832159f4a25f2daefef72f51883a93a194987",
-  "schema_version": 1,
-  "graph_sha256": "8b6f1a0d240c958dc5c4ae138d9b2342796621d00297c96e7255bf8a669b6c50"
+  "request_sha256": "44b0a8aaba71bc82c4ac6b0811333fa03fd41d5ec5be5fa07f37b83ec8e142da",
+  "schema_version": 1
 }

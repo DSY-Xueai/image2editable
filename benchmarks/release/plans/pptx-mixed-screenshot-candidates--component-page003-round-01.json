@@ -4,7 +4,7 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "1ee94fe181e144b956a566a94bfc51be655f5455cb99905a65b06a8c427da9d4",
+  "request_sha256": "6506835a9bd4dba8b9cbec39cf144b3a291abe89884ed0d9bc5feaf22bbdd7f9",
   "actions": [
     {
       "action": "collapse_to_parent",
@@ -20,18 +20,18 @@
     {
       "action": "collapse_to_parent",
       "object_ids": [
-        "parent_0005"
+        "parent_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "The parent mask is the complete visible lower-left translucent circle with native text protected from its raster layer."
+        "The parent_0004 mask is the complete visible lower-left translucent circle with native text protected from its raster layer."
       ]
     },
     {
       "action": "collapse_to_parent",
       "object_ids": [
-        "parent_0010"
+        "parent_0007"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -64,40 +64,18 @@
     {
       "action": "discard",
       "object_ids": [
-        "component_0004"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0007"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0009"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
         "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0005"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -113,20 +91,9 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This upper fragment of the lower-left circle duplicates the complete retained parent_0005."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0011"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This shorter horizontal-rule mask duplicates the complete retained parent_0010."
+        "This shorter horizontal-rule mask duplicates the complete retained parent_0007."
       ]
     }
   ],
-  "graph_sha256": "6502588807cbdafb0640f45f0ee254acd941f67a0d84aa75de2723fd602fce3e"
+  "graph_sha256": "1e54699168b741b8ec096a21f59e587604253248d174c6d3c0d492d342bd2591"
 }

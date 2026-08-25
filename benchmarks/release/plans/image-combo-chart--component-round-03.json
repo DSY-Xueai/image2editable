@@ -2,25 +2,17 @@
   "actions": [
     {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0004"], "parameters": {}},
     {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0005"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0006"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0009"], "parameters": {}},
     {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0007"], "parameters": {}},
     {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0008"], "parameters": {}},
     {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0010"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the first horizontal grid line in this narrow box"], "object_ids": ["component_0001"], "parameters": {"box": [0.092, 0.353, 0.914, 0.36], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the second horizontal grid line in this narrow box"], "object_ids": ["component_0002"], "parameters": {"box": [0.092, 0.453, 0.914, 0.46], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the third horizontal grid line in this narrow box"], "object_ids": ["component_0003"], "parameters": {"box": [0.092, 0.553, 0.914, 0.56], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the fourth horizontal grid line in this narrow box"], "object_ids": ["component_0009"], "parameters": {"box": [0.092, 0.653, 0.914, 0.66], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the fifth horizontal grid line in this narrow box"], "object_ids": ["component_0012"], "parameters": {"box": [0.092, 0.753, 0.914, 0.76], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the sixth horizontal grid line in this narrow box"], "object_ids": ["component_0013"], "parameters": {"box": [0.092, 0.853, 0.914, 0.86], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the lower-middle left-axis marker"], "object_ids": ["component_0015"], "parameters": {"box": [0.055, 0.64, 0.08, 0.67], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["difference evidence isolates the bottom left-axis marker"], "object_ids": ["component_0017"], "parameters": {"box": [0.055, 0.84, 0.077, 0.87], "independent": true}}
+    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}}
   ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "724f8fb209b48d31ab254f06b35fc13f4120ca975dfae7f8ae7e945062165ab5",
+  "request_sha256": "e973a3eeb89828c7ab28d934ba3d7d2ab4ae8c69cc9041a9d637401eeff882b5",
   "schema_version": 1,
-  "graph_sha256": "fb6f09ec7e1520a2d5d92a707dabe6a4d4dae39cd6a3241a3b24e82620761b99"
+  "graph_sha256": "ec0b06f32255bccf452f3545047d8c97e5fedee3c2cb00adb377debdea8995a9"
 }

@@ -4,12 +4,12 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "a28a036e789f0327319d7a35fc35b08160c7fdb43058cb8edaee336dcdf61dab",
+  "request_sha256": "1d162b431b2536aeaeb6c4171d6c9652b3dcfa568c6efc9516b7dd8f1af95751",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "parent_0005"
+        "parent_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -20,7 +20,7 @@
     {
       "action": "absorb_residual",
       "object_ids": [
-        "parent_0005"
+        "parent_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -29,5 +29,5 @@
       ]
     }
   ],
-  "graph_sha256": "55b9fdab2d7b56beb271b4157286004b56c470c6db1ab297bc988186d8dc6342"
+  "graph_sha256": "52b751278b772dc8573ad6e3552b87468eb467acd9d481e7ac08055b796d6daf"
 }

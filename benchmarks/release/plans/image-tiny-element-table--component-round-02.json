@@ -26,7 +26,7 @@
         "source and difference evidence isolate data-row background 1 in this exact box"
       ],
       "object_ids": [
-        "split_0002"
+        "split_0009"
       ],
       "parameters": {
         "box": [
@@ -45,7 +45,7 @@
         "source and difference evidence isolate data-row background 2 in this exact box"
       ],
       "object_ids": [
-        "split_0003"
+        "split_0028"
       ],
       "parameters": {
         "box": [
@@ -64,7 +64,7 @@
         "source and difference evidence isolate data-row background 3 in this exact box"
       ],
       "object_ids": [
-        "split_0004"
+        "split_0023"
       ],
       "parameters": {
         "box": [
@@ -83,7 +83,7 @@
         "source and difference evidence isolate data-row background 4 in this exact box"
       ],
       "object_ids": [
-        "split_0005"
+        "split_0037"
       ],
       "parameters": {
         "box": [
@@ -102,7 +102,7 @@
         "source and difference evidence isolate data-row background 5 in this exact box"
       ],
       "object_ids": [
-        "split_0006"
+        "split_0029"
       ],
       "parameters": {
         "box": [
@@ -121,7 +121,7 @@
         "source and difference evidence isolate data-row background 6 in this exact box"
       ],
       "object_ids": [
-        "split_0007"
+        "split_0030"
       ],
       "parameters": {
         "box": [
@@ -140,7 +140,7 @@
         "source and difference evidence isolate data-row background 7 in this exact box"
       ],
       "object_ids": [
-        "split_0008"
+        "split_0041"
       ],
       "parameters": {
         "box": [
@@ -159,7 +159,7 @@
         "source and difference evidence isolate data-row background 8 in this exact box"
       ],
       "object_ids": [
-        "split_0009"
+        "split_0042"
       ],
       "parameters": {
         "box": [
@@ -178,7 +178,7 @@
         "source and difference evidence isolate data-row background 9 in this exact box"
       ],
       "object_ids": [
-        "split_0010"
+        "split_0053"
       ],
       "parameters": {
         "box": [
@@ -197,7 +197,7 @@
         "source and difference evidence isolate data-row background 10 in this exact box"
       ],
       "object_ids": [
-        "split_0011"
+        "split_0096"
       ],
       "parameters": {
         "box": [
@@ -216,7 +216,7 @@
         "source and difference evidence isolate data-row background 11 in this exact box"
       ],
       "object_ids": [
-        "split_0012"
+        "split_0118"
       ],
       "parameters": {
         "box": [
@@ -235,7 +235,7 @@
         "source and difference evidence isolate data-row background 12 in this exact box"
       ],
       "object_ids": [
-        "split_0013"
+        "split_0011"
       ],
       "parameters": {
         "box": [
@@ -254,7 +254,7 @@
         "source and difference evidence isolate a vertical table structure line in this exact box"
       ],
       "object_ids": [
-        "split_0014"
+        "split_0006"
       ],
       "parameters": {
         "box": [
@@ -273,7 +273,7 @@
         "source and difference evidence isolate a vertical table structure line in this exact box"
       ],
       "object_ids": [
-        "split_0015"
+        "split_0002"
       ],
       "parameters": {
         "box": [
@@ -369,7 +369,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0023"
+        "split_0003"
       ],
       "parameters": {}
     },
@@ -424,7 +424,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0028"
+        "split_0004"
       ],
       "parameters": {}
     },
@@ -435,7 +435,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0029"
+        "split_0005"
       ],
       "parameters": {}
     },
@@ -446,7 +446,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0030"
+        "split_0007"
       ],
       "parameters": {}
     },
@@ -523,7 +523,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0037"
+        "split_0008"
       ],
       "parameters": {}
     },
@@ -567,7 +567,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0041"
+        "split_0010"
       ],
       "parameters": {}
     },
@@ -578,7 +578,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0042"
+        "split_0012"
       ],
       "parameters": {}
     },
@@ -699,7 +699,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0053"
+        "split_0013"
       ],
       "parameters": {}
     },
@@ -1172,7 +1172,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0096"
+        "split_0014"
       ],
       "parameters": {}
     },
@@ -1414,7 +1414,7 @@
         "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
       ],
       "object_ids": [
-        "split_0118"
+        "split_0015"
       ],
       "parameters": {}
     },
@@ -1835,46 +1835,13 @@
         "split_0156"
       ],
       "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0157"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0158"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0159"
-      ],
-      "parameters": {}
     }
   ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "936dc1348fba7aa91ba9cc05d829f6663fa77a50eb0c197703b28981274fb6e4",
+  "request_sha256": "2d4fb6f317db80c53f2fa85e1b95c4ea177141c0d135bac533bf304a055751b6",
   "schema_version": 1,
-  "graph_sha256": "4b853a585eeebb7f9eed93239a0d50dbf8f7a9602a991543b7f64b6502140a86"
+  "graph_sha256": "e009444d730fb206cae630a7cbf61f77659c6ab842e515f5e06cdb91d1c4a232"
 }

@@ -4,12 +4,12 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "fd761a1c2bda39e2a20ec8a32f2da4bad9d79daa49b24ca290f4fe62e781e95c",
+  "request_sha256": "dee6f9638a8897884b73cb14b9dfa4d744c9cc22fadb74386251970d84fd0640",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "parent_0005"
+        "parent_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -20,7 +20,7 @@
     {
       "action": "accept",
       "object_ids": [
-        "parent_0010"
+        "parent_0007"
       ],
       "parameters": {},
       "confidence": 0.99,
@@ -31,8 +31,8 @@
     {
       "action": "rebuild_background",
       "object_ids": [
-        "parent_0005",
-        "parent_0010"
+        "parent_0004",
+        "parent_0007"
       ],
       "parameters": {
         "margin_ratio": 0.005
@@ -43,5 +43,5 @@
       ]
     }
   ],
-  "graph_sha256": "0724cb513611ccf7d1dbc2c97be6803852d7f25639f59a6228464ae650c71752"
+  "graph_sha256": "1fe0e99c905f544666770966d9f0d6dfa850d7cb3ff5729620f8b89f67e5c974"
 }

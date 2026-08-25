@@ -4,50 +4,50 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "a3ac812e6ca878d5c32dfd88691e2e71eb126c647fca1ad2d115da840fff3317",
+  "request_sha256": "ba8a3967fe3c38495757f9da33ba7e9f6df53c0e0db31e3bec6782deb6aa9d91",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "component_0003"
+        "component_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "component_0003 passes every component quality check after independent ownership and background cleanup."
+        "component_0004 passes every component quality check after independent ownership and background cleanup."
       ]
     },
     {
       "action": "absorb_residual",
       "object_ids": [
-        "component_0003"
+        "component_0004"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0003."
+        "Only uniquely adjacent unexplained pixels are assigned to component_0004."
       ]
     },
     {
       "action": "accept",
       "object_ids": [
-        "component_0002"
+        "component_0011"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "component_0002 passes every component quality check after background cleanup."
+        "component_0011 passes every component quality check after background cleanup."
       ]
     },
     {
       "action": "absorb_residual",
       "object_ids": [
-        "component_0002"
+        "component_0011"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0002."
+        "Only uniquely adjacent unexplained pixels are assigned to component_0011."
       ]
     },
     {
@@ -161,5 +161,5 @@
       ]
     }
   ],
-  "graph_sha256": "61ba9d79bb647c5459d861738d465a9a30aa4821f8822a71cc25fead92608b10"
+  "graph_sha256": "bbe2540dc18f7970ae1ac272b0365759adfdde4ed3e51d31227f5fa28e833598"
 }

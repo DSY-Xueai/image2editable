@@ -4,19 +4,8 @@
   "page_id": "page_002",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "ca36339fa03baf2b2f37ea555f343bb043d09b4a99fd493aab5f95d99c468738",
+  "request_sha256": "15c78d54f7c7c621acb0322fdf7232a440542f1d9e3f0eb861a98edce8dbe2f6",
   "actions": [
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0006"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Complete rounded card surface in component isolation."
-      ]
-    },
     {
       "action": "accept",
       "object_ids": [
@@ -143,25 +132,10 @@
       "object_ids": [
         "component_0018"
       ],
-      "parameters": {
-        "independent": true
-      },
+      "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "Independent colored icon with complete internal glyph."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0019"
-      ],
-      "parameters": {
-        "independent": true
-      },
-      "confidence": 0.99,
-      "evidence": [
-        "Independent colored icon with complete internal glyph."
+        "Complete rounded card surface in component isolation."
       ]
     },
     {
@@ -295,6 +269,45 @@
       ]
     },
     {
+      "action": "accept",
+      "object_ids": [
+        "component_0030"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0031"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Independent colored icon with complete internal glyph."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Complete title background is separated from frozen OCR text."
+      ]
+    },
+    {
       "action": "discard",
       "object_ids": [
         "component_0001"
@@ -346,9 +359,20 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "Partial two-card fragment overlaps complete card and icon components."
+        "Tiny card-edge fragment is covered by the complete card surface."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Partial left-card fragment overlaps the complete card surface."
       ]
     }
   ],
-  "graph_sha256": "b2bbc450e787024447be02bb1845d2159ae39f879ae107fe6f80417d91d010ea"
+  "graph_sha256": "01d40e4217e8e456117748af368b159b5aada41dd012c960448d89315522b397"
 }

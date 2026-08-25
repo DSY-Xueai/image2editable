@@ -4,16 +4,15 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "41a1d37cf1fe1d981568b09183c2bc13eaf29e960d57588da2b3f5ed4464f4ce",
-  "graph_sha256": "ed5b38e27d43176346661f286ca51fcf6bd209caa9175adabe36d43f56fdc3ef",
+  "request_sha256": "c8b40e48bbe6a8402215cc5ba44e491111fa4bda26454df742e6caf4245fb6e9",
+  "graph_sha256": "521991222040575f41647476ec8fc2534f9ce0756297dd26d04db362dd5f7b1c",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the dark canvas owner with zero text residual, missing, duplicate, and orphan pixels"]},
     {"action": "accept", "object_ids": ["component_0004"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique blue-ring fragment with no violations"]},
     {"action": "accept", "object_ids": ["component_0005"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique blue-ring fragment with no violations"]},
-    {"action": "accept", "object_ids": ["component_0006"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this complete outer-ring arc with no violations"]},
     {"action": "accept", "object_ids": ["component_0007"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this complete outer-ring arc with no violations"]},
-    {"action": "accept", "object_ids": ["component_0010"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique red-ring intersection fragment with no violations"]},
+    {"action": "accept", "object_ids": ["component_0009"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the remaining outer-ring crossing fragment with no violations"]},
     {"action": "accept", "object_ids": ["component_0011"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the principal inner-red-ring arcs with no violations"]},
-    {"action": "retry_with_box", "object_ids": ["component_0002"], "parameters": {"box": [0.66875, 0.156667, 0.9575, 0.666667], "independent": true}, "confidence": 0.99, "evidence": ["the 147580px round-01 mask contains 147564 exact dark-background pixels and matches the 148312px unexplained circular interior; recover it as a non-overlapping background patch"]}
+    {"action": "retry_with_box", "object_ids": ["component_0002"], "parameters": {"box": [0.66875, 0.156667, 0.9575, 0.666667], "independent": true}, "confidence": 0.99, "evidence": ["the 147874px round-01 mask contains 147855 exact dark-background pixels and matches the unexplained circular interior; recover it as a non-overlapping background patch"]}
   ]
 }

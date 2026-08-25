@@ -14,9 +14,11 @@
 
 真实模型 benchmark 不放进普通 push CI，需要在受保护的 Release Gate 中显式开启。GitHub-hosted Windows 会把 10 个 case 分成 5 组并行运行；每个 case 仍执行 3 次独立重复。分片只缩短等待时间，不减少测试次数，也不放宽任何质量门禁。
 
-五份分片报告会由独立的聚合步骤重新校验。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
+五份分片报告会由独立的聚合步骤重新校验。v0.2 的正式参考环境固定为 GitHub-hosted Windows、AMD64、Python 3.12 和 CPU。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
 
 当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。diagnostic 只允许更新 plan 的绑定 hash，原有 decision、actions、parameters、confidence 和 evidence 必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
+
+性能基线只能通过 `baseline-candidate` 从五份成功的三次重复 diagnostic 报告生成。该命令会重新检查固定的 CPU 环境、完整 case 和页数、manifest、依赖约束及性能数据；probe、失败报告、CUDA 报告、缺失或重复的 case 都不能生成候选基线。候选文件仍需审核并提交为 `BASELINE.json`，它本身不会把 diagnostic 变成正式通过。
 
 如果只需要定位一次耗时较长的失败，可以把 diagnostic repeats 选为 `1`。这会运行相同的真实模型、页面检查和质量门禁，但只生成 `report_kind: probe` 的单次诊断报告，不计算性能，也不生成候选 plan。问题修复后仍需把 repeats 选回 `3`，完成三次严格 diagnostic。
 

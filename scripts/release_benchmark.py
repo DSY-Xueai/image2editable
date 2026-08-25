@@ -1686,7 +1686,7 @@ def run_diagnostic_manifest(
         "constraints_sha256": constraints_hash,
         "environment": environment,
         "repeat": repeat,
-        "selected_case_ids": [case["id"] for case in selected],
+        "selected_case_ids": sorted(case["id"] for case in selected),
         "attempts": attempts,
         "totals": {
             "cases": len(selected),
@@ -1848,6 +1848,96 @@ def _validated_shard_attempts(
     return attempts, environment
 
 
+def _validated_diagnostic_attempts(
+    report: dict[str, object],
+    *,
+    cases: dict[str, dict[str, object]],
+    manifest_hash: str,
+    constraints_hash: str,
+) -> tuple[list[dict[str, object]], dict[str, str]]:
+    if (
+        report.get("report_kind") != "diagnostic"
+        or report.get("status") != "diagnostic_complete"
+    ):
+        raise BenchmarkFailure("invalid_diagnostic_report")
+    shard_report = {
+        **report,
+        "report_kind": "shard",
+        "status": "passed",
+    }
+    try:
+        return _validated_shard_attempts(
+            shard_report,
+            cases=cases,
+            manifest_hash=manifest_hash,
+            constraints_hash=constraints_hash,
+        )
+    except BenchmarkFailure:
+        raise BenchmarkFailure("invalid_diagnostic_report") from None
+
+
+def create_baseline_candidate(
+    manifest_path: Path,
+    *,
+    shard_report_paths: list[Path],
+    constraints_path: Path,
+    report_path: Path,
+) -> dict[str, object]:
+    cases_list, manifest_hash = _load_batch_cases(manifest_path)
+    if (
+        len(cases_list) != 10
+        or sum(case["page_count"] for case in cases_list) != 14
+        or len(shard_report_paths) != 5
+        or report_path.resolve().exists()
+    ):
+        raise BenchmarkFailure("invalid_baseline_candidate")
+    cases = {case["id"]: case for case in cases_list}
+    constraints_hash = canonical_text_sha256(constraints_path)
+    required_environment = {
+        "os": "Windows",
+        "architecture": "AMD64",
+        "python": "3.12",
+        "device": "cpu",
+    }
+    all_attempts: list[dict[str, object]] = []
+    covered: set[str] = set()
+    for path in shard_report_paths:
+        diagnostic = _load_report(path, "invalid_diagnostic_report")
+        attempts, environment = _validated_diagnostic_attempts(
+            diagnostic,
+            cases=cases,
+            manifest_hash=manifest_hash,
+            constraints_hash=constraints_hash,
+        )
+        selected = set(diagnostic["selected_case_ids"])
+        if covered & selected or environment != required_environment:
+            raise BenchmarkFailure("invalid_baseline_candidate")
+        covered.update(selected)
+        all_attempts.extend(attempts)
+    if covered != set(cases):
+        raise BenchmarkFailure("invalid_baseline_candidate")
+
+    case_order = {case["id"]: index for index, case in enumerate(cases_list)}
+    all_attempts.sort(key=lambda item: (item["repeat"], case_order[item["case_id"]]))
+    performance = aggregate_performance(all_attempts)
+    candidate = {
+        "schema_version": 1,
+        "benchmark": "v0.2-core-14-page",
+        "manifest_sha256": manifest_hash,
+        "constraints_sha256": constraints_hash,
+        "environment": required_environment,
+        "median_total_duration_ms": performance["median_total_duration_ms"],
+        "case_median_duration_ms": performance["case_median_duration_ms"],
+    }
+    try:
+        _write_json_exclusive(report_path, candidate)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception:
+        raise BenchmarkFailure("invalid_baseline_candidate") from None
+    return candidate
+
+
 def aggregate_shard_reports(
     manifest_path: Path,
     *,
@@ -2005,7 +2095,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=("official-shard", "diagnostic-shard", "aggregate"),
+        choices=(
+            "official-shard",
+            "diagnostic-shard",
+            "aggregate",
+            "baseline-candidate",
+        ),
     )
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--workspace", type=Path)
@@ -2038,16 +2133,20 @@ def main(argv: list[str] | None = None) -> int:
             or arguments.constraints is not None
         ):
             parser.error("invalid diagnostic-shard arguments")
-    elif (
-        arguments.workspace is not None
-        or arguments.case_ids is not None
-        or arguments.plans_output is not None
-        or not arguments.shard_report
-        or arguments.baseline is None
-        or arguments.constraints is None
-        or arguments.repeat is not None
-    ):
-        parser.error("invalid aggregate arguments")
+    else:
+        invalid_shared_arguments = (
+            arguments.workspace is not None
+            or arguments.case_ids is not None
+            or arguments.plans_output is not None
+            or not arguments.shard_report
+            or arguments.constraints is None
+            or arguments.repeat is not None
+        )
+        if arguments.mode == "aggregate":
+            if invalid_shared_arguments or arguments.baseline is None:
+                parser.error("invalid aggregate arguments")
+        elif invalid_shared_arguments or arguments.baseline is not None:
+            parser.error("invalid baseline-candidate arguments")
     try:
         if arguments.mode == "official-shard":
             report = run_shard_manifest(
@@ -2069,7 +2168,7 @@ def main(argv: list[str] | None = None) -> int:
                 repeat=repeat,
             )
             success_status = "probe_complete" if repeat == 1 else "diagnostic_complete"
-        else:
+        elif arguments.mode == "aggregate":
             report = aggregate_shard_reports(
                 arguments.manifest,
                 shard_report_paths=arguments.shard_report,
@@ -2078,10 +2177,18 @@ def main(argv: list[str] | None = None) -> int:
                 report_path=arguments.report,
             )
             success_status = "passed"
+        else:
+            report = create_baseline_candidate(
+                arguments.manifest,
+                shard_report_paths=arguments.shard_report,
+                constraints_path=arguments.constraints,
+                report_path=arguments.report,
+            )
+            success_status = None
     except BenchmarkFailure as error:
         print(str(error), file=sys.stderr)
         return 1
-    return 0 if report["status"] == success_status else 1
+    return 0 if success_status is None or report["status"] == success_status else 1
 
 
 if __name__ == "__main__":

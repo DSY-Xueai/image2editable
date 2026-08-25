@@ -12,13 +12,13 @@
       "parameters": {}
     },
     {
-      "action": "accept",
-      "confidence": 0.98,
+      "action": "collapse_to_parent",
+      "confidence": 0.99,
       "evidence": [
-        "shrunk component retains its complete movable core"
+        "parent_0002 is the complete weekly-revenue panel owner and preserves the chart panel as one movable background object"
       ],
       "object_ids": [
-        "component_0002"
+        "parent_0002"
       ],
       "parameters": {}
     },
@@ -192,7 +192,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "df5a39fcd7e2a900200e60b4013674196f876b0189a9095e92e97d9763560fba",
+  "request_sha256": "b5e699355c3a30dd41eb601cf00514ca2b57a681aca9fbf7ca6229ae0076e3d6",
   "schema_version": 1,
-  "graph_sha256": "feffaaf30fed40ad948cba1940c9263e419ce60ef28429dcfd49952e1d38263d"
+  "graph_sha256": "7ff6c8bcac01d0190c7adc1e7bc12c714cc73f43f669ab87825d6c6d1b32fb91"
 }

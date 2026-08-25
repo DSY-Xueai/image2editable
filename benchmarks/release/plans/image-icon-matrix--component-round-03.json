@@ -1,13 +1,13 @@
 {
   "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three component quality retains the complete independent card background"], "object_ids": ["component_0006"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns all 18 adjacent pixels to this owner"], "object_ids": ["component_0006"], "parameters": {}}
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three component quality retains the complete independent card background"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed residual partition assigns all 320 adjacent edge pixels to this owner"], "object_ids": ["component_0009"], "parameters": {}}
   ],
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "2de2f3e3f3b93bc632fad592b6cec9dbdf5fe9562659484959cb1d33e06c52fc",
+  "request_sha256": "62cb7a992333f8cd34702e68eb6199bdaf1fb9b99e37c3503633a61ea3e63029",
   "schema_version": 1,
-  "graph_sha256": "aa1dade15edf9d8b05859fb2101cece20dabdf2e4e93875f9daaf7e5f0a8ce74"
+  "graph_sha256": "03b95ec11d70186567fc0dd0a7438ec4ffa2d9827e789e8f322ba980bffa895c"
 }

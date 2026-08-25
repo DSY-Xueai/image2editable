@@ -1,203 +1,33 @@
 {
   "actions": [
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
-      ],
-      "object_ids": [
-        "split_0001"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0002"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0003"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0004"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0005"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0006"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0007"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0008"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0009"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0010"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0011"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0012"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one semantic data-row visual"
-      ],
-      "object_ids": [
-        "split_0013"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
-      ],
-      "object_ids": [
-        "split_0014"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-four isolation retains one non-overlapping semantic table-header segment"
-      ],
-      "object_ids": [
-        "split_0015"
-      ],
-      "parameters": {}
-    },
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0001"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0002"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0011"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0023"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0029"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0041"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0053"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0118"], "parameters": {}},
     {
       "action": "rebuild_background",
       "confidence": 0.99,
-      "evidence": [
-        "duplicate, halo, and native-underlay diagnostics require removal of original pixels beneath the fifteen semantic table visuals"
-      ],
-      "object_ids": [
-        "split_0001",
-        "split_0002",
-        "split_0003",
-        "split_0004",
-        "split_0005",
-        "split_0006",
-        "split_0007",
-        "split_0008",
-        "split_0009",
-        "split_0010",
-        "split_0011",
-        "split_0012",
-        "split_0013",
-        "split_0014",
-        "split_0015"
-      ],
-      "parameters": {
-        "margin_ratio": 0.005
-      }
-    }
+      "evidence": ["remaining unexplained pixels are original table pixels beneath the fifteen accepted semantic table visuals"],
+      "object_ids": ["split_0001", "split_0002", "split_0006", "split_0009", "split_0011", "split_0023", "split_0028", "split_0029", "split_0030", "split_0037", "split_0041", "split_0042", "split_0053", "split_0096", "split_0118"],
+      "parameters": {"margin_ratio": 0.005}
+    },
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0011"], "parameters": {"margin_ratio": 0.09836065573770492}},
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0023"], "parameters": {"margin_ratio": 0.1}},
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0029"], "parameters": {"margin_ratio": 0.1}},
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0041"], "parameters": {"margin_ratio": 0.1}},
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0053"], "parameters": {"margin_ratio": 0.1}},
+    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0118"], "parameters": {"margin_ratio": 0.1}}
   ],
+  "graph_sha256": "88906fd285e1406b8cee49f0913ba6a81aaa598c9a07bc9512c4288318c76166",
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "8ce27421354224e5db409ea69fc7c4d96b131982b48d7d2c6af5eb70e6ae0984",
-  "schema_version": 1,
-  "graph_sha256": "e77c0b5e2d87366b4ea3578cf0cd4287a64f923fae1fc6bbe4ddcea475857e94"
+  "request_sha256": "aab1b4c1315e220af649a29c79e31fd9921a6ea6cba3bb9fad747d178bce834a",
+  "schema_version": 1
 }

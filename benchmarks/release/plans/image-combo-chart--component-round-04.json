@@ -1,28 +1,27 @@
 {
   "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0001"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0002"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0003"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts this independently movable chart bar"], "object_ids": ["component_0005"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0009"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0012"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent horizontal grid line"], "object_ids": ["component_0013"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0015"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["box retry produced the intended independent left-axis marker"], "object_ids": ["component_0017"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current component quality accepts the complete line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}},
-    {
-      "action": "rebuild_background",
-      "confidence": 0.99,
-      "evidence": ["duplicate metrics are caused by original pixels remaining beneath the eight newly retried grid-line and axis-marker components"],
-      "object_ids": ["component_0001", "component_0002", "component_0003", "component_0009", "component_0012", "component_0013", "component_0015", "component_0017"],
-      "parameters": {"margin_ratio": 0.005}
-    }
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0004"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0005"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0007"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0008"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0009"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0010"], "parameters": {}},
+    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts the independently movable line-chart parent with no component violation"], "object_ids": ["parent_0011"], "parameters": {}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the first horizontal grid line in this narrow box"], "object_ids": ["component_0001"], "parameters": {"box": [0.092, 0.353, 0.914, 0.36], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the second horizontal grid line in this narrow box"], "object_ids": ["component_0002"], "parameters": {"box": [0.092, 0.453, 0.914, 0.46], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the third horizontal grid line in this narrow box"], "object_ids": ["component_0003"], "parameters": {"box": [0.092, 0.553, 0.914, 0.56], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the fourth horizontal grid line in this narrow box"], "object_ids": ["component_0006"], "parameters": {"box": [0.092, 0.653, 0.914, 0.66], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the fifth horizontal grid line in this narrow box"], "object_ids": ["component_0012"], "parameters": {"box": [0.092, 0.753, 0.914, 0.76], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the sixth horizontal grid line in this narrow box"], "object_ids": ["component_0013"], "parameters": {"box": [0.092, 0.853, 0.914, 0.86], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the lower-middle left-axis marker"], "object_ids": ["component_0015"], "parameters": {"box": [0.055, 0.64, 0.08, 0.67], "independent": true}},
+    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the bottom left-axis marker"], "object_ids": ["component_0017"], "parameters": {"box": [0.055, 0.84, 0.077, 0.87], "independent": true}},
+    {"action": "rebuild_background", "confidence": 0.99, "evidence": ["background must be rebuilt only beneath the eight source-backed grid-line and axis-marker retries"], "object_ids": ["component_0001", "component_0002", "component_0003", "component_0006", "component_0012", "component_0013", "component_0015", "component_0017"], "parameters": {"margin_ratio": 0.005}}
   ],
+  "graph_sha256": "a82d7550b8eb9df0a29041e47e4f3d393210cb5edc35ef7f9571be98a47c662c",
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "91296ccc34080d922648919bb2a183de92d645d35fc305379299679e9397b055",
-  "schema_version": 1,
-  "graph_sha256": "08c0a6dbd836efb6210a6484b0338574e740f2ec895e3cf780c96035df7a9a39"
+  "request_sha256": "04a7cb5078f8a2ce755c8ec61fd25963716539dc6e356709c4d8b8bdf8e989a3",
+  "schema_version": 1
 }

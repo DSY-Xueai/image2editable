@@ -4,8 +4,8 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "0e9e8a50f14510044d5becc6faf320e147e53d77130e2cc2e33b5e2b46ba50d0",
-  "graph_sha256": "91051d302437c50ced991ca60d640322312aa2e6568e9c983bdf137626ae0a60",
+  "request_sha256": "0091bc0264cca07a4d4a9c878e2e149e67a251d430782c0c9502ef183dbb8bf0",
+  "graph_sha256": "6bc1bebc2f3d400c3a9cbbf990cc9d19ebac05f92409b35793fdc64dd735b1eb",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["mask statistics show this is the non-overlapping dark canvas owner: 1069108 of 1069207 mask pixels are exact background color, while foreground artwork is owned by separate children"]},
     {"action": "discard", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["large dark circular composite duplicates the independently owned rings and diagonal"]},
@@ -19,10 +19,10 @@
     {"action": "accept", "object_ids": ["component_0010"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["ownership mask is a unique red-ring intersection fragment"]},
     {"action": "accept", "object_ids": ["component_0011"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["isolation retains the principal inner-red-ring arcs as an independent non-text fragment"]},
     {"action": "accept", "object_ids": ["component_0012"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["ownership mask retains a unique ring-and-line crossing fragment"]},
-    {"action": "discard", "object_ids": ["component_0013"], "parameters": {}, "confidence": 0.99, "evidence": ["isolation contains only dark background from the removed release label"]},
+    {"action": "accept", "object_ids": ["component_0013"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["isolation retains a unique diagonal-line and ring crossing fragment without text overlap"]},
     {"action": "accept", "object_ids": ["component_0014"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["ownership mask retains unique diagonal-line crossings without overlap"]},
     {"action": "discard", "object_ids": ["component_0015"], "parameters": {}, "confidence": 0.99, "evidence": ["isolation contains the removed release-label shadow and dark background"]},
-    {"action": "accept", "object_ids": ["component_0016"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["ownership mask retains a unique red-ring and diagonal crossing fragment"]},
+    {"action": "discard", "object_ids": ["component_0016"], "parameters": {}, "confidence": 0.99, "evidence": ["isolation contains the removed release-label shadow and dark background"]},
     {"action": "accept", "object_ids": ["component_0017"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["isolation retains the principal yellow diagonal segment plus its unique ring crossings"]}
   ]
 }
