@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "b106c7f49bf4ebee6e84cb4c2f37e6f52905b10f2d54e5e059b73e3357c7f531",
+  "request_sha256": "1b63b9623c9442238a4da2327514fa2ea59105f52067daf8b580f06b7ff2a8cf",
   "actions": [
     {"action":"accept","object_ids":["component_0012"],"parameters":{},"confidence":0.99,"evidence":["The component passes quality and borders genuine residual edge pixels."]},
     {"action":"absorb_residual","object_ids":["component_0012"],"parameters":{},"confidence":0.99,"evidence":["The unexplained mask contains only adjacent network pixels assigned to this owner."]},
@@ -33,5 +33,5 @@
     {"action":"accept","object_ids":["component_0027"],"parameters":{},"confidence":0.99,"evidence":["The node passes quality and borders genuine residual pixels."]},
     {"action":"absorb_residual","object_ids":["component_0027"],"parameters":{},"confidence":0.99,"evidence":["The unexplained mask contains only adjacent node pixels assigned to this owner."]}
   ],
-  "graph_sha256": "92ff27840d20944fe67e7bd6414d6856f1f5d950b61a411fb9e1809f4468ce33"
+  "graph_sha256": "70efffe96625928557b507112a7a0d97f3b724ae1a76756e27259b70a465a603"
 }

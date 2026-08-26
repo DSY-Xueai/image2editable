@@ -7,19 +7,19 @@
     "os": "Windows",
     "architecture": "AMD64",
     "python": "3.12",
-    "device": "cuda"
+    "device": "cpu"
   },
-  "median_total_duration_ms": 3623083,
+  "median_total_duration_ms": 10633988,
   "case_median_duration_ms": {
-    "image-bilingual-dashboard": 300209,
-    "image-combo-chart": 334054,
-    "image-dark-poster": 235434,
-    "image-flowchart": 265611,
-    "image-icon-matrix": 236130,
-    "image-non-16-9-infographic": 221887,
-    "image-thin-line-network": 300412,
-    "image-tiny-element-table": 445036,
-    "pdf-rotated-page": 607310,
-    "pptx-mixed-screenshot-candidates": 719743
+    "image-bilingual-dashboard": 545874,
+    "image-combo-chart": 777934,
+    "image-dark-poster": 855071,
+    "image-flowchart": 721396,
+    "image-icon-matrix": 941729,
+    "image-non-16-9-infographic": 639812,
+    "image-thin-line-network": 653226,
+    "image-tiny-element-table": 702957,
+    "pdf-rotated-page": 2478400,
+    "pptx-mixed-screenshot-candidates": 2277593
   }
 }

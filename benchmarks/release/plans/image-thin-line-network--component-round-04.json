@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "0acf832fb3d9eb4982fd41c9916fa68b3f900bd604a57cee50870009ddd2ba74",
+  "request_sha256": "ec045514d57c581b51f00ac50d67ed3f030cec56fa46798de162767699168f12",
   "actions": [
     {
       "action": "rebuild_background",
@@ -14,5 +14,5 @@
       "evidence": ["All four masks are structurally correct; the report isolates their remaining failures to local background or underlay pixels."]
     }
   ],
-  "graph_sha256": "2f4b97e0a1759c189ff3eca2b7d54fc48aa491c28c9a58dad149fa6011a61730"
+  "graph_sha256": "692bb2a4fb04b147db84e07470b51d3a12a0dc060504efcdd808e5ce71c5b28e"
 }

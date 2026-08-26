@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "48acf6fd6541b304aaf80a018f70d4d80bfd0d31d4e67487660ca92a258ae783",
+  "request_sha256": "2d3dc43e3b50ee87d58b6fce59c10efb4ec5f0ef2a72fff6f23f0df6de940995",
   "actions": [
     {"action":"discard","object_ids":["component_0001"],"parameters":{},"confidence":0.99,"evidence":["The full-page mask is background, not an editable network object."]},
     {"action":"discard","object_ids":["component_0002"],"parameters":{},"confidence":0.99,"evidence":["The broad network-area mask is an overlapping background composite."]},
@@ -34,5 +34,5 @@
     {"action":"accept","object_ids":["component_0026"],"parameters":{},"confidence":0.99,"evidence":["This is a real upper-left node."]},
     {"action":"accept","object_ids":["component_0027"],"parameters":{},"confidence":0.99,"evidence":["This is a real upper-middle node."]}
   ],
-  "graph_sha256": "8d7829dc59e02ab8117f06ca91b557e2bb3608be739fbe67b3d9540ffe80a258"
+  "graph_sha256": "3478436ce75c94f03fae385a1d851e55e7957297e1a0ff77e2efcad88a9bed0f"
 }

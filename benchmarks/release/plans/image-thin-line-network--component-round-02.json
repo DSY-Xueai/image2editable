@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "5129acf52ea9541c8457d06736a985efbbc872b8cf5aafe7fa8d146dc2e0b3c3",
+  "request_sha256": "dee8d9a1cde5faa6b255f225768a54a7da1154909ecff6397333e9f857bc0ac4",
   "actions": [
     {
       "action": "rebuild_background",
@@ -14,5 +14,5 @@
       "evidence": ["The first reconstruction shows that the retained network and native text need one bounded clean-background rebuild."]
     }
   ],
-  "graph_sha256": "45bb8a40fb00f9406746c4037173e92b9e0ea56741f83679814f3b1376277f8e"
+  "graph_sha256": "85131b258961001d4c15566caea204258079f0629624c7fae4468895612e4980"
 }

@@ -4,7 +4,7 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 5,
-  "request_sha256": "e2bbb86dd31d562bbbfdf4397f367e69632552023332ed58b58637d991cd6a9a",
+  "request_sha256": "902c5e4afb1f90d82281ce7838015bc891b7aa38f5ef13f162f8164f4ad39b39",
   "actions": [
     {"action":"accept","object_ids":["component_0010"],"parameters":{},"confidence":0.99,"evidence":["The vertical network edge passes the current component quality checks."]},
     {"action":"absorb_residual","object_ids":["component_0010"],"parameters":{},"confidence":0.99,"evidence":["The bound unexplained mask contains an adjacent structural fragment assigned to the vertical network edge."]},
@@ -17,5 +17,5 @@
     {"action":"retry_with_box","object_ids":["component_0001"],"parameters":{"box":[0.974,0.929,1.0,0.996],"independent":true},"confidence":0.99,"evidence":["The 860-pixel unexplained region is an isolated white triangular corner mark at x=1567..1599 and y=841..892; recover it independently from the inactive full-page proposal."]},
     {"action":"rebuild_background","object_ids":["component_0010","component_0015","component_0017","component_0023","component_0001"],"parameters":{"margin_ratio":0.003},"confidence":0.99,"evidence":["A bounded three-pixel rebuild removes the old raster pixels under the four absorbed network fragments and the recovered corner mark."]}
   ],
-  "graph_sha256": "64957f17dd15f27ca16608f623bff17eb073dac7f5b488e3bd449f1c47a23065"
+  "graph_sha256": "a3fd4b2bbfe7756ba956fe286d6c12fcf49773f72fb7bc68612c7b7447449f45"
 }

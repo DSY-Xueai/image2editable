@@ -4,8 +4,8 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "c8b40e48bbe6a8402215cc5ba44e491111fa4bda26454df742e6caf4245fb6e9",
-  "graph_sha256": "521991222040575f41647476ec8fc2534f9ce0756297dd26d04db362dd5f7b1c",
+  "request_sha256": "ef0c1313937acd23d7d1c8398389205920be3855ccdb8b2cb9c4d19e9aa7a2bf",
+  "graph_sha256": "53d5d88c4bf2aa5014c98e1ce4ef5a5eeb2ec76170d8956dfa7abaee58563cde",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts the dark canvas owner with zero text residual, missing, duplicate, and orphan pixels"]},
     {"action": "accept", "object_ids": ["component_0004"], "parameters": {}, "confidence": 0.99, "evidence": ["round-01 report accepts this unique blue-ring fragment with no violations"]},

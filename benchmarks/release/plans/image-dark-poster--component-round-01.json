@@ -4,8 +4,8 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "0091bc0264cca07a4d4a9c878e2e149e67a251d430782c0c9502ef183dbb8bf0",
-  "graph_sha256": "6bc1bebc2f3d400c3a9cbbf990cc9d19ebac05f92409b35793fdc64dd735b1eb",
+  "request_sha256": "be757566903355fa0ee8de700f97ed850b4e21381c24b1cac1ee6275e06ac134",
+  "graph_sha256": "c3fc5f5cf84b2062094c26f0e2ec8330b019c7af8c5e422dc40ac50ec8350e5f",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {"independent": true}, "confidence": 0.99, "evidence": ["mask statistics show this is the non-overlapping dark canvas owner: 1069108 of 1069207 mask pixels are exact background color, while foreground artwork is owned by separate children"]},
     {"action": "discard", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["large dark circular composite duplicates the independently owned rings and diagonal"]},

@@ -109,7 +109,7 @@ def test_core_baseline_is_bound_to_manifest_and_runtime_constraints() -> None:
         "os": "Windows",
         "architecture": "AMD64",
         "python": "3.12",
-        "device": "cuda",
+        "device": "cpu",
     }
     assert baseline["median_total_duration_ms"] > 0
     assert set(baseline["case_median_duration_ms"]) == {

@@ -17,11 +17,11 @@
     {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the bottom left-axis marker"], "object_ids": ["component_0017"], "parameters": {"box": [0.055, 0.84, 0.077, 0.87], "independent": true}},
     {"action": "rebuild_background", "confidence": 0.99, "evidence": ["background must be rebuilt only beneath the eight source-backed grid-line and axis-marker retries"], "object_ids": ["component_0001", "component_0002", "component_0003", "component_0006", "component_0012", "component_0013", "component_0015", "component_0017"], "parameters": {"margin_ratio": 0.005}}
   ],
-  "graph_sha256": "a82d7550b8eb9df0a29041e47e4f3d393210cb5edc35ef7f9571be98a47c662c",
+  "graph_sha256": "6e772988f980183327a847d67b9a38941635f7722db5c70274ec3cf266a5111a",
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "04a7cb5078f8a2ce755c8ec61fd25963716539dc6e356709c4d8b8bdf8e989a3",
+  "request_sha256": "eb20859b082b8dc425e0ef7480dfd699d347a88425fba0495916d3c540e2cb81",
   "schema_version": 1
 }

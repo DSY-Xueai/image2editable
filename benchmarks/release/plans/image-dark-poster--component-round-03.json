@@ -4,8 +4,8 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "8c2af2eca3e3e873c882f99efffb0ebe2a68d1310cbbed21c9a4585958067e16",
-  "graph_sha256": "cc44330fbb78729c278a63f34e0727935796a8b173da69aec833fd31d7b9962c",
+  "request_sha256": "015447e513606988e33c4281533a36d986fbd5b1728334d5f256debeb178b58a",
+  "graph_sha256": "2387150a37d0c3111bb67043f55dc269cf4e42ae6509b22fafc8016200e5ba4b",
   "actions": [
     {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the dark outer canvas with no violations"]},
     {"action": "absorb_residual", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["signed unexplained mask contains only exact dark-background holes adjacent to the outer canvas, including 86 pixels around the release label"]},
