@@ -542,11 +542,13 @@ def _resolve_component_plan(
         if isinstance(candidate_graph, dict):
             validation_graph = candidate_graph
 
-    def compatible(plan: dict[str, object]) -> bool:
+    def compatible(
+        plan: dict[str, object], *, require_context: bool = False
+    ) -> bool:
         if not isinstance(validation_request, dict) or not isinstance(
             validation_graph, dict
         ) or "schema_version" not in validation_request:
-            return True
+            return not require_context
         from image2editable.component_contracts import validate_component_plan
 
         current_request_sha256 = request.get("request_sha256")
@@ -591,7 +593,9 @@ def _resolve_component_plan(
         return PlanSelection(filename, plan, None)
     if allow_stale_binding and len(identity) != 1:
         compatible_identity = [
-            (filename, plan) for filename, plan in identity if compatible(plan)
+            (filename, plan)
+            for filename, plan in identity
+            if compatible(plan, require_context=True)
         ]
         if len(compatible_identity) == 1:
             filename, plan = compatible_identity[0]
@@ -617,7 +621,7 @@ def _resolve_component_plan(
             "request_sha256": request["request_sha256"],
             "graph_sha256": request["graph_sha256"],
         }
-        if not compatible(rebound):
+        if not compatible(rebound, require_context=True):
             raise BenchmarkFailure(
                 "incompatible_plan",
                 {"stage": "component_plan_compatibility", "filename": filename},
@@ -956,6 +960,7 @@ def run_case(
     workspace: Path,
     command: Command = run_command,
     allow_stale_bindings: bool = False,
+    allow_compatible_component_bindings: bool = False,
     plan_observer: Callable[[str, dict[str, object], bool], None] | None = None,
 ) -> BenchmarkCaseResult:
     case_id = case.get("id")
@@ -1053,6 +1058,9 @@ def run_case(
     summary = _call(command, ["run", "execute", str(run_dir)], cwd=workspace)
     sequence = 0
     used_requests: set[tuple[object, ...]] = set()
+    allow_component_rebinding = (
+        allow_stale_bindings or allow_compatible_component_bindings
+    )
     while summary.get("status") == "awaiting_agent":
         response = _call(command, ["agent", "next", str(run_dir)], cwd=workspace)
         if response.get("kind") == "capability_handshake":
@@ -1100,11 +1108,11 @@ def run_case(
         selection = _resolve_component_plan(
             case_id,
             request,
-            allow_stale_binding=allow_stale_bindings,
+            allow_stale_binding=allow_component_rebinding,
             graph=request.get("_component_graph"),
         )
         plan = selection.rebound_plan or selection.plan
-        if allow_stale_bindings and plan_observer is not None:
+        if allow_component_rebinding and plan_observer is not None:
             plan_observer(
                 selection.filename,
                 plan,
@@ -1596,15 +1604,45 @@ def run_shard_manifest(
     environment = benchmark_environment()
     workspace = workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
+    observed_plans: dict[str, dict[str, object]] = {}
+    expected_plan_filenames: set[str] | None = None
+    current_repeat_plan_filenames: set[str] = set()
+
+    def observe_plan(
+        filename: str, plan: dict[str, object], _rebound: bool = True
+    ) -> None:
+        if (
+            Path(filename).name != filename
+            or not filename.endswith(".json")
+            or not _valid_component_plan(plan)
+        ):
+            raise BenchmarkFailure("invalid_plan")
+        if (
+            expected_plan_filenames is not None
+            and filename not in expected_plan_filenames
+        ):
+            raise BenchmarkFailure("unstable_plan_binding")
+        current_repeat_plan_filenames.add(filename)
+        existing = observed_plans.get(filename)
+        if existing is None:
+            observed_plans[filename] = plan
+        elif existing != plan:
+            raise BenchmarkFailure("unstable_plan_binding")
+
     attempts: list[dict[str, object]] = []
     for index in range(1, repeat + 1):
+        current_repeat_plan_filenames.clear()
         repeat_workspace = workspace / f"repeat-{index:02d}"
         repeat_workspace.mkdir()
         for case in selected:
             started = time.perf_counter()
             try:
                 result = case_runner(
-                    case, workspace=repeat_workspace, command=command
+                    case,
+                    workspace=repeat_workspace,
+                    command=command,
+                    allow_compatible_component_bindings=True,
+                    plan_observer=observe_plan,
                 )
                 _validate_batch_case(case, result)
                 attempt = {
@@ -1637,6 +1675,16 @@ def run_shard_manifest(
                     ),
                 }
             attempts.append(attempt)
+        repeat_attempts = [
+            attempt for attempt in attempts if attempt["repeat"] == index
+        ]
+        if all(attempt["status"] == "passed" for attempt in repeat_attempts):
+            if expected_plan_filenames is None:
+                expected_plan_filenames = set(current_repeat_plan_filenames)
+            elif current_repeat_plan_filenames != expected_plan_filenames:
+                for attempt in repeat_attempts:
+                    attempt["status"] = "failed"
+                    attempt["error_type"] = "unstable_plan_binding"
 
     failed = sum(attempt["status"] != "passed" for attempt in attempts)
     report = {

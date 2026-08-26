@@ -994,21 +994,63 @@ def _component_request() -> dict[str, object]:
 def _bound_component_request(run_dir: Path) -> tuple[dict[str, object], dict[str, object]]:
     request_dir = run_dir / "pages/page_001/reconstruction/agent/round-01"
     request_dir.mkdir(parents=True)
-    graph = b'{"nodes":[]}\n'
+    graph_document = {
+        "nodes": [
+            {
+                "id": "component_0001",
+                "kind": "child",
+                "parent_id": None,
+                "state": "pending",
+                "mask": "masks/component_0001.png",
+                "mask_sha256": "1" * 64,
+                "bbox": [0, 0, 5, 5],
+                "z_index": 0,
+                "text_ids": [],
+            }
+        ]
+    }
+    graph = (
+        json.dumps(graph_document, ensure_ascii=False, indent=2, sort_keys=True).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
     graph_sha256 = hashlib.sha256(graph).hexdigest()
     (request_dir / "component-graph.json").write_bytes(graph)
+    evidence_names = (
+        "source.png",
+        "numbered-masks.png",
+        "ocr-overlay.png",
+        "component-isolation.png",
+        "ownership.png",
+        "reconstructed.png",
+        "difference.png",
+        "unexplained-mask.png",
+        "component-graph.json",
+        "quality-report.json",
+        "presentation-manifest.json",
+    )
     request = {
         "schema_version": 1,
         "page_id": "page_001",
         "provider": "host",
         "repair_round": 1,
+        "source_sha256": "0" * 64,
         "graph_sha256": graph_sha256,
+        "candidate_ids": ["component_0001"],
+        "frozen_ids": [],
         "evidence": {
-            "component-graph.json": {
-                "path": "component-graph.json",
-                "sha256": graph_sha256,
+            name: {
+                "path": name,
+                "sha256": graph_sha256 if name == "component-graph.json" else "0" * 64,
             }
+            for name in evidence_names
         },
+        "review_evidence": [
+            name
+            for name in evidence_names
+            if name not in {"component-graph.json", "presentation-manifest.json"}
+        ],
     }
     payload = (
         json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
@@ -1159,7 +1201,11 @@ def test_release_runner_locks_the_complete_host_protocol(
                 value, expected_component_plan = _bound_component_request(run_dir)
                 _write_benchmark_plan(
                     plans / "pptx-mixed-screenshot-candidates--component.json",
-                    expected_component_plan,
+                    {
+                        **expected_component_plan,
+                        "request_sha256": "8" * 64,
+                        "graph_sha256": "9" * 64,
+                    },
                 )
         elif command == ["agent", "record"]:
             submitted = json.loads(
@@ -1207,7 +1253,7 @@ def test_release_runner_locks_the_complete_host_protocol(
         _runner_case(),
         workspace=tmp_path / "workspace",
         command=fake_command,
-        allow_stale_bindings=True,
+        allow_compatible_component_bindings=True,
         plan_observer=lambda filename, plan, rebound: observed_plans.append(
             (filename, rebound)
         ),
@@ -1259,8 +1305,7 @@ def test_release_runner_locks_the_complete_host_protocol(
     assert result.pages == [{"page_id": "page_001", "status": "validated"}]
     assert type(result.duration_ms) is int and result.duration_ms >= 0
     assert observed_plans == [
-        ("pptx-mixed-screenshot-candidates--candidate.json", False),
-        ("pptx-mixed-screenshot-candidates--component.json", False),
+        ("pptx-mixed-screenshot-candidates--component.json", True),
     ]
 
 
@@ -1757,6 +1802,42 @@ def test_release_runner_reports_safe_candidate_stale_plan_bindings(
     }
 
 
+def test_release_runner_official_component_rebinding_keeps_candidate_binding_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(tmp_path, monkeypatch)
+    stale = {**_candidate_plan(), "source_object_sha256": "5" * 64}
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--candidate.json", stale
+    )
+
+    def fake_command(
+        arguments: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
+        if arguments[0] == "prepare":
+            run_dir = Path(arguments[arguments.index("--run-dir") + 1])
+            run_dir.mkdir()
+            value = {"run_dir": str(run_dir.resolve()), "status": "prepared"}
+        elif arguments[:2] == ["run", "next"]:
+            value = _candidate_response()
+        else:
+            raise AssertionError(arguments)
+        return subprocess.CompletedProcess(arguments, 0, json.dumps(value), "")
+
+    with pytest.raises(runner.BenchmarkFailure, match="stale_plan") as caught:
+        runner.run_case(
+            _runner_case(),
+            workspace=tmp_path / "workspace",
+            command=fake_command,
+            allow_compatible_component_bindings=True,
+        )
+
+    assert caught.value.details is not None
+    assert caught.value.details["stage"] == "candidate_plan"
+
+
 def test_release_runner_reports_repeated_component_request_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1828,11 +1909,15 @@ def test_release_runner_diagnostic_rebinds_only_component_hashes(
     runner = importlib.import_module("scripts.release_benchmark")
     stale = {**_component_plan(), "request_sha256": "5" * 64}
     _install_runner_plans(tmp_path, monkeypatch, component_plan=stale)
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
 
     selection = runner._resolve_component_plan(
         "pptx-mixed-screenshot-candidates",
-        _component_request(),
+        request,
         allow_stale_binding=True,
+        graph=request["_component_graph"],
     )
 
     assert selection.filename == (
@@ -1841,10 +1926,32 @@ def test_release_runner_diagnostic_rebinds_only_component_hashes(
     assert selection.plan == stale
     assert selection.rebound_plan == {
         **stale,
-        "request_sha256": "3" * 64,
-        "graph_sha256": "4" * 64,
+        "request_sha256": request["request_sha256"],
+        "graph_sha256": request["graph_sha256"],
     }
     assert selection.rebound_plan["actions"] == stale["actions"]
+
+
+def test_release_runner_rejects_stale_component_without_complete_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    stale = {**_component_plan(), "request_sha256": "5" * 64}
+    _install_runner_plans(tmp_path, monkeypatch, component_plan=stale)
+    request = {
+        **_component_request(),
+        "_component_request": {"page_id": "page_001"},
+        "_component_graph": {"nodes": []},
+    }
+
+    with pytest.raises(runner.BenchmarkFailure, match="incompatible_plan"):
+        runner._resolve_component_plan(
+            "pptx-mixed-screenshot-candidates",
+            request,
+            allow_stale_binding=True,
+            graph=request["_component_graph"],
+        )
 
 
 def test_release_runner_diagnostic_rebinds_only_candidate_hashes(
@@ -1888,12 +1995,16 @@ def test_release_runner_diagnostic_rejects_duplicate_identity_plans(
         plans / "pptx-mixed-screenshot-candidates--component-copy.json",
         {**_component_plan(), "request_sha256": "6" * 64},
     )
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
 
     with pytest.raises(runner.BenchmarkFailure, match="duplicate_plan"):
         runner._resolve_component_plan(
             "pptx-mixed-screenshot-candidates",
-            _component_request(),
+            request,
             allow_stale_binding=True,
+            graph=request["_component_graph"],
         )
 
 
@@ -1932,7 +2043,7 @@ def test_release_runner_diagnostic_rejects_incompatible_stale_component_plan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = importlib.import_module("scripts.release_benchmark")
-    plans = _install_runner_plans(
+    _install_runner_plans(
         tmp_path,
         monkeypatch,
         component_plan={
@@ -1945,89 +2056,21 @@ def test_release_runner_diagnostic_rejects_incompatible_stale_component_plan(
                     "object_ids": ["component_0002"],
                     "parameters": {},
                     "confidence": 0.99,
-                    "evidence": ["stale plan targets a frozen component"],
+                    "evidence": ["stale plan targets an unknown component"],
                 }
             ],
         },
     )
-    graph = {
-        "nodes": [
-            {
-                "id": "parent_0001",
-                "kind": "parent",
-                "parent_id": None,
-                "state": "inactive",
-                "mask": "masks/parent_0001.png",
-                "mask_sha256": "0" * 64,
-                "bbox": [0, 0, 10, 10],
-                "z_index": 0,
-                "text_ids": [],
-            },
-            {
-                "id": "component_0001",
-                "kind": "child",
-                "parent_id": "parent_0001",
-                "state": "pending",
-                "mask": "masks/component_0001.png",
-                "mask_sha256": "1" * 64,
-                "bbox": [0, 0, 5, 5],
-                "z_index": 1,
-                "text_ids": [],
-            },
-            {
-                "id": "component_0002",
-                "kind": "child",
-                "parent_id": "parent_0001",
-                "state": "frozen",
-                "mask": "masks/component_0002.png",
-                "mask_sha256": "2" * 64,
-                "bbox": [5, 5, 10, 10],
-                "z_index": 2,
-                "text_ids": [],
-            },
-        ]
-    }
-    request = {
-        "schema_version": 1,
-        "page_id": "page_001",
-        "provider": "host",
-        "repair_round": 1,
-        "source_sha256": "0" * 64,
-        "request_sha256": "3" * 64,
-        "graph_sha256": "4" * 64,
-        "candidate_ids": ["component_0001"],
-        "frozen_ids": ["component_0002"],
-        "evidence": {
-            name: {"path": name, "sha256": "0" * 64}
-            for name in (
-                "source.png",
-                "numbered-masks.png",
-                "ocr-overlay.png",
-                "component-isolation.png",
-                "ownership.png",
-                "reconstructed.png",
-                "difference.png",
-                "component-graph.json",
-                "quality-report.json",
-                "presentation-manifest.json",
-                "unexplained-mask.png",
-            )
-        },
-        "review_evidence": [
-            "source.png",
-            "reconstructed.png",
-            "difference.png",
-            "unexplained-mask.png",
-            "quality-report.json",
-        ],
-    }
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
 
     with pytest.raises(runner.BenchmarkFailure, match="incompatible_plan"):
         runner._resolve_component_plan(
             "pptx-mixed-screenshot-candidates",
             request,
             allow_stale_binding=True,
-            graph=graph,
+            graph=request["_component_graph"],
         )
 
 
@@ -2768,9 +2811,20 @@ def test_release_official_shard_runs_only_selected_cases_and_keeps_manifest_iden
     constraints = tmp_path / "constraints.txt"
     constraints.write_text("package==1\n", encoding="utf-8")
 
+    calls: list[bool] = []
+
     def shard_case(
-        case: dict[str, object], *, workspace: Path, command: object
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_compatible_component_bindings: bool,
+        plan_observer: object,
     ) -> runner.BenchmarkCaseResult:
+        calls.append(allow_compatible_component_bindings)
+        plan_observer(
+            "image-one--component-round-01.json", _component_plan(), False
+        )
         run_dir = workspace / str(case["id"]) / "run"
         page = run_dir / "pages/page_001"
         (page / "reconstruction").mkdir(parents=True)
@@ -2806,6 +2860,68 @@ def test_release_official_shard_runs_only_selected_cases_and_keeps_manifest_iden
         "pages": 3,
         "failed_attempts": 0,
     }
+    assert calls == [True, True, True]
+
+
+@pytest.mark.parametrize(
+    ("variation", "expected_failed_attempts"),
+    [("binding", 2), ("missing", 1)],
+)
+def test_release_official_shard_rejects_unstable_component_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variation: str,
+    expected_failed_attempts: int,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    manifest = _batch_manifest(tmp_path)
+    monkeypatch.setattr(runner, "RELEASE_ROOT", manifest.parent)
+    attempt = 0
+
+    def shard_case(
+        case: dict[str, object],
+        *,
+        workspace: Path,
+        command: object,
+        allow_compatible_component_bindings: bool,
+        plan_observer: object,
+    ) -> runner.BenchmarkCaseResult:
+        nonlocal attempt
+        assert allow_compatible_component_bindings is True
+        attempt += 1
+        if variation != "missing" or attempt != 2:
+            plan = _component_plan()
+            if variation == "binding":
+                plan = {**plan, "request_sha256": str(attempt) * 64}
+            plan_observer(
+                "image-one--component-round-01.json", plan, variation == "binding"
+            )
+        run_dir = workspace / str(case["id"]) / "run"
+        page = run_dir / "pages/page_001"
+        (page / "reconstruction").mkdir(parents=True)
+        (page / "page_result.json").write_text(
+            '{"page_id":"page_001","status":"validated"}', encoding="utf-8"
+        )
+        _write_valid_release_quality(page / "reconstruction")
+        return runner.BenchmarkCaseResult(
+            str(case["id"]),
+            str(run_dir),
+            [{"page_id": "page_001", "status": "validated"}],
+            11,
+        )
+
+    report = runner.run_shard_manifest(
+        manifest,
+        case_ids=["image-one"],
+        workspace=tmp_path / "runs",
+        report_path=tmp_path / "shard.json",
+        case_runner=shard_case,
+    )
+
+    assert report["status"] == "failed"
+    failed = [attempt for attempt in report["attempts"] if attempt["status"] == "failed"]
+    assert len(failed) == expected_failed_attempts
+    assert all(attempt["error_type"] == "unstable_plan_binding" for attempt in failed)
 
 
 _CORE_SHARDS = [
