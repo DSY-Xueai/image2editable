@@ -113,6 +113,50 @@ _ACTIONS = {
 }
 _CAPABILITIES = ["vision", "local_file_read", "tool_use", "structured_json"]
 _CHALLENGE_COLORS = ("#2f6fed", "#d9485f", "#2b8a3e", "#9c36b5")
+_COMPONENT_PLAN_FAMILIES = (
+    (
+        "component_0003",
+        "component_0004",
+        frozenset(
+            {
+                "image-non-16-9-infographic--component-round-01-20260823.json",
+                "image-non-16-9-infographic--component-round-02-20260823.json",
+                "image-non-16-9-infographic--component-round-03-20260823.json",
+                "image-non-16-9-infographic--component-round-04.json",
+            }
+        ),
+    ),
+    (
+        "component_0004",
+        "component_0003",
+        frozenset(
+            {
+                "image-non-16-9-infographic--component-round-01.json",
+                "image-non-16-9-infographic--component-round-02.json",
+                "image-non-16-9-infographic--component-round-03.json",
+                "image-non-16-9-infographic--component-round-04-bca.json",
+            }
+        ),
+    ),
+)
+_COMPONENT_PLAN_ROUND_SIGNATURES = {
+    1: (
+        ((61, 316, 940, 540), "child", "pending"),
+        ((62, 887, 939, 1110), "child", "pending"),
+    ),
+    2: (
+        ((61, 316, 940, 540), "child", "pending"),
+        ((62, 887, 939, 1110), "child", "inactive"),
+    ),
+    3: (
+        ((61, 316, 940, 540), "parent", "pending"),
+        ((62, 887, 939, 1110), "child", "inactive"),
+    ),
+    4: (
+        ((60, 315, 941, 541), "parent", "pending"),
+        ((62, 887, 939, 1110), "child", "inactive"),
+    ),
+}
 
 
 class BenchmarkFailure(RuntimeError):
@@ -287,6 +331,55 @@ def _case_plan_entries(case_id: str) -> list[tuple[str, dict[str, object]]]:
 
 def _case_plans(case_id: str) -> list[dict[str, object]]:
     return [plan for _, plan in _case_plan_entries(case_id)]
+
+
+def _select_component_plan_family(
+    entries: list[tuple[str, dict[str, object]]], graph: dict[str, object]
+) -> tuple[str, dict[str, object]] | None:
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    if not isinstance(nodes, list):
+        return None
+    by_id = {
+        node.get("id"): node for node in nodes if isinstance(node, dict)
+    }
+    candidates = dict(entries)
+    registered = set().union(
+        *(plan_filenames for _, _, plan_filenames in _COMPONENT_PLAN_FAMILIES)
+    )
+    repair_rounds = {plan.get("repair_round") for plan in candidates.values()}
+    if (
+        len(candidates) != len(_COMPONENT_PLAN_FAMILIES)
+        or not set(candidates) <= registered
+        or len(repair_rounds) != 1
+    ):
+        return None
+    signatures = _COMPONENT_PLAN_ROUND_SIGNATURES.get(repair_rounds.pop())
+    if signatures is None:
+        return None
+
+    def matches(node_id: str, signature: tuple[object, ...]) -> bool:
+        expected_bbox, kind, state = signature
+        node = by_id.get(node_id)
+        bbox = node.get("bbox") if isinstance(node, dict) else None
+        return (
+            isinstance(expected_bbox, tuple)
+            and isinstance(bbox, list)
+            and len(bbox) == len(expected_bbox) == 4
+            and all(type(value) is int for value in bbox)
+            and all(abs(value - expected) <= 2 for value, expected in zip(bbox, expected_bbox))
+            and node.get("kind") == kind
+            and node.get("state") == state
+        )
+
+    selected: list[tuple[str, dict[str, object]]] = []
+    for top_id, bottom_id, plan_filenames in _COMPONENT_PLAN_FAMILIES:
+        family_candidates = plan_filenames & set(candidates)
+        if len(family_candidates) != 1:
+            return None
+        if matches(top_id, signatures[0]) and matches(bottom_id, signatures[1]):
+            filename = next(iter(family_candidates))
+            selected.append((filename, candidates[filename]))
+    return selected[0] if len(selected) == 1 else None
 
 
 def _sha256(value: object) -> bool:
@@ -613,7 +706,20 @@ def _resolve_component_plan(
                     "repair_round": request.get("repair_round"),
                 },
             )
-        raise BenchmarkFailure("duplicate_plan")
+        if not isinstance(validation_graph, dict):
+            raise BenchmarkFailure("duplicate_plan")
+        selected = _select_component_plan_family(
+            compatible_identity, validation_graph
+        )
+        if selected is None:
+            raise BenchmarkFailure("duplicate_plan")
+        filename, plan = selected
+        rebound = {
+            **plan,
+            "request_sha256": request["request_sha256"],
+            "graph_sha256": request["graph_sha256"],
+        }
+        return PlanSelection(filename, plan, rebound)
     if allow_stale_binding:
         filename, plan = identity[0]
         rebound = {

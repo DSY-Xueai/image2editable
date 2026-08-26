@@ -2008,6 +2008,230 @@ def test_release_runner_diagnostic_rejects_duplicate_identity_plans(
         )
 
 
+def test_release_runner_uses_graph_selector_for_compatible_plan_families(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    selected_filename = "pptx-mixed-screenshot-candidates--component.json"
+    alternate_filename = "pptx-mixed-screenshot-candidates--component-copy.json"
+    plans = _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "request_sha256": "5" * 64},
+    )
+    _write_benchmark_plan(
+        plans / alternate_filename,
+        {**_component_plan(), "request_sha256": "6" * 64},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_COMPONENT_PLAN_FAMILIES",
+        (
+            (
+                "component_0001",
+                "component_0002",
+                frozenset({selected_filename}),
+            ),
+            (
+                "component_0002",
+                "component_0001",
+                frozenset({alternate_filename}),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_COMPONENT_PLAN_ROUND_SIGNATURES",
+        {
+            1: (
+                ((0, 0, 5, 5), "child", "pending"),
+                ((10, 20, 15, 25), "child", "inactive"),
+            )
+        },
+    )
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
+    request["_component_graph"]["nodes"].append(
+        {
+            "id": "component_0002",
+            "kind": "child",
+            "state": "inactive",
+            "bbox": [10, 20, 15, 25],
+        }
+    )
+
+    selection = runner._resolve_component_plan(
+        "pptx-mixed-screenshot-candidates",
+        request,
+        allow_stale_binding=True,
+        graph=request["_component_graph"],
+    )
+
+    assert selection.filename == selected_filename
+    assert selection.rebound_plan == {
+        **selection.plan,
+        "request_sha256": request["request_sha256"],
+        "graph_sha256": request["graph_sha256"],
+    }
+
+
+@pytest.mark.parametrize("mutation", ["unreviewed_bbox", "unregistered_plan"])
+def test_release_runner_rejects_unreviewed_compatible_plan_family(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    selected_filename = "pptx-mixed-screenshot-candidates--component.json"
+    alternate_filename = "pptx-mixed-screenshot-candidates--component-copy.json"
+    plans = _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={**_component_plan(), "request_sha256": "5" * 64},
+    )
+    _write_benchmark_plan(
+        plans / alternate_filename,
+        {**_component_plan(), "request_sha256": "6" * 64},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_COMPONENT_PLAN_FAMILIES",
+        (
+            (
+                "component_0001",
+                "component_0002",
+                frozenset({selected_filename}),
+            ),
+            (
+                "component_0002",
+                "component_0001",
+                frozenset({alternate_filename}),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_COMPONENT_PLAN_ROUND_SIGNATURES",
+        {
+            1: (
+                ((0, 0, 5, 5), "child", "pending"),
+                ((10, 20, 15, 25), "child", "inactive"),
+            )
+        },
+    )
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
+    request["_component_graph"]["nodes"].append(
+        {
+            "id": "component_0002",
+            "kind": "child",
+            "state": "inactive",
+            "bbox": [10, 20, 15, 25],
+        }
+    )
+    if mutation == "unreviewed_bbox":
+        request["_component_graph"]["nodes"][0]["bbox"] = [0, 5, 5, 10]
+    else:
+        _write_benchmark_plan(
+            plans / "pptx-mixed-screenshot-candidates--component-third.json",
+            {**_component_plan(), "request_sha256": "7" * 64},
+        )
+
+    with pytest.raises(runner.BenchmarkFailure, match="duplicate_plan"):
+        runner._resolve_component_plan(
+            "pptx-mixed-screenshot-candidates",
+            request,
+            allow_stale_binding=True,
+            graph=request["_component_graph"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("top_id", "bottom_id", "expected_filenames"),
+    [
+        (
+            "component_0003",
+            "component_0004",
+            (
+                "image-non-16-9-infographic--component-round-01-20260823.json",
+                "image-non-16-9-infographic--component-round-02-20260823.json",
+                "image-non-16-9-infographic--component-round-03-20260823.json",
+                "image-non-16-9-infographic--component-round-04.json",
+            ),
+        ),
+        (
+            "component_0004",
+            "component_0003",
+            (
+                "image-non-16-9-infographic--component-round-01.json",
+                "image-non-16-9-infographic--component-round-02.json",
+                "image-non-16-9-infographic--component-round-03.json",
+                "image-non-16-9-infographic--component-round-04-bca.json",
+            ),
+        ),
+    ],
+)
+def test_release_infographic_plan_families_match_reviewed_graph_layouts(
+    top_id: str,
+    bottom_id: str,
+    expected_filenames: tuple[str, ...],
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    case_entries = runner._case_plan_entries("image-non-16-9-infographic")
+    signatures = (
+        (
+            ((61, 316, 940, 540), "child", "pending"),
+            ((62, 887, 939, 1110), "child", "pending"),
+        ),
+        (
+            ((61, 316, 940, 540), "child", "pending"),
+            ((62, 887, 939, 1110), "child", "inactive"),
+        ),
+        (
+            ((61, 316, 940, 540), "parent", "pending"),
+            ((62, 887, 939, 1110), "child", "inactive"),
+        ),
+        (
+            ((60, 315, 941, 541), "parent", "pending"),
+            ((62, 887, 939, 1110), "child", "inactive"),
+        ),
+    )
+    for repair_round, expected_filename in enumerate(expected_filenames, start=1):
+        entries = [
+            (filename, plan)
+            for filename, plan in case_entries
+            if plan.get("kind") == "component_plan"
+            and plan.get("page_id") == "page_001"
+            and plan.get("repair_round") == repair_round
+        ]
+        top, bottom = signatures[repair_round - 1]
+        selection = runner._select_component_plan_family(
+            entries,
+            {
+                "nodes": [
+                    {
+                        "id": top_id,
+                        "bbox": list(top[0]),
+                        "kind": top[1],
+                        "state": top[2],
+                    },
+                    {
+                        "id": bottom_id,
+                        "bbox": list(bottom[0]),
+                        "kind": bottom[1],
+                        "state": bottom[2],
+                    },
+                ]
+            },
+        )
+
+        assert selection is not None
+        assert selection[0] == expected_filename
+
+
 def test_release_runner_diagnostic_prefers_exact_component_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
