@@ -492,6 +492,7 @@ def _resolve_component_plan(
     request: dict[str, object],
     *,
     allow_stale_binding: bool = False,
+    graph: dict[str, object] | None = None,
 ) -> PlanSelection:
     if (
         not _matches(_PAGE_ID, request.get("page_id"))
@@ -532,6 +533,46 @@ def _resolve_component_plan(
                 ],
             },
         )
+    validation_request = request.get("_component_request")
+    if not isinstance(validation_request, dict):
+        validation_request = request
+    validation_graph = graph
+    if validation_graph is None:
+        candidate_graph = request.get("_component_graph")
+        if isinstance(candidate_graph, dict):
+            validation_graph = candidate_graph
+
+    def compatible(plan: dict[str, object]) -> bool:
+        if not isinstance(validation_request, dict) or not isinstance(
+            validation_graph, dict
+        ) or "schema_version" not in validation_request:
+            return True
+        from image2editable.component_contracts import validate_component_plan
+
+        current_request_sha256 = request.get("request_sha256")
+        if not _sha256(current_request_sha256):
+            current_request_sha256 = validation_request.get("request_sha256")
+        if not _sha256(current_request_sha256):
+            return False
+        request_payload = {
+            key: value
+            for key, value in validation_request.items()
+            if key != "request_sha256" and not key.startswith("_")
+        }
+        candidate = {
+            key: value for key, value in plan.items() if key != "graph_sha256"
+        }
+        candidate["request_sha256"] = current_request_sha256
+        try:
+            validate_component_plan(
+                candidate,
+                request=request_payload,
+                graph=validation_graph,
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return True
+
     matches = [
         (filename, plan)
         for filename, plan in identity
@@ -542,8 +583,32 @@ def _resolve_component_plan(
         if len(matches) != 1:
             raise BenchmarkFailure("duplicate_plan")
         filename, plan = matches[0]
+        if not compatible(plan):
+            raise BenchmarkFailure(
+                "incompatible_plan",
+                {"stage": "component_plan_compatibility", "filename": filename},
+            )
         return PlanSelection(filename, plan, None)
     if allow_stale_binding and len(identity) != 1:
+        compatible_identity = [
+            (filename, plan) for filename, plan in identity if compatible(plan)
+        ]
+        if len(compatible_identity) == 1:
+            filename, plan = compatible_identity[0]
+            rebound = {
+                **plan,
+                "request_sha256": request["request_sha256"],
+                "graph_sha256": request["graph_sha256"],
+            }
+            return PlanSelection(filename, plan, rebound)
+        if not compatible_identity:
+            raise BenchmarkFailure(
+                "incompatible_plan",
+                {
+                    "stage": "component_plan_compatibility",
+                    "repair_round": request.get("repair_round"),
+                },
+            )
         raise BenchmarkFailure("duplicate_plan")
     if allow_stale_binding:
         filename, plan = identity[0]
@@ -552,6 +617,11 @@ def _resolve_component_plan(
             "request_sha256": request["request_sha256"],
             "graph_sha256": request["graph_sha256"],
         }
+        if not compatible(rebound):
+            raise BenchmarkFailure(
+                "incompatible_plan",
+                {"stage": "component_plan_compatibility", "filename": filename},
+            )
         return PlanSelection(filename, plan, rebound)
     raise BenchmarkFailure(
         "stale_plan",
@@ -617,6 +687,10 @@ def _component_binding(response: dict[str, object], run_dir: Path) -> dict[str, 
         ):
             raise ValueError
         binding["graph_sha256"] = request["graph_sha256"]
+        binding["_component_request"] = request
+        graph_document = _strict_json(graph, _JSON_LIMIT)
+        if isinstance(graph_document, dict) and graph_document.get("nodes"):
+            binding["_component_graph"] = graph_document
     except (KeyboardInterrupt, SystemExit):
         raise
     except Exception:
@@ -1027,6 +1101,7 @@ def run_case(
             case_id,
             request,
             allow_stale_binding=allow_stale_bindings,
+            graph=request.get("_component_graph"),
         )
         plan = selection.rebound_plan or selection.plan
         if allow_stale_bindings and plan_observer is not None:

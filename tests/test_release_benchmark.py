@@ -252,7 +252,7 @@ EXPECTED_README = """# v0.2 核心 14 页 benchmark
 
 五份分片报告会由独立的聚合步骤重新校验。v0.2 的正式参考环境固定为 GitHub-hosted Windows、AMD64、Python 3.12 和 CPU。只有 manifest、依赖约束、运行环境、10 个 case、30 次尝试和 42 个累计页面全部一致，且性能没有超过同环境基线 15%，才会生成 `report_kind: official`、`status: passed` 的正式报告。单个分片不能代表 benchmark 通过。
 
-当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。若同一轮有多个已审核 plan，runner 会先选择与当前 request/graph 完整匹配的 plan；只有唯一旧 plan 时才允许更新绑定 hash。无论哪种情况，原有 decision、actions、parameters、confidence 和 evidence 都必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
+当 GitHub-hosted 环境产生的 request/graph hash 与已有 plans 不一致时，可以先运行 diagnostic。runner 会先选择与当前 request/graph 完整匹配的 plan；没有 exact match 时，只能在 action 通过当前 request/graph 完整契约校验的旧 plan 中选择唯一一个，并更新绑定 hash。无论哪种情况，原有 decision、actions、parameters、confidence 和 evidence 都必须保持不变；三次重复得到的绑定也必须完全一致。它会继续执行相同的页面与质量检查，但报告只会是 `report_kind: diagnostic`，不能算作正式通过。
 
 性能基线只能通过 `baseline-candidate` 从五份成功的三次重复 diagnostic 报告生成。该命令会重新检查固定的 CPU 环境、完整 case 和页数、manifest、依赖约束及性能数据；probe、失败报告、CUDA 报告、缺失或重复的 case 都不能生成候选基线。候选文件仍需审核并提交为 `BASELINE.json`，它本身不会把 diagnostic 变成正式通过。
 
@@ -1925,6 +1925,110 @@ def test_release_runner_diagnostic_prefers_exact_component_binding(
     )
     assert selection.plan == exact
     assert selection.rebound_plan is None
+
+
+def test_release_runner_diagnostic_rejects_incompatible_stale_component_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = _install_runner_plans(
+        tmp_path,
+        monkeypatch,
+        component_plan={
+            **_component_plan(),
+            "request_sha256": "5" * 64,
+            "graph_sha256": "6" * 64,
+            "actions": [
+                {
+                    "action": "accept",
+                    "object_ids": ["component_0002"],
+                    "parameters": {},
+                    "confidence": 0.99,
+                    "evidence": ["stale plan targets a frozen component"],
+                }
+            ],
+        },
+    )
+    graph = {
+        "nodes": [
+            {
+                "id": "parent_0001",
+                "kind": "parent",
+                "parent_id": None,
+                "state": "inactive",
+                "mask": "masks/parent_0001.png",
+                "mask_sha256": "0" * 64,
+                "bbox": [0, 0, 10, 10],
+                "z_index": 0,
+                "text_ids": [],
+            },
+            {
+                "id": "component_0001",
+                "kind": "child",
+                "parent_id": "parent_0001",
+                "state": "pending",
+                "mask": "masks/component_0001.png",
+                "mask_sha256": "1" * 64,
+                "bbox": [0, 0, 5, 5],
+                "z_index": 1,
+                "text_ids": [],
+            },
+            {
+                "id": "component_0002",
+                "kind": "child",
+                "parent_id": "parent_0001",
+                "state": "frozen",
+                "mask": "masks/component_0002.png",
+                "mask_sha256": "2" * 64,
+                "bbox": [5, 5, 10, 10],
+                "z_index": 2,
+                "text_ids": [],
+            },
+        ]
+    }
+    request = {
+        "schema_version": 1,
+        "page_id": "page_001",
+        "provider": "host",
+        "repair_round": 1,
+        "source_sha256": "0" * 64,
+        "request_sha256": "3" * 64,
+        "graph_sha256": "4" * 64,
+        "candidate_ids": ["component_0001"],
+        "frozen_ids": ["component_0002"],
+        "evidence": {
+            name: {"path": name, "sha256": "0" * 64}
+            for name in (
+                "source.png",
+                "numbered-masks.png",
+                "ocr-overlay.png",
+                "component-isolation.png",
+                "ownership.png",
+                "reconstructed.png",
+                "difference.png",
+                "component-graph.json",
+                "quality-report.json",
+                "presentation-manifest.json",
+                "unexplained-mask.png",
+            )
+        },
+        "review_evidence": [
+            "source.png",
+            "reconstructed.png",
+            "difference.png",
+            "unexplained-mask.png",
+            "quality-report.json",
+        ],
+    }
+
+    with pytest.raises(runner.BenchmarkFailure, match="incompatible_plan"):
+        runner._resolve_component_plan(
+            "pptx-mixed-screenshot-candidates",
+            request,
+            allow_stale_binding=True,
+            graph=graph,
+        )
 
 
 def test_release_runner_diagnostic_rejects_invalid_rebound_hashes(
