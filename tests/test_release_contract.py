@@ -89,7 +89,11 @@ def test_release_workflow_validates_passed_core_report() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert 'report["status"] != "passed"' in workflow
-    assert 'report["totals"] != {"cases": 10, "failed_attempts": 0, "pages": 42}' in workflow
+    assert (
+        'report["totals"] != {"attempts": 30, "cases": 10, '
+        '"failed_attempts": 0, "pages": 42}'
+        in workflow
+    )
     assert 'report["repeat"] != 3' in workflow
 
 

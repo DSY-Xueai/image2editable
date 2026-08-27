@@ -56,7 +56,7 @@ jobs:
           report = json.loads((root / "core-report" / "report.json").read_text(encoding="utf-8"))
           if report["status"] != "passed":
               raise SystemExit("core benchmark did not pass")
-          if report["totals"] != {"cases": 10, "failed_attempts": 0, "pages": 42}:
+          if report["totals"] != {"attempts": 30, "cases": 10, "failed_attempts": 0, "pages": 42}:
               raise SystemExit("unexpected core benchmark totals")
           if report["repeat"] != 3:
               raise SystemExit("unexpected core benchmark repeat")
