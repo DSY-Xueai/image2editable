@@ -20,7 +20,10 @@ from typing import Callable
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-from scripts.benchmark_conversion import _read_regular_file, _strict_json
+if __package__:
+    from scripts.benchmark_conversion import _read_regular_file, _strict_json
+else:
+    from benchmark_conversion import _read_regular_file, _strict_json
 
 
 ROOT = Path(__file__).resolve().parents[1]

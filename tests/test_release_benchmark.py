@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -3761,6 +3762,26 @@ def test_release_runner_manifest_fails_closed_on_warning_and_invalid_repeat(
             repeat=2,
             case_runner=warning_case,
         )
+
+
+def test_release_runner_direct_script_starts_without_installed_package(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "scripts/release_benchmark.py"),
+            "--help",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--mode" in result.stdout
 
 
 def test_release_runner_cli_routes_explicit_modes(
