@@ -21,6 +21,14 @@ on:
         options:
           - "3"
           - "1"
+      core_benchmark_diagnostic_target:
+        description: Diagnostic target
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - image-non-16-9-infographic
       run_core_benchmark:
         description: Run protected v0.2 core 14-page benchmark
         required: true
@@ -182,18 +190,12 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - shard: mixed-long
-            case_args: --case-id pptx-mixed-screenshot-candidates
-          - shard: pdf-network
-            case_args: --case-id pdf-rotated-page --case-id image-thin-line-network
-          - shard: visual-heavy
-            case_args: --case-id image-icon-matrix --case-id image-dark-poster
-          - shard: charts
-            case_args: --case-id image-flowchart --case-id image-combo-chart
-          - shard: remaining
-            case_args: --case-id image-bilingual-dashboard --case-id image-tiny-element-table --case-id image-non-16-9-infographic
+      matrix: >-
+        ${{ fromJSON(
+          inputs.core_benchmark_diagnostic_target == 'image-non-16-9-infographic'
+          && '{"include":[{"shard":"non-16-9","case_args":"--case-id image-non-16-9-infographic"}]}'
+          || '{"include":[{"shard":"mixed-long","case_args":"--case-id pptx-mixed-screenshot-candidates"},{"shard":"pdf-network","case_args":"--case-id pdf-rotated-page --case-id image-thin-line-network"},{"shard":"visual-heavy","case_args":"--case-id image-icon-matrix --case-id image-dark-poster"},{"shard":"charts","case_args":"--case-id image-flowchart --case-id image-combo-chart"},{"shard":"remaining","case_args":"--case-id image-bilingual-dashboard --case-id image-tiny-element-table --case-id image-non-16-9-infographic"}]}'
+        ) }}
     steps:
       - name: Require protected core-benchmark approval
         shell: pwsh

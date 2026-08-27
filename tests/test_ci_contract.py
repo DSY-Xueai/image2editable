@@ -62,6 +62,14 @@ CORE_SHARD_MATRIX = [
         ),
     },
 ]
+CORE_DIAGNOSTIC_SINGLE_MATRIX = {
+    "include": [
+        {
+            "shard": "non-16-9",
+            "case_args": "--case-id image-non-16-9-infographic",
+        }
+    ]
+}
 FAST_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML "
     "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch"
@@ -518,6 +526,13 @@ def test_release_gate_is_manual_and_has_exact_jobs_and_matrix() -> None:
                     "default": "3",
                     "options": ["3", "1"],
                 },
+                "core_benchmark_diagnostic_target": {
+                    "description": "Diagnostic target",
+                    "required": True,
+                    "type": "choice",
+                    "default": "all",
+                    "options": ["all", "image-non-16-9-infographic"],
+                },
                 "run_core_benchmark": {
                     "description": "Run protected v0.2 core 14-page benchmark",
                     "required": True,
@@ -726,10 +741,6 @@ def test_release_gate_core_benchmark_uses_protected_balanced_windows_shards() ->
         assert _needs(job) == {"build-distribution"}
         assert job["if"] == "${{ inputs." + input_name + " }}"
         assert job["environment"] == "core-benchmark"
-        assert job["strategy"] == {
-            "fail-fast": False,
-            "matrix": {"include": CORE_SHARD_MATRIX},
-        }
         approval = _named_step(job, "Require protected core-benchmark approval")
         assert approval["shell"] == "pwsh"
         assert approval["env"] == {
@@ -755,6 +766,15 @@ def test_release_gate_core_benchmark_uses_protected_balanced_windows_shards() ->
         assert _named_step(job, run_step)["working-directory"] == "${{ runner.temp }}"
 
     diagnostic = jobs["core-benchmark-diagnostic"]
+    diagnostic_matrix = diagnostic["strategy"]
+    assert diagnostic_matrix["fail-fast"] is False
+    assert "inputs.core_benchmark_diagnostic_target" in diagnostic_matrix["matrix"]
+    assert json.dumps(CORE_DIAGNOSTIC_SINGLE_MATRIX, separators=(",", ":")) in (
+        diagnostic_matrix["matrix"]
+    )
+    assert json.dumps(
+        {"include": CORE_SHARD_MATRIX}, separators=(",", ":")
+    ) in diagnostic_matrix["matrix"]
     assert _commands(_named_step(diagnostic, "Run diagnostic core benchmark shard")) == [
         (
             'python "${{ github.workspace }}/scripts/release_benchmark.py" '
@@ -780,6 +800,10 @@ def test_release_gate_core_benchmark_uses_protected_balanced_windows_shards() ->
     }
 
     official = jobs["core-benchmark"]
+    assert official["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"include": CORE_SHARD_MATRIX},
+    }
     assert _commands(_named_step(official, "Run strict core benchmark shard")) == [
         (
             'python "${{ github.workspace }}/scripts/release_benchmark.py" '

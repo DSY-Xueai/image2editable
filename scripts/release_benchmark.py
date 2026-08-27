@@ -116,6 +116,9 @@ _ACTIONS = {
 }
 _CAPABILITIES = ["vision", "local_file_read", "tool_use", "structured_json"]
 _CHALLENGE_COLORS = ("#2f6fed", "#d9485f", "#2b8a3e", "#9c36b5")
+_COMPONENT_DIAGNOSTIC_ID = re.compile(
+    r"(?:component|parent|text|merge|split)_[0-9]{4}"
+)
 _COMPONENT_PLAN_FAMILIES = (
     (
         "component_0003",
@@ -361,18 +364,27 @@ def _select_component_plan_family(
         return None
 
     def matches(node_id: str, signature: tuple[object, ...]) -> bool:
-        expected_bbox, kind, state = signature
-        node = by_id.get(node_id)
-        bbox = node.get("bbox") if isinstance(node, dict) else None
-        return (
-            isinstance(expected_bbox, tuple)
-            and isinstance(bbox, list)
-            and len(bbox) == len(expected_bbox) == 4
-            and all(type(value) is int for value in bbox)
-            and all(abs(value - expected) <= 2 for value, expected in zip(bbox, expected_bbox))
-            and node.get("kind") == kind
-            and node.get("state") == state
+        expected_bbox, _, _ = signature
+        layout_ids = (
+            node_id,
+            node_id.replace("component_", "parent_", 1),
         )
+        for layout_id in layout_ids:
+            node = by_id.get(layout_id)
+            bbox = node.get("bbox") if isinstance(node, dict) else None
+            if (
+                isinstance(expected_bbox, tuple)
+                and isinstance(bbox, list)
+                and len(bbox) == len(expected_bbox) == 4
+                and all(type(value) is int for value in bbox)
+                and all(
+                    abs(value - expected) <= 2
+                    for value, expected in zip(bbox, expected_bbox)
+                )
+                and node.get("kind") in {"child", "parent"}
+            ):
+                return True
+        return False
 
     selected: list[tuple[str, dict[str, object]]] = []
     for top_id, bottom_id, plan_filenames in _COMPONENT_PLAN_FAMILIES:
@@ -385,8 +397,152 @@ def _select_component_plan_family(
     return selected[0] if len(selected) == 1 else None
 
 
+def _project_resolved_infographic_actions(
+    filename: str,
+    plan: dict[str, object],
+    request: dict[str, object],
+    graph: dict[str, object],
+) -> dict[str, object]:
+    registered = set().union(
+        *(plan_filenames for _, _, plan_filenames in _COMPONENT_PLAN_FAMILIES)
+    )
+    if filename not in registered:
+        return plan
+    candidate_ids = request.get("candidate_ids")
+    nodes = graph.get("nodes")
+    actions = plan.get("actions")
+    if (
+        not isinstance(candidate_ids, list)
+        or not isinstance(nodes, list)
+        or not isinstance(actions, list)
+    ):
+        return plan
+    candidates = set(candidate_ids)
+    resolved = {
+        node.get("id")
+        for node in nodes
+        if isinstance(node, dict)
+        and node.get("kind") != "text"
+        and node.get("state") in {"inactive", "frozen"}
+        and node.get("id") not in candidates
+    }
+    recovery_ids = {
+        component_id
+        for action in actions
+        if isinstance(action, dict)
+        and action.get("action")
+        in {
+            "retry_with_box",
+            "retry_with_points",
+            "collapse_to_parent",
+            "absorb_into_parent",
+        }
+        for component_id in action.get("object_ids", [])
+    }
+    projected = [
+        action
+        for action in actions
+        if not (
+            isinstance(action, dict)
+            and action.get("action")
+            in {
+                "accept",
+                "discard",
+                "rebuild_background",
+                "absorb_residual",
+            }
+            and isinstance(action.get("object_ids"), list)
+            and bool(action["object_ids"])
+            and all(component_id in resolved for component_id in action["object_ids"])
+            and not any(
+                component_id in recovery_ids for component_id in action["object_ids"]
+            )
+        )
+    ]
+    if not projected or len(projected) == len(actions):
+        return plan
+    return {**plan, "actions": projected}
+
+
 def _sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _component_plan_compatibility_details(
+    request: dict[str, object],
+    graph: dict[str, object] | None,
+    plan_errors: list[dict[str, str]],
+) -> dict[str, object]:
+    details: dict[str, object] = {
+        "stage": "component_plan_compatibility",
+        "repair_round": request.get("repair_round"),
+        "request_sha256": request.get("request_sha256"),
+        "graph_sha256": request.get("graph_sha256"),
+        "plan_errors": plan_errors,
+    }
+    component_request = request.get("_component_request")
+    if not isinstance(component_request, dict):
+        return details
+    candidate_ids = component_request.get("candidate_ids")
+    frozen_ids = component_request.get("frozen_ids")
+    nodes = graph.get("nodes") if isinstance(graph, dict) else None
+    diagnostic_ids = [
+        value
+        for values in (candidate_ids, frozen_ids)
+        if isinstance(values, list)
+        for value in values
+    ]
+    if (
+        not isinstance(candidate_ids, list)
+        or not isinstance(frozen_ids, list)
+        or not isinstance(nodes, list)
+        or len(nodes) > 512
+        or any(
+            not isinstance(value, str)
+            or _COMPONENT_DIAGNOSTIC_ID.fullmatch(value) is None
+            for value in diagnostic_ids
+        )
+    ):
+        return details
+    graph_nodes = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            return details
+        node_id = node.get("id")
+        parent_id = node.get("parent_id")
+        if (
+            not isinstance(node_id, str)
+            or _COMPONENT_DIAGNOSTIC_ID.fullmatch(node_id) is None
+            or (
+                parent_id is not None
+                and (
+                    not isinstance(parent_id, str)
+                    or _COMPONENT_DIAGNOSTIC_ID.fullmatch(parent_id) is None
+                )
+            )
+        ):
+            return details
+        graph_nodes.append(
+            {
+                field: node.get(field)
+                for field in (
+                    "id",
+                    "kind",
+                    "parent_id",
+                    "state",
+                    "bbox",
+                    "z_index",
+                )
+            }
+        )
+    details.update(
+        {
+            "candidate_ids": candidate_ids,
+            "frozen_ids": frozen_ids,
+            "graph_nodes": graph_nodes,
+        }
+    )
+    return details
 
 
 def _matches(pattern: re.Pattern[str], value: object) -> bool:
@@ -638,12 +794,20 @@ def _resolve_component_plan(
         if isinstance(candidate_graph, dict):
             validation_graph = candidate_graph
 
+    compatibility_errors: dict[str, str] = {}
+    compatible_rebounds: dict[str, dict[str, object]] = {}
+
     def compatible(
-        plan: dict[str, object], *, require_context: bool = False
+        filename: str,
+        plan: dict[str, object],
+        *,
+        require_context: bool = False,
     ) -> bool:
         if not isinstance(validation_request, dict) or not isinstance(
             validation_graph, dict
         ) or "schema_version" not in validation_request:
+            if require_context:
+                compatibility_errors[filename] = "component context is unavailable"
             return not require_context
         from image2editable.component_contracts import validate_component_plan
 
@@ -657,8 +821,14 @@ def _resolve_component_plan(
             for key, value in validation_request.items()
             if key != "request_sha256" and not key.startswith("_")
         }
+        projected = _project_resolved_infographic_actions(
+            filename,
+            plan,
+            validation_request,
+            validation_graph,
+        )
         candidate = {
-            key: value for key, value in plan.items() if key != "graph_sha256"
+            key: value for key, value in projected.items() if key != "graph_sha256"
         }
         candidate["request_sha256"] = current_request_sha256
         try:
@@ -667,9 +837,26 @@ def _resolve_component_plan(
                 request=request_payload,
                 graph=validation_graph,
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as error:
+            message = str(error)
+            compatibility_errors[filename] = (
+                message
+                if message and len(message) <= 256 and message.isprintable()
+                else type(error).__name__
+            )
             return False
+        compatible_rebounds[filename] = {
+            **projected,
+            "request_sha256": current_request_sha256,
+            "graph_sha256": request["graph_sha256"],
+        }
         return True
+
+    def rebound_for(
+        filename: str, plan: dict[str, object]
+    ) -> dict[str, object] | None:
+        rebound = compatible_rebounds.get(filename)
+        return None if rebound == plan else rebound
 
     matches = [
         (filename, plan)
@@ -681,33 +868,44 @@ def _resolve_component_plan(
         if len(matches) != 1:
             raise BenchmarkFailure("duplicate_plan")
         filename, plan = matches[0]
-        if not compatible(plan):
+        if not compatible(filename, plan):
             raise BenchmarkFailure(
                 "incompatible_plan",
-                {"stage": "component_plan_compatibility", "filename": filename},
+                _component_plan_compatibility_details(
+                    request,
+                    validation_graph,
+                    [
+                        {
+                            "filename": filename,
+                            "error": compatibility_errors[filename],
+                        }
+                    ],
+                ),
             )
-        return PlanSelection(filename, plan, None)
+        return PlanSelection(filename, plan, rebound_for(filename, plan))
     if allow_stale_binding and len(identity) != 1:
         compatible_identity = [
             (filename, plan)
             for filename, plan in identity
-            if compatible(plan, require_context=True)
+            if compatible(filename, plan, require_context=True)
         ]
         if len(compatible_identity) == 1:
             filename, plan = compatible_identity[0]
-            rebound = {
-                **plan,
-                "request_sha256": request["request_sha256"],
-                "graph_sha256": request["graph_sha256"],
-            }
-            return PlanSelection(filename, plan, rebound)
+            return PlanSelection(filename, plan, rebound_for(filename, plan))
         if not compatible_identity:
             raise BenchmarkFailure(
                 "incompatible_plan",
-                {
-                    "stage": "component_plan_compatibility",
-                    "repair_round": request.get("repair_round"),
-                },
+                _component_plan_compatibility_details(
+                    request,
+                    validation_graph,
+                    [
+                        {
+                            "filename": filename,
+                            "error": compatibility_errors[filename],
+                        }
+                        for filename, _ in identity
+                    ],
+                ),
             )
         if not isinstance(validation_graph, dict):
             raise BenchmarkFailure("duplicate_plan")
@@ -717,25 +915,24 @@ def _resolve_component_plan(
         if selected is None:
             raise BenchmarkFailure("duplicate_plan")
         filename, plan = selected
-        rebound = {
-            **plan,
-            "request_sha256": request["request_sha256"],
-            "graph_sha256": request["graph_sha256"],
-        }
-        return PlanSelection(filename, plan, rebound)
+        return PlanSelection(filename, plan, rebound_for(filename, plan))
     if allow_stale_binding:
         filename, plan = identity[0]
-        rebound = {
-            **plan,
-            "request_sha256": request["request_sha256"],
-            "graph_sha256": request["graph_sha256"],
-        }
-        if not compatible(rebound, require_context=True):
+        if not compatible(filename, plan, require_context=True):
             raise BenchmarkFailure(
                 "incompatible_plan",
-                {"stage": "component_plan_compatibility", "filename": filename},
+                _component_plan_compatibility_details(
+                    request,
+                    validation_graph,
+                    [
+                        {
+                            "filename": filename,
+                            "error": compatibility_errors[filename],
+                        }
+                    ],
+                ),
             )
-        return PlanSelection(filename, plan, rebound)
+        return PlanSelection(filename, plan, rebound_for(filename, plan))
     raise BenchmarkFailure(
         "stale_plan",
         {

@@ -2233,6 +2233,222 @@ def test_release_infographic_plan_families_match_reviewed_graph_layouts(
         assert selection[0] == expected_filename
 
 
+def test_release_infographic_plan_family_uses_layout_after_components_resolve() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    entries = [
+        (filename, plan)
+        for filename, plan in runner._case_plan_entries(
+            "image-non-16-9-infographic"
+        )
+        if plan.get("kind") == "component_plan"
+        and plan.get("page_id") == "page_001"
+        and plan.get("repair_round") == 2
+    ]
+
+    selection = runner._select_component_plan_family(
+        entries,
+        {
+            "nodes": [
+                {
+                    "id": "component_0004",
+                    "bbox": [61, 316, 940, 540],
+                    "kind": "child",
+                    "state": "inactive",
+                },
+                {
+                    "id": "component_0003",
+                    "bbox": [62, 887, 939, 1110],
+                    "kind": "child",
+                    "state": "inactive",
+                },
+            ]
+        },
+    )
+
+    assert selection is not None
+    assert selection[0] == (
+        "image-non-16-9-infographic--component-round-02.json"
+    )
+
+
+def test_release_infographic_plan_family_uses_parent_layout_after_collapse() -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    entries = [
+        (filename, plan)
+        for filename, plan in runner._case_plan_entries(
+            "image-non-16-9-infographic"
+        )
+        if plan.get("kind") == "component_plan"
+        and plan.get("page_id") == "page_001"
+        and plan.get("repair_round") == 3
+    ]
+
+    selection = runner._select_component_plan_family(
+        entries,
+        {
+            "nodes": [
+                {
+                    "id": "component_0004",
+                    "bbox": [295, 474, 391, 496],
+                    "kind": "parent",
+                    "state": "pending",
+                },
+                {
+                    "id": "parent_0004",
+                    "bbox": [61, 316, 940, 540],
+                    "kind": "parent",
+                    "state": "inactive",
+                },
+                {
+                    "id": "component_0003",
+                    "bbox": [295, 1044, 391, 1065],
+                    "kind": "parent",
+                    "state": "pending",
+                },
+                {
+                    "id": "parent_0003",
+                    "bbox": [62, 887, 939, 1110],
+                    "kind": "parent",
+                    "state": "inactive",
+                },
+            ]
+        },
+    )
+
+    assert selection is not None
+    assert selection[0] == (
+        "image-non-16-9-infographic--component-round-03.json"
+    )
+
+
+@pytest.mark.parametrize("resolved_action", ["accept", "discard"])
+def test_release_infographic_plan_omits_actions_for_resolved_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolved_action: str,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    plan = {
+        **_component_plan(),
+        "request_sha256": "5" * 64,
+        "graph_sha256": "6" * 64,
+        "actions": [
+            *_component_plan()["actions"],
+            {
+                "action": "rebuild_background",
+                "object_ids": ["component_0001"],
+                "parameters": {"margin_ratio": 0.005},
+                "confidence": 0.99,
+                "evidence": ["clean the active component background"],
+            },
+            {
+                "action": resolved_action,
+                "object_ids": ["component_0002"],
+                "parameters": {},
+                "confidence": 0.99,
+                "evidence": ["the component was already resolved"],
+            },
+            {
+                "action": "rebuild_background",
+                "object_ids": ["component_0002"],
+                "parameters": {"margin_ratio": 0.005},
+                "confidence": 0.99,
+                "evidence": ["the resolved component no longer needs cleanup"],
+            },
+            {
+                "action": "absorb_residual",
+                "object_ids": ["component_0002"],
+                "parameters": {},
+                "confidence": 0.99,
+                "evidence": ["the resolved component has no residual work"],
+            },
+        ],
+    }
+    filename = "image-non-16-9-infographic--component-round-01.json"
+    _write_benchmark_plan(plans / filename, plan)
+    monkeypatch.setattr(runner, "PLAN_ROOT", plans)
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
+    request["_component_graph"]["nodes"].append(
+        {
+            "id": "component_0002",
+            "kind": "child",
+            "parent_id": None,
+            "state": "inactive",
+            "mask": "masks/component_0002.png",
+            "mask_sha256": "2" * 64,
+            "bbox": [10, 20, 15, 25],
+            "z_index": 1,
+            "text_ids": [],
+        }
+    )
+
+    selection = runner._resolve_component_plan(
+        "image-non-16-9-infographic",
+        request,
+        allow_stale_binding=True,
+        graph=request["_component_graph"],
+    )
+
+    assert selection.filename == filename
+    assert selection.rebound_plan is not None
+    assert selection.rebound_plan["actions"] == plan["actions"][:2]
+
+
+def test_release_infographic_plan_keeps_recovery_for_inactive_components(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = importlib.import_module("scripts.release_benchmark")
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    recovery = {
+        "action": "retry_with_box",
+        "object_ids": ["component_0002"],
+        "parameters": {"box": [0.1, 0.1, 0.2, 0.2]},
+        "confidence": 0.99,
+        "evidence": ["retry the unresolved inactive component"],
+    }
+    plan = {
+        **_component_plan(),
+        "request_sha256": "5" * 64,
+        "graph_sha256": "6" * 64,
+        "actions": [recovery],
+    }
+    filename = "image-non-16-9-infographic--component-round-01.json"
+    _write_benchmark_plan(plans / filename, plan)
+    monkeypatch.setattr(runner, "PLAN_ROOT", plans)
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
+    request["_component_graph"]["nodes"].append(
+        {
+            "id": "component_0002",
+            "kind": "child",
+            "parent_id": None,
+            "state": "inactive",
+            "mask": "masks/component_0002.png",
+            "mask_sha256": "2" * 64,
+            "bbox": [10, 20, 15, 25],
+            "z_index": 1,
+            "text_ids": [],
+        }
+    )
+
+    selection = runner._resolve_component_plan(
+        "image-non-16-9-infographic",
+        request,
+        allow_stale_binding=True,
+        graph=request["_component_graph"],
+    )
+
+    assert selection.rebound_plan is not None
+    assert selection.rebound_plan["actions"] == [recovery]
+
+
 def test_release_runner_diagnostic_prefers_exact_component_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2290,13 +2506,40 @@ def test_release_runner_diagnostic_rejects_incompatible_stale_component_plan(
     response, _ = _bound_component_request(run_dir)
     request = runner._component_binding(response, run_dir)
 
-    with pytest.raises(runner.BenchmarkFailure, match="incompatible_plan"):
+    with pytest.raises(runner.BenchmarkFailure, match="incompatible_plan") as caught:
         runner._resolve_component_plan(
             "pptx-mixed-screenshot-candidates",
             request,
             allow_stale_binding=True,
             graph=request["_component_graph"],
         )
+
+    assert caught.value.details == {
+        "stage": "component_plan_compatibility",
+        "repair_round": 1,
+        "request_sha256": request["request_sha256"],
+        "graph_sha256": request["graph_sha256"],
+        "candidate_ids": ["component_0001"],
+        "frozen_ids": [],
+        "graph_nodes": [
+            {
+                "id": "component_0001",
+                "kind": "child",
+                "parent_id": None,
+                "state": "pending",
+                "bbox": [0, 0, 5, 5],
+                "z_index": 0,
+            }
+        ],
+        "plan_errors": [
+            {
+                "filename": (
+                    "pptx-mixed-screenshot-candidates--component.json"
+                ),
+                "error": "component action object_ids are invalid",
+            }
+        ],
+    }
 
 
 def test_release_runner_diagnostic_rejects_invalid_rebound_hashes(
