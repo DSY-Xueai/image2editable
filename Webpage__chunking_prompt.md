@@ -10,7 +10,7 @@
 
 |                             原图                             |                       转换后可编辑效果                       |
 | :----------------------------------------------------------: | :----------------------------------------------------------: |
-| ![image-20260828144602663](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260828144602663.png) | ![image-20260828144626558](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260828144626558.png) |
+| ![Original image](docs/images/webpage-chunking-source.png) | ![Editable result](docs/images/webpage-chunking-result.png) |
 
 ------
 
@@ -55,7 +55,7 @@ In testing, the following prompts produced the best results. In practice, send t
 
 |                        Original Image                        |                    Editable Result After Conversion                    |
 | :----------------------------------------------------------: | :--------------------------------------------------------------------: |
-| ![image-20260828144602663](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260828144602663.png) | ![image-20260828144626558](C:\Users\d's'y\AppData\Roaming\Typora\typora-user-images\image-20260828144626558.png) |
+| ![Original image](docs/images/webpage-chunking-source.png) | ![Editable result](docs/images/webpage-chunking-result.png) |
 
 ------
 
