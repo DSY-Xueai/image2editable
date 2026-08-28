@@ -1,0 +1,1168 @@
+#!/usr/bin/env python3
+"""Background modeling and repair module.
+
+Builds a clean background image by:
+1. Adaptive background color detection (edge sampling)
+2. Using the original image as base (preserving real background)
+3. Inpainting foreground/text regions from surrounding pixels
+
+Usage:
+    from bg_model import build_background
+    bg = build_background(img_rgb, text_mask=mask)
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+
+import cv2
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def _corner_colors(background: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Return median RGB colors from the four 5% corner regions."""
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise ValueError("background must be an RGB image")
+
+    height, width = source.shape[:2]
+    if height <= 0 or width <= 0:
+        raise ValueError("background must not be empty")
+    corner_height = max(1, int(round(height * 0.05)))
+    corner_width = max(1, int(round(width * 0.05)))
+    regions = (
+        source[:corner_height, :corner_width],
+        source[:corner_height, -corner_width:],
+        source[-corner_height:, :corner_width],
+        source[-corner_height:, -corner_width:],
+    )
+    return tuple(
+        np.median(region.reshape(-1, 3), axis=0).astype(np.float32)
+        for region in regions
+    )
+
+
+def _bilinear_gradient(
+    colors: tuple[np.ndarray, ...],
+    width: int,
+    height: int,
+) -> np.ndarray:
+    """Build an RGB canvas interpolated between four corner colors."""
+    if width <= 0 or height <= 0:
+        raise ValueError("canvas dimensions must be positive")
+    corner_values = np.asarray(colors, dtype=np.float32)
+    if corner_values.shape != (4, 3):
+        raise ValueError("colors must contain four RGB values")
+
+    top_left, top_right, bottom_left, bottom_right = corner_values
+    x = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :, None]
+    y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None, None]
+    top = top_left * (1.0 - x) + top_right * x
+    bottom = bottom_left * (1.0 - x) + bottom_right * x
+    gradient = top * (1.0 - y) + bottom * y
+    return np.clip(np.rint(gradient), 0, 255).astype(np.uint8)
+
+
+def extend_background_to_widescreen(
+    background: np.ndarray,
+    canvas_width: int = 1920,
+    canvas_height: int = 1080,
+) -> np.ndarray:
+    """Extend a background to widescreen while preserving its centered content."""
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3:
+        raise ValueError("background must be an RGB image")
+    height, width = source.shape[:2]
+    canvas = _bilinear_gradient(
+        _corner_colors(source),
+        canvas_width,
+        canvas_height,
+    )
+
+    contain_scale = min(canvas_width / width, canvas_height / height)
+    contain_width = min(canvas_width, int(round(width * contain_scale)))
+    contain_height = min(canvas_height, int(round(height * contain_scale)))
+    contained = cv2.resize(
+        source, (contain_width, contain_height), interpolation=cv2.INTER_AREA
+    )
+    offset_x = (canvas_width - contain_width) // 2
+    offset_y = (canvas_height - contain_height) // 2
+    canvas[
+        offset_y:offset_y + contain_height,
+        offset_x:offset_x + contain_width,
+    ] = contained
+    return canvas
+
+
+def compute_widescreen_canvas(width: int, height: int) -> tuple[int, int, int, int]:
+    """Return the smallest centered integer 16:9 canvas containing the source."""
+    if width <= 0 or height <= 0:
+        raise ValueError("source dimensions must be positive")
+    units = max(math.ceil(width / 16), math.ceil(height / 9))
+    canvas_width = 16 * units
+    canvas_height = 9 * units
+    return (
+        canvas_width,
+        canvas_height,
+        (canvas_width - width) // 2,
+        (canvas_height - height) // 2,
+    )
+
+
+def _resize_cover(source: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Sample a centered cover with one uniform scale and no large intermediate."""
+    source_height, source_width = source.shape[:2]
+    scale = max(width / source_width, height / source_height)
+    transform = np.array(
+        (
+            (
+                scale,
+                0.0,
+                ((width - 1) - (source_width - 1) * scale) / 2.0,
+            ),
+            (
+                0.0,
+                scale,
+                ((height - 1) - (source_height - 1) * scale) / 2.0,
+            ),
+        ),
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        source,
+        transform,
+        (width, height),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def _build_ambient_backdrop(
+    source: np.ndarray,
+    canvas_width: int,
+    canvas_height: int,
+    offset_x: int,
+    offset_y: int,
+) -> np.ndarray:
+    """Build a soft decorative extension without repeating source objects."""
+    height, width = source.shape[:2]
+    canvas_ratio = canvas_width / canvas_height
+    work_short = min(256, canvas_width, canvas_height)
+    if canvas_width >= canvas_height:
+        work_height = work_short
+        work_width = max(1, int(round(work_short * canvas_ratio)))
+    else:
+        work_width = work_short
+        work_height = max(1, int(round(work_short / canvas_ratio)))
+    decorative = _resize_cover(source, work_width, work_height)
+    sigma = max(1.0, 0.025 * min(work_width, work_height))
+    decorative = cv2.GaussianBlur(decorative, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    decorative_float = decorative.astype(np.float32)
+    gray = cv2.cvtColor(decorative, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    decorative_float = decorative_float * 0.8 + gray[:, :, None] * 0.2
+    decorative = np.clip(
+        np.rint(decorative_float * 0.92), 0, 255
+    ).astype(np.uint8)
+    result = cv2.resize(
+        decorative, (canvas_width, canvas_height), interpolation=cv2.INTER_LINEAR
+    )
+
+    right_pad = canvas_width - offset_x - width
+    bottom_pad = canvas_height - offset_y - height
+    horizontal_extension = offset_x + right_pad
+    vertical_extension = offset_y + bottom_pad
+    x = np.arange(canvas_width, dtype=np.float32)[None, :]
+    dx = np.maximum(
+        np.maximum(offset_x - x, x - (offset_x + width - 1)), 0
+    )
+    for row_start in range(0, canvas_height, 64):
+        row_end = min(canvas_height, row_start + 64)
+        if horizontal_extension >= vertical_extension:
+            farthest = max(1, offset_x, right_pad)
+            ratio = np.broadcast_to(dx / farthest, (row_end - row_start, canvas_width))
+        else:
+            y = np.arange(row_start, row_end, dtype=np.float32)[:, None]
+            dy = np.maximum(
+                np.maximum(offset_y - y, y - (offset_y + height - 1)), 0
+            )
+            farthest = max(1, offset_y, bottom_pad)
+            ratio = np.broadcast_to(dy / farthest, (row_end - row_start, canvas_width))
+        values = result[row_start:row_end].astype(np.float32)
+        values *= (1.0 - 0.08 * np.clip(ratio, 0, 1))[:, :, None]
+        result[row_start:row_end] = np.clip(np.rint(values), 0, 255).astype(np.uint8)
+
+    band_limit = min(64, max(4, int(round(min(canvas_width, canvas_height) * 0.02))))
+
+    def lowpass(edge: np.ndarray) -> np.ndarray:
+        length = edge.shape[0]
+        edge_sigma = max(1.0, min(12.0, length * 0.025))
+        shaped = edge[:, None, :].astype(np.float32)
+        blurred = cv2.GaussianBlur(
+            shaped,
+            (0, 0),
+            sigmaX=1.0,
+            sigmaY=edge_sigma,
+        )[:, 0]
+        return blurred
+
+    def smooth_weights(depth: int) -> np.ndarray:
+        if depth <= 0:
+            return np.empty(0, dtype=np.float32)
+        value = 1.0 - np.arange(1, depth + 1, dtype=np.float32) / (depth + 1)
+        return value * value * (3.0 - 2.0 * value)
+
+    source_x2 = offset_x + width
+    source_y2 = offset_y + height
+
+    def blend_vertical_side(pad: int, seam_x: int, step: int, source_edge: np.ndarray) -> None:
+        depth = min(pad, band_limit) - 1
+        if depth <= 0:
+            return
+        columns = seam_x + step * np.arange(1, depth + 1)
+        ambient_edge = result[offset_y:source_y2, columns[0]]
+        delta = np.clip(
+            lowpass(source_edge) - lowpass(ambient_edge), -48, 48
+        )
+        weights = smooth_weights(depth)
+        strip = result[offset_y:source_y2, columns].astype(np.float32)
+        strip += delta[:, None, :] * weights[None, :, None]
+        result[offset_y:source_y2, columns] = np.clip(
+            np.rint(strip), 0, 255
+        ).astype(np.uint8)
+
+    def blend_horizontal_side(pad: int, seam_y: int, step: int, source_edge: np.ndarray) -> None:
+        depth = min(pad, band_limit) - 1
+        if depth <= 0:
+            return
+        rows = seam_y + step * np.arange(1, depth + 1)
+        ambient_edge = result[rows[0], offset_x:source_x2]
+        delta = np.clip(
+            lowpass(source_edge) - lowpass(ambient_edge), -48, 48
+        )
+        weights = smooth_weights(depth)
+        strip = result[rows, offset_x:source_x2].astype(np.float32)
+        strip += delta[None, :, :] * weights[:, None, None]
+        result[rows, offset_x:source_x2] = np.clip(
+            np.rint(strip), 0, 255
+        ).astype(np.uint8)
+
+    blend_vertical_side(offset_x, offset_x - 1, -1, source[:, 0])
+    blend_vertical_side(right_pad, source_x2, 1, source[:, -1])
+    blend_horizontal_side(offset_y, offset_y - 1, -1, source[0])
+    blend_horizontal_side(bottom_pad, source_y2, 1, source[-1])
+
+    if offset_x:
+        result[offset_y:source_y2, offset_x - 1] = source[:, 0]
+    if right_pad:
+        result[offset_y:source_y2, source_x2] = source[:, -1]
+    if offset_y:
+        result[offset_y - 1, offset_x:source_x2] = source[0]
+    if bottom_pad:
+        result[source_y2, offset_x:source_x2] = source[-1]
+    if offset_x and offset_y:
+        result[offset_y - 1, offset_x - 1] = source[0, 0]
+    if right_pad and offset_y:
+        result[offset_y - 1, source_x2] = source[0, -1]
+    if offset_x and bottom_pad:
+        result[source_y2, offset_x - 1] = source[-1, 0]
+    if right_pad and bottom_pad:
+        result[source_y2, source_x2] = source[-1, -1]
+    result[offset_y:offset_y + height, offset_x:offset_x + width] = source
+    return np.ascontiguousarray(result)
+
+
+def _outpaint_in_stages(
+    source: np.ndarray,
+    canvas_width: int,
+    canvas_height: int,
+    large_inpainter,
+) -> np.ndarray:
+    """Grow a centered source by at most 25% per axis in each inpaint pass."""
+    source_height, source_width = source.shape[:2]
+    current = source.copy()
+    current_width = source_width
+    current_height = source_height
+
+    while current_width < canvas_width or current_height < canvas_height:
+        if ((current_width < canvas_width and current_width < 4)
+                or (current_height < canvas_height and current_height < 4)):
+            raise ValueError("source axis is too small for a 25% outpaint stage")
+        next_width = min(canvas_width, current_width + max(1, current_width // 4))
+        next_height = min(canvas_height, current_height + max(1, current_height // 4))
+        current_source_x = (current_width - source_width) // 2
+        current_source_y = (current_height - source_height) // 2
+        next_source_x = (next_width - source_width) // 2
+        next_source_y = (next_height - source_height) // 2
+        left = next_source_x - current_source_x
+        top = next_source_y - current_source_y
+        seed = _build_ambient_backdrop(current, next_width, next_height, left, top)
+        mask = np.full((next_height, next_width), 255, dtype=np.uint8)
+        mask[top:top + current_height, left:left + current_width] = 0
+        candidate = large_inpainter(seed, mask)
+        if (not isinstance(candidate, np.ndarray)
+                or candidate.shape != seed.shape
+                or candidate.dtype != np.uint8):
+            raise ValueError("outpaint result must be a same-shape uint8 RGB array")
+        candidate = np.ascontiguousarray(candidate)
+        candidate[top:top + current_height, left:left + current_width] = current
+        if not _extension_quality_passes(candidate, current, left, top):
+            raise ValueError("outpaint stage failed extension quality checks")
+        current = candidate
+        current_width = next_width
+        current_height = next_height
+
+    return current
+
+
+def _extension_quality_passes(
+    candidate: np.ndarray,
+    source: np.ndarray,
+    offset_x: int,
+    offset_y: int,
+) -> bool:
+    """Reject extensions with broken seams, flat detail, or lost sharpness."""
+    source_height, source_width = source.shape[:2]
+    source_x2 = offset_x + source_width
+    source_y2 = offset_y + source_height
+    if not np.array_equal(candidate[offset_y:source_y2, offset_x:source_x2], source):
+        return False
+
+    def side_passes(new_region, new_seam, source_edge,
+                    new_strip, source_strip) -> bool:
+        difference = np.abs(
+            new_seam.astype(np.float32) - source_edge.astype(np.float32)
+        )
+        if difference.mean() > 18 or np.percentile(difference, 95) > 48:
+            return False
+        if np.std(source_edge.astype(np.float32)) >= 8 and np.std(new_region) < 3:
+            return False
+        source_gray = cv2.cvtColor(source_strip, cv2.COLOR_RGB2GRAY)
+        new_gray = cv2.cvtColor(new_strip, cv2.COLOR_RGB2GRAY)
+        source_detail = cv2.Laplacian(source_gray, cv2.CV_32F).var()
+        if source_detail >= 10:
+            new_detail = cv2.Laplacian(new_gray, cv2.CV_32F).var()
+            if new_detail / source_detail < 0.25:
+                return False
+        return True
+
+    checks = []
+    depth = min(32, source_height)
+    if offset_y:
+        checks.append((candidate[:offset_y, offset_x:source_x2],
+                       candidate[offset_y - 1, offset_x:source_x2], source[0],
+                       candidate[max(0, offset_y - 32):offset_y,
+                                 offset_x:source_x2],
+                       source[:depth]))
+    if source_y2 < candidate.shape[0]:
+        checks.append((candidate[source_y2:, offset_x:source_x2],
+                       candidate[source_y2, offset_x:source_x2], source[-1],
+                       candidate[source_y2:min(candidate.shape[0], source_y2 + 32),
+                                 offset_x:source_x2],
+                       source[-depth:]))
+    depth = min(32, source_width)
+    if offset_x:
+        checks.append((candidate[offset_y:source_y2, :offset_x],
+                       candidate[offset_y:source_y2, offset_x - 1], source[:, 0],
+                       candidate[offset_y:source_y2,
+                                 max(0, offset_x - 32):offset_x],
+                       source[:, :depth]))
+    if source_x2 < candidate.shape[1]:
+        checks.append((candidate[offset_y:source_y2, source_x2:],
+                       candidate[offset_y:source_y2, source_x2], source[:, -1],
+                       candidate[offset_y:source_y2,
+                                 source_x2:min(candidate.shape[1], source_x2 + 32)],
+                       source[:, -depth:]))
+    return all(side_passes(*check) for check in checks)
+
+
+def build_widescreen_background(
+    background: np.ndarray,
+    large_inpainter=None,
+) -> tuple[np.ndarray, int, int, str]:
+    """Create a lossless centered 16:9 background, preferring LaMa outpaint."""
+    source = np.asarray(background)
+    if source.ndim != 3 or source.shape[2] != 3 or source.dtype != np.uint8:
+        raise ValueError("background must be a uint8 RGB image")
+    height, width = source.shape[:2]
+    canvas_width, canvas_height, offset_x, offset_y = compute_widescreen_canvas(
+        width, height
+    )
+    if (canvas_width, canvas_height) == (width, height):
+        return source.copy(), 0, 0, "identity"
+
+    from scripts.lama_inpaint import LargeMaskInpaintError, inpaint_large_mask
+
+    inpainter = large_inpainter or inpaint_large_mask
+    try:
+        candidate = _outpaint_in_stages(
+            source, canvas_width, canvas_height, inpainter
+        )
+    except (LargeMaskInpaintError, ValueError):
+        return (
+            _build_ambient_backdrop(
+                source, canvas_width, canvas_height, offset_x, offset_y
+            ),
+            offset_x,
+            offset_y,
+            "ambient",
+        )
+
+    candidate[offset_y:offset_y + height, offset_x:offset_x + width] = source
+    if not _extension_quality_passes(candidate, source, offset_x, offset_y):
+        return (
+            _build_ambient_backdrop(
+                source, canvas_width, canvas_height, offset_x, offset_y
+            ),
+            offset_x,
+            offset_y,
+            "ambient",
+        )
+    return candidate, offset_x, offset_y, "outpaint"
+
+
+def build_background(
+    img: np.ndarray,
+    text_mask: np.ndarray | None = None,
+    fg_hint_mask: np.ndarray | None = None,
+    period: int = 32,
+) -> np.ndarray:
+    """Build a clean background image from the input.
+
+    Args:
+        img: Input image (H, W, 3) RGB uint8.
+        text_mask: Binary mask (H, W) where text regions = 255.
+        fg_hint_mask: Optional binary mask of known foreground regions.
+        period: Tile period (kept for API compatibility, unused in new approach).
+
+    Returns:
+        Clean background image (H, W, 3) RGB uint8.
+    """
+    h, w = img.shape[:2]
+
+    if text_mask is None:
+        text_mask = np.zeros((h, w), dtype=np.uint8)
+    if fg_hint_mask is None:
+        fg_hint_mask = np.zeros((h, w), dtype=np.uint8)
+    elif not _should_use_fg_hint(
+        nonzero_pixels=int(np.count_nonzero(fg_hint_mask)),
+        total_pixels=h * w,
+    ):
+        logger.warning("Ignoring oversized foreground hint for background refinement.")
+        fg_hint_mask = np.zeros((h, w), dtype=np.uint8)
+
+    # Combined exclusion mask
+    exclude = ((text_mask > 0) | (fg_hint_mask > 0)).astype(np.uint8) * 255
+
+    # Step 1: Detect background color adaptively
+    bg_color, bg_std, candidate_mask = _detect_background(img, exclude)
+    logger.info(
+        "Background color: RGB(%d,%d,%d), std=%.1f",
+        int(bg_color[0]), int(bg_color[1]), int(bg_color[2]), bg_std,
+    )
+
+    # Step 2: Build background — strategy depends on whether we have fg hints
+    has_fg_hint = np.any(fg_hint_mask > 0)
+
+    if has_fg_hint:
+        # Refinement pass: use original image + inpainting for pixel-accurate bg
+        bg = _original_based_background(
+            img,
+            exclude,
+            bg_color,
+            text_mask=text_mask,
+            fg_mask=fg_hint_mask,
+        )
+    else:
+        # Initial pass: smooth background for foreground detection
+        bg = _smooth_background(img, bg_color, candidate_mask, text_mask)
+
+    return bg
+
+
+def build_clean_background(
+    img: np.ndarray,
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+    large_inpainter=None,
+    text_clean_image: np.ndarray | None = None,
+    text_restore_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Remove visual elements and text from an image."""
+    removal = build_removal_mask(element_masks, text_mask)
+    repaired = repair_masked_background(img, removal, large_inpainter)
+    if text_clean_image is None:
+        return repaired
+
+    trusted = np.asarray(text_clean_image)
+    if trusted.shape != repaired.shape:
+        raise ValueError("text-clean image must match the source image shape")
+    restore_source_mask = (
+        text_mask if text_restore_mask is None else np.asarray(text_restore_mask)
+    )
+    if restore_source_mask.shape != repaired.shape[:2]:
+        raise ValueError("text restore mask must match the image height and width")
+    text_removal = build_removal_mask([], restore_source_mask) > 0
+    repaired[text_removal] = trusted[text_removal]
+    return repaired
+
+
+def build_removal_mask(
+    element_masks: list[np.ndarray],
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Combine visual-element and text masks for background repair."""
+    removal = (text_mask > 0).astype(np.uint8) * 255
+    for mask in element_masks:
+        removal[np.asarray(mask, dtype=bool)] = 255
+    return cv2.dilate(
+        removal,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    )
+
+
+def needs_large_mask_inpaint(mask: np.ndarray) -> bool:
+    """Return whether a mask is too large or deep for local OpenCV inpainting."""
+    binary = (np.asarray(mask) > 0).astype(np.uint8)
+    if not np.any(binary):
+        return False
+
+    h, w = binary.shape
+    mask_ratio = np.count_nonzero(binary) / binary.size
+    depth = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    max_depth_ratio = float(depth.max()) / np.hypot(h, w)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(
+        binary,
+        connectivity=8,
+    )
+    largest_component_ratio = (
+        int(np.max(stats[1:, cv2.CC_STAT_AREA])) / binary.size
+        if count > 1
+        else 0.0
+    )
+    return (
+        max_depth_ratio > 0.015
+        or (
+            mask_ratio > 0.08
+            and largest_component_ratio > 0.04
+        )
+    )
+
+
+def repair_masked_background(
+    image: np.ndarray,
+    mask: np.ndarray,
+    large_inpainter=None,
+) -> np.ndarray:
+    """Repair a mask with OpenCV or LaMa according to its scale."""
+    source = np.asarray(image)
+    binary = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if binary.shape != source.shape[:2]:
+        raise ValueError("mask must match the image height and width")
+    if not np.any(binary):
+        return source.copy()
+
+    if needs_large_mask_inpaint(binary):
+        if large_inpainter is None:
+            from scripts.lama_inpaint import inpaint_large_mask
+
+            large_inpainter = inpaint_large_mask
+        repaired = large_inpainter(source, binary)
+    else:
+        repaired = _inpaint(source, binary)
+
+    repaired = np.asarray(repaired)
+    if repaired.shape != source.shape:
+        raise ValueError(
+            f"inpaint output shape {repaired.shape} does not match {source.shape}"
+        )
+
+    output = repaired.astype(np.uint8, copy=True)
+    output[binary == 0] = source[binary == 0]
+    return output
+
+
+def build_text_only_background(
+    img: np.ndarray,
+    text_items: list[dict],
+    padding: int = 2,
+) -> np.ndarray:
+    """Remove detected text while preserving all non-text slide content."""
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    for item in text_items:
+        x, y, bw, bh = item["box"]
+        x1 = max(0, int(x - padding))
+        y1 = max(0, int(y - padding))
+        x2 = min(w, int(x + bw + padding))
+        y2 = min(h, int(y + bh + padding))
+        mask[y1:y2, x1:x2] = 255
+
+    if not np.any(mask):
+        return img.copy()
+    return _inpaint(img, mask)
+
+
+def _should_use_fg_hint(
+    nonzero_pixels: int,
+    total_pixels: int,
+    max_foreground_ratio: float = 0.45,
+) -> bool:
+    """Reject failed foreground hints that cover too much of the slide."""
+    if total_pixels <= 0:
+        return False
+    return nonzero_pixels / total_pixels <= max_foreground_ratio
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Adaptive background detection
+# ---------------------------------------------------------------------------
+
+
+def _detect_background(
+    img: np.ndarray, exclude_mask: np.ndarray
+) -> tuple[np.ndarray, float, np.ndarray]:
+    """Detect the dominant background color by sampling image edges.
+
+    Returns:
+        bg_color: (3,) float array — dominant background RGB.
+        bg_std: float — standard deviation of background pixels.
+        candidate_mask: (H, W) bool — pixels likely belonging to background.
+    """
+    h, w = img.shape[:2]
+
+    # Sample from edges (5% border on each side)
+    margin_y = max(5, int(h * 0.05))
+    margin_x = max(5, int(w * 0.05))
+
+    edge_mask = np.zeros((h, w), dtype=bool)
+    edge_mask[:margin_y, :] = True   # top
+    edge_mask[-margin_y:, :] = True  # bottom
+    edge_mask[:, :margin_x] = True   # left
+    edge_mask[:, -margin_x:] = True  # right
+
+    # Exclude known text/foreground from edge sampling
+    edge_mask &= (exclude_mask == 0)
+
+    edge_pixels = img[edge_mask].reshape(-1, 3).astype(np.float32)
+
+    if len(edge_pixels) < 10:
+        # Fallback: use all non-excluded pixels
+        valid = exclude_mask == 0
+        edge_pixels = img[valid].reshape(-1, 3).astype(np.float32)
+
+    if len(edge_pixels) < 10:
+        # Ultimate fallback
+        bg_color = np.array([255.0, 255.0, 255.0])
+        return bg_color, 30.0, np.ones((h, w), dtype=bool)
+
+    # Find dominant color via histogram peak (faster than KMeans)
+    bg_color = np.median(edge_pixels, axis=0)
+    bg_std = float(np.mean(np.std(edge_pixels, axis=0)))
+
+    # Adaptive threshold: pixels within N standard deviations of bg_color
+    threshold = max(35.0, bg_std * 2.5)
+
+    all_pixels = img.reshape(-1, 3).astype(np.float32)
+    dists = np.linalg.norm(all_pixels - bg_color, axis=1)
+    candidate_flat = dists < threshold
+
+    candidate_mask = candidate_flat.reshape(h, w)
+    # Exclude known foreground/text
+    candidate_mask &= (exclude_mask == 0)
+
+    return bg_color, bg_std, candidate_mask
+
+
+# ---------------------------------------------------------------------------
+# Step 2a: Smooth background for initial foreground detection
+# ---------------------------------------------------------------------------
+
+
+def _smooth_background(
+    img: np.ndarray,
+    bg_color: np.ndarray,
+    candidate_mask: np.ndarray,
+    text_mask: np.ndarray,
+) -> np.ndarray:
+    """Build a smooth background for the initial foreground detection pass.
+
+    Replaces non-background pixels with bg_color and applies smoothing.
+    This creates enough contrast for diff-based foreground detection while
+    preserving the general background appearance.
+
+    Args:
+        img: Original image (H, W, 3) RGB uint8.
+        bg_color: Detected background color (3,) float.
+        candidate_mask: (H, W) bool — pixels likely belonging to background.
+        text_mask: Binary mask (H, W) uint8 where text regions = 255.
+
+    Returns:
+        Smooth background (H, W, 3) RGB uint8.
+    """
+    bg = img.copy()
+    fill = np.clip(bg_color, 0, 255).astype(np.uint8)
+
+    # Replace non-candidate pixels (likely foreground) with bg_color
+    bg[~candidate_mask] = fill
+
+    # Also replace text regions
+    if text_mask is not None:
+        bg[text_mask > 0] = fill
+
+    # Smooth to blend transitions and reduce artifacts
+    bg = cv2.GaussianBlur(bg, (21, 21), 0)
+
+    return bg
+
+
+# ---------------------------------------------------------------------------
+# Step 2b: Original-based background with inpainting (refinement pass)
+# ---------------------------------------------------------------------------
+
+
+def _original_based_background(
+    img: np.ndarray,
+    exclude_mask: np.ndarray,
+    bg_color: np.ndarray,
+    text_mask: np.ndarray | None = None,
+    fg_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build background by starting from original image and inpainting excluded regions.
+
+    This preserves the original background pixel-for-pixel in areas without
+    foreground/text, and uses inpainting to fill the excluded regions from
+    surrounding real background pixels.
+
+    Args:
+        img: Original image (H, W, 3) RGB uint8.
+        exclude_mask: Binary mask (H, W) uint8, regions to repair = 255.
+        bg_color: Detected background color (3,) float.
+
+    Returns:
+        Clean background (H, W, 3) RGB uint8.
+    """
+    bg = img.copy()
+
+    # If nothing to repair, return original
+    if not np.any(exclude_mask > 0):
+        return bg
+
+    if text_mask is not None:
+        bg = _fill_text_regions(bg, text_mask)
+
+    repair_mask = fg_mask if fg_mask is not None else exclude_mask
+    if fg_mask is not None:
+        bg = _replace_unrecoverable_large_regions(bg, fg_mask, bg_color)
+        repair_mask = _build_component_repair_mask(fg_mask)
+    if not np.any(repair_mask > 0):
+        return bg
+
+    # Pre-fill foreground regions with bg_color for better inpainting seed
+    fill_color = np.clip(bg_color, 0, 255).astype(np.uint8)
+    bg[repair_mask > 0] = fill_color
+
+    # Build inpaint mask from the exact excluded regions.
+    inpaint_mask = _build_inpaint_mask(repair_mask)
+
+    # Inpaint to blend filled regions with surrounding real background
+    bg = _inpaint(bg, inpaint_mask)
+
+    return bg
+
+
+def _build_inpaint_mask(exclude_mask: np.ndarray) -> np.ndarray:
+    """Build inpaint mask from the exact exclusion mask."""
+    return exclude_mask.copy()
+
+
+def _build_component_repair_mask(fg_mask: np.ndarray) -> np.ndarray:
+    """Build a repair mask that also covers small component shadows."""
+    repair_mask = np.zeros_like(fg_mask)
+    safe_mask = _mask_for_destructive_repair(fg_mask)
+    total_area = max(int(fg_mask.shape[0] * fg_mask.shape[1]), 1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (safe_mask > 0).astype(np.uint8), connectivity=8
+    )
+
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if _is_unrecoverable_large_region(area, bw, bh, total_area):
+            continue
+
+        repair_mask[labels == i] = 255
+        if not _should_expand_shadow_halo(bw, bh, fg_mask.shape):
+            continue
+
+        pad = max(2, min(10, max(bw, bh) // 8))
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(fg_mask.shape[1], x + bw + pad)
+        y2 = min(fg_mask.shape[0], y + bh + pad)
+        repair_mask[y1:y2, x1:x2] = np.maximum(
+            repair_mask[y1:y2, x1:x2],
+            cv2.dilate(
+                (labels[y1:y2, x1:x2] == i).astype(np.uint8) * 255,
+                np.ones((pad * 2 + 1, pad * 2 + 1), np.uint8),
+                iterations=1,
+            ),
+        )
+
+    return repair_mask
+
+
+def _should_expand_shadow_halo(
+    width: int,
+    height: int,
+    mask_shape: tuple[int, int],
+    max_bbox_area_ratio: float = 0.08,
+    max_width_ratio: float = 0.25,
+    max_height_ratio: float = 0.30,
+) -> bool:
+    """Only expand repair for compact objects likely to have drop shadows."""
+    img_h, img_w = mask_shape
+    total_area = max(img_h * img_w, 1)
+    return (
+        width * height / total_area <= max_bbox_area_ratio
+        and width / max(img_w, 1) <= max_width_ratio
+        and height / max(img_h, 1) <= max_height_ratio
+    )
+
+
+def _mask_for_destructive_repair(fg_mask: np.ndarray) -> np.ndarray:
+    """Keep only foreground regions that are small enough to repair safely."""
+    repair_mask = fg_mask.copy()
+    total_area = max(int(fg_mask.shape[0] * fg_mask.shape[1]), 1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (fg_mask > 0).astype(np.uint8), connectivity=8
+    )
+
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if _is_unrecoverable_large_region(area, bw, bh, total_area):
+            repair_mask[labels == i] = 0
+
+    return repair_mask
+
+
+def _replace_unrecoverable_large_regions(
+    bg: np.ndarray,
+    fg_mask: np.ndarray,
+    bg_color: np.ndarray,
+) -> np.ndarray:
+    """Replace foreground bboxes that are unlikely to reveal true hidden pixels."""
+    output = bg.copy()
+    total_area = max(int(fg_mask.shape[0] * fg_mask.shape[1]), 1)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (fg_mask > 0).astype(np.uint8), connectivity=8
+    )
+
+    for i in range(1, num_labels):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if not _should_replace_region_bbox(area, bw, bh, total_area):
+            continue
+
+        pad = max(2, min(10, max(bw, bh) // 16))
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(fg_mask.shape[1], x + bw + pad)
+        y2 = min(fg_mask.shape[0], y + bh + pad)
+        fill = _fill_region_from_low_frequency_context(
+            output, fg_mask, x1, y1, x2 - x1, y2 - y1, bg_color
+        )
+        output[y1:y2, x1:x2] = fill
+
+    return output
+
+
+def _should_replace_region_bbox(
+    area: int,
+    width: int,
+    height: int,
+    total_area: int,
+    min_dense_fill_ratio: float = 0.18,
+    max_dense_bbox_ratio: float = 0.12,
+) -> bool:
+    """Choose regions where bbox fill is more stable than local inpaint."""
+    bbox_area = max(width * height, 1)
+    if _is_unrecoverable_large_region(area, width, height, total_area):
+        return True
+    return (
+        bbox_area / max(total_area, 1) <= max_dense_bbox_ratio
+        and area / bbox_area >= min_dense_fill_ratio
+    )
+
+
+def _sample_large_region_fill(
+    img: np.ndarray,
+    fg_mask: np.ndarray,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    bg_color: np.ndarray,
+) -> np.ndarray:
+    """Estimate a clean fill color from the ring around a large region."""
+    h, w = fg_mask.shape
+    pad = max(12, min(80, max(width, height) // 12))
+    sx1 = max(0, x - pad)
+    sy1 = max(0, y - pad)
+    sx2 = min(w, x + width + pad)
+    sy2 = min(h, y + height + pad)
+
+    ring = np.zeros((sy2 - sy1, sx2 - sx1), dtype=bool)
+    ring[:, :] = True
+    ring[
+        y - sy1:y + height - sy1,
+        x - sx1:x + width - sx1,
+    ] = False
+    ring &= fg_mask[sy1:sy2, sx1:sx2] == 0
+
+    pixels = img[sy1:sy2, sx1:sx2][ring]
+    if len(pixels) < 20:
+        fill = bg_color
+    else:
+        fill = np.median(pixels.reshape(-1, 3), axis=0)
+    return np.clip(fill, 0, 255).astype(np.uint8)
+
+
+def _fill_region_from_low_frequency_context(
+    img: np.ndarray,
+    fg_mask: np.ndarray,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    bg_color: np.ndarray,
+) -> np.ndarray:
+    """Fill a hidden region from low-frequency local context."""
+    h, w = fg_mask.shape
+    context = max(20, min(180, max(width, height) // 2))
+    sx1 = max(0, x - context)
+    sy1 = max(0, y - context)
+    sx2 = min(w, x + width + context)
+    sy2 = min(h, y + height + context)
+
+    roi = img[sy1:sy2, sx1:sx2].copy()
+    if roi.size == 0:
+        fill = np.clip(bg_color, 0, 255).astype(np.uint8)
+        return np.tile(fill, (height, width, 1))
+
+    mask = np.zeros((sy2 - sy1, sx2 - sx1), dtype=np.uint8)
+    mask[y - sy1:y + height - sy1, x - sx1:x + width - sx1] = 255
+
+    max_dim = max(roi.shape[:2])
+    scale = min(1.0, 220.0 / max(max_dim, 1))
+    if scale < 1.0:
+        small_size = (
+            max(1, int(roi.shape[1] * scale)),
+            max(1, int(roi.shape[0] * scale)),
+        )
+        small_roi = cv2.resize(roi, small_size, interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(mask, small_size, interpolation=cv2.INTER_NEAREST)
+    else:
+        small_roi = roi
+        small_mask = mask
+
+    repaired = cv2.inpaint(
+        cv2.cvtColor(small_roi, cv2.COLOR_RGB2BGR),
+        small_mask,
+        inpaintRadius=5,
+        flags=cv2.INPAINT_TELEA,
+    )
+    repaired = cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB)
+    if scale < 1.0:
+        repaired = cv2.resize(
+            repaired, (roi.shape[1], roi.shape[0]), interpolation=cv2.INTER_CUBIC
+        )
+
+    return repaired[y - sy1:y + height - sy1, x - sx1:x + width - sx1]
+
+
+def _is_unrecoverable_large_region(
+    area: int,
+    width: int,
+    height: int,
+    total_area: int,
+    min_bbox_area_ratio: float = 0.12,
+    min_fill_ratio: float = 0.30,
+) -> bool:
+    """Identify large dense regions where local inpainting leaves visible scars."""
+    bbox_area = max(width * height, 1)
+    return (
+        bbox_area / max(total_area, 1) >= min_bbox_area_ratio
+        and area / bbox_area >= min_fill_ratio
+    )
+
+
+def _fill_text_regions(img: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
+    """Clean OCR text boxes with nearby non-text background color."""
+    output = img.copy()
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (text_mask > 0).astype(np.uint8), connectivity=8
+    )
+    h, w = text_mask.shape
+
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(w, x + bw)
+        y2 = min(h, y + bh)
+
+        pad = max(4, min(16, max(bw, bh) // 6))
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(w, x2 + pad)
+        sy2 = min(h, y2 + pad)
+
+        box = output[y1:y2, x1:x2]
+        ink = _estimate_text_ink(box)
+        if not np.any(ink):
+            continue
+
+        fill = _sample_text_background(box, ink)
+        if fill is None:
+            local_mask = text_mask[sy1:sy2, sx1:sx2] == 0
+            local_pixels = output[sy1:sy2, sx1:sx2][local_mask]
+            if len(local_pixels) == 0:
+                fill = np.median(output.reshape(-1, 3), axis=0)
+            else:
+                fill = np.median(local_pixels.reshape(-1, 3), axis=0)
+        output[y1:y2, x1:x2][ink] = np.clip(fill, 0, 255).astype(np.uint8)
+
+    return output
+
+
+def _sample_text_background(
+    region: np.ndarray, ink: np.ndarray
+) -> np.ndarray | None:
+    """Sample the text box's own background, avoiding outside-page colors."""
+    background = (~ink).astype(np.uint8) * 255
+    if background.shape[0] >= 3 and background.shape[1] >= 3:
+        background = cv2.erode(background, np.ones((3, 3), np.uint8), iterations=1)
+    pixels = region[background > 0]
+    if len(pixels) < 10:
+        pixels = region[~ink]
+    if len(pixels) < 10:
+        return None
+    return np.median(pixels.reshape(-1, 3), axis=0)
+
+
+def _estimate_text_ink(region: np.ndarray) -> np.ndarray:
+    """Estimate glyph pixels in an OCR text box."""
+    if region.size == 0 or region.shape[0] < 3 or region.shape[1] < 3:
+        return np.zeros(region.shape[:2], dtype=bool)
+
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+    if float(np.std(gray)) < 8.0:
+        return np.zeros(gray.shape, dtype=bool)
+
+    thresh, _ = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    ink = _select_text_ink(gray, float(thresh))
+
+    ink_uint8 = ink.astype(np.uint8) * 255
+    ink_uint8 = cv2.dilate(ink_uint8, np.ones((3, 3), np.uint8), iterations=1)
+    return ink_uint8 > 0
+
+
+def _select_text_ink(gray: np.ndarray, thresh: float) -> np.ndarray:
+    """Pick the glyph class after dropping background connected to box edges."""
+    dark = gray <= thresh
+    light = gray > thresh
+    dark_inner = _remove_border_connected(dark)
+    light_inner = _remove_border_connected(light)
+
+    if np.count_nonzero(dark_inner) or np.count_nonzero(light_inner):
+        ink = (
+            dark_inner
+            if np.count_nonzero(dark_inner) >= np.count_nonzero(light_inner)
+            else light_inner
+        )
+    else:
+        ink = dark if np.count_nonzero(dark) <= np.count_nonzero(light) else light
+
+    return _add_antialiased_text_edges(gray, ink)
+
+
+def _add_antialiased_text_edges(gray: np.ndarray, ink: np.ndarray) -> np.ndarray:
+    """Include same-direction antialiased text pixels without taking the background."""
+    if not np.any(ink):
+        return ink
+    border = np.concatenate([
+        gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]
+    ]).astype(np.float32)
+    border_mean = float(np.mean(border))
+    ink_mean = float(np.mean(gray[ink]))
+
+    if ink_mean < border_mean:
+        candidate = gray <= max(0.0, border_mean - 25.0)
+    else:
+        candidate = gray >= min(255.0, border_mean + 25.0)
+
+    candidate_inner = _remove_border_connected(candidate)
+    if np.any(candidate_inner):
+        return ink | candidate_inner
+    return ink
+
+
+def _remove_border_connected(mask: np.ndarray) -> np.ndarray:
+    """Remove mask components touching the OCR box edge."""
+    if not np.any(mask):
+        return mask.copy()
+    num_labels, labels = cv2.connectedComponents(mask.astype(np.uint8), connectivity=8)
+    border_labels = set(labels[0, :])
+    border_labels.update(labels[-1, :])
+    border_labels.update(labels[:, 0])
+    border_labels.update(labels[:, -1])
+    keep = np.ones(num_labels, dtype=bool)
+    keep[list(border_labels)] = False
+    keep[0] = False
+    return keep[labels]
+
+
+# ---------------------------------------------------------------------------
+# Inpainting
+# ---------------------------------------------------------------------------
+
+
+def _inpaint(bg: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Inpaint masked regions using dual-pass approach."""
+    original = bg.copy()
+    bgr = cv2.cvtColor(bg, cv2.COLOR_RGB2BGR)
+
+    # First pass: Telea algorithm with larger radius for structural fill
+    repaired = cv2.inpaint(bgr, mask, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+
+    # Second pass: NS method for smoother blending on the same regions
+    repaired = cv2.inpaint(repaired, mask, inpaintRadius=5, flags=cv2.INPAINT_NS)
+
+    result = cv2.cvtColor(repaired, cv2.COLOR_BGR2RGB)
+
+    output = result.copy()
+    output[mask == 0] = original[mask == 0]
+
+    return output

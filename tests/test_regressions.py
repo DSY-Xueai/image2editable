@@ -1093,8 +1093,9 @@ def test_image_to_psd_skill_uses_shared_text_reconstruction() -> None:
     )
     launcher = (scripts_dir / "image_to_psd.py").read_text(encoding="utf-8")
 
-    assert "image2editable.cli" in launcher
-    assert not (scripts_dir / "text_detect.py").exists()
+    assert "from scripts.image_to_ppt import" in launcher
+    assert (scripts_dir / "text_detect.py").is_file()
+    assert "image2editable.cli" not in launcher
 
 
 def test_filter_noise_keeps_meaningful_all_caps_text() -> None:

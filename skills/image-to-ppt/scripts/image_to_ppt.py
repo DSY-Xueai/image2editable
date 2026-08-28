@@ -62,7 +62,6 @@ from scripts.object_detect import (
     filter_text_overlapping_proposals,
     generate_object_proposals,
 )
-from scripts.ppt_assemble import assemble_pptx, assemble_pptx_multi
 from scripts.text_detect import close_ocr_engines, detect_text, detect_text_batch
 from scripts import text_detect as text_detection
 from scripts.initial_diagnostics import (
@@ -99,6 +98,19 @@ from scripts.sam_worker import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def assemble_pptx(*args, **kwargs):
+    from scripts.ppt_assemble import assemble_pptx as writer
+
+    return writer(*args, **kwargs)
+
+
+def assemble_pptx_multi(*args, **kwargs):
+    from scripts.ppt_assemble import assemble_pptx_multi as writer
+
+    return writer(*args, **kwargs)
+
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 
