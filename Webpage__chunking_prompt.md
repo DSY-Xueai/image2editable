@@ -4,7 +4,7 @@
 
 以下示例使用网页ChatGPT 5.5 High(耗时约30分钟，与图片复杂度有关)，只针对图片，没试过PDF,图片版PPT的转换效果
 
-实测下来下列Prompt效果最好，实践中可按步发给AI，合并Prompt发现效果下降
+目前实测下来下列Prompt效果最好的一版，实践中可按步发给AI，合并Prompt发现效果下降
 
 ## 网页转换效果示例：
 
@@ -49,7 +49,7 @@ Principle: Separate the original visual elements in each image into independent 
 
 The example below uses ChatGPT 5.5 High on the web (taking about 30 minutes, depending on image complexity). It has only been tested with images; the conversion results for PDFs and image-based PowerPoint files have not been tested.
 
-In testing, the following prompts produced the best results. In practice, send them to the AI one step at a time; combining them into a single prompt reduced the quality.
+Based on current testing, the prompt set below has produced the best results so far. In practice, send them to the AI one step at a time; combining them into a single prompt reduced the quality.
 
 ## Web Conversion Example:
 
