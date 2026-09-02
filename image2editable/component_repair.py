@@ -304,136 +304,6 @@ def initialize_component_repair_state(
         )
 
 
-def record_local_component_plan(
-    store,
-    page_id: str,
-    *,
-    plan: dict,
-    _lease: ExecutionLease | None = None,
-) -> dict:
-    if _lease is not None:
-        _require_held_execution_lease(store, _lease)
-    lease = nullcontext() if _lease is not None else ExecutionLease(
-        store.root / "execution.lock", run_root=store.root
-    )
-    with lease:
-        relative_state = (
-            f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
-        )
-        state = validate_component_repair_state(store.read_json(relative_state))
-        _validate_repair_state_identity(store, state, page_id)
-        if state["provider"] not in {"local", "local-service"} or state[
-            "phase"
-        ] not in {
-            "awaiting_plan",
-            "plan_recorded",
-        }:
-            raise RuntimeError("Local component plan does not match repair state")
-        request_payload = _load_state_artifact(
-            store.root, state["current_round"]["request_ref"]
-        )
-        request = json.loads(request_payload.decode("utf-8"))
-        graph = json.loads(
-            _load_state_artifact(
-                store.root,
-                state["graph_ref"],
-                max_bytes=GRAPH_JSON_LIMIT,
-            ).decode("utf-8")
-        )
-        validate_component_plan(plan, request=request, graph=graph)
-        if (
-            plan["request_sha256"]
-            != state["current_round"]["request_ref"]["sha256"]
-        ):
-            raise ValueError(
-                "component plan request_sha256 does not match current request"
-            )
-        payload = json.dumps(
-            plan,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ).encode("utf-8") + b"\n"
-        if state["phase"] == "plan_recorded":
-            if (
-                _load_state_artifact(
-                    store.root, state["current_round"]["plan_ref"]
-                )
-                != payload
-            ):
-                raise RuntimeError(
-                    "A different local component plan is already recorded"
-                )
-            return {
-                "status": "recorded",
-                "plan_ref": state["current_round"]["plan_ref"],
-                "recovered": True,
-            }
-        reconstruction = store.root / "pages" / page_id / "reconstruction"
-        retry_allowed = (
-            state["phase"] == "awaiting_plan"
-            and state["plan_count"] == state["repair_round"]
-        )
-        destination = reconstruction / (
-            f"local-component-plan-{state['repair_round']:02d}-"
-            f"{state['current_round']['request_ref']['sha256']}.json"
-        )
-        payload_sha256 = hashlib.sha256(payload).hexdigest()
-        if destination.exists() or destination.is_symlink():
-            if (
-                _read_bound_file(
-                    destination,
-                    store.root,
-                    max_bytes=REQUEST_JSON_LIMIT,
-                    label="local component plan",
-                )
-                != payload
-            ):
-                if not retry_allowed:
-                    raise RuntimeError(
-                        "A different local component plan is already recorded"
-                    )
-                destination = destination.with_name(
-                    f"{destination.stem}-retry-{payload_sha256[:12]}.json"
-                )
-        if destination.exists() or destination.is_symlink():
-            if (
-                _read_bound_file(
-                    destination,
-                    store.root,
-                    max_bytes=REQUEST_JSON_LIMIT,
-                    label="local component plan",
-                )
-                != payload
-            ):
-                raise RuntimeError(
-                    "A different local component plan is already recorded"
-                )
-        else:
-            _write_exclusive(destination, payload, reconstruction)
-        plan_ref = {
-            "path": destination.resolve()
-            .relative_to(store.root.resolve())
-            .as_posix(),
-            "sha256": payload_sha256,
-        }
-        updated = dict(state)
-        updated["current_round"] = dict(state["current_round"])
-        updated["current_round"]["plan_ref"] = plan_ref
-        updated["phase"] = "plan_recorded"
-        if updated["plan_count"] < updated["repair_round"]:
-            updated["plan_count"] += 1
-        updated["revision"] += 1
-        updated["updated_at"] = _utc_now()
-        validate_component_repair_state(updated)
-        store.write_json(relative_state, updated)
-        return {
-            "status": "recorded",
-            "plan_ref": plan_ref,
-            "recovered": False,
-        }
-
-
 def reject_recoverable_component_plan(
     store,
     page_id: str,
@@ -613,22 +483,14 @@ def load_component_plan_correction_context(
         raise RuntimeError("Component plan rejection binding is invalid")
     plan_ref = rejection["rejected_plan_ref"]
     request_sha256 = request_ref["sha256"]
-    if state["provider"] in {"local", "local-service"}:
-        base_path = (
-            f"pages/{page_id}/reconstruction/local-component-plan-"
-            f"{state['repair_round']:02d}-{request_sha256}"
-        )
-    else:
-        base_path = (
-            f"host-component-plan-{page_id}-"
-            f"{state['repair_round']:02d}-{request_sha256}"
-        )
-    retry_paths = [base_path]
-    if state["provider"] == "host":
-        retry_paths.insert(
-            0,
-            f"host-component-plan-{page_id}-{state['repair_round']:02d}",
-        )
+    base_path = (
+        f"host-component-plan-{page_id}-"
+        f"{state['repair_round']:02d}-{request_sha256}"
+    )
+    retry_paths = [
+        f"host-component-plan-{page_id}-{state['repair_round']:02d}",
+        base_path,
+    ]
     plan_path = plan_ref["path"]
     if plan_path == f"{base_path}.json":
         retry_prefix = None

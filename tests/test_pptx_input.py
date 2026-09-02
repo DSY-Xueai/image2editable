@@ -776,7 +776,7 @@ def test_prepare_pptx_job_writes_inventory_manifest_and_analyzed_pages(tmp_path)
     )
 
 
-@pytest.mark.parametrize("agent_provider", ["host", "local"])
+@pytest.mark.parametrize("agent_provider", ["host"])
 def test_prepare_pptx_job_freezes_agent_provider(tmp_path, agent_provider):
     source = _large_picture_file(tmp_path, "provider.pptx")
 
@@ -791,7 +791,9 @@ def test_prepare_pptx_job_freezes_agent_provider(tmp_path, agent_provider):
     ] == agent_provider
 
 
-@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+@pytest.mark.parametrize(
+    "agent_provider", ["", "HOST", "remote", "local", "local-service", None]
+)
 def test_prepare_pptx_job_rejects_invalid_agent_provider(
     tmp_path, agent_provider
 ):

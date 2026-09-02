@@ -57,7 +57,9 @@ EXPECTED_PAGE_TRANSITIONS = {
 }
 
 
-@pytest.mark.parametrize("provider", [None, "remote"])
+@pytest.mark.parametrize(
+    "provider", [None, "remote", "local", "local-service"]
+)
 def test_runtime_rejects_missing_or_invalid_manifest_agent_provider(
     tmp_path, provider: object
 ) -> None:
@@ -76,7 +78,9 @@ def test_runtime_rejects_missing_or_invalid_manifest_agent_provider(
         runtime.run_job(run_dir)
 
 
-@pytest.mark.parametrize("provider", [None, "remote"])
+@pytest.mark.parametrize(
+    "provider", [None, "remote", "local", "local-service"]
+)
 def test_runtime_rejects_invalid_provider_before_agent_delegation(
     tmp_path, provider: object
 ) -> None:
@@ -95,7 +99,9 @@ def test_runtime_rejects_invalid_provider_before_agent_delegation(
         runtime.next_candidate(run_dir)
 
 
-@pytest.mark.parametrize("provider", [None, "remote"])
+@pytest.mark.parametrize(
+    "provider", [None, "remote", "local", "local-service"]
+)
 def test_get_status_rejects_missing_or_invalid_manifest_agent_provider(
     tmp_path, provider: object
 ) -> None:
@@ -118,7 +124,9 @@ def test_get_status_rejects_missing_or_invalid_manifest_agent_provider(
     "entry_name",
     ["record_decision", "rerender_pdf_page", "recover_job", "retry_page"],
 )
-@pytest.mark.parametrize("provider", [None, "remote"])
+@pytest.mark.parametrize(
+    "provider", [None, "remote", "local", "local-service"]
+)
 def test_public_runtime_entries_reject_missing_or_invalid_agent_provider(
     tmp_path, entry_name: str, provider: object
 ) -> None:
@@ -278,10 +286,6 @@ def test_runtime_performance_summary_contract_rejects_content_fields() -> None:
                 "inference_runs": {"sam": 1},
                 "inference_operations": {"sam": 2},
                 "inference_duration_ms": {"sam": 3},
-                "agent_runs": 1,
-                "agent_image_count": 4,
-                "agent_total_bytes": 20,
-                "agent_duration_ms": 5,
             }
         }
     }
@@ -294,12 +298,45 @@ def test_runtime_performance_summary_contract_rejects_content_fields() -> None:
         runtime._validate_performance_summary(invalid, ["page_001"])
 
 
+def test_runtime_performance_summary_normalizes_legacy_host_agent_fields() -> None:
+    page = runtime._empty_page_performance()
+    page.update(
+        {
+            "agent_runs": 0,
+            "agent_image_count": 0,
+            "agent_total_bytes": 0,
+            "agent_duration_ms": 0,
+        }
+    )
+    performance = {"pages": {"page_001": page}}
+
+    runtime._validate_performance_summary(performance, ["page_001"])
+
+    assert performance == {
+        "pages": {"page_001": runtime._empty_page_performance()}
+    }
+
+
+def test_runtime_performance_summary_rejects_nonzero_legacy_agent_fields() -> None:
+    page = runtime._empty_page_performance()
+    page.update(
+        {
+            "agent_runs": 1,
+            "agent_image_count": 0,
+            "agent_total_bytes": 0,
+            "agent_duration_ms": 0,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="performance summary"):
+        runtime._validate_performance_summary(
+            {"pages": {"page_001": page}}, ["page_001"]
+        )
+
+
 def test_invalid_performance_event_is_skipped_atomically(monkeypatch) -> None:
     summary = runtime._empty_page_performance()
-    first = {
-        "event": "local_agent", "image_count": 2, "total_bytes": 1,
-        "duration_ms": 1, "status": "success",
-    }
+    first = {"event": "span", "stage": "prepare", "duration_ms": 2}
     runtime._aggregate_performance_event(summary, first)
     monkeypatch.setattr(runtime, "_PERFORMANCE_MAX_INTEGER", 2)
 
@@ -310,8 +347,8 @@ def test_invalid_performance_event_is_skipped_atomically(monkeypatch) -> None:
     with pytest.raises(ValueError, match="integer limit"):
         runtime._aggregate_performance_event(candidate, first)
 
-    assert summary["agent_runs"] == 1
-    assert summary["agent_image_count"] == 2
+    assert summary["stage_runs"] == {"prepare": 1}
+    assert summary["stage_duration_ms"] == {"prepare": 2}
     assert candidate == summary
 
 

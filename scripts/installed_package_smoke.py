@@ -14,7 +14,7 @@ from typing import Sequence
 
 
 MODULES = ("image2editable", "scripts", "image_to_ppt")
-CATALOGS = ("model_catalog.json", "runtime_model_catalog.json")
+CATALOGS = ("runtime_model_catalog.json",)
 COMMAND_TIMEOUT_SECONDS = 180
 
 

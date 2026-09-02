@@ -1,6 +1,6 @@
 ---
 name: image-to-ppt
-description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX 转换为严格质量校验、分层可编辑的 PowerPoint；保留既有原生文字、形状、表格和图表，并支持宿主视觉 Agent 或显式安装的本地视觉 Agent。用于截图、设计稿、科研图和幻灯片页面的组件重建、残影检查与可编辑输出。
+description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX 转换为严格质量校验、分层可编辑的 PowerPoint；保留既有原生文字、形状、表格和图表，并使用宿主视觉 Agent 完成组件决策。用于截图、设计稿、科研图和幻灯片页面的组件重建、残影检查与可编辑输出。
 ---
 
 # Image to PPT
@@ -9,17 +9,18 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 ## 环境
 
+- 本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。
 - 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
-- 安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1。运行 `pip install -r references/requirements.txt`。
+- 先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`。缺少转换依赖时，运行 `python -m pip install -r "<skill-root>/references/requirements.txt"`，安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1；不得依赖调用者的当前工作目录。
 - LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
-- 若 OCR 不可用，先让用户选择：PaddleOCR（中文、英文和复杂版面识别通常更好，执行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`）或 Tesseract（较轻量，但还要安装系统 Tesseract，执行 `python -m pip install pytesseract`）。**未经用户确认，不要安装任何 OCR。**
-- 完整仓库或已安装 `image2editable` 产品包时，OCR 就绪后先让用户确认，再依次运行 `image2editable models install runtime` 和 `image2editable doctor`。前者下载并校验固定的 SAM、LaMa、DINO runtime receipt；取消时不得下载。
-- 如果用户明确选择 `local`，再依次运行 `python -m pip install ".[agent-local]"`、`image2editable models install agent` 和 `image2editable doctor --agent-local`；模型下载仍须先获得用户确认，仓库不包含模型权重。
+- OCR 不可用时，默认运行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`。PaddleOCR 是本 Skill 的固定默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
+- 完整仓库或已安装 `image2editable` 产品包时，依次运行 `image2editable models install runtime --yes` 和 `image2editable doctor`。前者以非交互方式下载并校验固定的 SAM、LaMa、DINO runtime receipt。
 - 纯 standalone 环境中，独立 skill 不假设该包存在，也不运行 `image2editable doctor`。开始转换前，必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径；`SAM2_MODEL`、`LAMA_MODEL` 必须指向文件，`GROUNDING_DINO_MODEL` 必须指向目录，并运行最小只读预检：
 
   ```bash
   python -c "import os; from pathlib import Path; names=('SAM2_MODEL','LAMA_MODEL','GROUNDING_DINO_MODEL'); raw={name: os.environ.get(name, '') for name in names}; paths={name: Path(value) for name, value in raw.items()}; assert all(raw.values()) and all(path.is_absolute() for path in paths.values()) and paths['SAM2_MODEL'].is_file() and paths['LAMA_MODEL'].is_file() and paths['GROUNDING_DINO_MODEL'].is_dir(); print('runtime model paths: ok')"
   ```
+- 纯 standalone 不包含模型下载器。任一模型路径缺失时，列出缺少的环境变量并停止；standalone 不得安装或切换到产品 Runtime。系统权限、网络策略或下载校验失败时，报告原始阻塞，不反复询问安装许可，也不伪装为安装成功。
 - 优先使用当前平台已正确安装的硬件加速环境；产品环境须通过 `doctor`，所有环境须通过下列设备预检。不要仅为 WSL 建议离开已经可用的环境：
 
   ```bash
@@ -68,29 +69,15 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 旧 `convert()` 保持兼容：默认返回单个 16:9 PPTX 路径字符串；CLI 默认输出两种尺寸。
 
-## 统一 Runtime Agent 模式
+## Runtime Host Agent 模式
 
-在完整仓库环境中，先按运行环境选择 Provider。Provider 写入 Run 后不可切换，两种模式共享同一套严格组件动作、最多五轮修复和质量门禁；质量没有改善时会提前停止，不会为了耗尽轮数重复执行。
+完整仓库环境只支持 `host` Provider。Provider 写入 Run 后不可切换；所有运行使用同一套严格组件动作、最多五轮修复和质量门禁。质量没有改善时会提前停止，不会为了耗尽轮数重复执行。
 
-优先选择 `host`：当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON；该模式直接使用当前 AI，不探测、加载或下载本地组件决策模型。
+当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON。Runtime 直接使用当前 AI，不探测、加载、下载或要求配置其他组件决策模型。
 
-Host 可能把诊断图交给宿主服务处理，敏感内容应选择用户已准备好的本地模型路径（`local` 或 `local-service`）。三种 Provider 当前都保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
-
-`local` 使用用户自行安装并校验的 Qwen 完成候选判断和组件计划，必须先安装 agent-local 依赖、固定模型和完整性凭据；任一预检或推理失败都停止，不回退到其他 Provider。仓库和发行包不包含模型权重。
-
-只有用户已经部署本地视觉模型服务时才选择 `local-service`。该服务必须支持图像输入、JSON 输出和 OpenAI 兼容的 Chat Completions 接口。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可临时覆盖 `.env`。缺少地址或模型名时，说明缺少的配置并停止，不要猜测模型名、下载模型或回退到 Local 或 Host。
+Host 可能把诊断图交给宿主服务处理；处理敏感内容前，确认宿主服务的数据策略符合要求。该 Provider 当前保持 `experimental`，直到使用相同真实文件完成视觉、结构和资源验收。
 
 每张图片、每一页都必须重新查看证据并独立决策，不能跨图片套用拆分决策。
-
-Local 运行由 Runtime 内部串行完成：
-
-```bash
-image2editable convert input.pdf -o output.pptx --agent-provider local
-image2editable prepare input.pptx --run-dir runs/pptx-job --agent-provider local
-image2editable run execute runs/pptx-job
-```
-
-使用已部署的 OpenAI 兼容服务时，把上述命令中的 Provider 改为 `--agent-provider local-service`。
 
 Host 运行先准备并推进到 `awaiting_agent`：
 
@@ -113,7 +100,7 @@ image2editable agent record runs/pptx-job --plan response.json
 image2editable run execute runs/pptx-job
 ```
 
-第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及绝对证据路径。必须先验证并遵循完整 request、组件图、evidence map、全部 hash、候选和冻结状态，只查看并逐项核验 request 的有序 `review_evidence`，不得再按固定文件清单重复打开未列入本轮审查的图片。首轮 `review_evidence` 仍包含全部视觉证据；后续轮的 `round-review.png` 以相同坐标提供本轮失败或重开节点及依赖邻居的 source、isolation、ownership、reconstructed、difference 和 residual 无损视图。若 request 回退为完整 `review_evidence`，必须逐项查看；`quality-report.json` 仍作为完整质量证据读取，不能当图片发送，也不得跳过任何质量门禁。再生成绑定当前 `request_sha256` 的严格 `component_plan`。Host 与 Local 使用同一门禁，Agent confidence 不能放宽硬失败。
+第一次 `agent next` 返回视觉 challenge。必须实际查看 `image_path`，把观察到的 `shape/color/count` 写入 `host_capability_response` 后记录；不能从 metadata 或文件名猜答案。后续 `agent next` 返回当前组件请求及绝对证据路径。必须先验证并遵循完整 request、组件图、evidence map、全部 hash、候选和冻结状态，只查看并逐项核验 request 的有序 `review_evidence`，不得再按固定文件清单重复打开未列入本轮审查的图片。首轮 `review_evidence` 仍包含全部视觉证据；后续轮的 `round-review.png` 以相同坐标提供本轮失败或重开节点及依赖邻居的 source、isolation、ownership、reconstructed、difference 和 residual 无损视图。若 request 回退为完整 `review_evidence`，必须逐项查看；`quality-report.json` 仍作为完整质量证据读取，不能当图片发送，也不得跳过任何质量门禁。再生成绑定当前 `request_sha256` 的严格 `component_plan`。Agent confidence 不能放宽硬失败。
 
 每页最多 5 个重修批次。已通过组件冻结；失败子组件折叠为完整父组件，父组件仍失败时只保留该页并报告 `preserved_with_warning`。不得用清空组件或栅格文字换取成功。可靠 OCR 文字必须全部由原生可编辑文本框贡献且仅出现一次；视觉组件和背景不得残留文字像素。重建组件通常是透明图片对象，不承诺把任意图形转换为原生矢量或 SmartArt。
 

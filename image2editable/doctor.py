@@ -55,12 +55,6 @@ _MODULES = (
 _OCR_MODULES = ("paddleocr", "paddle", "pytesseract")
 
 
-def model_status() -> dict[str, object]:
-    from image2editable.models import model_status as read_status
-
-    return read_status()
-
-
 def runtime_model_status() -> dict[str, object]:
     from image2editable.runtime_models import runtime_model_status as read_status
 
@@ -216,12 +210,10 @@ def _model_check(
     return _module_check(detail, next_command=install_command)
 
 
-def check_environment(*, agent_local: bool = False) -> dict[str, Any]:
+def check_environment() -> dict[str, Any]:
     names = [module for _, module in _MODULES]
     names.extend(_OCR_MODULES)
     names.append("aspose.psd")
-    if agent_local:
-        names.append("huggingface_hub")
     results = _probe_modules(names)
 
     python_ok = (3, 10) <= sys.version_info[:2] < (3, 13)
@@ -233,8 +225,6 @@ def check_environment(*, agent_local: bool = False) -> dict[str, Any]:
         if sys.platform == "win32"
         else "python3.12 -m image2editable doctor"
     )
-    if agent_local:
-        python_command += " --agent-local"
     checks = {
         "python": _module_check(
             python_detail,
@@ -256,16 +246,6 @@ def check_environment(*, agent_local: bool = False) -> dict[str, Any]:
             "image2editable models install runtime",
         ),
     }
-    if agent_local:
-        checks["huggingface-hub"] = _module_check(
-            results["huggingface_hub"],
-            next_command='python -m pip install ".[agent-local]"',
-        )
-        checks["agent-model"] = _model_check(
-            "agent-model",
-            model_status,
-            "image2editable models install agent",
-        )
     return {
         "ready": all(
             check["ok"] for check in checks.values() if check["required"]

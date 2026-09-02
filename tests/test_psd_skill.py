@@ -44,8 +44,6 @@ def test_psd_skill_documents_shared_agent_quality_workflow() -> None:
         "--format psd",
         "python -m scripts.image_to_psd",
         "--agent-provider host",
-        "--agent-provider local",
-        "--agent-provider local-service",
         "SAM2_MODEL",
         "LAMA_MODEL",
         "GROUNDING_DINO_MODEL",
@@ -61,6 +59,9 @@ def test_psd_skill_documents_shared_agent_quality_workflow() -> None:
         "--diff-threshold",
         "--min-area",
         "背景建模瓦片周期",
+        "--agent-provider local",
+        "local-service",
+        "agent-local",
     ):
         assert stale not in text
 

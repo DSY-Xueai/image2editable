@@ -1011,24 +1011,6 @@ def test_presentation_loader_and_compositor_consume_layers_incrementally(
         background.close()
 
 
-def _local_receipt(tmp_path: Path) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "model_id": "test/model",
-        "requested_revision": "test",
-        "resolved_revision": "a" * 40,
-        "stability": "experimental",
-        "snapshot_path": str((tmp_path / "model-snapshot").resolve()),
-        "files": [
-            {
-                "path": "config.json",
-                "size": 2,
-                "sha256": "b" * 64,
-            }
-        ],
-    }
-
-
 def _write_mock_component_state(store: RunStore, page_id: str) -> None:
     reference = {"path": "mock-artifact.json", "sha256": "0" * 64}
     store.write_json(
@@ -1147,332 +1129,6 @@ def test_image_component_retry_passes_source_image_once_to_sam_worker(
     }]
 
 
-def test_local_provider_runs_builtin_model_without_service_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    _, initial_calls, assembly_calls = _install_component_e2e_boundaries(monkeypatch)
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        slide_size="16:9",
-        agent_provider="local",
-    )
-    expected_receipt = {"snapshot_path": str(tmp_path / "model")}
-    bound_receipts = []
-    plans = []
-    monkeypatch.setattr(
-        runtime, "_local_model_receipt", lambda store: expected_receipt
-    )
-
-    def bind_receipt(store, receipt):
-        bound_receipts.append((store.root, receipt))
-        return receipt
-
-    monkeypatch.setattr(runtime, "_bind_local_model_receipt", bind_receipt)
-    monkeypatch.setattr(
-        runtime,
-        "_local_service_config",
-        lambda: pytest.fail("built-in local provider must not read service config"),
-    )
-
-    def fake_local_agent(
-        request_path,
-        *,
-        model_receipt,
-        resource_policy,
-        performance_trace=None,
-    ):
-        request_path = Path(request_path)
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        plan = {
-            "schema_version": 1,
-            "kind": "component_plan",
-            "page_id": request["page_id"],
-            "provider": "local",
-            "repair_round": request["repair_round"],
-            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-            "actions": [_accept_action()],
-        }
-        plans.append(plan)
-        assert model_receipt is expected_receipt
-        assert resource_policy["name"] == "safe-default"
-        return plan
-
-    monkeypatch.setattr(runtime, "_run_local_agent", fake_local_agent)
-
-    completed = runtime.run_job(run_dir)
-
-    assert completed["status"] == "completed"
-    assert initial_calls == ["page_001"]
-    assert assembly_calls == ["single"]
-    assert [plan["provider"] for plan in plans] == ["local"]
-    assert bound_receipts == [(run_dir.resolve(), expected_receipt)]
-    assert not (run_dir / "host_capabilities.json").exists()
-    assert not (run_dir / "host-challenge").exists()
-    state = RunStore.open(run_dir).read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    assert state["provider"] == "local"
-    assert state["plan_count"] == 1
-
-
-def test_local_model_preflight_allows_low_available_ram_after_capacity_checks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
-    receipt = _local_receipt(tmp_path)
-    recommendation = {
-        "compatible": False,
-        "reason": "available RAM is below the recommendation",
-        "model_id": receipt["model_id"],
-        "revision": receipt["requested_revision"],
-        "minimum_vram_gib": 8,
-        "minimum_available_vram_gib": 6.5,
-        "minimum_ram_gib": 15,
-        "required_free_disk_gib": 8,
-        "hardware": {
-            "cuda": True,
-            "vram_gib": 8.0,
-            "available_vram_gib": 6.9,
-            "ram_gib": 15.22,
-            "available_ram_gib": 2.7,
-            "free_disk_gib": 67.0,
-        },
-        "dependencies": {
-            "torch": {"compatible": True},
-            "transformers": {"compatible": True},
-        },
-    }
-    monkeypatch.setattr(
-        runtime,
-        "_local_hardware_recommendation",
-        lambda store: recommendation,
-    )
-    monkeypatch.setattr(
-        "image2editable.models.model_status",
-        lambda: {"valid": True, "receipt": receipt},
-    )
-
-    assert runtime._local_model_receipt(RunStore.open(run_dir)) is receipt
-
-
-def test_local_model_preflight_keeps_available_vram_as_hard_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "_local_hardware_recommendation",
-        lambda store: {
-            "compatible": False,
-            "reason": "available VRAM is below the requirement",
-            "model_id": "test/model",
-            "revision": "test",
-            "minimum_vram_gib": 8,
-            "minimum_available_vram_gib": 6.5,
-            "minimum_ram_gib": 15,
-            "required_free_disk_gib": 8,
-            "hardware": {
-                "cuda": True,
-                "vram_gib": 8.0,
-                "available_vram_gib": 5.0,
-                "ram_gib": 15.22,
-                "available_ram_gib": 8.0,
-                "free_disk_gib": 67.0,
-            },
-            "dependencies": {"torch": {"compatible": True}},
-        },
-    )
-
-    with pytest.raises(RuntimeError, match="preflight failed"):
-        runtime._local_model_receipt(RunStore.open(run_dir))
-
-
-@pytest.mark.parametrize(
-    ("bad_action", "rejection_reason", "correction_instruction"),
-    [
-        (
-            "absorb_residual",
-            "unrelated_residual_target",
-            "The previous plan was rejected because an absorb_residual target had "
-            "no containment or 3px adjacency with the signed residual. Modify or "
-            "remove the related absorb_residual action; do not change request_sha256.",
-        ),
-        (
-            "split",
-            "invalid_split_target",
-            "The previous plan was rejected because a split target did not contain "
-            "the exact requested number of connected proposals. Modify or remove "
-            "the related split action; do not change request_sha256.",
-        ),
-    ],
-)
-def test_local_service_provider_corrects_rejected_plan_in_the_same_round(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    bad_action: str,
-    rejection_reason: str,
-    correction_instruction: str,
-) -> None:
-    from scripts.visual_segment import RecoverableComponentPlanError
-
-    source = tmp_path / "source.png"
-    _component_source(source)
-    _install_component_e2e_boundaries(monkeypatch)
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        slide_size="16:9",
-        agent_provider="local-service",
-    )
-    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
-    calls = []
-    bad_plan = None
-
-    def fake_local_agent(
-        request_path,
-        *,
-        service_config,
-        performance_trace=None,
-        correction_context=None,
-    ):
-        nonlocal bad_plan
-        request_path = Path(request_path)
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        common = {
-            "schema_version": 1,
-            "kind": "component_plan",
-            "page_id": request["page_id"],
-            "provider": request["provider"],
-            "repair_round": request["repair_round"],
-            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-        }
-        calls.append(correction_context)
-        if len(calls) == 1:
-            assert correction_context is None
-            bad_plan = {
-                **common,
-                "actions": [{
-                    "action": bad_action,
-                    "object_ids": ["component_0001"],
-                    "parameters": {"parts": 2} if bad_action == "split" else {},
-                    "confidence": 0.95,
-                    "evidence": ["incorrect residual target"],
-                }],
-            }
-            return bad_plan
-            assert correction_context == {
-                "instruction": correction_instruction,
-                "rejected_plan": bad_plan,
-                "forbidden_action_pairs": [[bad_action, "component_0001"]],
-            }
-        return {**common, "actions": [_accept_action()]}
-
-    real_execute = legacy.execute_component_action_round
-
-    def reject_bad_plan(image, graph, actions, **kwargs):
-        if any(action["action"] == bad_action for action in actions):
-            raise RecoverableComponentPlanError(
-                "component plan action is not executable",
-                reason=rejection_reason,
-            )
-        return real_execute(image, graph, actions, **kwargs)
-
-    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
-    monkeypatch.setattr(legacy, "execute_component_action_round", reject_bad_plan)
-
-    completed = runtime.run_job(run_dir)
-
-    assert completed["status"] == "completed"
-    assert len(calls) == 2
-    state = RunStore.open(run_dir).read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    assert state["repair_round"] == 1
-    assert state["plan_count"] == 1
-    plans = list((run_dir / "pages/page_001/reconstruction").glob(
-        "local-component-plan-01-*.json"
-    ))
-    assert len(plans) == 2
-    assert any("-retry-" in path.name for path in plans)
-
-
-def test_local_service_provider_warning_fails_without_fake_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    _install_component_e2e_boundaries(
-        monkeypatch,
-        baked_background_pages={"page_001"},
-    )
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        slide_size="16:9",
-        agent_provider="local-service",
-    )
-    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
-    rounds = []
-
-    def fake_local_agent(request_path, **kwargs):
-        request_path = Path(request_path)
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        repair_round = request["repair_round"]
-        rounds.append(repair_round)
-        return {
-            "schema_version": 1,
-            "kind": "component_plan",
-            "page_id": request["page_id"],
-            "provider": request["provider"],
-            "repair_round": request["repair_round"],
-            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-            "actions": [_accept_action()] if request["repair_round"] == 1 else [],
-        }
-
-    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
-
-    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
-        runtime.run_job(run_dir)
-
-    assert rounds == [1, 2]
-    assert RunStore.open(run_dir).read_json("run_state.json")["status"] == "failed"
-    state = RunStore.open(run_dir).read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    assert state["plan_count"] == 2
-    assert state["status"] == "preserved_with_warning"
-    assert not (run_dir / "final/output.pptx").exists()
-    assert not (run_dir / "host_capabilities.json").exists()
-    round_two = run_dir / "pages/page_001/reconstruction/agent/round-02"
-    assert (round_two / "numbered-masks.png").read_bytes() != (
-        round_two / "source.png"
-    ).read_bytes()
-    assert (round_two / "ownership.png").read_bytes() != (
-        round_two / "source.png"
-    ).read_bytes()
-    request = json.loads(
-        (round_two / "component_agent_request.json").read_text(encoding="utf-8")
-    )
-    unexplained = round_two / "unexplained-mask.png"
-    assert unexplained.read_bytes() == (
-        run_dir / "pages/page_001/reconstruction/execution-01/unexplained-mask.png"
-    ).read_bytes()
-    assert request["evidence"]["unexplained-mask.png"]["sha256"] == (
-        hashlib.sha256(unexplained.read_bytes()).hexdigest()
-    )
-
-
 def test_host_component_rounds_publish_hash_bound_presentation_manifests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1521,31 +1177,21 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
         source,
         run_dir=tmp_path / "run",
         slide_size="16:9",
-        agent_provider="local-service",
+        agent_provider="host",
     )
-    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
-
-    def fake_local_agent(request_path, **kwargs):
-        request_path = Path(request_path)
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        return {
-            "schema_version": 1,
-            "kind": "component_plan",
-            "page_id": request["page_id"],
-            "provider": request["provider"],
-            "repair_round": request["repair_round"],
-            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-            "actions": [_accept_action()],
-        }
-
-    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
+    assert runtime.run_job(run_dir)["status"] == "awaiting_agent"
+    _record_current_component_plan(
+        run_dir,
+        tmp_path / "round-1-plan.json",
+        [_accept_action()],
+    )
     real_reserve = legacy._ensure_component_disk_reserve
     reserve_calls = 0
 
     def fail_next_publication(*args, **kwargs):
         nonlocal reserve_calls
         reserve_calls += 1
-        if reserve_calls == 3:
+        if reserve_calls == 1:
             raise RuntimeError("component page disk reserve is insufficient")
         return real_reserve(*args, **kwargs)
 
@@ -1559,97 +1205,8 @@ def test_next_round_disk_reserve_fails_before_evidence_publication(
         runtime.run_job(run_dir)
 
     reconstruction = run_dir / "pages/page_001/reconstruction"
-    assert reserve_calls == 3
+    assert reserve_calls == 1
     assert not (reconstruction / "evidence-round-02").exists()
-
-
-def test_local_service_provider_stops_when_page_quality_does_not_improve(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    _install_component_e2e_boundaries(
-        monkeypatch,
-        baked_background_pages={"page_001"},
-    )
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        slide_size="16:9",
-        agent_provider="local-service",
-    )
-    monkeypatch.setattr(runtime, "_local_service_config", lambda: object())
-    rounds = []
-
-    def fake_local_agent(request_path, **kwargs):
-        request_path = Path(request_path)
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        repair_round = request["repair_round"]
-        rounds.append(repair_round)
-        return {
-            "schema_version": 1,
-            "kind": "component_plan",
-            "page_id": request["page_id"],
-            "provider": request["provider"],
-            "repair_round": request["repair_round"],
-            "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-            "actions": [
-                {
-                    "action": "expand",
-                    "object_ids": ["component_0001"],
-                    "parameters": {"margin_ratio": repair_round / 100},
-                    "confidence": 0.95,
-                    "evidence": ["bounded distinct repair attempt"],
-                }
-            ],
-        }
-
-    monkeypatch.setattr(runtime, "_run_local_service_agent", fake_local_agent)
-
-    with pytest.raises(RuntimeError, match="editable reconstruction incomplete"):
-        runtime.run_job(run_dir)
-
-    assert rounds == [1, 2]
-    state = RunStore.open(run_dir).read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    assert state["plan_count"] == 2
-    assert state["stop_reason"] == "no_quality_improvement"
-    assert state["status"] == "preserved_with_warning"
-    assert not (run_dir / "pages/page_001/reconstruction/agent/round-03").exists()
-    assert not (run_dir / "final/output.pptx").exists()
-
-
-def test_local_service_missing_configuration_stops_before_heavy_page_initialization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "source.png"
-    _component_source(source)
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        agent_provider="local-service",
-    )
-    initialized = False
-
-    def missing_service():
-        raise RuntimeError("Local model service is not configured")
-
-    def unexpected_initialize(*args, **kwargs):
-        nonlocal initialized
-        initialized = True
-        raise AssertionError("heavy page initialization must not start")
-
-    monkeypatch.setattr(runtime, "_local_service_config", missing_service)
-    monkeypatch.setattr(runtime, "initialize_legacy_page", unexpected_initialize)
-
-    with pytest.raises(RuntimeError, match="not configured"):
-        runtime.run_job(run_dir)
-
-    assert initialized is False
-    assert not (run_dir / "host_capabilities.json").exists()
 
 
 def test_pdf_component_plan_e2e_is_serial_and_falls_back_before_one_assembly(
@@ -7350,46 +6907,28 @@ def test_run_job_preserves_pptx_without_calling_legacy(
     } == {"preserved"}
 
 
-def test_host_pptx_completion_never_reads_local_model_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_runtime_has_no_removed_local_provider_entrypoints() -> None:
+    removed = {
+        "_run_local_candidate_agent",
+        "_run_local_service_candidate_agent",
+        "_local_model_receipt",
+        "_local_service_config",
+        "_run_local_agent",
+        "_run_local_service_agent",
+        "_local_model_summary",
+    }
+
+    assert removed.isdisjoint(vars(runtime))
+
+
+def test_host_pptx_completion_has_no_agent_model_state(tmp_path: Path) -> None:
     source = tmp_path / "source.pptx"
     _pptx(source, slide_count=1)
     run_dir = runtime.prepare_job(source, run_dir=tmp_path / "run")
-    monkeypatch.setattr(
-        runtime,
-        "_local_model_summary",
-        lambda store: (_ for _ in ()).throw(
-            AssertionError("Host read Local model state")
-        ),
-    )
+    summary = runtime.run_job(run_dir)
 
-    assert runtime.run_job(run_dir)["status"] == "completed"
-
-
-def test_local_pptx_completed_summary_with_model_is_idempotent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source.pptx"
-    _pptx(source, slide_count=1)
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        agent_provider="local",
-    )
-    runtime._bind_local_model_receipt(
-        RunStore.open(run_dir),
-        _local_receipt(tmp_path),
-    )
-    completed = runtime.run_job(run_dir)
-
-    def unexpected_execute(store: RunStore) -> dict[str, object]:
-        raise AssertionError("completed Local PPTX executed again")
-
-    monkeypatch.setattr(runtime, "execute_pptx_preserve", unexpected_execute)
-
-    assert completed["agent_model"]["provider"] == "local"
-    assert runtime.run_job(run_dir) == completed
+    assert summary["status"] == "completed"
+    assert "agent_model" not in summary
 
 
 def test_run_job_executes_agent_approved_shadow_plan(
@@ -7482,59 +7021,6 @@ def test_run_job_executes_agent_approved_shadow_plan(
         == "awaiting_agent"
     )
     assert not (run_dir / "final" / "output.pptx").exists()
-
-
-def test_local_provider_decides_pptx_candidate_with_builtin_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    image = tmp_path / "slide.png"
-    _image(image)
-    source = tmp_path / "source.pptx"
-    presentation = Presentation()
-    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-    slide.shapes.add_picture(
-        str(image), 0, 0, presentation.slide_width, presentation.slide_height
-    )
-    presentation.save(source)
-    run_dir = runtime.prepare_job(
-        source,
-        run_dir=tmp_path / "run",
-        agent_provider="local",
-    )
-    store = RunStore.open(run_dir)
-    manifest, _ = runtime._manifest_input(store)
-    receipt = _local_receipt(tmp_path)
-    observed = []
-    monkeypatch.setattr(runtime, "_local_model_receipt", lambda current: receipt)
-    monkeypatch.setattr(
-        runtime,
-        "_bind_local_model_receipt",
-        lambda current, value: value,
-    )
-
-    def decide(candidate, *, model_receipt, resource_policy):
-        observed.append((candidate, model_receipt, resource_policy))
-        return {
-            "decision": "replace",
-            "confidence": 0.99,
-            "category": "full_slide_screenshot",
-            "evidence": ["complete slide screenshot"],
-        }
-
-    monkeypatch.setattr(runtime, "_run_local_candidate_agent", decide)
-    with ExecutionLease(run_dir / "execution.lock", run_root=run_dir) as lease:
-        context = runtime._resolve_pptx_candidates(store, manifest, lease)
-
-    assert context == {"model_receipt": receipt}
-    assert len(observed) == 1
-    candidate = observed[0][0]
-    assert Path(candidate["image_path"]).is_file()
-    assert observed[0][1] is receipt
-    assert observed[0][2]["name"] == "safe-default"
-    decision = store.read_json("pages/page_001/decision.json")["decisions"][0]
-    assert decision["runtime_action"] == "shadow_run"
-    assert (run_dir / "pages/page_001/page_request.json").is_file()
 
 
 def test_mixed_pptx_warning_output_is_recovery_not_reconstruction_success(
@@ -8951,10 +8437,6 @@ def test_run_summary_reports_performance_counts_without_content(
             "inference_finish", page_id=page_id, stage="sam_candidates",
             model="sam", operation_count=2, duration_ms=23, status="success",
         )
-        trace.event(
-            "local_agent", image_count=4, total_bytes=4096,
-            duration_ms=29, status="success",
-        )
         reconstruction = store.root / "pages" / page_id / "reconstruction"
         reconstruction.mkdir()
         (reconstruction / "component_state.json").write_text(
@@ -8985,10 +8467,6 @@ def test_run_summary_reports_performance_counts_without_content(
                 "inference_runs": {"sam": 1},
                 "inference_operations": {"sam": 2},
                 "inference_duration_ms": {"sam": 23},
-                "agent_runs": 1,
-                "agent_image_count": 4,
-                "agent_total_bytes": 4096,
-                "agent_duration_ms": 29,
             }
         }
     }

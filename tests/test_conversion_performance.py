@@ -68,7 +68,6 @@ def test_event_and_span_reject_unknown_fields(tmp_path: Path) -> None:
         ("worker", {"duration_ms": True, "status": "success"}),
         ("worker", {"duration_ms": 1, "status": "pending"}),
         ("worker", {"duration_ms": 1, "status": "success", "operation_count": []}),
-        ("local_agent", {"duration_ms": 1, "status": "success", "stage": "inference"}),
     ],
 )
 def test_event_rejects_invalid_schema_values_and_combinations(

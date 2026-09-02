@@ -11,7 +11,7 @@ validate_agent_provider = component_contracts.validate_agent_provider
 
 
 def test_component_agent_provider_contract_is_frozen() -> None:
-    assert AGENT_PROVIDERS == frozenset({"host", "local", "local-service"})
+    assert AGENT_PROVIDERS == frozenset({"host"})
     assert MAX_REPAIR_ROUNDS == 5
     assert "pending_gate" in component_contracts.COMPONENT_STATES
     assert "component-isolation.png" in component_contracts.COMPONENT_EVIDENCE_NAMES
@@ -189,14 +189,16 @@ def test_component_agent_request_rejects_invalid_review_evidence(
         component_contracts.validate_component_agent_request(request)
 
 
-@pytest.mark.parametrize("value", ["host", "local"])
+@pytest.mark.parametrize("value", ["host"])
 def test_validate_agent_provider_accepts_supported_lowercase_values(value: str) -> None:
     assert validate_agent_provider(value) == value
 
 
-@pytest.mark.parametrize("value", ["", "HOST", "remote", None])
+@pytest.mark.parametrize(
+    "value", ["", "HOST", "remote", "local", "local-service", None]
+)
 def test_validate_agent_provider_rejects_unsupported_values(value: object) -> None:
-    with pytest.raises(ValueError, match="agent_provider"):
+    with pytest.raises(ValueError, match="expected: host"):
         validate_agent_provider(value)
 
 

@@ -14,9 +14,9 @@
 ## 运行与发布边界
 
 - `image2editable --version` 从已安装 distribution metadata 读取版本；当前版本为 `0.2.0`。
-- `image2editable doctor` 用于检查本地依赖；用户自行部署的 OpenAI-compatible 视觉模型通过明确的 `local-service` 模式接入。
+- `image2editable doctor` 用于检查转换依赖和固定运行时模型；组件决策统一由 Host Agent 完成。
 - 发行包契约矩阵覆盖 Windows、Linux、macOS 的 Python 3.10–3.12；真实性能比较只接受与 manifest、依赖约束和运行环境完全一致的基线。
-- 本地模型权重、模型缓存、临时 workspace 和生成的 PPTX 不进入 wheel、Git 或 benchmark 工件；Release Gate 只保存必要的 JSON 证据。
+- 运行时模型权重、模型缓存、临时 workspace 和生成的 PPTX 不进入 wheel、Git 或 benchmark 工件；Release Gate 只保存必要的 JSON 证据。
 - PowerPoint 原生对象、截图候选和 OCR 文本的边界保持严格校验；不以 warning、fallback 或未解释像素换取通过。
 
 ## 安全与版本

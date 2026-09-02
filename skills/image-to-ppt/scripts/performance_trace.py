@@ -18,7 +18,6 @@ _PLATFORM = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 _EVENT_FIELDS = {
     "span": ({"stage", "page_id", "model", "operation_count", "duration_ms"}, {"stage", "duration_ms"}),
     "worker": ({"stage", "page_id", "model", "operation_count", "duration_ms", "status"}, {"duration_ms", "status"}),
-    "local_agent": ({"image_count", "total_bytes", "duration_ms", "status"}, {"image_count", "total_bytes", "duration_ms", "status"}),
     "worker_start": ({"stage", "page_id", "model", "operation_count"}, {"stage"}),
     "worker_finish": ({"stage", "page_id", "model", "operation_count", "duration_ms", "status"}, {"stage", "duration_ms", "status"}),
     "model_load_start": ({"page_id", "model"}, {"model"}),

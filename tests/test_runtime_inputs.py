@@ -277,7 +277,7 @@ def test_public_prepare_rejects_psd_output_for_document_input(
         )
 
 
-@pytest.mark.parametrize("agent_provider", ["host", "local"])
+@pytest.mark.parametrize("agent_provider", ["host"])
 def test_prepare_image_job_freezes_agent_provider(
     tmp_path: Path, agent_provider: str
 ) -> None:
@@ -295,7 +295,9 @@ def test_prepare_image_job_freezes_agent_provider(
     ] == agent_provider
 
 
-@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+@pytest.mark.parametrize(
+    "agent_provider", ["", "HOST", "remote", "local", "local-service", None]
+)
 def test_public_image_prepare_apis_reject_invalid_agent_provider(
     tmp_path: Path, agent_provider: object
 ) -> None:

@@ -209,9 +209,9 @@ def test_skill_documents_offline_product_and_standalone_model_contracts() -> Non
     assert skill.index("image2editable models install runtime") < skill.index(
         "image2editable doctor"
     )
-    assert skill.index('python -m pip install ".[agent-local]"') < skill.index(
-        "image2editable models install agent"
-    ) < skill.index("image2editable doctor --agent-local")
+    assert "agent-local" not in skill
+    assert "image2editable models install agent" not in skill
+    assert "image2editable doctor --agent-local" not in skill
     assert "不运行 `image2editable doctor`" in skill
     assert "产品环境须通过 `doctor`，所有环境须通过下列设备预检" in skill
     assert "SAM2_MODEL`、`LAMA_MODEL` 必须指向文件" in skill

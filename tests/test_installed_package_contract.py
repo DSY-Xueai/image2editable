@@ -26,11 +26,10 @@ def test_import_comes_from_the_installed_distribution() -> None:
     assert "site-packages" in str(imported).casefold()
 
 
-def test_packaged_catalogs_are_available() -> None:
+def test_packaged_runtime_catalog_is_available() -> None:
     distribution = metadata.distribution("image2editable")
     files = {str(path).replace("\\", "/") for path in distribution.files or ()}
 
-    assert "image2editable/model_catalog.json" in files
     assert "image2editable/runtime_model_catalog.json" in files
 
 

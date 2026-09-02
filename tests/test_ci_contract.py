@@ -246,7 +246,6 @@ def _configure_installed_distribution(smoke, tmp_path, monkeypatch):
         "image_to_ppt": purelib / "image_to_ppt.py",
     }
     catalog_paths = [
-        purelib / "image2editable" / "model_catalog.json",
         purelib / "image2editable" / "runtime_model_catalog.json",
     ]
     for path in [*module_paths.values(), *catalog_paths, launcher]:

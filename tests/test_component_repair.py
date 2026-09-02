@@ -31,8 +31,9 @@ from image2editable.component_repair import (
     record_parent_fallback_execution,
     record_parent_fallback_quality,
     record_component_quality,
-    record_local_component_plan,
 )
+from image2editable.component_contracts import validate_component_plan
+from image2editable.host_agent import _record_plan_reference
 import image2editable.component_repair as component_repair
 import image2editable.component_quality as component_quality
 import image2editable.legacy as legacy
@@ -48,6 +49,39 @@ from scripts.visual_segment import (
 from scripts.sam_worker import component_prompt_mask, run_component_prompt_worker
 from PIL import Image
 import numpy as np
+
+
+def _record_test_component_plan(store, page_id: str, *, plan: dict) -> dict:
+    state = store.read_json(
+        f"pages/{page_id}/reconstruction/component_state.json"
+    )
+    request_path = store.root / state["current_round"]["request_ref"]["path"]
+    request = load_component_agent_request(request_path)
+    validate_component_plan(
+        plan,
+        request=request,
+        graph=load_component_agent_graph(request_path),
+    )
+    payload = json.dumps(
+        plan,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    plan_path = store.root / (
+        f"host-component-plan-{page_id}-{request['repair_round']:02d}-"
+        f"{plan['request_sha256']}.json"
+    )
+    plan_path.write_bytes(payload)
+    _record_plan_reference(store, request, plan_path)
+    return {
+        "status": "recorded",
+        "plan_ref": {
+            "path": plan_path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        },
+        "recovered": False,
+    }
 
 
 def _page_quality_key_case(**metrics: float) -> dict:
@@ -1084,251 +1118,6 @@ def test_initialized_state_points_to_hash_bound_current_request(page_session: di
     assert persisted["phase"] == "awaiting_plan"
 
 
-def test_local_plan_is_hash_bound_and_recorded_without_host_state(
-    page_session: dict,
-) -> None:
-    from image2editable.store import RunStore
-
-    local_session = {**page_session, "provider": "local"}
-    request_path = build_component_agent_request(local_session, repair_round=1)
-    store = RunStore(request_path.parents[5])
-    store.write_json(
-        "job_manifest.json",
-        {
-            "schema_version": 1,
-            "pages": ["page_001"],
-            "options": {"agent_provider": "local"},
-        },
-    )
-    initialize_component_repair_state(
-        store,
-        "page_001",
-        request_path=request_path,
-        initial_component_count=2,
-    )
-    assert advance_component_repair(store, "page_001")["status"] == "awaiting_agent"
-    plan = {
-        "schema_version": 1,
-        "kind": "component_plan",
-        "page_id": "page_001",
-        "provider": "local",
-        "repair_round": 1,
-        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-        "actions": [_action("accept", ["candidate_b"])],
-    }
-
-    recorded = record_local_component_plan(store, "page_001", plan=plan)
-
-    state = store.read_json("pages/page_001/reconstruction/component_state.json")
-    assert state["phase"] == "plan_recorded"
-    assert state["plan_count"] == 1
-    assert state["current_round"]["plan_ref"] == recorded["plan_ref"]
-    assert not (store.root / "host_capabilities.json").exists()
-
-
-def test_recoverable_plan_rejection_reopens_same_local_round_and_preserves_plans(
-    page_session: dict,
-) -> None:
-    from image2editable.store import RunStore
-
-    page_session["provider"] = "local"
-    request_path = build_component_agent_request(page_session, repair_round=1)
-    store = RunStore(request_path.parents[5])
-    store.write_json("job_manifest.json", {
-        "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
-    })
-    initialize_component_repair_state(
-        store, "page_001", request_path=request_path, initial_component_count=2,
-    )
-    advance_component_repair(store, "page_001")
-    request_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
-    rejected_plan = {
-        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
-        "request_sha256": request_sha256,
-        "actions": [_action("absorb_residual", ["candidate_b"])],
-    }
-    first = record_local_component_plan(
-        store, "page_001", plan=rejected_plan,
-    )
-    rejected_path = store.root / first["plan_ref"]["path"]
-    rejected_payload = rejected_path.read_bytes()
-    recorded = store.read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    first_rejection_name = (
-        f"component-plan-rejection-{recorded['revision'] + 1:08d}.json"
-    )
-    store.write_json(
-        f"pages/page_001/reconstruction/{first_rejection_name}",
-        {
-            "schema_version": 1,
-            "page_id": "page_001",
-            "repair_round": 1,
-            "request_ref": recorded["current_round"]["request_ref"],
-            "rejected_plan_ref": recorded["current_round"]["plan_ref"],
-            "reason": "unrelated_residual_target",
-        },
-    )
-    assert runtime._local_plan_correction_context(
-        RunStore(store.root), "page_001", request_path
-    ) is None
-
-    component_repair.reject_recoverable_component_plan(
-        store,
-        "page_001",
-        repair_round=1,
-        request_ref=recorded["current_round"]["request_ref"],
-        plan_ref=recorded["current_round"]["plan_ref"],
-    )
-
-    reopened = store.read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    assert reopened["phase"] == "awaiting_plan"
-    assert reopened["repair_round"] == 1
-    assert reopened["current_round"]["request_ref"] == (
-        recorded["current_round"]["request_ref"]
-    )
-    assert reopened["current_round"]["plan_ref"] is None
-    assert reopened["current_round"]["execution_ref"] is None
-    assert reopened["current_round"]["quality_ref"] is None
-    assert reopened["graph_ref"] == recorded["graph_ref"]
-    assert reopened["plan_count"] == recorded["plan_count"]
-    half_committed_plan = copy.deepcopy(rejected_plan)
-    half_committed_plan["actions"] = [_action("discard", ["candidate_b"])]
-    half_committed_payload = json.dumps(
-        half_committed_plan,
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    ).encode("utf-8") + b"\n"
-    half_committed_path = rejected_path.with_name(
-        f"{rejected_path.stem}-retry-"
-        f"{hashlib.sha256(half_committed_payload).hexdigest()[:12]}.json"
-    )
-    half_committed_path.write_bytes(half_committed_payload)
-    resumed = RunStore(store.root)
-    correction_context = runtime._local_plan_correction_context(
-        resumed, "page_001", request_path
-    )
-    assert correction_context["rejected_plan"] == rejected_plan
-    assert "do not change request_sha256" in correction_context["instruction"]
-
-    second_rejected_plan = copy.deepcopy(rejected_plan)
-    second_rejected_plan["actions"][0]["evidence"] = [
-        "second unrelated residual target"
-    ]
-    second = record_local_component_plan(
-        store, "page_001", plan=second_rejected_plan,
-    )
-    second_recorded = store.read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    component_repair.reject_recoverable_component_plan(
-        store,
-        "page_001",
-        repair_round=1,
-        request_ref=second_recorded["current_round"]["request_ref"],
-        plan_ref=second_recorded["current_round"]["plan_ref"],
-    )
-    rejection_paths = sorted(
-        rejected_path.parent.glob("component-plan-rejection-*.json")
-    )
-    assert len(rejection_paths) == 2
-    assert rejection_paths[0].name == first_rejection_name
-    second_context = runtime._local_plan_correction_context(
-        RunStore(store.root), "page_001", request_path
-    )
-    assert second_context["rejected_plan"] == second_rejected_plan
-    assert (store.root / second["plan_ref"]["path"]).is_file()
-
-    corrected_plan = copy.deepcopy(rejected_plan)
-    corrected_plan["actions"] = [_action("discard", ["candidate_b"])]
-    corrected = record_local_component_plan(
-        store, "page_001", plan=corrected_plan,
-    )
-    repeated = record_local_component_plan(
-        store, "page_001", plan=corrected_plan,
-    )
-
-    assert corrected["plan_ref"] != first["plan_ref"]
-    assert "-retry-" in corrected["plan_ref"]["path"]
-    assert repeated["plan_ref"] == corrected["plan_ref"]
-    assert repeated["recovered"] is True
-    assert rejected_path.read_bytes() == rejected_payload
-
-    assert (store.root / corrected["plan_ref"]["path"]).is_file()
-
-
-def test_recoverable_split_rejection_exposes_bound_correction_context(
-    page_session: dict,
-) -> None:
-    from image2editable.store import RunStore
-
-    page_session["provider"] = "local"
-    request_path = build_component_agent_request(page_session, repair_round=1)
-    store = RunStore(request_path.parents[5])
-    store.write_json("job_manifest.json", {
-        "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
-    })
-    initialize_component_repair_state(
-        store, "page_001", request_path=request_path, initial_component_count=2,
-    )
-    advance_component_repair(store, "page_001")
-    first_plan = {
-        "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
-        "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
-        "actions": [_action("absorb_residual", ["candidate_b"])],
-    }
-    record_local_component_plan(store, "page_001", plan=first_plan)
-    recorded = store.read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    component_repair.reject_recoverable_component_plan(
-        store,
-        "page_001",
-        repair_round=1,
-        request_ref=recorded["current_round"]["request_ref"],
-        plan_ref=recorded["current_round"]["plan_ref"],
-    )
-    first_context = runtime._local_plan_correction_context(
-        RunStore(store.root), "page_001", request_path
-    )
-    assert first_context["forbidden_action_pairs"] == [
-        ["absorb_residual", "candidate_b"]
-    ]
-
-    split_plan = {**first_plan, "actions": [
-        _action("split", ["candidate_b"], {"parts": 2})
-    ]}
-    record_local_component_plan(store, "page_001", plan=split_plan)
-    recorded = store.read_json(
-        "pages/page_001/reconstruction/component_state.json"
-    )
-    component_repair.reject_recoverable_component_plan(
-        store,
-        "page_001",
-        repair_round=1,
-        request_ref=recorded["current_round"]["request_ref"],
-        plan_ref=recorded["current_round"]["plan_ref"],
-        reason="invalid_split_target",
-    )
-
-    context = runtime._local_plan_correction_context(
-        RunStore(store.root), "page_001", request_path
-    )
-    assert context["rejected_plan"] == split_plan
-    assert context["forbidden_action_pairs"] == [
-        ["absorb_residual", "candidate_b"],
-        ["split", "candidate_b"],
-    ]
-    assert "exact requested number of connected proposals" in context["instruction"]
-
-
 def test_recoverable_host_plan_execution_returns_to_awaiting_agent(
     page_session: dict,
     tmp_path: Path,
@@ -1499,20 +1288,20 @@ def test_nonrecoverable_execution_errors_remain_fatal(
 ) -> None:
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
     )
     advance_component_repair(store, "page_001")
-    record_local_component_plan(store, "page_001", plan={
+    _record_test_component_plan(store, "page_001", plan={
         "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
+        "provider": "host", "repair_round": 1,
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [_action("accept", ["candidate_b"])],
     })
@@ -1552,14 +1341,14 @@ def test_execution_refreshes_candidates_after_discard(
         candidate["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
         graph["nodes"].append(candidate)
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     _refresh_test_presentation_manifest(page_session)
 
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=3,
@@ -1567,11 +1356,11 @@ def test_execution_refreshes_candidates_after_discard(
     advance_component_repair(store, "page_001")
     plan = {
         "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
+        "provider": "host", "repair_round": 1,
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [_action("discard", ["candidate_b"])],
     }
-    record_local_component_plan(store, "page_001", plan=plan)
+    _record_test_component_plan(store, "page_001", plan=plan)
     output_dir = request_path.parents[2] / "execution-01"
     next_graph = execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
@@ -1579,7 +1368,7 @@ def test_execution_refreshes_candidates_after_discard(
     )
     next_graph_path = output_dir / "component-graph.json"
     execution = {
-        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": 1, "request_sha256": plan["request_sha256"],
         "input_graph_sha256": hashlib.sha256(
             (request_path.parent / "component-graph.json").read_bytes()
@@ -1630,7 +1419,7 @@ def test_page_only_background_residual_enters_next_round(
 ) -> None:
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     evidence_graph_path = page_session["evidence"]["component-graph.json"]
     evidence_graph = json.loads(evidence_graph_path.read_text(encoding="utf-8"))
     for component_id, point in (("candidate_b", (0, 0)), ("frozen_a", (1, 1))):
@@ -1650,7 +1439,7 @@ def test_page_only_background_residual_enters_next_round(
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
@@ -1666,7 +1455,7 @@ def test_page_only_background_residual_enters_next_round(
     ))
     plan = {
         "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": 1,
+        "provider": "host", "repair_round": 1,
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [
             _action("discard", ["candidate_b"]),
@@ -1675,7 +1464,7 @@ def test_page_only_background_residual_enters_next_round(
             ),
         ],
     }
-    record_local_component_plan(store, "page_001", plan=plan)
+    _record_test_component_plan(store, "page_001", plan=plan)
     execution_dir = request_path.parents[2] / "execution-01"
     execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
@@ -1683,7 +1472,7 @@ def test_page_only_background_residual_enters_next_round(
     )
     graph_path = execution_dir / "component-graph.json"
     execution = {
-        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": 1, "request_sha256": plan["request_sha256"],
         "input_graph_sha256": hashlib.sha256(
             (request_path.parent / "component-graph.json").read_bytes()
@@ -1933,12 +1722,12 @@ def test_page_residual_owner_is_reopened_with_component_failures(
 ) -> None:
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
@@ -2020,13 +1809,13 @@ def test_record_suppress_text_preserves_linked_frozen_visual_assets(
     text["mask_sha256"] = hashlib.sha256(text_mask.read_bytes()).hexdigest()
     graph_path.write_text(json.dumps(graph), encoding="utf-8")
     _refresh_test_presentation_manifest(page_session)
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1,
         "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
@@ -2034,11 +1823,11 @@ def test_record_suppress_text_preserves_linked_frozen_visual_assets(
     advance_component_repair(store, "page_001")
     plan = {
         "schema_version": 1, "kind": "component_plan",
-        "page_id": "page_001", "provider": "local", "repair_round": 1,
+        "page_id": "page_001", "provider": "host", "repair_round": 1,
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [_action("suppress_text", ["text_0001"])],
     }
-    record_local_component_plan(store, "page_001", plan=plan)
+    _record_test_component_plan(store, "page_001", plan=plan)
     output_dir = request_path.parents[2] / "execution-01"
     next_graph = execute_component_actions(
         np.zeros((2, 2, 3), dtype=np.uint8), graph, plan["actions"],
@@ -2049,7 +1838,7 @@ def test_record_suppress_text_preserves_linked_frozen_visual_assets(
     next_graph_path = output_dir / "component-graph.json"
     refs = _quality_input_refs(output_dir, store, next_graph_path)
     execution = {
-        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": 1, "request_sha256": plan["request_sha256"],
         "input_graph_sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
         "output_graph_sha256": hashlib.sha256(next_graph_path.read_bytes()).hexdigest(),
@@ -2557,7 +2346,7 @@ def _initial_unowned_diagnostic(source_sha256: str, *, text: str = "ny") -> dict
 def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     source_sha256 = hashlib.sha256(
         page_session["evidence"]["source.png"].read_bytes()
     ).hexdigest()
@@ -2573,7 +2362,7 @@ def _failed_diagnostic_round_one(page_session: dict, monkeypatch):
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=1,
@@ -2607,7 +2396,7 @@ def _next_round_session(page_session: dict, store, quality: dict) -> dict:
     quality_path = Path(page_session["reconstruction_dir"]) / "round-02-quality.json"
     quality_path.write_text(json.dumps(quality), encoding="utf-8")
     evidence["quality-report.json"] = quality_path
-    session = {**page_session, "provider": "local", "evidence": evidence}
+    session = {**page_session, "provider": "host", "evidence": evidence}
     _refresh_test_presentation_manifest(session)
     return session
 
@@ -2615,12 +2404,12 @@ def _next_round_session(page_session: dict, store, quality: dict) -> dict:
 def _failed_underlay_round_one(page_session: dict):
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     first_request = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(first_request.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=first_request, initial_component_count=2,
@@ -2649,7 +2438,7 @@ def _real_next_round_session(page_session: dict, store, quality_path: Path) -> d
     evidence = dict(page_session["evidence"])
     evidence["component-graph.json"] = store.root / state["graph_ref"]["path"]
     evidence["quality-report.json"] = quality_path
-    session = {**page_session, "provider": "local", "evidence": evidence}
+    session = {**page_session, "provider": "host", "evidence": evidence}
     _refresh_test_presentation_manifest(session)
     return session
 
@@ -3876,11 +3665,11 @@ def _execute_composite_quality_round(
     request = load_component_agent_request(request_path)
     plan = {
         "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "local", "repair_round": request["repair_round"],
+        "provider": "host", "repair_round": request["repair_round"],
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [action],
     }
-    record_local_component_plan(store, "page_001", plan=plan)
+    _record_test_component_plan(store, "page_001", plan=plan)
     execution_dir = request_path.parents[2] / f"execution-{request['repair_round']:02d}"
     execute_component_actions(
         np.zeros((*shape, 3), dtype=np.uint8), graph, plan["actions"],
@@ -3935,7 +3724,7 @@ def _execute_composite_quality_round(
         for name, path in quality_paths.items()
     }
     execution = {
-        "schema_version": 1, "page_id": "page_001", "provider": "local",
+        "schema_version": 1, "page_id": "page_001", "provider": "host",
         "repair_round": request["repair_round"],
         "request_sha256": plan["request_sha256"],
         "input_graph_sha256": request["graph_sha256"],
@@ -4156,12 +3945,12 @@ def test_background_responsibility_artifact_is_hash_bound(
 def _start_quality_mutation_round(page_session: dict):
     from image2editable.store import RunStore
 
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,
@@ -4411,13 +4200,13 @@ def _record_composite_quality(
         path = evidence_root / name
         if path.suffix == ".png" and name != "component-graph.json":
             Image.fromarray(np.zeros((*shape, 3), dtype=np.uint8)).save(path)
-    page_session["provider"] = "local"
+    page_session["provider"] = "host"
     _refresh_test_presentation_manifest(page_session)
     request_path = build_component_agent_request(page_session, repair_round=1)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
-        "options": {"agent_provider": "local"},
+        "options": {"agent_provider": "host"},
     })
     initialize_component_repair_state(
         store, "page_001", request_path=request_path, initial_component_count=2,

@@ -25,22 +25,16 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
     assert data["project"] == {
         "name": "image2editable",
             "version": "0.2.0",
-        "description": "Local-first image to editable PPTX and layered PSD runtime",
+        "description": "Image to editable PPTX and layered PSD runtime",
         "readme": "README_EN.md",
         "requires-python": ">=3.10,<3.13",
         "license": {"file": "LICENSE"},
         "dynamic": ["dependencies"],
         "scripts": {"image2editable": "image2editable.cli:main"},
         "optional-dependencies": {
-            "agent-local": [
-                "huggingface-hub>=0.34.0",
-                "torch>=2.5.1,<3",
-                "transformers>=4.57,<5",
-                "accelerate>=1.8,<2",
-            ],
-                "psd": ["aspose-psd>=26.5.0"],
-                "render-qa": ["pywin32>=306; sys_platform == 'win32'"],
-                "test": [
+            "psd": ["aspose-psd>=26.5.0"],
+            "render-qa": ["pywin32>=306; sys_platform == 'win32'"],
+            "test": [
                 "pytest",
                 "PyYAML>=6,<7",
                 "pypdf>=5",
@@ -58,7 +52,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "scripts*",
     ]
     assert data["tool"]["setuptools"]["package-data"] == {
-        "image2editable": ["model_catalog.json", "runtime_model_catalog.json"]
+        "image2editable": ["runtime_model_catalog.json"]
     }
     assert data["tool"]["setuptools"]["dynamic"]["dependencies"] == {
         "file": ["requirements.txt"]
@@ -107,11 +101,6 @@ def _stub_ready_doctor(
     monkeypatch.setattr(
         doctor,
         "runtime_model_status",
-        lambda: {"installed": True, "valid": True},
-    )
-    monkeypatch.setattr(
-        doctor,
-        "model_status",
         lambda: {"installed": True, "valid": True},
     )
     monkeypatch.setattr(doctor.sys, "version_info", (3, 12, 0))
@@ -398,7 +387,7 @@ def test_doctor_requires_valid_runtime_models_without_installing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from image2editable import models, runtime_models
+    from image2editable import runtime_models
 
     monkeypatch.setenv("IMAGE2EDITABLE_MODEL_CACHE", str(tmp_path))
     monkeypatch.setattr(
@@ -426,17 +415,6 @@ def test_doctor_requires_valid_runtime_models_without_installing(
         "snapshot_download",
         lambda **kwargs: pytest.fail("doctor must not download snapshots"),
     )
-    monkeypatch.setattr(
-        models,
-        "install_agent_model",
-        lambda **kwargs: pytest.fail("doctor must not install agent models"),
-    )
-    monkeypatch.setattr(
-        models,
-        "snapshot_download",
-        lambda **kwargs: pytest.fail("doctor must not download agent snapshots"),
-    )
-
     report = doctor.check_environment()
 
     assert report["ready"] is False
@@ -451,32 +429,6 @@ def test_doctor_requires_valid_runtime_models_without_installing(
         "next_command": "image2editable models install runtime",
     }
     assert "agent-model" not in report["checks"]
-
-
-def test_doctor_agent_local_requires_imports_and_receipt_without_leaking_status(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_ready_doctor(monkeypatch, missing={"huggingface_hub"})
-    monkeypatch.setattr(
-        doctor,
-        "model_status",
-        lambda: {
-            "installed": True,
-            "valid": False,
-            "reason": r"invalid receipt at C:\private\qwen",
-        },
-    )
-
-    report = doctor.check_environment(agent_local=True)
-
-    assert report["ready"] is False
-    assert report["checks"]["huggingface-hub"]["next_command"] == (
-        'python -m pip install ".[agent-local]"'
-    )
-    assert report["checks"]["agent-model"]["next_command"] == (
-        "image2editable models install agent"
-    )
-    assert "private" not in json.dumps(report)
 
 
 def test_doctor_normalizes_unsafe_model_status_exception_name(
@@ -512,20 +464,6 @@ def test_doctor_uses_platform_appropriate_python_next_command(
     )
 
 
-def test_doctor_python_next_command_preserves_agent_local_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _stub_ready_doctor(monkeypatch)
-    monkeypatch.setattr(doctor.sys, "version_info", (3, 13, 0))
-    monkeypatch.setattr(doctor.sys, "platform", "linux")
-
-    report = doctor.check_environment(agent_local=True)
-
-    assert report["checks"]["python"]["next_command"] == (
-        "python3.12 -m image2editable doctor --agent-local"
-    )
-
-
 def test_cli_convert_forwards_all_image_options(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -553,7 +491,7 @@ def test_cli_convert_forwards_all_image_options(
             "--lang",
             "en",
             "--agent-provider",
-            "local",
+            "host",
         ]
     )
 
@@ -567,7 +505,7 @@ def test_cli_convert_forwards_all_image_options(
                 "output_path": "out.pptx",
                 "slide_size": "16:9",
                 "lang": "en",
-                "agent_provider": "local",
+                "agent_provider": "host",
             },
         )
     ]
@@ -578,12 +516,25 @@ def test_cli_convert_forwards_all_image_options(
     assert "conversion progress" in captured.err
 
 
-def test_cli_accepts_explicit_local_service_provider() -> None:
-    args = cli.build_parser().parse_args(
-        ["convert", "source.png", "--agent-provider", "local-service"]
-    )
+@pytest.mark.parametrize("provider", ["local", "local-service"])
+def test_cli_rejects_removed_agent_provider(provider: str) -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["convert", "source.png", "--agent-provider", provider]
+        )
 
-    assert args.agent_provider == "local-service"
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["doctor", "--agent-local"],
+        ["models", "recommend"],
+        ["models", "install", "agent"],
+    ],
+)
+def test_cli_rejects_removed_local_model_commands(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(argv)
 
 
 @pytest.mark.parametrize("command", ["prepare", "convert"])
@@ -653,7 +604,7 @@ def test_cli_prepare_forwards_all_image_options(
             "--lang",
             "ch",
             "--agent-provider",
-            "local",
+            "host",
         ]
     )
 
@@ -666,7 +617,7 @@ def test_cli_prepare_forwards_all_image_options(
                 "output_path": "out.pptx",
                 "slide_size": "original",
                 "lang": "ch",
-                "agent_provider": "local",
+                "agent_provider": "host",
             },
         )
     ]
@@ -792,35 +743,20 @@ def test_cli_doctor_exit_code_follows_ready(
     report = {"ready": ready, "checks": {"python": {"ok": ready}}}
     calls = []
 
-    def fake_check_environment(*, agent_local: bool = False) -> dict[str, object]:
-        calls.append(agent_local)
+    def fake_check_environment() -> dict[str, object]:
+        calls.append(True)
         return report
 
     monkeypatch.setattr(cli, "check_environment", fake_check_environment)
 
     assert cli.main(["doctor"]) == expected_exit
-    assert calls == [False]
+    assert calls == [True]
     assert json.loads(capsys.readouterr().out) == report
 
 
-def test_cli_doctor_agent_local_forwards_flag(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    calls = []
-
-    def fake_check_environment(*, agent_local: bool = False) -> dict[str, object]:
-        calls.append(agent_local)
-        return {"ready": True, "checks": {}}
-
-    monkeypatch.setattr(cli, "check_environment", fake_check_environment)
-
-    assert cli.main(["doctor", "--agent-local"]) == 0
-    assert calls == [True]
-    assert json.loads(capsys.readouterr().out)["ready"] is True
-
-
-@pytest.mark.parametrize("provider", [None, "remote"])
+@pytest.mark.parametrize(
+    "provider", [None, "remote", "local", "local-service"]
+)
 def test_cli_status_rejects_missing_or_invalid_manifest_agent_provider(
     tmp_path: Path, provider: object
 ) -> None:
@@ -837,22 +773,6 @@ def test_cli_status_rejects_missing_or_invalid_manifest_agent_provider(
 
     with pytest.raises(RuntimeError, match="manifest.*agent_provider"):
         cli.main(["run", "status", str(run_dir)])
-
-
-def test_cli_status_accepts_local_service_manifest_provider(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    source = tmp_path / "source.png"
-    source.write_bytes(b"image")
-    run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
-    manifest_path = run_dir / "job_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["options"]["agent_provider"] = "local-service"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-
-    assert cli.main(["run", "status", str(run_dir)]) == 0
-    assert json.loads(capsys.readouterr().out)["run"]["status"] == "prepared"
-
 
 def test_module_help_starts() -> None:
     root = Path(__file__).resolve().parents[1]
@@ -947,105 +867,6 @@ def test_cli_agent_next_and_record_emit_only_json_to_stdout(
     assert json.loads(capsys.readouterr().out) == {"status": "recorded"}
 
 
-def test_cli_models_recommend_json_is_routed_lazily(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from image2editable import models
-
-    profile = models.HardwareProfile(8, 16, 20, True)
-    expected = {
-        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-        "compatible": True,
-    }
-    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
-    monkeypatch.setattr(
-        models,
-        "recommend_agent_model",
-        lambda hardware, cache_dir=None: expected,
-    )
-
-    assert cli.main(["models", "recommend", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == expected
-
-
-def test_cli_models_install_yes_displays_plan_before_installing(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from image2editable import models
-
-    profile = models.HardwareProfile(8, 16, 20, True)
-    plan = {
-        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-        "revision": "main",
-        "required_free_disk_gib": 8,
-        "cache_dir": "cache",
-        "stability": "experimental",
-        "compatible": True,
-    }
-    calls: list[dict[str, object]] = []
-    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
-    monkeypatch.setattr(
-        models,
-        "recommend_agent_model",
-        lambda hardware, cache_dir=None: plan,
-    )
-
-    def install(**kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"model_id": plan["model_id"], "resolved_revision": "a" * 40}
-
-    monkeypatch.setattr(models, "install_agent_model", install)
-
-    assert cli.main(["models", "install", "agent", "--yes"]) == 0
-    captured = capsys.readouterr()
-    assert calls == [
-        {
-            "cache_dir": None,
-            "confirmed": True,
-            "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-            "revision": "main",
-        }
-    ]
-    assert json.loads(captured.out)["resolved_revision"] == "a" * 40
-    assert "Qwen/Qwen3-VL-2B-Instruct" in captured.err
-    assert "experimental" in captured.err
-
-
-def test_cli_models_install_cancelled_before_installer(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from image2editable import models
-
-    profile = models.HardwareProfile(8, 16, 20, True)
-    monkeypatch.setattr(models, "detect_hardware", lambda cache_dir=None: profile)
-    monkeypatch.setattr(
-        models,
-        "recommend_agent_model",
-        lambda hardware, cache_dir=None: {
-            "model_id": "Qwen/Qwen3-VL-2B-Instruct",
-            "revision": "main",
-            "required_free_disk_gib": 8,
-            "cache_dir": "cache",
-            "stability": "experimental",
-            "compatible": True,
-        },
-    )
-    monkeypatch.setattr(
-        models,
-        "install_agent_model",
-        lambda **kwargs: pytest.fail("installer must not run after cancellation"),
-    )
-    monkeypatch.setattr("builtins.input", lambda prompt: "no")
-
-    assert cli.main(["models", "install", "agent"]) == 1
-    captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"status": "cancelled"}
-    assert "上述实验性模型" in captured.err
-
-
 def test_cli_models_install_runtime_yes_prints_safe_plan_before_installing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1126,24 +947,17 @@ def test_cli_models_install_runtime_cancelled_without_network(
     assert "上述实验性模型" not in captured.err
 
 
-def test_cli_models_status_prints_agent_and_runtime_status(
+def test_cli_models_status_prints_runtime_status(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from image2editable import models
     from image2editable import runtime_models
 
-    agent = {
-        "installed": False,
-        "valid": False,
-        "install_command": "image2editable models install agent",
-    }
     runtime = {
         "installed": False,
         "valid": False,
         "install_command": "image2editable models install runtime",
     }
-    monkeypatch.setattr(models, "model_status", lambda cache_dir=None: agent)
     monkeypatch.setattr(
         runtime_models,
         "runtime_model_status",
@@ -1151,7 +965,4 @@ def test_cli_models_status_prints_agent_and_runtime_status(
     )
 
     assert cli.main(["models", "status"]) == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "agent": agent,
-        "runtime": runtime,
-    }
+    assert json.loads(capsys.readouterr().out) == runtime

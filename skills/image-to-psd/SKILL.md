@@ -1,6 +1,6 @@
 ---
 name: image-to-psd
-description: 将一张或多张图片转换为经过严格质量校验的分层 PSD；可独立运行，也可使用 image2editable 的 Host、Local 或本地服务 Agent。输出修复背景、独立透明视觉组件和可编辑 Photoshop 文字图层。仅支持图片输入，不用于 PDF 或 PPTX。
+description: 将一张或多张图片转换为经过严格质量校验的分层 PSD；可独立运行，也可使用 image2editable 的 Host Agent。输出修复背景、独立透明视觉组件和可编辑 Photoshop 文字图层。仅支持图片输入，不用于 PDF 或 PPTX。
 ---
 
 # Image to PSD
@@ -30,20 +30,16 @@ export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 
 ## 独立运行
 
-独立模式不需要安装 `image2editable` 产品包。使用 Python 3.10-3.12，并从 skill 根目录安装依赖：
+本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。独立模式不需要安装 `image2editable` 产品包。使用 Python 3.10-3.12。先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`，再用绝对路径安装依赖；不得依赖调用者的当前工作目录：
 
 ```bash
-python -m pip install -r references/requirements.txt
+python -m pip install -r "<skill-root>/references/requirements.txt"
 ```
 
-若 OCR 尚未准备好，先让用户选择 PaddleOCR 或 Tesseract；未经确认不要安装。PaddleOCR 更适合中文、英文和复杂版面，Tesseract 较轻量但还需要系统程序。
+OCR 尚未准备好时，直接安装固定版本的 PaddleOCR。它是本 Skill 的默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
 
 ```bash
-# PaddleOCR
 python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
-
-# Tesseract Python adapter
-python -m pip install pytesseract
 ```
 
 开始转换前，把三个模型配置为绝对本地路径：`SAM2_MODEL` 和 `LAMA_MODEL` 指向文件，`GROUNDING_DINO_MODEL` 指向目录。独立模式不读取产品 receipt，也不运行 `image2editable doctor`。
@@ -51,6 +47,8 @@ python -m pip install pytesseract
 ```bash
 python -c "import os; from pathlib import Path; names=('SAM2_MODEL','LAMA_MODEL','GROUNDING_DINO_MODEL'); raw={name: os.environ.get(name, '') for name in names}; paths={name: Path(value) for name, value in raw.items()}; assert all(raw.values()) and all(path.is_absolute() for path in paths.values()) and paths['SAM2_MODEL'].is_file() and paths['LAMA_MODEL'].is_file() and paths['GROUNDING_DINO_MODEL'].is_dir(); print('runtime model paths: ok')"
 ```
+
+纯 standalone 不包含模型下载器。任一模型路径缺失时，列出缺少的环境变量并停止；standalone 不得安装或切换到产品 Runtime。系统权限、网络策略或下载校验失败时，报告原始阻塞，不反复询问安装许可，也不伪装为安装成功。
 
 推理不会下载模型或回退 Hugging Face cache。SAM 和 LaMa 文件必须匹配固定身份；DINO 目录视为用户明确提供的本地 override。LaMa 缺失或初始化失败时停止，不降级到容易产生条带或拖影的 OpenCV 修复。
 
@@ -76,33 +74,28 @@ standalone CLI 只负责图片重建，不接受 `--agent-provider`。它先完�
 
 ## 产品 Runtime
 
-完整仓库或已安装的 `image2editable` 支持 `host`、`local` 和 `local-service`。三种 Provider 使用同一组件动作、最多 5 批修复和相同质量门，运行开始后不能切换。
+完整仓库或已安装的 `image2editable` 只支持 `host` Provider，使用统一的组件动作、最多 5 批修复和相同质量门。
 
-先安装 PSD 依赖。OCR 就绪并获得用户同意后，安装并校验固定的 SAM、LaMa 和 DINO runtime：
+完整仓库中缺少 PSD 依赖时，在仓库根目录安装对应 extra：
 
 ```bash
 python -m pip install -e ".[psd]"
-image2editable models install runtime
+```
+
+仅已安装 `image2editable` distribution、没有仓库源码时，直接安装同一 PSD writer 依赖，不对调用者的当前项目执行 editable install：
+
+```bash
+python -m pip install "aspose-psd>=26.5.0"
+```
+
+随后以非交互方式安装并校验固定的 SAM、LaMa 和 DINO runtime：
+
+```bash
+image2editable models install runtime --yes
 image2editable doctor
 ```
 
-`host` 直接使用当前支持视觉、本地文件读取、工具调用和结构化 JSON 的宿主，不探测或下载本地组件决策模型。敏感文件应使用用户已经准备好的 `local` 或 `local-service`。
-
-`local` 使用用户明确安装的内置 Qwen Agent。安装模型前必须再次确认：
-
-```bash
-python -m pip install -e ".[psd,agent-local]"
-image2editable models install agent
-image2editable doctor --agent-local
-image2editable convert input.png -o output.psd --format psd --agent-provider local
-```
-
-`local-service` 用于用户已经部署的 OpenAI-compatible 视觉模型服务。它必须支持图片输入、JSON 输出和 Chat Completions。优先读取项目根目录 `.env` 中的 `IMAGE2EDITABLE_LOCAL_BASE_URL`、`IMAGE2EDITABLE_LOCAL_MODEL` 和可选 `IMAGE2EDITABLE_LOCAL_API_KEY`；同名环境变量可以临时覆盖。缺少地址或模型名时停止，不猜测模型名、不下载模型，也不回退到其他 Provider。
-
-```bash
-image2editable convert input.png -o output.psd \
-  --format psd --agent-provider local-service
-```
+`host` 直接使用当前支持视觉、本地文件读取、工具调用和结构化 JSON 的宿主，不探测、下载或要求配置其他组件决策模型。处理敏感文件前，确认宿主服务的数据策略符合要求。
 
 Host 模式先准备 Run，再推进到 `awaiting_agent`：
 

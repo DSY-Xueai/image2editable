@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import secrets
 import stat
-import subprocess
-import sys
 import tempfile
 from typing import Any, Iterable, Sequence
 
@@ -20,8 +17,6 @@ from image2editable.component_contracts import (
 )
 from image2editable.component_repair import (
     _read_bound_file,
-    load_component_plan_correction_context,
-    record_local_component_plan,
     resume_round_limited_component_repair,
 )
 from image2editable.contracts import (
@@ -56,8 +51,6 @@ _PPTX_EXECUTION_MANIFEST: ContextVar[dict[str, Any] | None] = ContextVar(
     "_PPTX_EXECUTION_MANIFEST", default=None
 )
 COMPONENT_QUALITY_GATE_VERSION = "component-quality-v2"
-_LOCAL_MODEL_PROVENANCE = "local-agent-model.json"
-_LOCAL_MODEL_PROVENANCE_LIMIT = 16 * 1024 * 1024
 _PERFORMANCE_TRACE_PREFIX = "performance-"
 _PERFORMANCE_SUMMARY_NAME = "performance-summary.json"
 _PERFORMANCE_TRACE_LIMIT = 16 * 1024 * 1024
@@ -75,8 +68,11 @@ _PERFORMANCE_MAPS = {
     "inference_operations": "model",
     "inference_duration_ms": "model",
 }
-_PERFORMANCE_SCALARS = {
-    "agent_runs", "agent_image_count", "agent_total_bytes", "agent_duration_ms",
+_LEGACY_HOST_PERFORMANCE_FIELDS = {
+    "agent_runs",
+    "agent_image_count",
+    "agent_total_bytes",
+    "agent_duration_ms",
 }
 _LOGGER = logging.getLogger(__name__)
 
@@ -205,10 +201,6 @@ def _empty_page_performance() -> dict[str, Any]:
         "inference_runs": {},
         "inference_operations": {},
         "inference_duration_ms": {},
-        "agent_runs": 0,
-        "agent_image_count": 0,
-        "agent_total_bytes": 0,
-        "agent_duration_ms": 0,
     }
 
 
@@ -272,15 +264,6 @@ def _aggregate_performance_event(
                 summary, "inference_duration_ms", model, event["duration_ms"]
             ),
         ))
-    elif kind == "local_agent":
-        for name, source in (
-            ("agent_runs", None),
-            ("agent_image_count", "image_count"),
-            ("agent_total_bytes", "total_bytes"),
-            ("agent_duration_ms", "duration_ms"),
-        ):
-            value = 1 if source is None else event[source]
-            updates.append(_metric_update(summary, name, None, value))
     for field, key, value in updates:
         if key is None:
             summary[field] = value
@@ -390,7 +373,7 @@ def _write_performance_summaries(
 def _validate_performance_summary(
     performance: object, expected_page_ids: Sequence[str]
 ) -> None:
-    fields = set(_PERFORMANCE_MAPS) | _PERFORMANCE_SCALARS
+    fields = set(_PERFORMANCE_MAPS)
     if not isinstance(performance, dict) or set(performance) != {"pages"}:
         raise RuntimeError("Run performance summary fields are invalid")
     pages = performance["pages"]
@@ -401,7 +384,18 @@ def _validate_performance_summary(
             _validate_field("page_id", page_id)
         except ValueError as error:
             raise RuntimeError("Run performance summary page id is invalid") from error
-        if not isinstance(page, dict) or set(page) != fields:
+        if not isinstance(page, dict):
+            raise RuntimeError("Run performance summary page fields are invalid")
+        page_fields = set(page)
+        if page_fields == fields | _LEGACY_HOST_PERFORMANCE_FIELDS:
+            if any(
+                type(page[field]) is not int or page[field] != 0
+                for field in _LEGACY_HOST_PERFORMANCE_FIELDS
+            ):
+                raise RuntimeError("Run performance summary page fields are invalid")
+            for field in _LEGACY_HOST_PERFORMANCE_FIELDS:
+                page.pop(field)
+        elif page_fields != fields:
             raise RuntimeError("Run performance summary page fields are invalid")
         for field, identifier_kind in _PERFORMANCE_MAPS.items():
             metrics = page[field]
@@ -419,13 +413,6 @@ def _validate_performance_summary(
                     or value > _PERFORMANCE_MAX_INTEGER
                 ):
                     raise RuntimeError("Run performance summary metric is invalid")
-        if any(
-            type(page[field]) is not int
-            or page[field] < 0
-            or page[field] > _PERFORMANCE_MAX_INTEGER
-            for field in _PERFORMANCE_SCALARS
-        ):
-            raise RuntimeError("Run performance summary scalar is invalid")
 
 
 def _discover_powerpoint_renderer():
@@ -560,81 +547,6 @@ def record_decision(
     return record(run_dir, **kwargs)
 
 
-def _run_local_candidate_agent(
-    candidate: dict[str, object],
-    *,
-    model_receipt: dict[str, object],
-    resource_policy: dict[str, object],
-) -> dict[str, object]:
-    from image2editable.local_agent import run_local_candidate_agent
-
-    return run_local_candidate_agent(
-        candidate,
-        model_receipt=model_receipt,
-        resource_policy=resource_policy,
-    )
-
-
-def _run_local_service_candidate_agent(
-    candidate: dict[str, object],
-    *,
-    service_config: object,
-) -> dict[str, object]:
-    from image2editable.local_agent import run_local_service_candidate_agent
-
-    return run_local_service_candidate_agent(
-        candidate,
-        service_config=service_config,
-    )
-
-
-def _resolve_pptx_candidates(
-    store: RunStore,
-    manifest: dict[str, Any],
-    _lease: ExecutionLease,
-) -> dict[str, object] | None:
-    provider = _manifest_agent_provider(manifest)
-    if provider == "host":
-        return None
-    from image2editable.agent import _record_decision, next_candidate as find_next
-
-    candidate = find_next(store.root)["candidate"]
-    if candidate is None:
-        return None
-    if provider == "local":
-        receipt = _bind_local_model_receipt(store, _local_model_receipt(store))
-        context = {"model_receipt": receipt}
-        run_candidate_agent = _run_local_candidate_agent
-    else:
-        service_config = _local_service_config()
-        context = {"service_config": service_config}
-        run_candidate_agent = _run_local_service_candidate_agent
-    while candidate is not None:
-        if provider == "local":
-            decision = run_candidate_agent(
-                candidate,
-                model_receipt=context["model_receipt"],
-                resource_policy=_manifest_resource_policy(manifest),
-            )
-        else:
-            decision = run_candidate_agent(
-                candidate,
-                service_config=context["service_config"],
-            )
-        if not isinstance(decision, dict) or set(decision) != {
-            "decision", "confidence", "category", "evidence",
-        }:
-            raise RuntimeError("Local candidate decision fields are invalid")
-        _record_decision(
-            store.root,
-            page_id=candidate["page_id"],
-            object_id=candidate["source_shape_id"],
-            **decision,
-        )
-        candidate = find_next(store.root)["candidate"]
-    return context
-
-
 def next_host_agent_item(run_dir: str | Path) -> dict[str, object]:
     from image2editable.host_agent import next_host_agent_item as find_next
 
@@ -759,32 +671,11 @@ def _legacy_component_status(store: RunStore, page_id: str) -> dict[str, Any]:
 def _advance_legacy_pages(
     store: RunStore, manifest: dict[str, Any], page_ids: list[str],
     lease: ExecutionLease,
-    *,
-    agent_context: dict[str, object] | None = None,
 ) -> dict[str, Any] | None:
     completed = {
         PageStatus.VALIDATED.value,
         PageStatus.PRESERVED_WITH_WARNING.value,
     }
-    provider = _manifest_agent_provider(manifest)
-    pages = store.read_json("page_jobs.json")["pages"]
-    needs_agent = any(
-        pages[page_id]["status"] not in completed for page_id in page_ids
-    )
-    local_receipt = None
-    local_service = None
-    if provider == "local" and needs_agent:
-        local_receipt = (
-            agent_context["model_receipt"]
-            if agent_context is not None
-            else _bind_local_model_receipt(store, _local_model_receipt(store))
-        )
-    elif provider == "local-service" and needs_agent:
-        local_service = (
-            agent_context["service_config"]
-            if agent_context is not None
-            else _local_service_config()
-        )
     for page_id in page_ids:
         performance_trace = _page_performance_trace(store, page_id)
         if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
@@ -800,36 +691,6 @@ def _advance_legacy_pages(
                 store, page_id, _lease=lease,
                 performance_trace=performance_trace,
             )
-            if outcome["status"] == "awaiting_agent" and provider in {
-                "local", "local-service",
-            }:
-                request_path = _local_component_request_path(store, page_id)
-                if provider == "local":
-                    agent_options = {
-                        "model_receipt": local_receipt,
-                        "resource_policy": _manifest_resource_policy(manifest),
-                        "performance_trace": performance_trace,
-                    }
-                    run_agent = _run_local_agent
-                else:
-                    agent_options = {
-                        "service_config": local_service,
-                        "performance_trace": performance_trace,
-                    }
-                    run_agent = _run_local_service_agent
-                correction_context = _local_plan_correction_context(
-                    store, page_id, request_path
-                )
-                if correction_context is not None:
-                    agent_options["correction_context"] = correction_context
-                plan = run_agent(request_path, **agent_options)
-                record_local_component_plan(
-                    store,
-                    page_id,
-                    plan=plan,
-                    _lease=lease,
-                )
-                continue
             if outcome["status"] != "processing":
                 break
         else:
@@ -850,285 +711,6 @@ def _advance_legacy_pages(
                 f"{outcome['status']}"
             )
     return None
-
-
-def _local_model_receipt(store: RunStore) -> dict[str, object]:
-    recommendation = _local_hardware_recommendation(store)
-    if not recommendation["compatible"] and not _local_capacity_is_runnable(
-        recommendation
-    ):
-        raise RuntimeError(
-            "Local Agent resource/dependency preflight failed: "
-            f"{recommendation['reason']}"
-        )
-    from image2editable import models
-
-    status = models.model_status()
-    if not status["valid"]:
-        reason = status.get("reason", "model is not installed")
-        raise RuntimeError(
-            f"Local Agent model is unavailable: {reason}; run: "
-            f"{status['install_command']}"
-        )
-    receipt = status["receipt"]
-    if (
-        receipt["model_id"] != recommendation["model_id"]
-        or receipt["requested_revision"] != recommendation["revision"]
-    ):
-        raise RuntimeError(
-            "Installed Local Agent model does not match the current recommendation; "
-            f"run: {status['install_command']}"
-        )
-    return receipt
-
-
-def _local_capacity_is_runnable(recommendation: dict[str, object]) -> bool:
-    try:
-        hardware = recommendation["hardware"]
-        dependencies = recommendation["dependencies"]
-        return (
-            isinstance(hardware, dict)
-            and hardware.get("cuda") is True
-            and float(hardware["vram_gib"])
-            >= float(recommendation["minimum_vram_gib"])
-            and float(hardware["available_vram_gib"])
-            >= float(recommendation["minimum_available_vram_gib"])
-            and float(hardware["ram_gib"])
-            >= float(recommendation["minimum_ram_gib"])
-            and float(hardware["free_disk_gib"])
-            >= float(recommendation["required_free_disk_gib"])
-            and isinstance(dependencies, dict)
-            and all(
-                isinstance(record, dict) and record.get("compatible") is True
-                for record in dependencies.values()
-            )
-        )
-    except (KeyError, TypeError, ValueError):
-        return False
-
-
-def _local_hardware_recommendation(store: RunStore) -> dict[str, object]:
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
-    env["IMAGE2EDITABLE_MODEL_CACHE"] = str(store.root.resolve())
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "image2editable",
-            "models",
-            "recommend",
-            "--json",
-        ],
-        env=env,
-        capture_output=True,
-        check=False,
-        timeout=60,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", errors="replace")[-1000:].strip()
-        raise RuntimeError(f"Local Agent hardware preflight failed: {detail}")
-    try:
-        recommendation = json.loads(completed.stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError("Local Agent hardware preflight returned invalid JSON") from error
-    if not isinstance(recommendation, dict):
-        raise RuntimeError("Local Agent hardware preflight returned invalid JSON")
-    if not isinstance(recommendation.get("compatible"), bool) or not isinstance(
-        recommendation.get("reason"), str
-    ):
-        raise RuntimeError("Local Agent hardware preflight returned invalid result")
-    if recommendation["compatible"] and (
-        not isinstance(recommendation.get("model_id"), str)
-        or not isinstance(recommendation.get("revision"), str)
-    ):
-        raise RuntimeError("Local Agent hardware preflight returned invalid result")
-    return recommendation
-
-
-def _bind_local_model_receipt(
-    store: RunStore,
-    receipt: dict[str, object],
-) -> dict[str, object]:
-    fields = (
-        "schema_version",
-        "model_id",
-        "requested_revision",
-        "resolved_revision",
-        "stability",
-        "snapshot_path",
-        "files",
-    )
-    if not isinstance(receipt, dict) or any(field not in receipt for field in fields):
-        raise RuntimeError("Local Agent model receipt is incomplete")
-    frozen_receipt = {field: receipt[field] for field in fields}
-    receipt_payload = json.dumps(
-        frozen_receipt,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    document = {
-        "schema_version": SCHEMA_VERSION,
-        "provider": "local",
-        "receipt_sha256": hashlib.sha256(receipt_payload).hexdigest(),
-        "receipt": frozen_receipt,
-    }
-    payload = (
-        json.dumps(
-            document,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
-    target = store.root / _LOCAL_MODEL_PROVENANCE
-    try:
-        status = target.lstat()
-    except FileNotFoundError:
-        _write_local_model_provenance(target, payload)
-    else:
-        if (
-            _is_link_or_reparse(status)
-            or not stat.S_ISREG(status.st_mode)
-            or status.st_nlink != 1
-            or status.st_size > _LOCAL_MODEL_PROVENANCE_LIMIT
-            or _read_bound_file(
-                target,
-                store.root,
-                max_bytes=_LOCAL_MODEL_PROVENANCE_LIMIT,
-                label="local model provenance",
-            )
-            != payload
-        ):
-            raise RuntimeError(
-                "This Run is already bound to a different model snapshot"
-            )
-    return receipt
-
-
-def _write_local_model_provenance(target: Path, payload: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    for name in ("O_BINARY", "O_NOINHERIT", "O_NOFOLLOW"):
-        flags |= getattr(os, name, 0)
-    try:
-        descriptor = os.open(target, flags, 0o600)
-    except OSError as error:
-        raise RuntimeError("Local Agent model provenance cannot be created") from error
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            opened = os.fstat(stream.fileno())
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-            current = target.lstat()
-            if (
-                _is_link_or_reparse(current)
-                or not stat.S_ISREG(opened.st_mode)
-                or not stat.S_ISREG(current.st_mode)
-                or opened.st_nlink != 1
-                or current.st_nlink != 1
-                or (opened.st_dev, opened.st_ino)
-                != (current.st_dev, current.st_ino)
-            ):
-                raise RuntimeError("Local Agent model provenance identity changed")
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
-
-
-def _local_model_summary(store: RunStore) -> dict[str, object] | None:
-    target = store.root / _LOCAL_MODEL_PROVENANCE
-    if not _path_entry_exists(target):
-        return None
-    payload = _read_bound_file(
-        target,
-        store.root,
-        max_bytes=_LOCAL_MODEL_PROVENANCE_LIMIT,
-        label="local model provenance",
-    )
-    document = json.loads(payload.decode("utf-8"))
-    receipt = document["receipt"]
-    return {
-        "provider": "local",
-        "model_id": receipt["model_id"],
-        "requested_revision": receipt["requested_revision"],
-        "resolved_revision": receipt["resolved_revision"],
-        "stability": receipt["stability"],
-        "receipt_sha256": document["receipt_sha256"],
-    }
-
-
-def _local_component_request_path(store: RunStore, page_id: str) -> Path:
-    state = validate_component_repair_state(
-        store.read_json(
-            f"pages/{page_id}/reconstruction/component_state.json"
-        )
-    )
-    if state["provider"] not in {"local", "local-service"} or state[
-        "phase"
-    ] != "awaiting_plan":
-        raise RuntimeError("Local Agent request does not match repair state")
-    relative = Path(*state["current_round"]["request_ref"]["path"].split("/"))
-    request_path = (store.root / relative).resolve()
-    try:
-        request_path.relative_to(store.root.resolve())
-    except ValueError as error:
-        raise RuntimeError("Local Agent request is outside the Run") from error
-    return request_path
-
-
-def _local_plan_correction_context(
-    store: RunStore, page_id: str, request_path: Path
-) -> dict[str, object] | None:
-    return load_component_plan_correction_context(store, page_id, request_path)
-
-
-def _run_local_agent(
-    request_path: str | Path,
-    *,
-    model_receipt: dict,
-    resource_policy: dict,
-    performance_trace=None,
-    correction_context: dict[str, object] | None = None,
-) -> dict:
-    from image2editable.local_agent import run_local_agent
-
-    options = {
-        "model_receipt": model_receipt,
-        "resource_policy": resource_policy,
-        "performance_trace": performance_trace,
-    }
-    if correction_context is not None:
-        options["correction_context"] = correction_context
-    return run_local_agent(request_path, **options)
-
-
-def _local_service_config() -> object:
-    from image2editable.local_service import load_config
-
-    return load_config()
-
-
-def _run_local_service_agent(
-    request_path: str | Path,
-    *,
-    service_config: object,
-    performance_trace=None,
-    correction_context: dict[str, object] | None = None,
-) -> dict:
-    from image2editable.local_agent import run_local_service_agent
-
-    options = {
-        "service_config": service_config,
-        "performance_trace": performance_trace,
-    }
-    if correction_context is not None:
-        options["correction_context"] = correction_context
-    return run_local_service_agent(request_path, **options)
 
 
 def _ensure_legacy_pages_processing(
@@ -1524,28 +1106,6 @@ def _pptx_manifest_expectations(
     return slide_count, preserved_objects, pending_candidates, input_sha256
 
 
-def _validate_agent_model_summary(summary: object) -> None:
-    fields = {
-        "provider",
-        "model_id",
-        "requested_revision",
-        "resolved_revision",
-        "stability",
-        "receipt_sha256",
-    }
-    if not isinstance(summary, dict) or set(summary) != fields:
-        raise RuntimeError("Local model summary fields are invalid")
-    if (
-        summary.get("provider") != "local"
-        or any(
-            not isinstance(summary.get(field), str) or not summary[field]
-            for field in fields - {"provider", "receipt_sha256"}
-        )
-        or not _is_sha256(summary.get("receipt_sha256"))
-    ):
-        raise RuntimeError("Local model summary values are invalid")
-
-
 def _validate_pptx_public_summary(
     summary: object,
     expected_output: Path,
@@ -1554,7 +1114,6 @@ def _validate_pptx_public_summary(
     pending_candidates: int,
     input_sha256: str,
     resource_policy: dict[str, object],
-    agent_provider: str,
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX execution summary must be an object")
@@ -1578,11 +1137,6 @@ def _validate_pptx_public_summary(
         "output_sha256",
         "resource_policy",
     }
-    if "agent_model" in summary:
-        if agent_provider != "local":
-            raise RuntimeError("Host PPTX summary cannot contain Local model state")
-        expected_public_keys.add("agent_model")
-        _validate_agent_model_summary(summary["agent_model"])
     if "performance" in summary:
         expected_public_keys.add("performance")
     if set(summary) != expected_public_keys:
@@ -1635,7 +1189,6 @@ def _validate_pptx_execution_summary(
     pending_candidates: int,
     input_sha256: str,
     resource_policy: dict[str, object],
-    agent_provider: str,
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX execution summary must be an object")
@@ -1649,7 +1202,6 @@ def _validate_pptx_execution_summary(
         pending_candidates,
         input_sha256,
         resource_policy,
-        agent_provider,
     )
     if (
         not isinstance(token, dict)
@@ -1669,7 +1221,6 @@ def _validate_pptx_shadow_public_summary(
     original_candidates: int,
     input_sha256: str,
     resource_policy: dict[str, object],
-    agent_provider: str,
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX shadow summary must be an object")
@@ -1688,11 +1239,6 @@ def _validate_pptx_shadow_public_summary(
         "output_sha256",
         "resource_policy",
     }
-    if "agent_model" in summary:
-        if agent_provider != "local":
-            raise RuntimeError("Host PPTX summary cannot contain Local model state")
-        expected_keys.add("agent_model")
-        _validate_agent_model_summary(summary["agent_model"])
     if "performance" in summary:
         expected_keys.add("performance")
     if set(summary) != expected_keys:
@@ -1760,7 +1306,6 @@ def _validate_pptx_shadow_execution_summary(
     original_candidates: int,
     input_sha256: str,
     resource_policy: dict[str, object],
-    agent_provider: str,
 ) -> None:
     if type(summary) is not dict:
         raise RuntimeError("PPTX shadow summary must be an object")
@@ -1774,7 +1319,6 @@ def _validate_pptx_shadow_execution_summary(
         original_candidates,
         input_sha256,
         resource_policy,
-        agent_provider,
     )
     if (
         not isinstance(token, dict)
@@ -1951,7 +1495,6 @@ def _run_job(
     store = RunStore.open(run_dir)
     manifest, input_type = _manifest_input(store)
     resource_policy = _manifest_resource_policy(manifest)
-    agent_provider = _manifest_agent_provider(manifest)
     state = store.read_json("run_state.json")
     page_jobs = store.read_json("page_jobs.json")
     if state["status"] == RunStatus.COMPLETED.value:
@@ -1981,7 +1524,6 @@ def _run_job(
                     pptx_pending_candidates,
                     pptx_input_sha256,
                     resource_policy,
-                    agent_provider,
                 )
                 completed_output_sha256 = summary["output_sha256"]
             else:
@@ -1998,7 +1540,6 @@ def _run_job(
                     pptx_pending_candidates,
                     pptx_input_sha256,
                     resource_policy,
-                    agent_provider,
                 )
                 completed_output_sha256 = pptx_input_sha256
             _validate_completed_pptx_output(
@@ -2060,9 +1601,6 @@ def _run_job(
             pptx_input_sha256,
         ) = _pptx_manifest_expectations(manifest, page_jobs)
         validate_pptx_inventories(store, manifest)
-        pptx_agent_context = _resolve_pptx_candidates(
-            store, manifest, _lease
-        )
         # Component repair may pause at the Agent boundary.  Enter RUNNING
         # only after all immutable PPTX input/inventory checks pass so a
         # rejected prepare remains recoverable in PREPARED.
@@ -2104,7 +1642,6 @@ def _run_job(
                     manifest,
                     existing_component_pages,
                     _lease,
-                    agent_context=pptx_agent_context,
                 )
                 if waiting is not None:
                     return waiting
@@ -2204,7 +1741,6 @@ def _run_job(
                         pptx_pending_candidates,
                         pptx_input_sha256,
                         resource_policy,
-                        agent_provider,
                     )
                 else:
                     _validate_pptx_execution_summary(
@@ -2215,7 +1751,6 @@ def _run_job(
                         pptx_pending_candidates,
                         pptx_input_sha256,
                         resource_policy,
-                        agent_provider,
                     )
             except Exception:
                 try:
@@ -2297,10 +1832,6 @@ def _run_job(
                 "resource_policy": resource_policy,
                 "quality_gate_version": COMPONENT_QUALITY_GATE_VERSION,
             }
-        if agent_provider == "local":
-            local_model = _local_model_summary(store)
-            if local_model is not None:
-                summary["agent_model"] = local_model
         performance = _performance_summary(store, page_ids)
         summary["performance"] = performance
         store.write_json("run_summary.json", summary)

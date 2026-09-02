@@ -226,7 +226,7 @@ def test_prepare_pdf_job_copies_and_renders_pages_in_order(tmp_path: Path) -> No
     assert RunStore.open(run).read_json("run_state.json")["status"] == "prepared"
 
 
-@pytest.mark.parametrize("agent_provider", ["host", "local"])
+@pytest.mark.parametrize("agent_provider", ["host"])
 def test_prepare_pdf_job_freezes_agent_provider(
     tmp_path: Path, agent_provider: str
 ) -> None:
@@ -245,7 +245,9 @@ def test_prepare_pdf_job_freezes_agent_provider(
     assert RunStore.open(run).read_json("page_jobs.json")["pages"]["page_001"]["status"] == "pending"
 
 
-@pytest.mark.parametrize("agent_provider", ["", "HOST", "remote", None])
+@pytest.mark.parametrize(
+    "agent_provider", ["", "HOST", "remote", "local", "local-service", None]
+)
 def test_prepare_pdf_job_rejects_invalid_agent_provider(
     tmp_path: Path, agent_provider: object
 ) -> None:

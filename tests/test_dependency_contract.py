@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS = ROOT / "requirements.txt"
 STANDALONE_REQUIREMENTS = ROOT / "skills" / "image-to-ppt" / "references" / "requirements.txt"
 SKILL = ROOT / "skills" / "image-to-ppt" / "SKILL.md"
+PSD_SKILL = ROOT / "skills" / "image-to-psd" / "SKILL.md"
 README = ROOT / "README.md"
 README_EN = ROOT / "README_EN.md"
 ROOT_VISUAL_SEGMENT = ROOT / "scripts" / "visual_segment.py"
@@ -200,22 +201,16 @@ def test_host_pptx_routes_screenshot_decisions_before_execute() -> None:
     )
 
 
-def test_local_service_provider_docs_are_unambiguous() -> None:
+def test_removed_local_provider_docs_are_absent() -> None:
     chinese = README.read_text(encoding="utf-8")
     english = README_EN.read_text(encoding="utf-8")
     skill = SKILL.read_text(encoding="utf-8")
 
-    assert "可选：安装 Local Agent" not in chinese
-    assert "Qwen" not in chinese
-    assert "`local-service` 使用 OpenAI 兼容的本地服务" in chinese
-    assert "--agent-provider local-service" in chinese
-    assert "Optional: install the Local Agent" not in english
-    assert "Qwen" not in english
-    assert "`local-service` uses an OpenAI-compatible local service" in english
-    assert "--agent-provider local-service" in english
-    assert "`local` 使用用户自行安装并校验的 Qwen" in skill
-    assert "`local-service`" in skill
-    assert "--agent-provider local-service" in skill
+    for document in (chinese, english, skill):
+        assert "agent-local" not in document
+        assert "local-service" not in document
+        assert "models install agent" not in document
+        assert "doctor --agent-local" not in document
 
 
 def test_sam_ref_is_full_commit_sha() -> None:
@@ -263,24 +258,14 @@ def test_runtime_dependency_ranges_match_product_and_standalone() -> None:
     assert _dependency_lines(STANDALONE_REQUIREMENTS) == RUNTIME_REQUIREMENTS
 
 
-def test_pyproject_reads_runtime_dependencies_and_does_not_relax_agent_extra() -> None:
+def test_pyproject_reads_runtime_dependencies_without_agent_extra() -> None:
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
 
     assert project["project"]["dynamic"] == ["dependencies"]
     assert project["tool"]["setuptools"]["dynamic"]["dependencies"]["file"] == [
         "requirements.txt"
     ]
-    agent_local = project["project"]["optional-dependencies"]["agent-local"]
-    assert [
-        requirement
-        for requirement in agent_local
-        if requirement.split(">=", 1)[0]
-        in {"torch", "transformers", "accelerate"}
-    ] == [
-        "torch>=2.5.1,<3",
-        "transformers>=4.57,<5",
-        "accelerate>=1.8,<2",
-    ]
+    assert "agent-local" not in project["project"]["optional-dependencies"]
 
 
 def test_runtime_constraints_are_explicitly_candidate_and_fully_pinned() -> None:
@@ -504,47 +489,44 @@ def test_readmes_keep_hardware_policy_out_of_quick_start() -> None:
     assert "python -c \"import sys, torch" not in readme_en_text
 
 
-def test_readmes_document_offline_models_after_ocr_and_before_doctor() -> None:
+def test_readmes_are_skill_first_and_omit_the_cli_walkthrough() -> None:
     readme_text = README.read_text(encoding="utf-8")
     readme_en_text = README_EN.read_text(encoding="utf-8")
-    paddle_url = "https://www.paddlepaddle.org.cn/install/quick"
-    tesseract_url = "https://tesseract-ocr.github.io/tessdoc/Installation.html"
-    commands = (
-        'python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"',
+    forbidden = (
+        "### CLI",
+        "pip install .",
+        "paddleocr==",
         "tesseract --version",
-        "python -m pip install pytesseract",
+        "pip install pytesseract",
         "image2editable models install runtime",
-        "\nimage2editable doctor\n",
+        "image2editable doctor",
+        "image2editable agent next",
+        "image2editable agent record",
+        "--agent-provider",
+        "Skill 或 CLI",
+        "Skill or CLI",
     )
 
     for text in (readme_text, readme_en_text):
-        assert text.index("pip install .") < text.index(commands[0])
-        for before, after in zip(commands, commands[1:]):
-            assert text.index(before) < text.index(after)
-        assert paddle_url in text
-        assert tesseract_url in text
-        assert '"ready": true' in text
-    assert "需要确认" in readme_text
-    assert "SAM 2.1 Large、Big-LaMa 和 Grounding DINO" in readme_text
-    assert "校验下载结果、记录模型完整性" in readme_text
-    assert "模型文件、完整性记录" in readme_text
-    assert "asks for confirmation" in readme_en_text
-    assert "SAM 2.1 Large, Big-LaMa, and Grounding DINO" in readme_en_text
-    assert "receipt" in readme_en_text
-    assert "Codex、Claude Code" in readme_text
-    assert "Codex or Claude Code" in readme_en_text
-    assert "#### 安装 OCR" in readme_text
-    assert "##### 方案一：PaddleOCR（推荐）" in readme_text
-    assert "##### 方案二：Tesseract" in readme_text
-    assert readme_text.index("#### 检查环境 ✅") < readme_text.index(
-        "#### 配置本地模型服务"
-    )
-    assert "#### Install OCR" in readme_en_text
-    assert "##### Option 1: PaddleOCR (recommended)" in readme_en_text
-    assert "##### Option 2: Tesseract" in readme_en_text
-    assert readme_en_text.index("#### Check the environment ✅") < readme_en_text.index(
-        "#### Configure a local model service"
-    )
+        assert "npx skills add DSY-Xueai/image2editable --skill image-to-ppt" in text
+        assert all(phrase.casefold() not in text.casefold() for phrase in forbidden)
+    assert "完整仓库或已安装 `image2editable` 的环境" in readme_text
+    assert "仅安装 standalone Skill 时" in readme_text
+    assert "a full repository or an installed `image2editable` Runtime" in readme_en_text
+    assert "A standalone Skill installation" in readme_en_text
+    for text in (readme_text, readme_en_text):
+        for variable in ("SAM2_MODEL", "LAMA_MODEL", "GROUNDING_DINO_MODEL"):
+            assert variable in text
+    for phrase in (
+        "普通用户",
+        "开发者可",
+        "底层执行接口",
+        "Users only",
+        "Developers can",
+        "underlying execution interface",
+    ):
+        assert phrase.casefold() not in readme_text.casefold()
+        assert phrase.casefold() not in readme_en_text.casefold()
 
 
 def test_model_setup_docs_never_claim_first_conversion_downloads_models() -> None:
@@ -562,6 +544,34 @@ def test_model_setup_docs_never_claim_first_conversion_downloads_models() -> Non
 
     for document in documents:
         assert all(text.casefold() not in document.casefold() for text in forbidden)
+
+
+def test_conversion_skills_install_dependencies_without_confirmation() -> None:
+    paddle_command = (
+        'python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" '
+        '"PaddleX==3.7.2" "PyYAML==6.0.2"'
+    )
+    forbidden = (
+        "先让用户选择",
+        "未经用户确认",
+        "获得用户同意后",
+        "取消时不得下载",
+    )
+
+    for path in (SKILL, PSD_SKILL):
+        text = path.read_text(encoding="utf-8")
+        assert "不得为依赖或模型安装向用户询问确认" in text
+        assert "缺少时直接安装" in text
+        assert "<skill-root>/references/requirements.txt" in text
+        assert paddle_command in text
+        assert "image2editable models install runtime --yes" in text
+        assert "不得安装或切换到产品 Runtime" in text
+        assert "优先切换到上述产品 Runtime" not in text
+        assert all(phrase not in text for phrase in forbidden)
+
+    psd_text = PSD_SKILL.read_text(encoding="utf-8")
+    assert 'python -m pip install -e ".[psd]"' in psd_text
+    assert 'python -m pip install "aspose-psd>=26.5.0"' in psd_text
 
 
 def test_readmes_describe_quality_completion_and_current_layout() -> None:

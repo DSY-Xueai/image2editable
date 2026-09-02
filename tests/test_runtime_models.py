@@ -53,7 +53,7 @@ def _expected_catalog() -> dict[str, object]:
 def test_runtime_model_catalog_is_exact_and_packaged() -> None:
     assert json.loads(CATALOG_PATH.read_text(encoding="utf-8")) == _expected_catalog()
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'image2editable = ["model_catalog.json", "runtime_model_catalog.json"]' in pyproject
+    assert 'image2editable = ["runtime_model_catalog.json"]' in pyproject
 
 
 def _runtime_models():

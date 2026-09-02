@@ -20,11 +20,6 @@ from typing import Callable
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
-if __package__:
-    from scripts.benchmark_conversion import _read_regular_file, _strict_json
-else:
-    from benchmark_conversion import _read_regular_file, _strict_json
-
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_ROOT = ROOT / "benchmarks" / "release"
@@ -87,6 +82,66 @@ _CANDIDATE_FIELDS = {
     "category",
     "evidence",
 }
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_nlink,
+    )
+
+
+def _read_regular_file(path: Path, limit: int, *, require_single_link: bool) -> bytes:
+    before = path.lstat()
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size > limit
+        or (require_single_link and before.st_nlink != 1)
+    ):
+        raise ValueError
+    with path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if _identity(opened) != _identity(before):
+            raise ValueError
+        payload = handle.read(limit + 1)
+    after = path.lstat()
+    if len(payload) > limit or _identity(after) != _identity(before):
+        raise ValueError
+    return payload
+
+
+def _object_without_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_: str) -> object:
+    raise ValueError
+
+
+def _strict_json(payload: str | bytes, limit: int) -> dict[str, object]:
+    encoded = payload.encode("utf-8") if isinstance(payload, str) else payload
+    if len(encoded) > limit:
+        raise ValueError
+    value = json.loads(
+        encoded,
+        object_pairs_hook=_object_without_duplicate_keys,
+        parse_constant=_reject_json_constant,
+    )
+    if not isinstance(value, dict):
+        raise ValueError
+    return value
+
+
 _COMPONENT_FIELDS = {
     "schema_version",
     "kind",
