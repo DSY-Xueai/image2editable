@@ -27,12 +27,14 @@ PSD_COMMON_ENGINE_FILES = {
     "object_worker.py",
     "ocr_worker.py",
     "performance_trace.py",
+    "page_routing.py",
     "runtime_model_paths.py",
     "sam_worker.py",
     "text_detect.py",
     "visual_compare_qa.py",
     "visual_segment.py",
     "visual_worker.py",
+    "worker_pool.py",
     "worker_resources.py",
 }
 

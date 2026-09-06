@@ -4,6 +4,7 @@ import base64
 import json
 import hashlib
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -137,11 +138,60 @@ def test_isolated_ocr_batch_uses_one_worker_for_multiple_images(
     assert not any(path.name.startswith("ocr-batch-") for path in tmp_path.iterdir())
 
 
+def test_isolated_ocr_batch_uses_task_worker_pool(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (20, 10), "white").save(first)
+    Image.new("RGB", (30, 12), "white").save(second)
+    received = []
+
+    class FakePool:
+        def request(self, payload, **kwargs):
+            received.append((payload, kwargs))
+            Path(payload["result"]).write_text(
+                json.dumps({
+                    "images": [
+                        {
+                            "path": str(path),
+                            "items": [{
+                                "poly": [[1, 2], [9, 2], [9, 7], [1, 7]],
+                                "text": f"T{index}",
+                                "score": 0.99,
+                            }],
+                        }
+                        for index, path in enumerate(payload["images"], start=1)
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            return {}
+
+    results = text_detect.detect_text_batch(
+        [first, second],
+        lang="en",
+        isolated=True,
+        worker_root=tmp_path,
+        worker_pool=FakePool(),
+    )
+
+    assert [[item["text"] for item in items] for items, _ in results] == [
+        ["T1"], ["T2"],
+    ]
+    payload, kwargs = received[0]
+    assert payload["images"] == [str(first.resolve()), str(second.resolve())]
+    assert payload["lang"] == "en"
+    assert kwargs == {"performance_trace": None, "page_id": None}
+
+
 def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     from scripts import ocr_worker
+
+    monkeypatch.setenv("FLAGS_paddle_num_threads", "4")
 
     image_path = tmp_path / "source.png"
     Image.new("RGB", (30, 20), "red").save(image_path)
@@ -221,7 +271,7 @@ def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
 
     assert captured["detector_kwargs"] == {
         "model_name": "PP-OCRv5_mobile_det",
-        "cpu_threads": 1,
+        "cpu_threads": 4,
         "enable_mkldnn": False,
         "limit_side_len": 64,
         "limit_type": "min",
@@ -232,7 +282,7 @@ def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
     assert captured["detection_predict_kwargs"] == {"max_side_limit": 4000}
     assert captured["recognizer_kwargs"] == {
         "model_name": "en_model",
-        "cpu_threads": 1,
+        "cpu_threads": 4,
         "enable_mkldnn": False,
     }
     assert captured["recognition_ratios"] == [1.0, 4.0]
@@ -820,6 +870,37 @@ def test_prepare_component_layers_keeps_isolated_worker_assets_in_work_dir(
         assert not path.is_absolute()
         assert ".." not in path.parts
         assert (owned_root / path).resolve().is_relative_to(owned_root)
+
+
+def test_prepare_component_layers_accepts_precomputed_ocr_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (20, 10), "white").save(image_path)
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: pytest.fail("precomputed OCR must be reused"),
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_process_image_isolated",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("visual sentinel")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="visual sentinel"):
+        image_to_ppt.prepare_component_layers(
+            image_path,
+            tmp_path / "prepared",
+            lang="ch",
+            resource_isolation=True,
+            ocr_result=([], np.zeros((10, 20), dtype=np.uint8)),
+        )
 
 
 def test_resource_safe_proposals_release_owned_detector(monkeypatch) -> None:
@@ -1625,11 +1706,21 @@ def test_clear_alpha_repairs_low_contrast_transparent_text(
     assert np.count_nonzero(repaired[:, :, 3]) == 0
 
 
+def test_ocr_worker_uses_bounded_thread_default(monkeypatch) -> None:
+    from scripts import ocr_worker
+
+    monkeypatch.delenv("FLAGS_paddle_num_threads", raising=False)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.setattr(ocr_worker.os, "cpu_count", lambda: 32)
+
+    assert ocr_worker._cpu_threads() == 8
+
+
 def test_ocr_worker_sets_omp_before_lazy_paddle_import_without_torch() -> None:
     from scripts import ocr_worker
 
     source = Path(ocr_worker.__file__).read_text(encoding="utf-8")
-    assert source.index('os.environ["OMP_NUM_THREADS"] = "1"') < source.index(
+    assert source.index('os.environ.setdefault("OMP_NUM_THREADS"') < source.index(
         "from paddleocr import TextDetection"
     )
     assert source.index(
@@ -1647,10 +1738,12 @@ def test_ocr_product_and_skill_mirrors_match() -> None:
         "lama_worker.py",
         "object_worker.py",
         "ocr_worker.py",
+        "page_routing.py",
         "sam_worker.py",
         "text_detect.py",
         "visual_segment.py",
         "visual_worker.py",
+        "worker_pool.py",
         "worker_resources.py",
     ]
     pairs = [
@@ -1674,6 +1767,85 @@ def test_ocr_product_and_skill_mirrors_match() -> None:
         assert hashlib.sha256(product.read_bytes()).digest() == hashlib.sha256(
             mirror.read_bytes()
         ).digest()
+
+
+def test_skill_image_to_ppt_imports_without_product_package(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    skill_root = tmp_path / "image-to-ppt"
+    shutil.copytree(root / "skills" / "image-to-ppt", skill_root)
+    probe = """
+import builtins
+
+original_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == 'image2editable' or name.startswith('image2editable.'):
+        raise ModuleNotFoundError(name='image2editable')
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+import scripts.image_to_ppt
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=skill_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_resident_visual_worker_reuses_sam_generator_for_component_prompts(
+    tmp_path: Path,
+) -> None:
+    from scripts import sam_worker, visual_worker
+
+    created = []
+
+    class Predictor:
+        def set_image(self, image: np.ndarray) -> None:
+            self.image = image
+
+        def predict(self, **kwargs):
+            mask = np.zeros((1, 4, 5), dtype=bool)
+            column = int(np.asarray(kwargs["box"])[0])
+            mask[0, 1:3, column] = True
+            return mask, np.asarray([0.9]), None
+
+    generator = type("Generator", (), {"predictor": Predictor()})()
+    processor = visual_worker._ResidentVisualProcessor(
+        process_image=lambda *args, **kwargs: {},
+        create_detector=lambda: object(),
+        create_generator=lambda checkpoint: created.append(checkpoint) or generator,
+        resolve_checkpoint=lambda: tmp_path / "sam.pt",
+    )
+
+    masks = []
+    for index, component_id in enumerate(("left", "right")):
+        root = tmp_path / component_id
+        root.mkdir()
+        image_path = root / "image.png"
+        request_path = root / "request.json"
+        result_path = root / "result.json"
+        Image.fromarray(np.zeros((4, 5, 3), dtype=np.uint8)).save(image_path)
+        request_path.write_text(json.dumps({
+            "schema_version": sam_worker._BATCH_SCHEMA_VERSION,
+            "image": image_path.name,
+            "prompts": [{
+                "component_id": component_id,
+                "box": [index + 1, 1, index + 2, 3],
+                "positive": [],
+                "negative": [],
+            }],
+        }), encoding="utf-8")
+
+        processor.component_prompts(request_path, result_path)
+        masks.append(
+            sam_worker.read_component_prompt_batch_result(request_path, result_path)
+        )
+
+    assert created == [tmp_path / "sam.pt"]
+    assert [int(np.where(batch[0])[1].min()) for batch in masks] == [1, 2]
 
 
 def test_root_and_skill_workers_load_outside_repository(tmp_path: Path) -> None:

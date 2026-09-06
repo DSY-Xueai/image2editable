@@ -381,7 +381,16 @@ def test_empty_page_trace_still_produces_empty_page_summary(tmp_path) -> None:
 
     summary = runtime._performance_summary(store, ["page_001"])
 
-    assert summary == {"pages": {"page_001": runtime._empty_page_performance()}}
+    assert summary == {
+        "pages": {"page_001": runtime._empty_page_performance()},
+        "agent_runs": 0,
+        "agent_image_count": 0,
+        "agent_total_bytes": 0,
+        "model_loads": {},
+        "route_counts": {"unknown": 1},
+        "local_fidelity_pages": [],
+        "total_duration_ms": 0,
+    }
     assert (run_dir / "performance-page_001.jsonl").is_file()
 
 

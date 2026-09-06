@@ -132,9 +132,10 @@ def test_prepare_job_classifies_and_dispatches_all_supported_inputs(
             {
                 "run_dir": run_dir,
                 "output_path": output,
-                    "slide_size": "original",
-                    "lang": "en",
-                    "agent_provider": "host",
+                "slide_size": "original",
+                "lang": "en",
+                "agent_provider": "host",
+                "pipeline_mode": "strict",
             },
         )
     ]

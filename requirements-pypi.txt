@@ -1,0 +1,13 @@
+# PyPI-compatible runtime dependencies. The reproducible Git-pinned SAM 2
+# requirement remains in requirements.txt for local and Skill installations.
+python-pptx>=1.0.2,<2
+opencv-python>=4.10.0.84,<5
+Pillow>=10.4,<12
+numpy>=1.26.4,<2
+pypdfium2>=5.7.1,<6
+pypdf>=5,<7
+torch>=2.5.1,<3
+torchvision>=0.20.1,<1
+sam2>=1.1.0,<2
+transformers>=4.57,<5
+accelerate>=1.8,<2

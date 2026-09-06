@@ -37,6 +37,12 @@ def _add_image_options(parser: argparse.ArgumentParser) -> None:
         choices=("original", "16:9", "both"),
         default="both",
     )
+    parser.add_argument(
+        "--pipeline-mode",
+        choices=("strict", "fast"),
+        default="strict",
+        help="选择质量基线 strict 或确定性快速路由 fast",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -222,6 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slide_size=args.slide_size,
                 lang=args.lang,
                 agent_provider=args.agent_provider,
+                **({"pipeline_mode": args.pipeline_mode} if args.pipeline_mode != "strict" else {}),
                 **format_kwargs,
             )
         _print_json(summary)
@@ -241,6 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 slide_size=args.slide_size,
                 lang=args.lang,
                 agent_provider=args.agent_provider,
+                **({"pipeline_mode": args.pipeline_mode} if args.pipeline_mode != "strict" else {}),
                 **format_kwargs,
             )
         _print_json({"run_dir": str(Path(run_dir).resolve()), "status": "prepared"})

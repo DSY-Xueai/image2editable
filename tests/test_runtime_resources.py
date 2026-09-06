@@ -369,7 +369,16 @@ def test_runtime_applies_policy_before_importing_heavy_legacy_module(
 
     def import_module(name: str) -> Any:
         events.append(("import", name))
-        return types.SimpleNamespace(convert_variants=lambda *args, **kwargs: {})
+
+        class Pool:
+            def close(self) -> None:
+                pass
+
+        return types.SimpleNamespace(
+            convert_variants=lambda *args, **kwargs: {},
+            create_ocr_worker_pool=Pool,
+            create_visual_worker_pool=Pool,
+        )
 
     monkeypatch.setattr(runtime, "apply_resource_policy", apply)
     monkeypatch.setattr(legacy.importlib, "import_module", import_module)

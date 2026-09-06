@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import math
 import os
 import copy
 import ctypes
@@ -371,7 +372,11 @@ def execute_component_actions(
                     )
                 accepted["kind"] = "parent"
                 accepted["parent_id"] = None
-            completed_mask = _complete_opaque_mask_regions(accepted_mask, image)
+            completed_mask = (
+                accepted_mask
+                if action["parameters"].get("preserve_mask") is True
+                else _complete_opaque_mask_regions(accepted_mask, image)
+            )
             active_visual_masks = [
                 masks[node["id"]]
                 for node in nodes.values()
@@ -1354,6 +1359,22 @@ def resolve_visual_elements(
     return elements
 
 
+def complete_initial_visual_element_masks(
+    elements: list[VisualElement], image: np.ndarray
+) -> None:
+    """Restore antialiased edges before the first background reconstruction."""
+    if not elements:
+        return
+    claimed = np.zeros(elements[0].mask.shape, dtype=bool)
+    for element in sorted(
+        elements, key=lambda value: getattr(value, "z_index", 0), reverse=True
+    ):
+        semantic = _complete_opaque_mask_regions(element.semantic_mask, image)
+        element.semantic_mask = semantic
+        element.mask = semantic & ~claimed
+        claimed |= element.mask
+
+
 def _enclosed_holes(mask: np.ndarray) -> np.ndarray:
     background = ~np.asarray(mask, dtype=bool)
     if not np.any(background):
@@ -1460,6 +1481,7 @@ def _merge_semantic_candidates(
     rules = {
         "container": (0.95, 0.50),
         "person": (0.80, 0.0),
+        "object": (0.98, 0.0),
     }
     passthrough = [candidate for candidate in candidates if candidate.role not in rules]
     for role, (min_containment, min_iou) in rules.items():
@@ -1527,6 +1549,14 @@ def _same_semantic_instance(
 ) -> bool:
     if first.object_box is None or second.object_box is None:
         return False
+    # DINO labels for a composite graphic vary across full-image and tile passes.
+    # The caller only reaches this branch after a near-total mask containment check.
+    if role == "object":
+        first_tokens = {token.strip(".,").lower() for token in first.label.split()}
+        second_tokens = {token.strip(".,").lower() for token in second.label.split()}
+        return bool(first_tokens & second_tokens) or "decoration" in (
+            first_tokens | second_tokens
+        )
     first_box = first.object_box
     second_box = second.object_box
     x1 = max(first_box[0], second_box[0])
@@ -1957,6 +1987,9 @@ def reconcile_residual_candidates(
 def generate_geometry_candidates(
     image: np.ndarray,
     min_area: int = 20,
+    *,
+    text_mask: np.ndarray | None = None,
+    min_area_fraction: float | None = None,
 ) -> list[MaskCandidate]:
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 40, 120)
@@ -1974,14 +2007,136 @@ def generate_geometry_candidates(
 
     candidates = []
     max_area = image.shape[0] * image.shape[1] * 0.9
+    visible_min_area = 0
+    ignored_text = None
+    if min_area_fraction is not None:
+        visible_min_area = max(20, int(image.shape[0] * image.shape[1] * min_area_fraction))
+        ignored_text = (
+            np.zeros(image.shape[:2], dtype=bool)
+            if text_mask is None
+            else np.asarray(text_mask, dtype=bool)
+        )
+        if ignored_text.shape != image.shape[:2]:
+            raise ValueError("geometry candidate text mask shape is invalid")
     for contour in contours:
         area = cv2.contourArea(contour)
         if area < min_area or area > max_area:
             continue
+        if visible_min_area:
+            x, y, width, height = cv2.boundingRect(contour)
+            local_mask = np.zeros((height, width), dtype=np.uint8)
+            cv2.drawContours(
+                local_mask,
+                [contour - np.asarray([[[x, y]]])],
+                -1,
+                255,
+                thickness=-1,
+            )
+            if np.count_nonzero(local_mask & ~ignored_text[y:y + height, x:x + width]) < visible_min_area:
+                continue
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
         cv2.drawContours(mask, [contour], -1, 255, thickness=-1)
         candidates.append(MaskCandidate(mask > 0, 0.70, "geometry"))
     return candidates
+
+
+def generate_flat_color_candidates(
+    image: np.ndarray,
+    text_mask: np.ndarray | None = None,
+    min_area_fraction: float = 0.001,
+) -> list[MaskCandidate]:
+    """Extract large, uniform color regions without model segmentation."""
+    rgb = np.asarray(image, dtype=np.uint8)
+    height, width = rgb.shape[:2]
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("flat color candidate image must be RGB")
+    if text_mask is None:
+        ignored_text = np.zeros((height, width), dtype=bool)
+    else:
+        ignored_text = np.asarray(text_mask, dtype=bool)
+        if ignored_text.shape != (height, width):
+            raise ValueError("flat color candidate text mask shape is invalid")
+        ignored_text = cv2.dilate(
+            ignored_text.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+
+    smoothed = cv2.bilateralFilter(rgb, 5, 20, 5).astype(np.int16)
+    boundaries = np.zeros((height, width), dtype=np.uint8)
+    horizontal = np.max(np.abs(smoothed[:, 1:] - smoothed[:, :-1]), axis=2) >= 8
+    vertical = np.max(np.abs(smoothed[1:, :] - smoothed[:-1, :]), axis=2) >= 8
+    boundaries[:, 1:] |= horizontal
+    boundaries[:, :-1] |= horizontal
+    boundaries[1:, :] |= vertical
+    boundaries[:-1, :] |= vertical
+    boundaries[ignored_text] = 0
+    barriers = cv2.dilate(
+        boundaries,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    barriers[ignored_text] = 0
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (barriers == 0).astype(np.uint8), connectivity=8
+    )
+
+    min_area = max(100, int(rgb.size // 3 * min_area_fraction))
+    max_area = int(height * width * 0.85)
+    qualified = []
+    for label in range(1, component_count):
+        left, top, region_width, region_height = (
+            int(value) for value in stats[label, :4]
+        )
+        region = np.s_[top:top + region_height, left:left + region_width]
+        core = labels[region] == label
+        visible_core = core & ~ignored_text[region]
+        core_area = int(np.count_nonzero(visible_core))
+        if core_area < min_area or core_area > max_area:
+            continue
+        pixels = rgb[region][visible_core]
+        if not len(pixels):
+            continue
+        median = np.median(pixels, axis=0)
+        color_mad = float(np.max(np.median(np.abs(pixels - median), axis=0)))
+        if color_mad > 4.0:
+            continue
+        qualified.append((label, tuple(float(value) for value in median)))
+
+    grouped: dict[tuple[float, ...], list[int]] = {}
+    for label, median in qualified:
+        grouped.setdefault(median, []).append(label)
+    masks = {}
+    for median, labels_for_color in grouped.items():
+        lower = tuple(max(0, math.ceil(value - 16)) for value in median)
+        upper = tuple(min(255, math.floor(value + 16)) for value in median)
+        compatible = cv2.inRange(rgb, lower, upper) != 0
+        compatible[ignored_text] = True
+        compatible_count, compatible_labels = cv2.connectedComponents(
+            compatible.astype(np.uint8), connectivity=8
+        )
+        if compatible_count <= 1:
+            continue
+        for label in labels_for_color:
+            left, top, region_width, region_height = (
+                int(value) for value in stats[label, :4]
+            )
+            region = np.s_[top:top + region_height, left:left + region_width]
+            core = labels[region] == label
+            overlap_labels, overlap_counts = np.unique(
+                compatible_labels[region][core], return_counts=True
+            )
+            compatible_label = int(overlap_labels[np.argmax(overlap_counts)])
+            mask = compatible_labels == compatible_label
+            visible_area = int(np.count_nonzero(mask & ~ignored_text))
+            if visible_area < min_area or visible_area > max_area:
+                continue
+            masks[label] = mask
+    return [
+        MaskCandidate(masks[label], 0.98, "flat_color")
+        for label, _ in qualified
+        if label in masks
+    ]
 
 
 def resolve_sam_checkpoint() -> Path:

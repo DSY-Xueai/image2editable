@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+import importlib
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import secrets
 import stat
 import tempfile
+import time
 from typing import Any, Iterable, Sequence
 
 from image2editable.component_contracts import (
@@ -27,11 +29,29 @@ from image2editable.contracts import (
     utc_now,
     validate_schema_version,
 )
-from image2editable.inputs import classify_inputs, prepare_image_job, sha256_file
+from image2editable.inputs import (
+    classify_inputs,
+    prepare_image_job,
+    sha256_file,
+    validate_pipeline_mode,
+)
 from image2editable.execution import ExecutionLease, _lock, _unlock
 from image2editable.legacy import (
     _safe_rmtree,
+    _clear_legacy_output_records,
+    _clear_legacy_staging_records,
+    _cleanup_native_pdf_sources,
+    _legacy_output_targets,
+    _legacy_psd_output_targets,
+    _legacy_output_identity,
+    _load_legacy_output_records,
+    _load_legacy_staging_records,
+    _write_legacy_output_records,
     _load_legacy_ref,
+    _native_pdf_analysis,
+    _page_ocr_rotation,
+    _remove_legacy_outputs,
+    _verify_legacy_output_record,
     _source_path,
     advance_legacy_page,
     assemble_route_candidate,
@@ -329,14 +349,71 @@ def _read_page_performance(
     return summary
 
 
+def _page_route(store: RunStore, page_id: str) -> tuple[str, bool]:
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    try:
+        state = store.read_json(
+            Path("pages") / page_id / "reconstruction" / "component_state.json"
+        )
+    except (FileNotFoundError, ValueError):
+        state = {}
+    if state.get("route") == "pdf_native":
+        return "pdf_native", False
+    result_ref = state.get("result_ref")
+    if isinstance(result_ref, dict):
+        try:
+            result = json.loads(_load_legacy_ref(store, result_ref)[1])
+        except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+            result = {}
+        if result.get("route") == "local_fidelity":
+            return "local_fidelity", True
+    try:
+        prepared = json.loads(
+            (reconstruction / "initial" / "prepared_page.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return "unknown", False
+    policy = prepared.get("page_policy")
+    route = policy.get("route") if isinstance(policy, dict) else None
+    return (route, False) if route in {"direct", "local_refine", "strict"} else (
+        "unknown", False
+    )
+
+
 def _performance_summary(
-    store: RunStore, page_ids: Sequence[str]
+    store: RunStore,
+    page_ids: Sequence[str],
+    *,
+    total_duration_ms: int = 0,
 ) -> dict[str, Any]:
+    if type(total_duration_ms) is not int or total_duration_ms < 0:
+        raise ValueError("performance total duration is invalid")
     pages = {}
+    model_loads: dict[str, int] = {}
+    route_counts: dict[str, int] = {}
+    local_fidelity_pages = []
     for page_id in page_ids:
         _page_performance_trace(store, page_id)
-        pages[page_id] = _read_page_performance(store, page_id)
-    return {"pages": pages}
+        page = _read_page_performance(store, page_id)
+        pages[page_id] = page
+        for model, count in page["model_loads"].items():
+            model_loads[model] = model_loads.get(model, 0) + count
+        route, local_fidelity = _page_route(store, page_id)
+        route_counts[route] = route_counts.get(route, 0) + 1
+        if local_fidelity:
+            local_fidelity_pages.append(page_id)
+    return {
+        "pages": pages,
+        "agent_runs": 0,
+        "agent_image_count": 0,
+        "agent_total_bytes": 0,
+        "model_loads": model_loads,
+        "route_counts": route_counts,
+        "local_fidelity_pages": local_fidelity_pages,
+        "total_duration_ms": total_duration_ms,
+    }
 
 
 def _write_performance_summaries(
@@ -374,7 +451,14 @@ def _validate_performance_summary(
     performance: object, expected_page_ids: Sequence[str]
 ) -> None:
     fields = set(_PERFORMANCE_MAPS)
-    if not isinstance(performance, dict) or set(performance) != {"pages"}:
+    aggregate_fields = {
+        "agent_runs", "agent_image_count", "agent_total_bytes",
+        "model_loads", "route_counts", "local_fidelity_pages",
+        "total_duration_ms",
+    }
+    if not isinstance(performance, dict) or frozenset(performance) not in {
+        frozenset({"pages"}), frozenset({"pages", *aggregate_fields})
+    }:
         raise RuntimeError("Run performance summary fields are invalid")
     pages = performance["pages"]
     if not isinstance(pages, dict) or set(pages) != set(expected_page_ids):
@@ -413,6 +497,41 @@ def _validate_performance_summary(
                     or value > _PERFORMANCE_MAX_INTEGER
                 ):
                     raise RuntimeError("Run performance summary metric is invalid")
+    if set(performance) == {"pages"}:
+        return
+    if any(
+        type(performance[field]) is not int or performance[field] != 0
+        for field in ("agent_runs", "agent_image_count", "agent_total_bytes")
+    ):
+        raise RuntimeError("Run performance Agent metrics are invalid")
+    if (
+        type(performance["total_duration_ms"]) is not int
+        or not 0 <= performance["total_duration_ms"] <= _PERFORMANCE_MAX_INTEGER
+    ):
+        raise RuntimeError("Run performance duration is invalid")
+    for field, identifier_kind in (
+        ("model_loads", "model"), ("route_counts", "route")
+    ):
+        metrics = performance[field]
+        if not isinstance(metrics, dict):
+            raise RuntimeError("Run performance aggregate is invalid")
+        for name, value in metrics.items():
+            try:
+                _validate_field(identifier_kind, name)
+            except ValueError as error:
+                raise RuntimeError("Run performance aggregate is invalid") from error
+            if (
+                type(value) is not int or value < 0
+                or value > _PERFORMANCE_MAX_INTEGER
+            ):
+                raise RuntimeError("Run performance aggregate is invalid")
+    local_pages = performance["local_fidelity_pages"]
+    if (
+        not isinstance(local_pages, list)
+        or local_pages != list(dict.fromkeys(local_pages))
+        or any(page_id not in expected_page_ids for page_id in local_pages)
+    ):
+        raise RuntimeError("Run performance local fidelity pages are invalid")
 
 
 def _discover_powerpoint_renderer():
@@ -460,6 +579,8 @@ def _finalize_reconstruction_routes(
         state = store.read_json(
             f"pages/{page_id}/reconstruction/component_state.json"
         )
+        if state.get("route") == "pdf_native":
+            continue
         if state.get("status") != "ready_for_assembly":
             continue
         component_result_path, _ = _load_legacy_ref(store, state["result_ref"])
@@ -578,6 +699,7 @@ def prepare_job(
     lang: str = "ch",
     agent_provider: str = "host",
     output_format: str = "pptx",
+    pipeline_mode: str = "strict",
 ) -> Path:
     input_type, paths = classify_inputs(inputs)
     if output_format not in {"pptx", "psd"}:
@@ -596,6 +718,7 @@ def prepare_job(
         "slide_size": slide_size,
         "lang": lang,
         "agent_provider": agent_provider,
+        "pipeline_mode": pipeline_mode,
     }
     if input_type == "images" and output_format != "pptx":
         prepare_kwargs["output_format"] = output_format
@@ -668,49 +791,170 @@ def _legacy_component_status(store: RunStore, page_id: str) -> dict[str, Any]:
     }
 
 
+def _batch_legacy_ocr(
+    store: RunStore,
+    manifest: dict[str, Any],
+    page_ids: list[str],
+    *,
+    ocr_worker_pool=None,
+) -> dict[str, Any]:
+    """Run one isolated OCR batch for eligible, not-yet-initialized pages."""
+    if manifest.get("options", {}).get("pipeline_mode", "strict") != "fast":
+        return {}
+    page_jobs = store.read_json("page_jobs.json")["pages"]
+    completed = {
+        PageStatus.VALIDATED.value,
+        PageStatus.PRESERVED_WITH_WARNING.value,
+    }
+    eligible = []
+    for page_id in page_ids:
+        if page_jobs[page_id]["status"] in completed:
+            continue
+        if _native_pdf_analysis(store, page_id) is not None:
+            continue
+        if (
+            store.root / "pages" / page_id / "reconstruction"
+            / "component_state.json"
+        ).is_file():
+            continue
+        if _page_ocr_rotation(store, page_id) != 0:
+            continue
+        eligible.append((page_id, _source_path(store, page_id)))
+    if len(eligible) < 2:
+        return {}
+
+    try:
+        module = importlib.import_module("image_to_ppt")
+        batch_kwargs = {
+            "lang": manifest["options"]["lang"],
+            "isolated": True,
+            "worker_root": store.root,
+        }
+        if ocr_worker_pool is not None:
+            batch_kwargs["worker_pool"] = ocr_worker_pool
+        results = module.detect_text_batch(
+            [source for _, source in eligible],
+            **batch_kwargs,
+        )
+        if not isinstance(results, list) or len(results) != len(eligible):
+            _LOGGER.warning("Fast OCR batch returned the wrong page count")
+            return {}
+    except Exception as error:
+        _LOGGER.warning("Fast OCR batch failed; falling back to page OCR: %s", error)
+        return {}
+    return {
+        page_id: result
+        for (page_id, _), result in zip(eligible, results, strict=True)
+    }
+
+
 def _advance_legacy_pages(
     store: RunStore, manifest: dict[str, Any], page_ids: list[str],
-    lease: ExecutionLease,
+    lease: ExecutionLease, *, ocr_worker_pool=None, visual_worker_pool=None,
+    visual_worker_pool_factory=None,
 ) -> dict[str, Any] | None:
     completed = {
         PageStatus.VALIDATED.value,
         PageStatus.PRESERVED_WITH_WARNING.value,
     }
-    for page_id in page_ids:
-        performance_trace = _page_performance_trace(store, page_id)
-        if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
-            continue
-        reconstruction = store.root / "pages" / page_id / "reconstruction"
-        if not (reconstruction / "component_state.json").is_file():
-            initialize_legacy_page(
-                store, page_id, _lease=lease,
-                performance_trace=performance_trace,
+    visual_page_ids = [
+        page_id for page_id in page_ids
+        if _native_pdf_analysis(store, page_id) is None
+    ]
+    module = (
+        importlib.import_module("image_to_ppt") if visual_page_ids else None
+    )
+    owns_ocr_worker_pool = ocr_worker_pool is None
+    owns_visual_worker_pool = (
+        visual_worker_pool is None and visual_worker_pool_factory is None
+    )
+    if ocr_worker_pool is None and module is not None:
+        ocr_worker_pool = module.create_ocr_worker_pool()
+    pipeline_mode = manifest.get("options", {}).get("pipeline_mode", "strict")
+    if (
+        module is not None
+        and pipeline_mode != "fast"
+        and visual_worker_pool is None
+    ):
+        visual_worker_pool = module.create_visual_worker_pool()
+
+    def ensure_visual_worker_pool():
+        nonlocal visual_worker_pool
+        if visual_worker_pool is None:
+            if module is None:
+                raise RuntimeError("visual worker requested for native PDF page")
+            visual_worker_pool = (
+                visual_worker_pool_factory()
+                if visual_worker_pool_factory is not None
+                else module.create_visual_worker_pool()
             )
-        for _ in range(MAX_REPAIR_ROUNDS * 6 + 4):
-            outcome = advance_legacy_page(
-                store, page_id, _lease=lease,
-                performance_trace=performance_trace,
-            )
-            if outcome["status"] != "processing":
-                break
-        else:
-            raise RuntimeError("Legacy component page exceeded durable boundary limit")
-        if outcome["status"] == "awaiting_agent":
-            _transition_pages(store, [page_id], PageStatus.AWAITING_AGENT)
-            store.transition_run(RunStatus.AWAITING_AGENT)
-            summary = _legacy_waiting_summary(store, manifest, page_id, outcome)
-            store.write_json("run_summary.json", summary)
-            return summary
-        if outcome["status"] == "preserved_with_warning":
-            _transition_pages(store, [page_id], PageStatus.PRESERVED_WITH_WARNING)
-        elif outcome["status"] == "ready_for_assembly":
-            _transition_pages(store, [page_id], PageStatus.VALIDATED)
-        else:
-            raise RuntimeError(
-                "Legacy component page did not reach a terminal boundary: "
-                f"{outcome['status']}"
-            )
-    return None
+        return visual_worker_pool
+
+    try:
+        batch_ocr = _batch_legacy_ocr(
+            store, manifest, page_ids, ocr_worker_pool=ocr_worker_pool,
+        )
+        for page_id in page_ids:
+            performance_trace = _page_performance_trace(store, page_id)
+            if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
+                continue
+            reconstruction = store.root / "pages" / page_id / "reconstruction"
+            if not (reconstruction / "component_state.json").is_file():
+                initialize_kwargs = {
+                    "_lease": lease,
+                    "performance_trace": performance_trace,
+                    "ocr_worker_pool": ocr_worker_pool,
+                    "visual_worker_pool": visual_worker_pool,
+                }
+                if pipeline_mode == "fast":
+                    initialize_kwargs["visual_worker_pool_factory"] = (
+                        ensure_visual_worker_pool
+                    )
+                if page_id in batch_ocr:
+                    initialize_kwargs["ocr_result"] = batch_ocr[page_id]
+                initialize_legacy_page(store, page_id, **initialize_kwargs)
+            for _ in range(MAX_REPAIR_ROUNDS * 6 + 4):
+                advance_kwargs = {
+                    "_lease": lease,
+                    "performance_trace": performance_trace,
+                    "visual_worker_pool": visual_worker_pool,
+                }
+                if pipeline_mode == "fast":
+                    advance_kwargs["visual_worker_pool_factory"] = (
+                        ensure_visual_worker_pool
+                    )
+                outcome = advance_legacy_page(
+                    store,
+                    page_id,
+                    **advance_kwargs,
+                )
+                if outcome["status"] != "processing":
+                    break
+            else:
+                raise RuntimeError(
+                    "Legacy component page exceeded durable boundary limit"
+                )
+            if outcome["status"] == "awaiting_agent":
+                _transition_pages(store, [page_id], PageStatus.AWAITING_AGENT)
+                store.transition_run(RunStatus.AWAITING_AGENT)
+                summary = _legacy_waiting_summary(store, manifest, page_id, outcome)
+                store.write_json("run_summary.json", summary)
+                return summary
+            if outcome["status"] == "preserved_with_warning":
+                _transition_pages(store, [page_id], PageStatus.PRESERVED_WITH_WARNING)
+            elif outcome["status"] == "ready_for_assembly":
+                _transition_pages(store, [page_id], PageStatus.VALIDATED)
+            else:
+                raise RuntimeError(
+                    "Legacy component page did not reach a terminal boundary: "
+                    f"{outcome['status']}"
+                )
+        return None
+    finally:
+        if owns_visual_worker_pool and visual_worker_pool is not None:
+            visual_worker_pool.close()
+        if owns_ocr_worker_pool and ocr_worker_pool is not None:
+            ocr_worker_pool.close()
 
 
 def _ensure_legacy_pages_processing(
@@ -827,6 +1071,16 @@ def _manifest_agent_provider(manifest: dict[str, Any]) -> str:
         return validate_agent_provider(options.get("agent_provider"))
     except ValueError as error:
         raise RuntimeError("Run manifest agent_provider is invalid") from error
+
+
+def _manifest_pipeline_mode(manifest: dict[str, Any]) -> str:
+    options = manifest.get("options")
+    if type(options) is not dict:
+        raise RuntimeError("Run manifest pipeline_mode requires options")
+    try:
+        return validate_pipeline_mode(options.get("pipeline_mode", "strict"))
+    except ValueError as error:
+        raise RuntimeError("Run manifest pipeline_mode is invalid") from error
 
 
 def _manifest_resource_policy(manifest: dict[str, Any]) -> dict[str, object]:
@@ -965,6 +1219,56 @@ def _run_owned_directory(
     return resolved, (status.st_dev, status.st_ino)
 
 
+def _prune_completed_legacy_artifacts(
+    store: RunStore, page_ids: Sequence[str]
+) -> None:
+    retained = {
+        "component_state.json",
+        "component_result.json",
+        "component_delivery.json",
+        _PERFORMANCE_SUMMARY_NAME,
+    }
+    for page_id in page_ids:
+        owned = _run_owned_directory(
+            store, Path("pages") / page_id / "reconstruction"
+        )
+        if owned is None:
+            continue
+        reconstruction, expected_identity = owned
+        directories = []
+        files = []
+        for child in reconstruction.iterdir():
+            status = child.lstat()
+            if _is_link_or_reparse(status):
+                raise RuntimeError(
+                    f"Completed reconstruction contains an unsafe link: {child}"
+                )
+            if stat.S_ISDIR(status.st_mode):
+                directories.append((child, (status.st_dev, status.st_ino)))
+            elif stat.S_ISREG(status.st_mode):
+                if child.name not in retained:
+                    files.append((
+                        child,
+                        _legacy_output_identity(child),
+                        sha256_file(child),
+                    ))
+            else:
+                raise RuntimeError(
+                    f"Completed reconstruction contains an unsafe entry: {child}"
+                )
+        for directory in directories:
+            _safe_rmtree(*directory)
+        if files:
+            _remove_legacy_outputs(files)
+        current = reconstruction.lstat()
+        if (
+            _is_link_or_reparse(current)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino) != expected_identity
+        ):
+            raise RuntimeError("Completed reconstruction identity changed")
+
+
 def _quarantine_run_owned_directory(
     directory: tuple[Path, tuple[int, int]],
 ) -> tuple[Path, Path, tuple[int, int]]:
@@ -1071,6 +1375,90 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _legacy_output_hashes(
+    outputs: object,
+    records: list[tuple[Path, tuple[int, int, int, int, int], str]],
+) -> dict[str, str]:
+    if not isinstance(outputs, dict) or any(
+        type(name) is not str or type(path) is not str
+        for name, path in outputs.items()
+    ):
+        raise RuntimeError("Legacy outputs are invalid")
+    hashes = {str(path): digest for path, _, digest in records}
+    if len(hashes) != len(records) or set(hashes) != set(outputs.values()):
+        raise RuntimeError("Legacy output records do not match outputs")
+    return {name: hashes[path] for name, path in outputs.items()}
+
+
+def _validate_completed_legacy_summary(
+    store: RunStore,
+    manifest: dict[str, Any],
+    page_jobs: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    if (
+        summary.get("status") != RunStatus.COMPLETED.value
+        or type(summary.get("pages")) is not int
+        or summary["pages"] != len(manifest["pages"])
+        or summary.get("quality_gate_version")
+        != COMPONENT_QUALITY_GATE_VERSION
+    ):
+        raise RuntimeError("Completed legacy summary values are invalid")
+    if summary.get("outputs") != _expected_legacy_outputs(store, manifest):
+        raise RuntimeError(
+            "Completed legacy summary outputs do not match manifest"
+        )
+    pages = page_jobs.get("pages")
+    if (
+        not isinstance(pages, dict)
+        or set(pages) != set(manifest["pages"])
+        or any(
+            not isinstance(page, dict)
+            or page.get("status") not in {
+                PageStatus.VALIDATED.value,
+                PageStatus.PRESERVED_WITH_WARNING.value,
+            }
+            for page in pages.values()
+        )
+    ):
+        raise RuntimeError("Completed legacy page states are invalid")
+
+
+def _legacy_assembly_records(
+    store: RunStore,
+    outputs: dict[str, str],
+    returned_records: list[tuple[Path, tuple[int, int, int, int, int], str]],
+) -> list[tuple[Path, tuple[int, int, int, int, int], str]]:
+    try:
+        persisted = _load_legacy_output_records(store, expected_outputs=outputs)
+    except RuntimeError as error:
+        if str(error) != "Legacy output records are missing":
+            raise
+        persisted = []
+    if persisted:
+        if returned_records and set(returned_records) != set(persisted):
+            raise RuntimeError(
+                "Legacy returned output records do not match persisted records"
+            )
+        return persisted
+    if returned_records:
+        raise RuntimeError("Legacy output records are missing")
+    if not outputs:
+        return []
+    records = {}
+    for name, value in outputs.items():
+        if type(name) is not str or type(value) is not str:
+            raise RuntimeError("Legacy outputs are invalid")
+        path = Path(value)
+        identity = _legacy_output_identity(path)
+        digest = sha256_file(path)
+        if _legacy_output_identity(path) != identity:
+            raise RuntimeError("Legacy output changed before record creation")
+        records[name] = (path, identity, digest)
+    _write_legacy_output_records(store, records)
+    return list(records.values())
 
 
 def _pptx_manifest_expectations(
@@ -1549,9 +1937,25 @@ def _run_job(
             return summary
         summary = store.read_json("run_summary.json")
         validate_schema_version(summary)
+        _validate_completed_resource_policy(summary, resource_policy)
+        _validate_completed_legacy_summary(
+            store, manifest, page_jobs, summary
+        )
         if "performance" in summary:
             _validate_performance_summary(summary["performance"], manifest["pages"])
-        _validate_completed_resource_policy(summary, resource_policy)
+        output_records = _load_legacy_output_records(
+            store,
+            expected_outputs=summary.get("outputs"),
+        )
+        expected_hashes = _legacy_output_hashes(
+            summary.get("outputs"), output_records
+        )
+        if summary.get("output_sha256") != expected_hashes:
+            raise RuntimeError(
+                "Completed legacy output hashes do not match records"
+            )
+        for record in output_records:
+            _verify_legacy_output_record(record)
         return summary
     if state["status"] != RunStatus.PREPARED.value:
         raise RuntimeError(
@@ -1564,6 +1968,7 @@ def _run_job(
         ) as lease:
             return _run_job(store.root, _lease=lease)
 
+    execution_started = time.perf_counter()
     store.write_json(
         "execution.json",
         {
@@ -1605,7 +2010,35 @@ def _run_job(
         # only after all immutable PPTX input/inventory checks pass so a
         # rejected prepare remains recoverable in PREPARED.
         store.transition_run(RunStatus.RUNNING)
+        ocr_worker_pool = None
+        visual_worker_pool = None
         try:
+            visual_page_ids = [
+                page_id for page_id in page_ids
+                if _native_pdf_analysis(store, page_id) is None
+            ]
+            module = (
+                importlib.import_module("image_to_ppt")
+                if visual_page_ids else None
+            )
+            if module is not None:
+                ocr_worker_pool = module.create_ocr_worker_pool()
+            pipeline_mode = manifest.get("options", {}).get(
+                "pipeline_mode", "strict"
+            )
+            if module is not None and pipeline_mode != "fast":
+                visual_worker_pool = module.create_visual_worker_pool()
+
+            def ensure_visual_worker_pool():
+                nonlocal visual_worker_pool
+                if visual_worker_pool is None:
+                    if module is None:
+                        raise RuntimeError(
+                            "visual worker requested for native PDF page"
+                        )
+                    visual_worker_pool = module.create_visual_worker_pool()
+                return visual_worker_pool
+
             # Advance any durable component-reconstruction state before asking
             # the shadow planner for donor/OOXML work.  Host rounds therefore
             # remain at the durable boundary until assembly-ready.
@@ -1623,10 +2056,17 @@ def _run_job(
                 # component extraction.  Full-page candidates use the
                 # deterministic layer builder; other approved candidates use
                 # the existing isolated CV initializer.
-                initialize_legacy_page(
-                    store, page_id, _lease=_lease,
-                    performance_trace=_page_performance_trace(store, page_id),
-                )
+                initialize_kwargs = {
+                    "_lease": _lease,
+                    "performance_trace": _page_performance_trace(store, page_id),
+                    "ocr_worker_pool": ocr_worker_pool,
+                    "visual_worker_pool": visual_worker_pool,
+                }
+                if pipeline_mode == "fast":
+                    initialize_kwargs["visual_worker_pool_factory"] = (
+                        ensure_visual_worker_pool
+                    )
+                initialize_legacy_page(store, page_id, **initialize_kwargs)
             existing_component_pages = [
                 page_id
                 for page_id in page_ids
@@ -1637,11 +2077,20 @@ def _run_job(
             ]
             if existing_component_pages:
                 _ensure_legacy_pages_processing(store, existing_component_pages)
+                advance_kwargs = {
+                    "ocr_worker_pool": ocr_worker_pool,
+                    "visual_worker_pool": visual_worker_pool,
+                }
+                if pipeline_mode == "fast":
+                    advance_kwargs["visual_worker_pool_factory"] = (
+                        ensure_visual_worker_pool
+                    )
                 waiting = _advance_legacy_pages(
                     store,
                     manifest,
                     existing_component_pages,
                     _lease,
+                    **advance_kwargs,
                 )
                 if waiting is not None:
                     return waiting
@@ -1687,15 +2136,76 @@ def _run_job(
             if cleanup_error is not None:
                 raise error from cleanup_error
             raise
+        finally:
+            if visual_worker_pool is not None:
+                visual_worker_pool.close()
+            if ocr_worker_pool is not None:
+                ocr_worker_pool.close()
     else:
         page_ids = list(page_jobs["pages"])
         pptx_shadow_plans = []
         pptx_expected_output = None
         pptx_output_existed = False
+        ocr_worker_pool = None
+        visual_worker_pool = None
+        try:
+            visual_page_ids = [
+                page_id for page_id in page_ids
+                if _native_pdf_analysis(store, page_id) is None
+            ]
+            module = (
+                importlib.import_module("image_to_ppt")
+                if visual_page_ids else None
+            )
+            if module is not None:
+                ocr_worker_pool = module.create_ocr_worker_pool()
+            pipeline_mode = manifest.get("options", {}).get(
+                "pipeline_mode", "strict"
+            )
+            if module is not None and pipeline_mode != "fast":
+                visual_worker_pool = module.create_visual_worker_pool()
+
+            def ensure_visual_worker_pool():
+                nonlocal visual_worker_pool
+                if visual_worker_pool is None:
+                    if module is None:
+                        raise RuntimeError(
+                            "visual worker requested for native PDF page"
+                        )
+                    visual_worker_pool = module.create_visual_worker_pool()
+                return visual_worker_pool
+
+            store.transition_run(RunStatus.RUNNING)
+            _ensure_legacy_pages_processing(store, page_ids)
+            advance_kwargs = {
+                "ocr_worker_pool": ocr_worker_pool,
+                "visual_worker_pool": visual_worker_pool,
+            }
+            if pipeline_mode == "fast":
+                advance_kwargs["visual_worker_pool_factory"] = (
+                    ensure_visual_worker_pool
+                )
+            waiting = _advance_legacy_pages(
+                store, manifest, page_ids, _lease, **advance_kwargs
+            )
+            if waiting is not None:
+                return waiting
+        except Exception as error:
+            cleanup_error = _record_failure(store, page_ids, error)
+            if cleanup_error is not None:
+                raise error from cleanup_error
+            raise
+        finally:
+            if visual_worker_pool is not None:
+                visual_worker_pool.close()
+            if ocr_worker_pool is not None:
+                ocr_worker_pool.close()
     if store.read_json("run_state.json")["status"] != RunStatus.RUNNING.value:
         store.transition_run(RunStatus.RUNNING)
     pptx_output_published = False
     pptx_output_record = None
+    legacy_output_records = []
+    legacy_staging_records = []
 
     try:
         if input_type == "pptx":
@@ -1807,12 +2317,19 @@ def _run_job(
                 _transition_pages(store, page_ids, PageStatus.PRESERVED)
             store.transition_run(RunStatus.FINALIZING)
         else:
-            _ensure_legacy_pages_processing(store, page_ids)
-            waiting = _advance_legacy_pages(store, manifest, page_ids, _lease)
-            if waiting is not None:
-                return waiting
             _finalize_reconstruction_routes(store, manifest, page_ids)
-            outputs = assemble_legacy_results(store)
+            assembled_outputs = assemble_legacy_results(store)
+            returned_records = list(
+                getattr(assembled_outputs, "records", [])
+            )
+            outputs = dict(assembled_outputs)
+            persisted_records = _legacy_assembly_records(
+                store, outputs, returned_records
+            )
+            output_sha256 = _legacy_output_hashes(outputs, persisted_records)
+            legacy_output_records = persisted_records
+            for record in legacy_output_records:
+                _verify_legacy_output_record(record)
             for page_id in page_ids:
                 store.write_json(
                     Path("pages") / page_id / "page_result.json",
@@ -1829,19 +2346,61 @@ def _run_job(
                 "status": RunStatus.COMPLETED.value,
                 "pages": len(page_ids),
                 "outputs": outputs,
+                "output_sha256": output_sha256,
                 "resource_policy": resource_policy,
                 "quality_gate_version": COMPONENT_QUALITY_GATE_VERSION,
             }
-        performance = _performance_summary(store, page_ids)
+        performance = _performance_summary(
+            store,
+            page_ids,
+            total_duration_ms=round(
+                (time.perf_counter() - execution_started) * 1000
+            ),
+        )
         summary["performance"] = performance
+        if input_type != "pptx":
+            for record in legacy_output_records:
+                _verify_legacy_output_record(record)
         store.write_json("run_summary.json", summary)
+        if input_type != "pptx":
+            for record in legacy_output_records:
+                _verify_legacy_output_record(record)
         store.transition_run(RunStatus.COMPLETED)
+        if input_type != "pptx":
+            for record in legacy_output_records:
+                _verify_legacy_output_record(record)
         _write_performance_summaries(store, performance)
+        if input_type != "pptx":
+            for record in legacy_output_records:
+                _verify_legacy_output_record(record)
+        if input_type == "pdf":
+            _cleanup_native_pdf_sources(store, page_ids)
+        if input_type != "pptx":
+            try:
+                _prune_completed_legacy_artifacts(store, page_ids)
+            except Exception:
+                _LOGGER.warning(
+                    "Completed legacy artifact cleanup failed", exc_info=True
+                )
         return summary
     except Exception as error:
         compensation_error = None
         pptx_output_removed = False
         pages_restored = False
+        legacy_compensation_failed = False
+        if input_type != "pptx" and not legacy_output_records:
+            try:
+                legacy_output_records = _load_legacy_output_records(store)
+            except Exception as caught:
+                legacy_compensation_failed = True
+                compensation_error = caught
+        if input_type != "pptx":
+            try:
+                legacy_staging_records = _load_legacy_staging_records(store)
+            except Exception as caught:
+                legacy_compensation_failed = True
+                if compensation_error is None:
+                    compensation_error = caught
         if (
             input_type == "pptx"
             and not pptx_output_published
@@ -1876,12 +2435,44 @@ def _run_job(
                         compensation_error.__cause__ = retry_error
                 if not (pptx_output_removed and pages_restored):
                     retry_blocked = True
+        if input_type != "pptx" and legacy_output_records:
+            try:
+                _remove_legacy_outputs(list(reversed(legacy_output_records)))
+            except Exception as caught:
+                legacy_compensation_failed = True
+                if compensation_error is None:
+                    compensation_error = caught
+            if not legacy_compensation_failed:
+                try:
+                    _clear_legacy_output_records(store)
+                except Exception as caught:
+                    legacy_compensation_failed = True
+                    if compensation_error is None:
+                        compensation_error = caught
+            if legacy_compensation_failed:
+                retry_blocked = True
+        if input_type != "pptx" and legacy_staging_records:
+            try:
+                existing_staging = [
+                    record for record in legacy_staging_records
+                    if _path_entry_exists(record[0])
+                ]
+                if existing_staging:
+                    _remove_legacy_outputs(list(reversed(existing_staging)))
+                _clear_legacy_staging_records(store)
+            except Exception as caught:
+                legacy_compensation_failed = True
+                retry_blocked = True
+                if compensation_error is None:
+                    compensation_error = caught
         cleanup_error = _record_failure(
             store,
             page_ids,
             error,
             recover_completed=(
-                input_type == "pptx" and pptx_output_published
+                (input_type == "pptx" and pptx_output_published)
+                or bool(legacy_output_records)
+                or bool(legacy_staging_records)
             ),
             retry_blocked=retry_blocked,
         )
@@ -1983,46 +2574,60 @@ def _manifest_output_path(manifest: dict[str, Any]) -> Path | None:
     return path
 
 
-def _expected_legacy_output_entries(
+def _expected_legacy_outputs(
+    store: RunStore,
     manifest: dict[str, Any],
-    input_type: str,
-) -> list[Path]:
+) -> dict[str, str]:
     output = _manifest_output_path(manifest)
     if output is None:
-        return []
-    entries = [output]
+        output_format = manifest.get("output_format", "pptx")
+        pages = manifest.get("pages")
+        if not isinstance(pages, list):
+            raise RuntimeError("Run manifest pages must be an array")
+        if output_format == "psd" and len(pages) == 1:
+            output = store.root / "final" / "output.psd"
+        elif output_format == "psd":
+            output = store.root / "final"
+        else:
+            output = store.root / "final" / "output.pptx"
+    output = output.absolute()
     if manifest.get("output_format", "pptx") == "psd":
-        return entries
-    options = manifest["options"]
-    slide_size = options.get("slide_size")
-    if slide_size == "16:9":
-        return entries
-    pages = manifest.get("pages")
-    if not isinstance(pages, list):
-        raise RuntimeError("Run manifest pages must be an array")
-    base = output.with_suffix("")
-    if len(pages) == 1:
-        if slide_size == "both":
-            entries.extend(
-                (
-                    Path(f"{base}_16x9.pptx"),
-                    Path(f"{base}_original.pptx"),
-                )
-            )
-        return entries
-    if slide_size == "both":
-        entries.append(Path(f"{base}_16x9.pptx"))
-    if slide_size not in {"both", "original"}:
-        return entries
-    combine_original = (
-        input_type == "pdf"
-        and manifest["input"].get("page_ratios_equal") is True
-    )
-    if combine_original:
-        entries.append(Path(f"{base}_original.pptx"))
+        targets = _legacy_psd_output_targets(manifest, output)
     else:
-        entries.append(Path(f"{base}_original"))
-    return entries
+        targets = _legacy_output_targets(
+            output, manifest["options"]["slide_size"]
+        )
+    return {name: str(path) for name, path in targets.items()}
+
+
+def _legacy_output_candidates(
+    store: RunStore,
+    manifest: dict[str, Any],
+) -> set[Path]:
+    candidates = {
+        Path(path) for path in _expected_legacy_outputs(store, manifest).values()
+    }
+    declared = _manifest_output_path(manifest)
+    if declared is not None:
+        candidates.add(declared.absolute())
+        pages = manifest.get("pages")
+        options = manifest.get("options", {})
+        if (
+            isinstance(pages, list)
+            and len(pages) > 1
+            and isinstance(options, dict)
+            and options.get("slide_size") in {"both", "original"}
+            and manifest.get("output_format", "pptx") == "pptx"
+        ):
+            candidates.add(Path(f"{declared.absolute().with_suffix('')}_original"))
+    return candidates
+
+
+def _expected_legacy_output_entries(
+    store: RunStore,
+    manifest: dict[str, Any],
+) -> list[Path]:
+    return [Path(path) for path in _expected_legacy_outputs(store, manifest).values()]
 
 
 def _is_owned_final_output(store: RunStore, output: Path) -> bool:
@@ -2063,36 +2668,25 @@ def recover_job(run_dir: str | Path) -> dict[str, Any]:
                 f"current status is {state['status']}"
             )
 
-        manifest, input_type = _manifest_input(store)
-        if input_type == "pptx":
-            expected_output = _pptx_output_path(store, manifest)
-            if _path_entry_exists(expected_output):
-                raise RuntimeError(
-                    f"PPTX recovery is blocked by an existing output: "
-                    f"{expected_output}"
-                )
-        else:
-            for output in _expected_legacy_output_entries(
-                manifest, input_type
-            ):
-                if _path_entry_exists(
-                    output
-                ) and not _is_owned_final_output(store, output):
-                    raise RuntimeError(
-                        "Run recovery is blocked by an existing external "
-                        f"output: {output}"
-                    )
+        failed_summary = _failed_summary(store)
+        if (
+            failed_summary is not None
+            and failed_summary.get("retry_blocked") is True
+        ):
+            raise RuntimeError(
+                "Run recovery is blocked while an output entry may be owned "
+                "by another process"
+            )
 
+        manifest, input_type = _manifest_input(store)
         page_jobs = store.read_json("page_jobs.json")
         pages_changed = _reset_page_jobs(
             page_jobs,
             analyzed=input_type == "pptx",
         )
-        cleanup_candidates = [
-            _run_owned_directory(store, "final"),
-            _run_owned_directory(store, "work"),
-        ]
+        cleanup_candidates = [_run_owned_directory(store, "work")]
         if input_type == "pptx":
+            cleanup_candidates.append(_run_owned_directory(store, "final"))
             cleanup_candidates.extend(
                 _pptx_reconstruction_directories(store, page_jobs)
             )
@@ -2101,6 +2695,53 @@ def recover_job(run_dir: str | Path) -> dict[str, Any]:
             for directory in cleanup_candidates
             if directory is not None
         ]
+
+        if input_type == "pptx":
+            expected_output = _pptx_output_path(store, manifest)
+            if _path_entry_exists(expected_output):
+                raise RuntimeError(
+                    f"PPTX recovery is blocked by an existing output: "
+                    f"{expected_output}"
+                )
+        else:
+            expected_outputs = _expected_legacy_outputs(store, manifest)
+            output_records = _load_legacy_output_records(store)
+            staging_records = _load_legacy_staging_records(store)
+            if output_records:
+                _legacy_output_hashes(expected_outputs, output_records)
+                published_records = [
+                    record for record in output_records
+                    if _path_entry_exists(record[0])
+                ]
+                for record in published_records:
+                    _verify_legacy_output_record(record)
+            else:
+                published_records = []
+            recorded_paths = {record[0] for record in output_records}
+            for output in _legacy_output_candidates(store, manifest):
+                if _path_entry_exists(output) and output not in recorded_paths:
+                    label = (
+                        "an unbound legacy output"
+                        if _is_owned_final_output(store, output)
+                        else "an existing external output"
+                    )
+                    raise RuntimeError(
+                        f"Run recovery is blocked by {label}: {output}"
+                    )
+            if published_records:
+                _remove_legacy_outputs(list(reversed(published_records)))
+            existing_staging = [
+                record for record in staging_records
+                if _path_entry_exists(record[0])
+            ]
+            for record in existing_staging:
+                _verify_legacy_output_record(record)
+            if existing_staging:
+                _remove_legacy_outputs(list(reversed(existing_staging)))
+            if output_records:
+                _clear_legacy_output_records(store)
+            if staging_records:
+                _clear_legacy_staging_records(store)
 
         for directory in cleanup:
             _safe_rmtree(*directory)
@@ -2152,6 +2793,15 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
         or retrying_completed_warning
     ):
         raise RuntimeError(f"Run is not failed or continuing a retry: {page_id}")
+    if (
+        not retrying_completed_warning
+        and failed_summary is not None
+        and failed_summary.get("retry_blocked") is True
+    ):
+        raise RuntimeError(
+            f"Retry is blocked while an output entry may be owned "
+            f"by another process: {page_id}"
+        )
     try:
         component_state = validate_component_repair_state(store.read_json(
             f"pages/{page_id}/reconstruction/component_state.json"
@@ -2214,15 +2864,32 @@ def retry_page(run_dir: str | Path, page_id: str) -> dict[str, Any]:
                 "updated_at": utc_now(),
             })
             return get_status(store.root)
-    if input_type == "pptx" and not retrying_completed_warning and (
-        (
-            failed_summary is not None
-            and failed_summary.get("retry_blocked") is True
-        )
-        or _path_entry_exists(_pptx_output_path(store, manifest))
+    if (
+        input_type == "pptx"
+        and not retrying_completed_warning
+        and _path_entry_exists(_pptx_output_path(store, manifest))
     ):
         raise RuntimeError(
             f"PPTX retry is blocked while an output entry may be owned "
+            f"by another process: {page_id}"
+        )
+    if (
+        input_type != "pptx"
+        and not retrying_completed_warning
+        and (
+            any(
+                _path_entry_exists(output)
+                for output in _expected_legacy_output_entries(store, manifest)
+            )
+            or (
+                (final_directory := _run_owned_directory(store, "final"))
+                is not None
+                and next(final_directory[0].iterdir(), None) is not None
+            )
+        )
+    ):
+        raise RuntimeError(
+            f"Legacy retry is blocked while an output entry may be owned "
             f"by another process: {page_id}"
         )
     if retrying_completed_warning:
@@ -2434,6 +3101,7 @@ def convert(
     lang: str = "ch",
     agent_provider: str = "host",
     output_format: str = "pptx",
+    pipeline_mode: str = "strict",
 ) -> dict[str, Any]:
     prepare_kwargs: dict[str, Any] = {
         "run_dir": run_dir,
@@ -2442,6 +3110,8 @@ def convert(
         "lang": lang,
         "agent_provider": agent_provider,
     }
+    if pipeline_mode != "strict":
+        prepare_kwargs["pipeline_mode"] = pipeline_mode
     if output_format != "pptx":
         prepare_kwargs["output_format"] = output_format
     prepared = prepare_job(inputs, **prepare_kwargs)

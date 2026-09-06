@@ -206,10 +206,8 @@ def test_build_presentation_layer_repairs_gradient_component_holes() -> None:
     }
     assert np.all(layer["ownership_mask"] <= ownership)
     assert not np.any(layer["presentation_alpha_mask"] & ~semantic)
-    assert np.all(
-        layer["generated_underlay_mask"]
-        >= (semantic & ~ownership & (child | text))
-    )
+    assert np.all(layer["generated_underlay_mask"][semantic & text])
+    assert not np.any(layer["generated_underlay_mask"] & child)
     assert np.all(layer["presentation_alpha_mask"][layer["generated_underlay_mask"]])
     assert not np.array_equal(layer["rgb"][text], text_clean[text])
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
@@ -368,6 +366,51 @@ def test_presentation_layer_offers_smooth_repair_for_visual_holes(
     assert calls == [True]
 
 
+def test_presentation_layer_leaves_higher_owned_pixels_to_higher_layer() -> None:
+    from scripts.component_underlay import build_presentation_layer
+
+    height, width = 48, 72
+    y, x = np.mgrid[:height, :width]
+    source = np.full((height, width, 3), 245, dtype=np.uint8)
+    line = np.abs(y - (x // 2 + 6)) <= 1
+    source[line] = (34, 125, 176)
+    semantic = np.ones((height, width), dtype=bool)
+    higher = np.zeros((height, width), dtype=bool)
+    higher[18:30, 30:42] = True
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=source,
+        ownership_mask=semantic & ~higher,
+        semantic_mask=semantic,
+        higher_layer_mask=higher,
+        text_mask=np.zeros_like(higher),
+    )
+
+    assert not np.any(layer["presentation_alpha_mask"] & higher)
+    assert not np.any(layer["generated_underlay_mask"] & higher)
+
+
+def test_visual_metrics_ignore_conflicting_donor_directions_at_visual_edge() -> None:
+    from scripts.component_underlay import _visual_metrics
+
+    source = np.full((7, 7, 3), 255, dtype=np.uint8)
+    blue = np.array((46, 134, 171), dtype=np.uint8)
+    source[3, 4:6] = blue
+    donor = np.zeros(source.shape[:2], dtype=bool)
+    donor[1:3, 3] = True
+    donor[3, 4:6] = True
+    visual_hole = np.zeros_like(donor)
+    visual_hole[3, 3] = True
+    candidate = source.copy()
+    candidate[3, 3] = (150, 194, 213)
+
+    metrics = _visual_metrics(candidate, source, donor, visual_hole)
+
+    assert metrics["boundary_color_mae"] == 0.0
+    assert metrics["gradient_jump_p95"] == 0.0
+
+
 def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
     from scripts.component_underlay import build_presentation_layer
 
@@ -428,11 +471,7 @@ def test_presentation_layer_metrics_ignore_visible_child_pixels() -> None:
         **arguments,
     )
 
-    true_mae = np.abs(
-        layer["rgb"][child].astype(np.int16)
-        - parent_truth[child].astype(np.int16)
-    ).mean()
-    assert true_mae <= 8.0
+    assert not np.any(layer["presentation_alpha_mask"] & child)
     assert layer["metrics"] == reference["metrics"]
     assert layer["metrics"]["boundary_color_mae"] <= 3.0
     assert layer["metrics"]["gradient_jump_p95"] <= 6.0
@@ -734,10 +773,12 @@ def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
     )
 
     assert not np.any(layer["ownership_mask"] & contaminated)
-    assert np.all(layer["generated_underlay_mask"][contaminated & semantic])
+    visible_halo = contaminated & semantic & ~higher
+    assert np.all(layer["generated_underlay_mask"][visible_halo])
+    assert not np.any(layer["generated_underlay_mask"] & higher)
     repaired_error = np.abs(
-        layer["rgb"][contaminated].astype(np.int16)
-        - truth[contaminated].astype(np.int16)
+        layer["rgb"][visible_halo].astype(np.int16)
+        - truth[visible_halo].astype(np.int16)
     )
     assert repaired_error.mean() <= 8.0
 
@@ -840,6 +881,30 @@ def test_component_repair_rejects_unheld_execution_lease(page_session: dict) -> 
             store, "page_001", request_path=request_path,
             initial_component_count=2, _lease=lease,
         )
+
+
+def test_require_parent_fallback_commits_fast_strict_escalation(
+    page_session: dict,
+) -> None:
+    store, _ = _failed_underlay_round_one(page_session)
+
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        outcome = component_repair.require_parent_fallback(
+            store,
+            "page_001",
+            reason="fast_strict_escalation_exhausted",
+            _lease=lease,
+        )
+
+    assert outcome == {
+        "status": "fallback_required",
+        "page_id": "page_001",
+        "repair_round": 1,
+        "stop_reason": "fast_strict_escalation_exhausted",
+    }
+    state = store.read_json("pages/page_001/reconstruction/component_state.json")
+    assert state["phase"] == "fallback_required"
+    assert state["fallback"] == {"status": "required", "parent_ids": ["candidate_b"]}
 
 
 def test_execution_lease_authorizes_only_its_held_run(tmp_path: Path) -> None:
@@ -3282,6 +3347,32 @@ def test_retry_actions_are_batched_before_graph_mutation(tmp_path: Path) -> None
     by_id = {node["id"]: node for node in result["nodes"]}
     assert by_id["left"]["state"] == "pending"
     assert by_id["right"]["state"] == "pending"
+
+
+def test_accept_preserves_strict_mask_when_requested(tmp_path: Path) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    strict_mask = np.zeros(image.shape[:2], dtype=bool)
+    strict_mask[1:11, 1:11] = True
+    strict_mask[5, 5] = False
+    left = next(node for node in graph["nodes"] if node["id"] == "left")
+    mask_path = input_dir / left["mask"]
+    Image.fromarray(strict_mask.astype(np.uint8) * 255).save(mask_path)
+    left["mask_sha256"] = hashlib.sha256(mask_path.read_bytes()).hexdigest()
+    left["bbox"] = [1, 1, 11, 11]
+
+    output_dir = tmp_path / "round-preserved-strict-mask"
+    result = execute_component_actions(
+        image,
+        graph,
+        [_action("accept", ["left"], {"preserve_mask": True})],
+        input_dir=input_dir,
+        output_dir=output_dir,
+    )
+
+    accepted = next(node for node in result["nodes"] if node["id"] == "left")
+    actual = np.asarray(Image.open(output_dir / accepted["mask"]).convert("L")) > 0
+    assert accepted["state"] == "pending_gate"
+    assert np.array_equal(actual, strict_mask)
 
 
 def test_retry_batch_rejects_invalid_second_mask_without_graph_mutation_or_output(

@@ -459,10 +459,10 @@ def _prepare_page_quality_context(
         np.ones((2 * alignment_radius + 1,) * 2, dtype=np.uint8),
     ) > 0
     background_residual_text_ink = _residual_text_ink_mask(
-        background_rgb, text, text_ink_neighborhood, calibration
+        background_rgb, text_ink, text_ink_neighborhood, calibration
     )
     reconstructed_residual_text_ink = _residual_text_ink_mask(
-        reconstructed_rgb, text, text_ink_neighborhood, calibration
+        reconstructed_rgb, text_ink, text_ink_neighborhood, calibration
     )
     text_count, text_labels = _text_region_labels(text, text_items)
     reconstructed_residual_region_counts = np.bincount(

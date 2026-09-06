@@ -226,6 +226,62 @@ def test_prepare_pdf_job_copies_and_renders_pages_in_order(tmp_path: Path) -> No
     assert RunStore.open(run).read_json("run_state.json")["status"] == "prepared"
 
 
+def test_prepare_pdf_job_persists_native_analysis_and_relative_assets(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "asset.png"
+    Image.new("RGB", (12, 8), "green").save(image)
+    source = tmp_path / "native.pdf"
+    document = canvas.Canvas(str(source), pagesize=(200, 120))
+    document.drawImage(str(image), 20, 15, width=48, height=32)
+    document.drawString(80, 70, "Editable")
+    document.save()
+
+    run = _pdf_input().prepare_pdf_job(source, run_dir=tmp_path / "run")
+    request = RunStore.open(run).read_json(
+        "pages/page_001/page_request.json"
+    )
+    analysis = request["pdf_analysis"]
+
+    assert analysis["classification"] == "native"
+    assert analysis["requires_visual"] is False
+    picture = next(
+        item for item in analysis["objects"] if item["type"] == "image"
+    )
+    assert picture["asset_path"] == "pages/page_001/pdf-assets/image-0001.png"
+    asset = run / picture["asset_path"]
+    assert asset.is_file()
+    assert picture["asset_sha256"] == hashlib.sha256(asset.read_bytes()).hexdigest()
+    with Image.open(asset) as extracted:
+        assert extracted.size == (12, 8)
+
+
+def test_prepare_pdf_job_falls_back_when_native_analysis_fails(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    source = tmp_path / "fallback.pdf"
+    document = canvas.Canvas(str(source), pagesize=(200, 120))
+    document.drawString(20, 70, "Still renderable")
+    document.save()
+
+    monkeypatch.setattr(
+        _pdf_input(),
+        "analyze_pdf_document",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("unsupported content stream")
+        ),
+    )
+
+    run = _pdf_input().prepare_pdf_job(source, run_dir=tmp_path / "run")
+    request = RunStore.open(run).read_json(
+        "pages/page_001/page_request.json"
+    )
+
+    assert request["pdf_analysis"]["classification"] == "raster"
+    assert request["pdf_analysis"]["requires_visual"] is True
+    assert request["pdf_analysis"]["unsupported_features"] == ["analysis_error"]
+
+
 @pytest.mark.parametrize("agent_provider", ["host"])
 def test_prepare_pdf_job_freezes_agent_provider(
     tmp_path: Path, agent_provider: str

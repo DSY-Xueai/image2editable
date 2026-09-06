@@ -22,12 +22,14 @@ import uuid
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from pptx import Presentation
 
-from image2editable.contracts import validate_schema_version
+from image2editable.contracts import utc_now, validate_schema_version
 from image2editable.component_contracts import (
     MAX_REPAIR_ROUNDS,
     validate_component_graph,
+    validate_component_repair_state,
 )
 from image2editable.component_repair import (
+    COMPONENT_STATE_NAME,
     EVIDENCE_NAMES,
     advance_component_repair,
     build_component_agent_request,
@@ -36,11 +38,13 @@ from image2editable.component_repair import (
     record_component_execution,
     record_component_quality,
     record_next_component_request,
+    require_parent_fallback,
     reject_recoverable_component_plan,
     record_parent_fallback_execution,
     record_parent_fallback_quality,
     _decode_binary_grayscale_png,
     _read_bound_file,
+    _require_held_execution_lease,
     _snapshot_directory_chain,
     _validate_presentation_manifest,
     _write_exclusive,
@@ -89,6 +93,49 @@ def _page_ocr_rotation(store: RunStore, page_id: str) -> int:
     if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
         raise ValueError(f"{page_id}: PDF render rotation is invalid")
     return rotation
+
+
+def _native_pdf_analysis(store: RunStore, page_id: str) -> dict | None:
+    try:
+        request = store.read_json(Path("pages") / page_id / "page_request.json")
+    except FileNotFoundError:
+        return None
+    analysis = request.get("pdf_analysis")
+    render = request.get("render")
+    if (
+        request.get("source_type") != "pdf"
+        or not isinstance(analysis, dict)
+        or analysis.get("classification") not in {"native", "hybrid"}
+        or analysis.get("requires_visual") is not False
+        or not isinstance(analysis.get("objects"), list)
+        or not isinstance(render, dict)
+        or render.get("rotation") != 0
+    ):
+        return None
+    for item in analysis["objects"]:
+        if not isinstance(item, dict):
+            return None
+        if item.get("type") == "text":
+            matrix = item.get("matrix")
+            if (
+                not isinstance(matrix, list)
+                or len(matrix) != 6
+                or abs(float(matrix[1])) > 1e-6
+                or abs(float(matrix[2])) > 1e-6
+            ):
+                return None
+        if item.get("type") == "image":
+            transform = item.get("transform")
+            if (
+                not isinstance(transform, list)
+                or len(transform) != 6
+                or abs(float(transform[0])) <= 1e-6
+                or abs(float(transform[3])) <= 1e-6
+                or abs(float(transform[1])) > 1e-4
+                or abs(float(transform[2])) > 1e-4
+            ):
+                return None
+    return analysis
 
 
 def _is_link_or_reparse(status: Any) -> bool:
@@ -586,13 +633,41 @@ def execute_legacy(store: RunStore) -> dict[str, Any]:
 
 def initialize_legacy_page(
     store: RunStore, page_id: str, *, _lease: ExecutionLease,
-    performance_trace=None,
+    performance_trace=None, ocr_result=None, ocr_worker_pool=None,
+    visual_worker_pool=None, visual_worker_pool_factory=None,
 ) -> dict[str, Any]:
     reconstruction = store.root / "pages" / page_id / "reconstruction"
     state_path = reconstruction / "component_state.json"
     if state_path.is_file():
         return {"status": "already_initialized", "page_id": page_id}
     manifest = store.read_json("job_manifest.json")
+    native_analysis = _native_pdf_analysis(store, page_id)
+    if native_analysis is not None:
+        reconstruction.mkdir(parents=True, exist_ok=True)
+        native_path = reconstruction / "native_page.json"
+        store.write_json(
+            native_path.relative_to(store.root),
+            {
+                "schema_version": 1,
+                "page_id": page_id,
+                "analysis": native_analysis,
+            },
+        )
+        store.write_json(
+            state_path.relative_to(store.root),
+            {
+                "schema_version": 1,
+                "page_id": page_id,
+                "route": "pdf_native",
+                "phase": "ready_for_assembly",
+                "status": "ready_for_assembly",
+                "native_page_ref": {
+                    "path": native_path.relative_to(store.root).as_posix(),
+                    "sha256": sha256_file(native_path),
+                },
+            },
+        )
+        return {"status": "initialized", "page_id": page_id}
     source = _source_path(store, page_id)
     performance = (
         performance_trace.span(
@@ -601,13 +676,35 @@ def initialize_legacy_page(
         if performance_trace is not None
         else nullcontext()
     )
+    pipeline_mode = manifest.get("options", {}).get("pipeline_mode", "strict")
+    prepare_kwargs = {
+        "lang": manifest["options"]["lang"],
+        "resource_isolation": True,
+        "ocr_rotation": _page_ocr_rotation(store, page_id),
+    }
+    if pipeline_mode == "fast":
+        prepare_kwargs.update({
+            "pipeline_mode": pipeline_mode,
+            "source_kind": {
+                "images": "image", "pdf": "pdf", "pptx": "pptx",
+            }.get(manifest.get("input", {}).get("type"), "image"),
+        })
+    if ocr_result is not None:
+        prepare_kwargs["ocr_result"] = ocr_result
+    if ocr_worker_pool is not None:
+        prepare_kwargs["ocr_worker_pool"] = ocr_worker_pool
+    if visual_worker_pool is not None:
+        prepare_kwargs["visual_worker_pool"] = visual_worker_pool
+    if visual_worker_pool_factory is not None:
+        prepare_kwargs["visual_worker_pool_factory"] = visual_worker_pool_factory
+    if ocr_worker_pool is not None or visual_worker_pool is not None:
+        prepare_kwargs["performance_trace"] = performance_trace
+        prepare_kwargs["page_id"] = page_id
     with performance:
         prepared = importlib.import_module("image_to_ppt").prepare_component_layers(
             source,
             reconstruction / "initial",
-            lang=manifest["options"]["lang"],
-            resource_isolation=True,
-            ocr_rotation=_page_ocr_rotation(store, page_id),
+            **prepare_kwargs,
         )
     session = _build_initial_page_session(
         store, page_id, prepared, reconstruction
@@ -620,7 +717,102 @@ def initialize_legacy_page(
         initial_component_count=prepared["initial_component_count"],
         _lease=_lease,
     )
+    if pipeline_mode == "fast":
+        _record_deterministic_fast_plan(
+            store, page_id, request_path, reconstruction, _lease=_lease
+        )
     return {"status": "initialized", "page_id": page_id}
+
+
+def _record_deterministic_fast_plan(
+    store: RunStore, page_id: str, request_path: Path, reconstruction: Path,
+    *, _lease: ExecutionLease,
+) -> None:
+    """Record a deterministic Fast plan without waiting for an Agent."""
+    from image2editable.component_contracts import validate_component_plan
+    from image2editable.component_repair import (
+        load_component_agent_graph,
+        load_component_agent_request,
+    )
+    from image2editable.host_agent import _record_plan_reference, _request_sha256
+
+    # Advance request_published to awaiting_plan through the durable state API.
+    advance_component_repair(store, page_id, _lease=_lease)
+    request = load_component_agent_request(request_path)
+    graph = load_component_agent_graph(request_path)
+    request_sha256 = _request_sha256(request)
+    strict_escalation = (
+        request["repair_round"] == 2
+        and (reconstruction / "strict-escalation-02" / "graph"
+             / "component-graph.json").is_file()
+    )
+    absorbed_ids: set[str] = set()
+    if request["repair_round"] == 2:
+        absorbed_path = (
+            reconstruction / "strict-escalation-02" / "graph"
+            / "absorbed-component-ids.json"
+        )
+        if absorbed_path.is_file():
+            metadata = json.loads(absorbed_path.read_text(encoding="utf-8"))
+            component_ids = metadata.get("component_ids") if isinstance(metadata, dict) else None
+            if (
+                not isinstance(metadata, dict)
+                or metadata.get("schema_version") != 1
+                or not isinstance(component_ids, list)
+                or any(type(component_id) is not str or not component_id for component_id in component_ids)
+                or component_ids != sorted(set(component_ids))
+                or not set(component_ids).issubset(request["candidate_ids"])
+            ):
+                raise ValueError("strict absorbed component metadata is invalid")
+            absorbed_ids = set(component_ids)
+    active_candidate_ids = [
+        object_id for object_id in request["candidate_ids"]
+        if object_id not in absorbed_ids
+    ]
+    actions = [
+        {
+            "action": "discard" if object_id in absorbed_ids else "accept",
+            "object_ids": [object_id],
+            "parameters": (
+                {"preserve_mask": True}
+                if strict_escalation and object_id not in absorbed_ids
+                else {}
+            ),
+            "confidence": 1.0,
+            "evidence": ["deterministic page route"],
+        }
+        for object_id in request["candidate_ids"]
+    ]
+    if active_candidate_ids:
+        actions.append({
+            "action": "rebuild_background",
+            "object_ids": active_candidate_ids,
+            "parameters": {"margin_ratio": 0.01},
+            "confidence": 1.0,
+            "evidence": ["deterministic page route"],
+        })
+    plan = {
+        "schema_version": 1,
+        "kind": "component_plan",
+        "page_id": page_id,
+        "provider": "host",
+        "repair_round": request["repair_round"],
+        "request_sha256": request_sha256,
+        "actions": actions,
+    }
+    validate_component_plan(plan, request=request, graph=graph)
+    payload = json.dumps(
+        plan, ensure_ascii=False, indent=2, sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    plan_path = reconstruction / (
+        f"deterministic-component-plan-{page_id}-"
+        f"{request['repair_round']:02d}-{request_sha256}.json"
+    )
+    if not plan_path.exists():
+        _write_exclusive(plan_path, payload, reconstruction)
+    elif plan_path.read_bytes() != payload:
+        raise RuntimeError("A different deterministic component plan exists")
+    _record_plan_reference(store, request, plan_path)
 def _build_initial_page_session(
     store: RunStore, page_id: str, prepared: dict, reconstruction: Path
 ) -> dict:
@@ -1441,13 +1633,49 @@ def _render_component_evidence(
 
 def advance_legacy_page(
     store: RunStore, page_id: str, *, _lease: ExecutionLease,
-    performance_trace=None,
+    performance_trace=None, visual_worker_pool=None,
+    visual_worker_pool_factory=None,
 ) -> dict[str, Any]:
+    state_path = Path("pages") / page_id / "reconstruction" / COMPONENT_STATE_NAME
+    state = (
+        store.read_json(state_path)
+        if (store.root / state_path).is_file()
+        else None
+    )
+    if isinstance(state, dict) and state.get("route") == "pdf_native":
+        if (
+            state.get("page_id") != page_id
+            or state.get("phase") != "ready_for_assembly"
+            or state.get("status") != "ready_for_assembly"
+        ):
+            raise ValueError("native PDF page state is invalid")
+        _load_legacy_ref(store, state.get("native_page_ref"))
+        return {"status": "ready_for_assembly", "page_id": page_id}
     outcome = advance_component_repair(store, page_id, _lease=_lease)
+    if outcome["status"] == "awaiting_agent":
+        manifest = store.read_json("job_manifest.json")
+        if manifest.get("options", {}).get("pipeline_mode", "strict") == "fast":
+            state = store.read_json(
+                f"pages/{page_id}/reconstruction/component_state.json"
+            )
+            request_ref = state["current_round"]["request_ref"]["path"]
+            request_path = store.root / Path(*PurePosixPath(request_ref).parts)
+            _record_deterministic_fast_plan(
+                store,
+                page_id,
+                request_path,
+                store.root / "pages" / page_id / "reconstruction",
+                _lease=_lease,
+            )
+            outcome = advance_component_repair(store, page_id, _lease=_lease)
     status = outcome["status"]
     if status == "needs_execution":
         rejected = _execute_legacy_round(
-            store, page_id, _lease, performance_trace=performance_trace
+            store,
+            page_id,
+            _lease,
+            performance_trace=performance_trace,
+            visual_worker_pool=visual_worker_pool,
         )
         if rejected:
             return {
@@ -1460,7 +1688,21 @@ def advance_legacy_page(
         record_component_quality(store, page_id, _lease=_lease)
         return {"status": "processing", "page_id": page_id}
     if status == "needs_next_round":
-        _publish_next_legacy_request(store, page_id, outcome["repair_round"], _lease)
+        if _fast_strict_escalation_exhausted(
+            store, page_id, outcome["repair_round"],
+        ):
+            return _commit_local_fidelity_result(
+                store, page_id, _lease=_lease,
+            )
+        _publish_next_legacy_request(
+            store,
+            page_id,
+            outcome["repair_round"],
+            _lease,
+            visual_worker_pool=visual_worker_pool,
+            visual_worker_pool_factory=visual_worker_pool_factory,
+            performance_trace=performance_trace,
+        )
         return {"status": "processing", "page_id": page_id}
     if status == "needs_parent_fallback":
         _execute_legacy_parent_fallback(store, page_id, _lease)
@@ -1600,7 +1842,7 @@ def _rebuild_canvas_background(
 
         rebuilt, _ = _choose_visual_fill(
             rgb=rebuilt,
-            source_rgb=source,
+            source_rgb=current,
             semantic_mask=repair,
             donor_mask=~repair,
             visual_hole=repair,
@@ -2571,6 +2813,405 @@ def _record_inference_performance(
         _LOGGER.warning("Performance trace recording failed")
 
 
+def _rebind_strict_pending_masks(
+    graph: dict,
+    strict_slide_data: dict,
+    *,
+    old_graph_dir: Path,
+    strict_graph_dir: Path,
+    pending_ids: list[str],
+) -> dict:
+    """Map strict visual masks back onto the existing pending component IDs."""
+    import numpy as np
+
+    validated = validate_component_graph(graph)
+    nodes = {node["id"]: node for node in validated["nodes"]}
+    if pending_ids != sorted(set(pending_ids)) or any(
+        component_id not in nodes
+        or nodes[component_id]["state"] not in {"pending", "pending_gate"}
+        for component_id in pending_ids
+    ):
+        raise ValueError("strict pending component IDs are invalid")
+    components = strict_slide_data.get("components")
+    mask_paths = strict_slide_data.get("_element_mask_paths")
+    semantic_paths = strict_slide_data.get("_semantic_mask_paths")
+    if (
+        not isinstance(components, list)
+        or not isinstance(mask_paths, list)
+        or len(components) != len(mask_paths)
+        or not mask_paths
+    ):
+        raise ValueError("strict visual candidate count is invalid")
+
+    def load_mask(path: Path) -> np.ndarray:
+        with Image.open(path) as image:
+            mask = np.asarray(image.convert("L"), dtype=np.uint8).copy() > 0
+        if mask.ndim != 2 or not np.any(mask):
+            raise ValueError("strict visual candidate mask is invalid")
+        return mask
+
+    old_masks = {}
+    for component_id in pending_ids:
+        node = nodes[component_id]
+        old_path = old_graph_dir / Path(*PurePosixPath(node["mask"]).parts)
+        old_masks[component_id] = load_mask(old_path)
+    strict_masks = [load_mask(Path(path)) for path in mask_paths]
+    shape = next(iter(old_masks.values())).shape
+    if any(mask.shape != shape for mask in strict_masks):
+        raise ValueError("strict visual candidate dimensions differ")
+    child_ids = [
+        component_id for component_id in pending_ids
+        if nodes[component_id]["parent_id"] is not None
+    ]
+    strict_semantic_masks = None
+    if child_ids:
+        if (
+            not isinstance(semantic_paths, list)
+            or len(semantic_paths) != len(strict_masks)
+        ):
+            raise ValueError("strict semantic candidate masks are invalid")
+        strict_semantic_masks = [load_mask(Path(path)) for path in semantic_paths]
+        if any(mask.shape != shape for mask in strict_semantic_masks):
+            raise ValueError("strict semantic candidate dimensions differ")
+
+    scores = []
+    for component_id in pending_ids:
+        source = old_masks[component_id]
+        for index, candidate in enumerate(strict_masks):
+            intersection = int(np.count_nonzero(source & candidate))
+            union = int(np.count_nonzero(source | candidate))
+            if intersection:
+                scores.append((
+                    intersection / max(1, union), -index, component_id, index,
+                ))
+    assignments = {}
+    used = set()
+    for _, _, component_id, index in sorted(scores, reverse=True):
+        if component_id in assignments or index in used:
+            continue
+        assignments[component_id] = index
+        used.add(index)
+    assigned_candidates = set(assignments.values())
+    absorbed_ids = []
+    for component_id in pending_ids:
+        if component_id in assignments:
+            continue
+        source = old_masks[component_id]
+        source_pixels = max(1, int(np.count_nonzero(source)))
+        if any(
+            index in assigned_candidates
+            and np.count_nonzero(source & candidate) / source_pixels >= 0.98
+            for index, candidate in enumerate(strict_masks)
+        ):
+            absorbed_ids.append(component_id)
+    if len(assignments) + len(absorbed_ids) != len(pending_ids):
+        raise ValueError("strict visual candidates could not be mapped")
+
+    replacements = {
+        component_id: strict_masks[index]
+        for component_id, index in assignments.items()
+    }
+    parent_assignments = {}
+    for component_id, index in assignments.items():
+        parent_id = nodes[component_id]["parent_id"]
+        if parent_id is None:
+            continue
+        previous = parent_assignments.setdefault(parent_id, index)
+        if previous != index:
+            raise ValueError("strict semantic parent mapping is ambiguous")
+    if strict_semantic_masks is not None:
+        replacements.update({
+            parent_id: strict_semantic_masks[index]
+            for parent_id, index in parent_assignments.items()
+        })
+
+    strict_graph_dir.mkdir(parents=True, exist_ok=False)
+    masks_dir = strict_graph_dir / "masks"
+    masks_dir.mkdir()
+    (strict_graph_dir / "absorbed-component-ids.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "component_ids": absorbed_ids,
+        }, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    rebound = {"nodes": []}
+    for index, original in enumerate(validated["nodes"], start=1):
+        node = dict(original)
+        target_name = (
+            f"masks/{index:04d}-{original['id']}.png"
+            if original["id"] in assignments
+            else original["mask"]
+        )
+        target = strict_graph_dir / Path(*PurePosixPath(target_name).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        mask = replacements.get(original["id"])
+        if mask is not None:
+            Image.fromarray(mask.astype(np.uint8) * 255, mode="L").save(target)
+        else:
+            source_path = old_graph_dir / Path(
+                *PurePosixPath(original["mask"]).parts
+            )
+            shutil.copyfile(source_path, target)
+            rebound["nodes"].append(node)
+            continue
+        ys, xs = np.nonzero(mask)
+        node.update({
+            "mask": target_name,
+            "mask_sha256": sha256_file(target),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+        })
+        rebound["nodes"].append(node)
+    return rebound
+
+
+def _prepare_fast_strict_round(
+    store: RunStore,
+    page_id: str,
+    repair_round: int,
+    pending_ids: list[str],
+    *,
+    visual_worker_pool=None,
+    performance_trace=None,
+) -> Path | None:
+    """Build one strict visual round for a failed Fast page."""
+    import numpy as np
+
+    manifest = store.read_json("job_manifest.json")
+    if manifest.get("options", {}).get("pipeline_mode", "strict") != "fast":
+        return None
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    prepared_path = reconstruction / "initial" / "prepared_page.json"
+    module = importlib.import_module("image_to_ppt")
+    prepared = module.load_component_layers(prepared_path)
+    policy = prepared.get("_page_policy", {})
+    if policy.get("route") not in {"direct", "local_refine"}:
+        return None
+    root = reconstruction / f"strict-escalation-{repair_round:02d}"
+    if root.exists():
+        graph_path = root / "graph" / "component-graph.json"
+        if graph_path.is_file():
+            validate_component_graph(json.loads(graph_path.read_text(encoding="utf-8")))
+            return graph_path
+        shutil.rmtree(root)
+    root.mkdir()
+    strict_prepared_dir = root / "prepared"
+    source_value = prepared.get("original_image_path")
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("prepared source image is invalid")
+    source = Path(source_value)
+    if not source.is_file():
+        raise ValueError("prepared source image is missing")
+    with Image.open(prepared["_text_mask_path"]) as image:
+        text_mask = np.asarray(image.convert("L")).copy()
+    try:
+        prepare_kwargs = {
+            "lang": manifest["options"]["lang"],
+            "resource_isolation": True,
+            "ocr_result": (prepared.get("text_items", []), text_mask),
+        }
+        if visual_worker_pool is not None:
+            prepare_kwargs.update({
+                "visual_worker_pool": visual_worker_pool,
+                "performance_trace": performance_trace,
+                "page_id": page_id,
+            })
+        strict_slide_data = module.prepare_component_layers(
+            source,
+            strict_prepared_dir,
+            **prepare_kwargs,
+        )
+        current_state = store.read_json(
+            f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+        )
+        current_graph_path = _state_artifact(
+            store, current_state["graph_ref"]
+        )
+        current_graph = json.loads(current_graph_path.read_text(encoding="utf-8"))
+        graph_dir = root / "graph"
+        rebound = _rebind_strict_pending_masks(
+            current_graph,
+            strict_slide_data,
+            old_graph_dir=current_graph_path.parent,
+            strict_graph_dir=graph_dir,
+            pending_ids=pending_ids,
+        )
+        graph_path = graph_dir / "component-graph.json"
+        graph_path.write_text(
+            json.dumps(rebound, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        return graph_path
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    finally:
+        text_mask = None
+        shutil.rmtree(strict_prepared_dir, ignore_errors=True)
+
+
+def _fast_strict_escalation_exhausted(
+    store: RunStore, page_id: str, next_repair_round: int,
+) -> bool:
+    if next_repair_round != 3:
+        return False
+    manifest = store.read_json("job_manifest.json")
+    if manifest.get("options", {}).get("pipeline_mode", "strict") != "fast":
+        return False
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    prepared = importlib.import_module("image_to_ppt").load_component_layers(
+        reconstruction / "initial" / "prepared_page.json"
+    )
+    if prepared.get("_page_policy", {}).get("route") not in {
+        "direct", "local_refine",
+    }:
+        return False
+    graph_path = reconstruction / "strict-escalation-02/graph/component-graph.json"
+    if not graph_path.is_file():
+        return False
+    validate_component_graph(json.loads(graph_path.read_text(encoding="utf-8")))
+    return True
+
+
+def _commit_local_fidelity_result(
+    store: RunStore,
+    page_id: str,
+    *,
+    _lease: ExecutionLease,
+) -> dict[str, str]:
+    _require_held_execution_lease(store, _lease)
+    state_relative = (
+        Path("pages") / page_id / "reconstruction" / COMPONENT_STATE_NAME
+    )
+    state = validate_component_repair_state(store.read_json(state_relative))
+    if (
+        state["page_id"] != page_id
+        or state["phase"] != "freeze_committed"
+        or state["fallback"] != {"status": "none", "parent_ids": []}
+    ):
+        raise RuntimeError("component repair is not ready for local fidelity")
+
+    _, quality_payload = _load_legacy_ref(
+        store, state["current_round"]["quality_ref"], max_bytes=16 * 1024 * 1024
+    )
+    quality = json.loads(quality_payload.decode("utf-8"))
+    refs = quality.get("input_refs")
+    required_refs = {
+        "source", "background", "reconstructed", "text_mask",
+        "native_check", "presentation_manifest",
+    }
+    if not isinstance(refs, dict) or not required_refs <= set(refs):
+        raise ValueError("local fidelity quality references are invalid")
+    if refs["source"]["sha256"] != state["source_sha256"]:
+        raise ValueError("local fidelity source hash is invalid")
+    source_path = _state_artifact(store, refs["source"])
+    candidate_path = _state_artifact(store, refs["reconstructed"])
+    text_mask_path = _state_artifact(store, refs["text_mask"])
+
+    reconstruction = store.root / "pages" / page_id / "reconstruction"
+    component_dir = reconstruction / f"local-fidelity-{uuid.uuid4().hex[:12]}"
+    manifest_path = reconstruction / "local_fidelity_page.json"
+    manifest_published = False
+    try:
+        from image2editable.local_fidelity import build_local_fidelity_components
+
+        fidelity = build_local_fidelity_components(
+            source_path=source_path,
+            candidate_path=candidate_path,
+            reliable_text_mask_path=text_mask_path,
+            output_dir=component_dir,
+        )
+        if fidelity["uncovered_pixels"] != 0:
+            raise RuntimeError("local fidelity left uncovered residual pixels")
+        component_records = []
+        for component in fidelity["components"]:
+            path = Path(component["path"]).resolve()
+            if not path.is_relative_to(component_dir.resolve()):
+                raise ValueError("local fidelity component escapes output directory")
+            component_records.append({
+                "ref": {
+                    "path": path.relative_to(store.root.resolve()).as_posix(),
+                    "sha256": component["sha256"],
+                },
+                "bbox": component["bbox"],
+                "coverage": component["coverage"],
+            })
+        manifest = {
+            "schema_version": 1,
+            "page_id": page_id,
+            "source_sha256": state["source_sha256"],
+            "components": component_records,
+            "residual_pixels": fidelity["residual_pixels"],
+            "uncovered_pixels": fidelity["uncovered_pixels"],
+        }
+        manifest_payload = json.dumps(
+            manifest, ensure_ascii=False, indent=2, sort_keys=True
+        ).encode("utf-8") + b"\n"
+        _write_exclusive(manifest_path, manifest_payload, reconstruction)
+        manifest_published = True
+    except BaseException:
+        if not manifest_published and component_dir.is_dir():
+            _safe_rmtree(
+                component_dir, _directory_identity(component_dir.lstat())
+            )
+        raise
+
+    graph_payload = _load_legacy_ref(
+        store, state["graph_ref"], max_bytes=16 * 1024 * 1024
+    )[1]
+    graph = validate_component_graph(json.loads(graph_payload.decode("utf-8")))
+    result = {
+        "schema_version": 1,
+        "page_id": page_id,
+        "status": "ready_for_assembly",
+        "provider": state["provider"],
+        "repair_rounds": state["plan_count"],
+        "initial_component_count": state["initial_component_count"],
+        "final_component_ids": sorted(
+            node["id"] for node in _active_visual_nodes(graph)
+        ),
+        "graph_ref": state["graph_ref"],
+        "round_history": state["round_history"],
+        "accepted_graph_sha256": quality["input_graph_sha256"],
+        "fallback": state["fallback"],
+        "accepted_asset_refs": {
+            key: value for key, value in refs.items()
+            if key != "background_responsibility"
+        },
+        "text_items": quality.get("text_items", []),
+        "raster_text_preserved": False,
+        "warning": None,
+        "delivery_checks": {"pptx_reopen": "unknown"},
+        "route": "local_fidelity",
+        "local_fidelity_ref": {
+            "path": manifest_path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        },
+    }
+    result_payload = json.dumps(
+        result, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8") + b"\n"
+    result_path = reconstruction / "component_result.json"
+    _write_exclusive(result_path, result_payload, reconstruction)
+
+    updated = dict(state)
+    updated.update({
+        "phase": "ready_for_assembly",
+        "status": "ready_for_assembly",
+        "stop_reason": None,
+        "result_ref": {
+            "path": result_path.relative_to(store.root).as_posix(),
+            "sha256": hashlib.sha256(result_payload).hexdigest(),
+        },
+        "revision": state["revision"] + 1,
+        "updated_at": utc_now(),
+    })
+    validate_component_repair_state(updated)
+    store.write_json(state_relative, updated)
+    return {"status": "ready_for_assembly", "page_id": page_id}
+
+
 def _request_evidence_ref(
     store: RunStore,
     request_path: Path,
@@ -2589,10 +3230,14 @@ def _request_evidence_ref(
 
 def _execute_legacy_round(
     store: RunStore, page_id: str, lease: ExecutionLease,
-    *, performance_trace=None,
+    *, performance_trace=None, visual_worker_pool=None,
 ) -> bool:
     import numpy as np
-    from scripts.sam_worker import run_component_prompt_batch_worker
+    from scripts.sam_worker import (
+        component_prompt_batch_request_bytes,
+        read_component_prompt_batch_result,
+        run_component_prompt_batch_worker,
+    )
     from scripts.visual_segment import RecoverableComponentPlanError
 
     state = store.read_json(
@@ -2688,11 +3333,50 @@ def _execute_legacy_round(
     def sam_batch_runner(*, image, prompts):
         started = time.perf_counter()
         try:
-            masks = run_component_prompt_batch_worker(
-                image,
-                prompts,
-                work_dir=output_dir.parent,
-            )
+            if visual_worker_pool is None:
+                masks = run_component_prompt_batch_worker(
+                    image,
+                    prompts,
+                    work_dir=output_dir.parent,
+                )
+            else:
+                with tempfile.TemporaryDirectory(
+                    prefix="component-sam-batch-",
+                    dir=output_dir.parent,
+                ) as temporary:
+                    root = Path(temporary)
+                    image_path = root / "image.png"
+                    request_path = root / "request.json"
+                    result_path = root / "result.json"
+                    Image.fromarray(np.asarray(image, dtype=np.uint8), mode="RGB").save(
+                        image_path
+                    )
+                    request_path.write_bytes(
+                        component_prompt_batch_request_bytes(
+                            tuple(image.shape[:2]),
+                            prompts,
+                        )
+                    )
+                    visual_worker_pool.request(
+                        {
+                            "kind": "component_prompts",
+                            "request": str(request_path),
+                            "result": str(result_path),
+                        },
+                        performance_trace=performance_trace,
+                        page_id=page_id,
+                    )
+                    try:
+                        masks = read_component_prompt_batch_result(
+                            request_path,
+                            result_path,
+                        )
+                    except RuntimeError as error:
+                        if str(error) != (
+                            "SAM component worker returned an invalid result batch"
+                        ):
+                            raise
+                        masks = []
         except BaseException:
             _record_inference_performance(
                 performance_trace, started, page_id, len(prompts), "error"
@@ -2821,12 +3505,32 @@ def _execute_legacy_round(
 
 
 def _publish_next_legacy_request(
-    store: RunStore, page_id: str, repair_round: int, lease: ExecutionLease
+    store: RunStore,
+    page_id: str,
+    repair_round: int,
+    lease: ExecutionLease,
+    *,
+    visual_worker_pool=None,
+    visual_worker_pool_factory=None,
+    performance_trace=None,
 ) -> None:
     state = store.read_json(
         f"pages/{page_id}/reconstruction/component_state.json"
     )
     graph_path = _state_artifact(store, state["graph_ref"])
+    if repair_round == 2:
+        if visual_worker_pool is None and visual_worker_pool_factory is not None:
+            visual_worker_pool = visual_worker_pool_factory()
+        strict_graph_path = _prepare_fast_strict_round(
+            store,
+            page_id,
+            repair_round,
+            list(state["failed_ids"]),
+            visual_worker_pool=visual_worker_pool,
+            performance_trace=performance_trace,
+        )
+        if strict_graph_path is not None:
+            graph_path = strict_graph_path
     quality_path = _state_artifact(
         store, state["current_round"]["quality_ref"]
     )
@@ -3029,6 +3733,162 @@ def _execute_legacy_parent_fallback(
     )
 
 
+def _native_pdf_box(
+    value: object, page_height: float, *, allow_line: bool = False,
+) -> list[float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(
+            type(number) not in {int, float} or not math.isfinite(number)
+            for number in value
+        )
+    ):
+        raise ValueError("native PDF object bbox is invalid")
+    left, bottom, right, top = (float(number) for number in value)
+    if (
+        right < left
+        or top < bottom
+        or (not allow_line and (right == left or top == bottom))
+        or (allow_line and right == left and top == bottom)
+    ):
+        raise ValueError("native PDF object bbox is empty")
+    return [left, page_height - top, right, page_height - bottom]
+
+
+def _native_pdf_slide_data(
+    store: RunStore, page_id: str, state: dict, reconstruction: Path,
+) -> dict:
+    _, payload = _load_legacy_ref(store, state.get("native_page_ref"))
+    document = json.loads(payload.decode("utf-8"))
+    if document.get("page_id") != page_id or not isinstance(
+        document.get("analysis"), dict
+    ):
+        raise ValueError("native PDF page artifact is invalid")
+    analysis = document["analysis"]
+    width = analysis.get("width_pt")
+    height = analysis.get("height_pt")
+    if (
+        type(width) not in {int, float}
+        or type(height) not in {int, float}
+        or not math.isfinite(width)
+        or not math.isfinite(height)
+        or width <= 0
+        or height <= 0
+    ):
+        raise ValueError("native PDF page dimensions are invalid")
+
+    output_dir = Path(tempfile.mkdtemp(prefix="native-assembly-", dir=reconstruction))
+    output_identity = _directory_identity(output_dir.lstat())
+    try:
+        background = output_dir / "background.png"
+        Image.new("RGB", (1, 1), "white").save(background)
+        elements = []
+        for item in sorted(analysis["objects"], key=lambda value: value["z_index"]):
+            object_id = item["id"]
+            z_index = item["z_index"]
+            object_type = item["type"]
+            is_line = (
+                object_type == "shape" and item.get("shape_type") == "line"
+            )
+            box = _native_pdf_box(
+                item["bbox_pt"], float(height), allow_line=is_line
+            )
+            left, top, right, bottom = box
+            if object_type in {"image", "patch"}:
+                _, image_payload = _load_legacy_ref(store, {
+                    "path": item["asset_path"],
+                    "sha256": item["asset_sha256"],
+                })
+                elements.append({
+                    "object_id": object_id,
+                    "route": "native_image",
+                    "z_index": z_index,
+                    "component": {
+                        "blob": image_payload,
+                        "x": left,
+                        "y": top,
+                        "w": right - left,
+                        "h": bottom - top,
+                        **({"crop": item["crop"]} if "crop" in item else {}),
+                    },
+                })
+            elif object_type == "text":
+                color = item.get("color_rgb", [0, 0, 0])
+                elements.append({
+                    "object_id": object_id,
+                    "route": "native_text",
+                    "z_index": z_index,
+                    "text": {
+                        "box": [left, top, right - left, bottom - top],
+                        "text": item["text"],
+                        "font": str(item.get("font") or "Arial").lstrip("/"),
+                        "font_size_pt": item["font_size"],
+                        "character_spacing_pt": item.get(
+                            "character_spacing_pt", 0.0
+                        ),
+                        "fill_opacity": item.get("fill_opacity", 1.0),
+                        "bold": item.get("bold", False),
+                        "italic": item.get("italic", False),
+                        "color": "#" + "".join(
+                            f"{int(channel):02x}" for channel in color
+                        ),
+                        "align": 0,
+                    },
+                })
+            elif object_type == "shape":
+                shape = {
+                    "shape_type": item["shape_type"],
+                    "fill_rgb": (
+                        item.get("stroke_rgb", [0, 0, 0])
+                        if item["shape_type"] == "line"
+                        else item.get("fill_rgb")
+                    ),
+                    "stroke_rgb": item.get("stroke_rgb"),
+                    "line_width": item.get("line_width", 1.0),
+                    "fill_opacity": item.get("fill_opacity", 1.0),
+                    "stroke_opacity": item.get("stroke_opacity", 1.0),
+                }
+                if item["shape_type"] == "line":
+                    shape["line_start"] = [
+                        item["line_start"][0],
+                        float(height) - item["line_start"][1],
+                    ]
+                    shape["line_end"] = [
+                        item["line_end"][0],
+                        float(height) - item["line_end"][1],
+                    ]
+                elements.append({
+                    "object_id": object_id,
+                    "route": "native_shape",
+                    "z_index": z_index,
+                    "bbox": box,
+                    "shape": shape,
+                })
+        return {
+            "img_width": float(width),
+            "img_height": float(height),
+            "background_path": str(background),
+            "background_original_path": str(background),
+            "background_widescreen_path": str(background),
+            "background_rgb": [255, 255, 255],
+            "original_image_path": str(background),
+            "components": [],
+            "text_items": [],
+            "visual_elements": elements,
+            "_assembly_assets_dir": str(output_dir),
+        }
+    except Exception:
+        _safe_rmtree(output_dir, output_identity)
+        raise
+
+
+class _PublishedLegacyOutputs(dict[str, Any]):
+    def __init__(self, outputs: dict[str, Any], records: list[tuple]) -> None:
+        super().__init__(outputs)
+        self.records = records
+
+
 def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     manifest = store.read_json("job_manifest.json")
     page_ids = manifest["pages"]
@@ -3080,6 +3940,17 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             state = store.read_json(
                 f"pages/{page_id}/reconstruction/component_state.json"
             )
+            if state.get("route") == "pdf_native":
+                slide = _native_pdf_slide_data(
+                    store, page_id, state, reconstruction
+                )
+                asset_dir = Path(slide.pop("_assembly_assets_dir"))
+                assembly_asset_dirs.append(
+                    (asset_dir, _directory_identity(asset_dir.lstat()))
+                )
+                slides.append(slide)
+                page_records.append((page_id, state, None, None))
+                continue
             if output_format == "psd" and state["status"] == "preserved_with_warning":
                 raise RuntimeError(
                     f"PSD output requires every page to pass the quality gate: {page_id}"
@@ -3126,7 +3997,9 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
 
     staged = {}
     published = {}
-    published_targets = []
+    planned_records = {}
+    published_records = []
+    staging_records = {}
     try:
         for index, (variant, target) in enumerate(targets.items()):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -3175,26 +4048,104 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
 
         for variant, target in targets.items():
             staging = staged[variant]
+            identity = _legacy_output_identity(staging)
+            digest = sha256_file(staging)
+            if _legacy_output_identity(staging) != identity:
+                raise RuntimeError("Legacy staged output changed before publication")
+            planned_records[variant] = (target, identity, digest)
+            staging_records[variant] = (staging, identity, digest)
+        _write_legacy_staging_records(store, list(staged.values()))
+        _write_legacy_output_records(store, planned_records)
+
+        for variant, target in targets.items():
+            staging = staged[variant]
             try:
                 os.link(staging, target)
             except Exception:
                 raise
-            published_targets.append(target)
-            staging.unlink()
+            record = planned_records[variant]
+            published_records.append(record)
+            _verify_legacy_output_record(record)
+            staging_record = staging_records[variant]
+            _remove_legacy_outputs([staging_record])
+            del staging_records[variant]
             published[variant] = str(target)
-    except Exception:
-        for target in published_targets:
-            target.unlink(missing_ok=True)
+        _record_legacy_delivery(
+            store,
+            page_records,
+            published,
+            published_records,
+            output_format=output_format,
+        )
+        for record in published_records:
+            _verify_legacy_output_record(record)
+        _clear_legacy_staging_records(store)
+    except Exception as error:
+        cleanup_error = None
+        try:
+            _remove_legacy_outputs(list(reversed(published_records)))
+        except Exception as caught:
+            cleanup_error = caught
+        if cleanup_error is None:
+            _clear_legacy_output_records(store)
+            try:
+                _remove_legacy_outputs(
+                    list(reversed(list(staging_records.values())))
+                )
+            except Exception as caught:
+                cleanup_error = caught
+            if cleanup_error is None:
+                _clear_legacy_staging_records(store)
+        if cleanup_error is not None:
+            raise error from cleanup_error
         raise
     finally:
         for staging in staged.values():
-            staging.unlink(missing_ok=True)
+            if staging.exists():
+                record = next(
+                    (
+                        value for value in staging_records.values()
+                        if value[0] == staging
+                    ),
+                    None,
+                )
+                if record is not None:
+                    try:
+                        _remove_legacy_outputs([record])
+                    except Exception:
+                        pass
+                else:
+                    staging.unlink()
         _cleanup_legacy_assembly_assets(assembly_asset_dirs)
 
-    _record_legacy_delivery(
-        store, page_records, published, output_format=output_format
-    )
-    return published
+    return _PublishedLegacyOutputs(published, published_records)
+
+
+def _cleanup_native_pdf_sources(
+    store: RunStore,
+    page_ids: list[str],
+) -> None:
+    for page_id in page_ids:
+        state = store.read_json(
+            f"pages/{page_id}/reconstruction/component_state.json"
+        )
+        if state.get("route") != "pdf_native":
+            continue
+        page = store.root / "pages" / page_id
+        for name in ("source.png", "source_detail.png"):
+            try:
+                (page / name).unlink(missing_ok=True)
+            except OSError:
+                _LOGGER.warning("Native PDF render cleanup failed: %s", page / name)
+        assets = page / "pdf-assets"
+        try:
+            status = assets.lstat()
+        except FileNotFoundError:
+            continue
+        try:
+            _safe_rmtree(assets, _directory_identity(status))
+        except (OSError, RuntimeError):
+            _LOGGER.warning("Native PDF asset cleanup failed: %s", assets)
 
 
 def _cleanup_legacy_assembly_assets(
@@ -3202,6 +4153,228 @@ def _cleanup_legacy_assembly_assets(
 ) -> None:
     for path, identity in reversed(directories):
         _safe_rmtree(path, identity)
+
+
+def _legacy_output_identity(path: Path) -> tuple[int, int, int, int, int]:
+    status = path.lstat()
+    if not stat.S_ISREG(status.st_mode) or _is_link_or_reparse(status):
+        raise RuntimeError(f"Legacy output is not a regular file: {path}")
+    return (
+        status.st_dev,
+        status.st_ino,
+        status.st_mode,
+        status.st_size,
+        status.st_mtime_ns,
+    )
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _write_legacy_output_records(
+    store: RunStore,
+    records: dict[str, tuple[Path, tuple[int, int, int, int, int], str]],
+) -> None:
+    _write_legacy_file_records(store, "legacy_output_records.json", records)
+
+
+def _write_legacy_file_records(
+    store: RunStore,
+    filename: str,
+    records: dict[str, tuple[Path, tuple[int, int, int, int, int], str]],
+) -> None:
+    store.write_json(
+        filename,
+        {
+            "schema_version": 1,
+            "outputs": {
+                name: {
+                    "path": str(path),
+                    "dev": identity[0],
+                    "ino": identity[1],
+                    "mode": identity[2],
+                    "size": identity[3],
+                    "mtime_ns": identity[4],
+                    "sha256": digest,
+                }
+                for name, (path, identity, digest) in records.items()
+            },
+        },
+    )
+
+
+def _write_legacy_staging_records(
+    store: RunStore,
+    paths: list[Path],
+) -> None:
+    records = {
+        str(index): (
+            path,
+            _legacy_output_identity(path),
+            sha256_file(path),
+        )
+        for index, path in enumerate(paths)
+    }
+    _write_legacy_file_records(store, "legacy_staging_records.json", records)
+
+
+def _load_legacy_output_records(
+    store: RunStore,
+    *,
+    expected_outputs: dict[str, str] | None = None,
+) -> list[tuple[Path, tuple[int, int, int, int, int], str]]:
+    return _load_legacy_file_records(
+        store, "legacy_output_records.json", expected_outputs=expected_outputs
+    )
+
+
+def _load_legacy_file_records(
+    store: RunStore,
+    filename: str,
+    *,
+    expected_outputs: dict[str, str] | None = None,
+) -> list[tuple[Path, tuple[int, int, int, int, int], str]]:
+    try:
+        document = store.read_json(filename)
+    except FileNotFoundError:
+        if expected_outputs:
+            raise RuntimeError("Legacy output records are missing")
+        return []
+    outputs = document.get("outputs") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != 1
+        or not isinstance(outputs, dict)
+        or not outputs
+        or any(type(name) is not str or not name for name in outputs)
+    ):
+        raise RuntimeError("Legacy output records are invalid")
+    if expected_outputs is not None and {
+        name: record.get("path") if isinstance(record, dict) else None
+        for name, record in outputs.items()
+    } != expected_outputs:
+        raise RuntimeError("Legacy output records do not match outputs")
+    records = []
+    expected_keys = {
+        "path", "dev", "ino", "mode", "size", "mtime_ns", "sha256"
+    }
+    for record in outputs.values():
+        if (
+            not isinstance(record, dict)
+            or set(record) != expected_keys
+            or type(record["path"]) is not str
+            or any(
+                type(record[name]) is not int
+                for name in ("dev", "ino", "mode", "size", "mtime_ns")
+            )
+            or not _is_sha256(record["sha256"])
+        ):
+            raise RuntimeError("Legacy output record is invalid")
+        records.append((
+            Path(record["path"]),
+            (
+                record["dev"],
+                record["ino"],
+                record["mode"],
+                record["size"],
+                record["mtime_ns"],
+            ),
+            record["sha256"],
+        ))
+    return records
+
+
+def _load_legacy_staging_records(
+    store: RunStore,
+) -> list[tuple[Path, tuple[int, int, int, int, int], str]]:
+    return _load_legacy_file_records(store, "legacy_staging_records.json")
+
+
+def _clear_legacy_output_records(store: RunStore) -> None:
+    (store.root / "legacy_output_records.json").unlink(missing_ok=True)
+
+
+def _clear_legacy_staging_records(store: RunStore) -> None:
+    (store.root / "legacy_staging_records.json").unlink(missing_ok=True)
+
+
+def _verify_legacy_output_record(
+    record: tuple[Path, tuple[int, int, int, int, int], str],
+) -> None:
+    output, expected_identity, expected_hash = record
+    if _legacy_output_identity(output) != expected_identity:
+        raise RuntimeError("Legacy output identity changed after publication")
+    if sha256_file(output) != expected_hash:
+        raise RuntimeError("Legacy output hash changed after publication")
+    if _legacy_output_identity(output) != expected_identity:
+        raise RuntimeError("Legacy output changed during verification")
+
+
+def _remove_legacy_output(
+    record: tuple[Path, tuple[int, int, int, int, int], str],
+) -> None:
+    _remove_legacy_outputs([record])
+
+
+def _remove_legacy_outputs(
+    records: list[tuple[Path, tuple[int, int, int, int, int], str]],
+) -> None:
+    isolated_records = []
+    try:
+        for output, expected_identity, expected_hash in records:
+            descriptor, isolated_value = tempfile.mkstemp(
+                dir=output.parent,
+                prefix=f".{output.name}.recovery-",
+                suffix=".tmp",
+            )
+            os.close(descriptor)
+            isolated = Path(isolated_value)
+            isolated.unlink()
+            try:
+                os.replace(output, isolated)
+            except FileNotFoundError as error:
+                isolated.unlink(missing_ok=True)
+                raise RuntimeError(
+                    "Legacy output disappeared during removal"
+                ) from error
+            isolated_records.append((isolated, output))
+            identity = _legacy_output_identity(isolated)
+            digest = sha256_file(isolated)
+            stable_identity = _legacy_output_identity(isolated)
+            if (
+                identity != expected_identity
+                or stable_identity != expected_identity
+                or digest != expected_hash
+            ):
+                raise RuntimeError("Legacy output changed and was not removed")
+
+        for isolated, _ in isolated_records:
+            isolated.unlink()
+        for _, output in isolated_records:
+            if output.exists() or output.is_symlink():
+                raise RuntimeError("A new legacy output appeared during removal")
+    except Exception as error:
+        restoration_error = None
+        for isolated, output in reversed(isolated_records):
+            if not isolated.exists():
+                continue
+            try:
+                if output.exists() or output.is_symlink():
+                    raise RuntimeError(
+                        f"Concurrent legacy output was preserved at {isolated}"
+                    )
+                os.replace(isolated, output)
+            except Exception as caught:
+                if restoration_error is None:
+                    restoration_error = caught
+        if restoration_error is not None:
+            raise error from restoration_error
+        raise
 
 
 def _legacy_output_targets(output_path: Path, slide_size: str) -> dict[str, Path]:
@@ -3237,11 +4410,13 @@ def _record_legacy_delivery(
     store: RunStore,
     page_records: list[tuple[str, dict, dict | None, dict | None]],
     outputs: dict[str, str],
+    output_records: list[tuple[Path, tuple[int, int, int, int, int], str]],
     *,
     output_format: str = "pptx",
 ) -> None:
+    hashes = {str(path): digest for path, _, digest in output_records}
     output_refs = {
-        name: {"path": path, "sha256": sha256_file(path)}
+        name: {"path": path, "sha256": hashes[path]}
         for name, path in outputs.items()
     }
     for page_id, state, result, route_result_ref in page_records:
@@ -3254,7 +4429,7 @@ def _record_legacy_delivery(
             },
             "outputs": output_refs,
         }
-        if result is None:
+        if result is None and state["status"] == "preserved_with_warning":
             delivery["warning"] = (
                 "Component reconstruction did not pass the parent gate; "
                 "the full source image was preserved."
@@ -3364,6 +4539,102 @@ def _accepted_reconstruction_inputs(
         "component_assets": component_assets,
         "text_items": result.get("text_items", prepared.get("text_items", [])),
     }
+
+
+def _load_local_fidelity_components(
+    store: RunStore,
+    result: dict,
+    *,
+    page_size: tuple[int, int],
+    output_dir: Path,
+) -> list[dict]:
+    reference = result.get("local_fidelity_ref")
+    route = result.get("route")
+    if reference is None and route is None:
+        return []
+    if route != "local_fidelity" or reference is None:
+        raise ValueError("local fidelity result binding is invalid")
+    _, payload = _load_legacy_ref(store, reference, max_bytes=16 * 1024 * 1024)
+    manifest = json.loads(payload.decode("utf-8"))
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "schema_version", "page_id", "source_sha256", "components",
+        "residual_pixels", "uncovered_pixels",
+    }:
+        raise ValueError("local fidelity manifest is invalid")
+    width, height = page_size
+    page_area = width * height
+    if (
+        manifest["schema_version"] != 1
+        or type(manifest["schema_version"]) is not int
+        or manifest["page_id"] != result.get("page_id")
+        or manifest["source_sha256"]
+        != result["accepted_asset_refs"]["source"]["sha256"]
+        or type(manifest["residual_pixels"]) is not int
+        or not 0 <= manifest["residual_pixels"] <= page_area
+        or manifest["uncovered_pixels"] != 0
+        or type(manifest["uncovered_pixels"]) is not int
+        or not isinstance(manifest["components"], list)
+        or len(manifest["components"]) > page_area
+    ):
+        raise ValueError("local fidelity manifest is invalid")
+
+    import numpy as np
+
+    covered = np.zeros((height, width), dtype=bool)
+    components = []
+    for index, item in enumerate(manifest["components"], start=1):
+        if not isinstance(item, dict) or set(item) != {
+            "ref", "bbox", "coverage"
+        }:
+            raise ValueError("local fidelity component is invalid")
+        bbox = item["bbox"]
+        if (
+            not isinstance(bbox, list)
+            or len(bbox) != 4
+            or any(type(value) is not int for value in bbox)
+        ):
+            raise ValueError("local fidelity component bbox is invalid")
+        left, top, right, bottom = bbox
+        if not (0 <= left < right <= width and 0 <= top < bottom <= height):
+            raise ValueError("local fidelity component bbox is invalid")
+        expected_coverage = (right - left) * (bottom - top) / page_area
+        coverage = item["coverage"]
+        if (
+            type(coverage) not in {int, float}
+            or not math.isfinite(coverage)
+            or not math.isclose(
+                float(coverage), expected_coverage, rel_tol=1e-9, abs_tol=1e-12
+            )
+            or not 0 < coverage <= 0.35
+        ):
+            raise ValueError("local fidelity component coverage is invalid")
+        _, patch_payload = _load_legacy_ref(
+            store,
+            item["ref"],
+            max_bytes=max(1024 * 1024, (right - left) * (bottom - top) * 8),
+        )
+        with Image.open(io.BytesIO(patch_payload)) as image:
+            if image.format != "PNG" or image.mode != "RGBA" or image.size != (
+                right - left, bottom - top
+            ):
+                raise ValueError("local fidelity component image is invalid")
+            alpha = np.asarray(image.getchannel("A")) > 0
+        if not np.any(alpha) or np.any(covered[top:bottom, left:right] & alpha):
+            raise ValueError("local fidelity component alpha is invalid")
+        covered[top:bottom, left:right] |= alpha
+        snapshot = output_dir / f"local-fidelity-{index:04d}.png"
+        snapshot.write_bytes(patch_payload)
+        components.append({
+            "component_id": f"local_fidelity_{index:04d}",
+            "path": str(snapshot),
+            "x": left,
+            "y": top,
+            "w": right - left,
+            "h": bottom - top,
+        })
+    if int(np.count_nonzero(covered)) != manifest["residual_pixels"]:
+        raise ValueError("local fidelity residual count is invalid")
+    return components
 
 
 def _accepted_slide_data(
@@ -3516,6 +4787,24 @@ def _accepted_slide_data(
                     published_route["plan"],
                 )
                 route_result_ref = published_route["result_ref"]
+        fidelity_components = _load_local_fidelity_components(
+            store,
+            result,
+            page_size=page_size,
+            output_dir=output_dir,
+        )
+        next_z_index = max(
+            (item["z_index"] for item in visual_elements), default=-1
+        ) + 1
+        for index, component in enumerate(fidelity_components):
+            component["z_index"] = next_z_index + index
+            visual_elements.append({
+                "object_id": component["component_id"],
+                "route": "raster_component",
+                "z_index": component["z_index"],
+                "component": component,
+            })
+        components.extend(fidelity_components)
         return {
             **prepared,
             "text_items": result.get(

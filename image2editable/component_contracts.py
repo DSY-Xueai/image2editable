@@ -130,7 +130,7 @@ def validate_component_repair_state(state: object) -> dict:
     if state["stop_reason"] not in {
         None, "empty_plan", "repeated_plan", "no_executable_actions",
         "round_limit", "no_quality_improvement", "unowned_raster_text",
-        "page_quality_failed",
+        "page_quality_failed", "fast_strict_escalation_exhausted",
     }:
         raise ValueError("component repair stop_reason is invalid")
     _validate_artifact_ref(state["graph_ref"], "graph_ref")
@@ -361,7 +361,7 @@ _ACTION_PARAMETERS = {
     "absorb_into_parent": frozenset(),
 }
 _OPTIONAL_ACTION_PARAMETERS = {
-    "accept": frozenset({"independent"}),
+    "accept": frozenset({"independent", "preserve_mask"}),
     "retry_with_box": frozenset({"independent"}),
     "retry_with_points": frozenset({"independent"}),
 }
@@ -551,6 +551,8 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
             raise ValueError("component action parameters are invalid")
         if "independent" in parameters and type(parameters["independent"]) is not bool:
             raise ValueError("component action independent parameter is invalid")
+        if "preserve_mask" in parameters and type(parameters["preserve_mask"]) is not bool:
+            raise ValueError("component action preserve_mask parameter is invalid")
         confidence = action["confidence"]
         if type(confidence) not in {int, float} or not math.isfinite(confidence) or not 0 <= confidence <= 1:
             raise ValueError("component action confidence is invalid")

@@ -13,6 +13,7 @@ import types
 import weakref
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -30,6 +31,56 @@ from scripts import (
 
 
 GROUNDING_DINO_REVISION = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+
+
+def test_refine_visual_mask_limits_grabcut_to_component_neighborhood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = np.zeros((400, 600, 3), dtype=np.uint8)
+    mask = np.zeros((400, 600), dtype=bool)
+    mask[100:140, 200:260] = True
+    seen: dict[str, tuple[int, ...]] = {}
+
+    def fake_grabcut(
+        crop: np.ndarray,
+        trimap: np.ndarray,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        seen["crop"] = crop.shape
+        seen["trimap"] = trimap.shape
+
+    monkeypatch.setattr(fg_extract.cv2, "grabCut", fake_grabcut)
+
+    refined = fg_extract._refine_visual_mask(image, mask)
+
+    assert seen == {"crop": (56, 76, 3), "trimap": (56, 76)}
+    assert np.array_equal(refined, mask)
+
+
+def test_refine_visual_mask_clamps_local_context_at_page_edge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = np.zeros((100, 120, 3), dtype=np.uint8)
+    mask = np.zeros((100, 120), dtype=bool)
+    mask[:20, :30] = True
+    seen: dict[str, tuple[int, ...]] = {}
+
+    def fake_grabcut(
+        crop: np.ndarray,
+        trimap: np.ndarray,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        seen["crop"] = crop.shape
+        seen["trimap"] = trimap.shape
+
+    monkeypatch.setattr(fg_extract.cv2, "grabCut", fake_grabcut)
+
+    refined = fg_extract._refine_visual_mask(image, mask)
+
+    assert seen == {"crop": (28, 38, 3), "trimap": (28, 38)}
+    assert np.array_equal(refined, mask)
 
 
 def test_grounding_dino_loads_processor_and_model_from_exact_local_revision(
@@ -482,6 +533,16 @@ def test_visual_worker_rejects_source_hash_mismatch_before_loading_pipeline(
         "text_mask_size": len(mask_content),
         "text_clean_sha256": hashlib.sha256(text_clean_content).hexdigest(),
         "text_clean_size": len(text_clean_content),
+        "page_policy": {
+            "route": "direct",
+            "confidence": 0.9,
+            "reasons": ["test"],
+            "automatic_sam": False,
+            "max_residual_rounds": 0,
+            "hole_recheck": False,
+            "max_lama_calls": 1,
+            "host_agent_allowed": False,
+        },
     }).encode("utf-8")
     request.write_bytes(request_content)
     monkeypatch.setattr(
@@ -525,6 +586,12 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
         "text_mask_size": len(mask_content),
         "text_clean_sha256": hashlib.sha256(text_clean_content).hexdigest(),
         "text_clean_size": len(text_clean_content),
+        "page_policy": {
+            "route": "direct", "confidence": 0.9, "reasons": ["test"],
+            "automatic_sam": False, "max_residual_rounds": 0,
+            "hole_recheck": False, "max_lama_calls": 1,
+            "host_agent_allowed": False,
+        },
     }).encode("utf-8")
     request.write_bytes(request_content)
     source_content = source.read_bytes()
@@ -536,6 +603,8 @@ def test_visual_worker_processes_verified_in_memory_source_snapshot(
         assert tuple(snapshot[0, 0]) == (255, 0, 0)
         assert kwargs["_text_mask"].shape == (6, 8)
         assert tuple(kwargs["_text_clean_image"][0, 0]) == (255, 255, 255)
+        assert kwargs["page_policy"].route == "direct"
+        assert kwargs["page_policy"].automatic_sam is False
         return {"snapshot": "verified"}
 
     monkeypatch.setattr(visual_worker, "_load_process_image", lambda: fake_process)
@@ -4288,6 +4357,110 @@ def test_resolve_visual_elements_reuses_candidate_as_semantic_support() -> None:
     assert elements[0].semantic_mask is candidate.mask
 
 
+def test_resolve_visual_elements_completes_initial_antialiased_card_edge() -> None:
+    import numpy as np
+
+    image = np.full((72, 72, 3), 240, dtype=np.uint8)
+    image[15:57, 15:57] = (178, 116, 68)
+    mask = np.zeros(image.shape[:2], dtype=bool)
+    mask[16:56, 16:56] = True
+    candidate = visual_segment.MaskCandidate(mask, 0.95, "sam")
+
+    elements = visual_segment.resolve_visual_elements([candidate])
+    visual_segment.complete_initial_visual_element_masks(elements, image)
+
+    assert len(elements) == 1
+    assert np.all(elements[0].mask[15:57, 15:57])
+    assert np.all(elements[0].semantic_mask[15:57, 15:57])
+
+
+def test_image_pipeline_imports_initial_mask_completion() -> None:
+    assert (
+        image_to_ppt.complete_initial_visual_element_masks
+        is visual_segment.complete_initial_visual_element_masks
+    )
+
+
+def test_resolve_visual_elements_merges_strongly_contained_object_masks_despite_detector_label_variation() -> None:
+    import numpy as np
+
+    full_line = np.zeros((80, 120), dtype=bool)
+    full_line[35:43, 15:105] = True
+    left_line = np.zeros_like(full_line)
+    left_line[35:43, 15:64] = True
+    right_line = np.zeros_like(full_line)
+    right_line[35:43, 50:105] = True
+    candidates = [
+        visual_segment.MaskCandidate(
+            full_line, 0.94, "grounded:full:object",
+            label="trophy wreath", role="object",
+            object_box=(14.0, 34.0, 106.0, 44.0),
+        ),
+        visual_segment.MaskCandidate(
+            left_line, 0.90, "grounded:tile_1:object",
+            label="decoration", role="object",
+            object_box=(14.0, 34.0, 66.0, 44.0),
+        ),
+        visual_segment.MaskCandidate(
+            right_line, 0.91, "grounded:tile_2:object",
+            label="trophy", role="object",
+            object_box=(48.0, 34.0, 106.0, 44.0),
+        ),
+    ]
+
+    elements = visual_segment.resolve_visual_elements(candidates)
+
+    assert len(elements) == 1
+    assert np.array_equal(elements[0].mask, full_line)
+    assert np.array_equal(elements[0].semantic_mask, full_line)
+
+
+def test_resolve_visual_elements_keeps_differently_labelled_objects_with_distinct_pixels() -> None:
+    import numpy as np
+
+    outer = np.zeros((100, 140), dtype=bool)
+    outer[10:70, 20:100] = True
+    inner = np.zeros_like(outer)
+    inner[12:68, 22:98] = True
+    candidates = [
+        visual_segment.MaskCandidate(
+            outer, 0.95, "grounded:full:object",
+            label="trophy", role="object", object_box=(20.0, 10.0, 100.0, 70.0),
+        ),
+        visual_segment.MaskCandidate(
+            inner, 0.94, "grounded:tile_2:object",
+            label="medal", role="object", object_box=(22.0, 12.0, 98.0, 68.0),
+        ),
+    ]
+
+    elements = visual_segment.resolve_visual_elements(candidates)
+
+    assert len(elements) == 2
+
+
+def test_resolve_visual_elements_keeps_overlapping_candidates_with_different_roles() -> None:
+    import numpy as np
+
+    outer = np.zeros((100, 140), dtype=bool)
+    outer[10:70, 20:100] = True
+    inner = np.zeros_like(outer)
+    inner[12:68, 22:98] = True
+    candidates = [
+        visual_segment.MaskCandidate(
+            outer, 0.95, "grounded:full:object",
+            label="line", role="object", object_box=(20.0, 10.0, 100.0, 70.0),
+        ),
+        visual_segment.MaskCandidate(
+            inner, 0.94, "grounded:tile_2:container",
+            label="line", role="container", object_box=(22.0, 12.0, 98.0, 68.0),
+        ),
+    ]
+
+    elements = visual_segment.resolve_visual_elements(candidates)
+
+    assert len(elements) == 2
+
+
 def test_reference_option_is_explicit() -> None:
     assert _parse_reference_option(reference=False, no_reference=False) is False
     assert _parse_reference_option(reference=True, no_reference=False) is True
@@ -6390,6 +6563,66 @@ def test_prepare_multiple_images_separates_ocr_and_visual_stages(
         "finalize:second",
         "close-ocr",
     ]
+
+
+def test_isolated_prepare_multiple_images_batches_ocr_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    image_paths = [tmp_path / "first.png", tmp_path / "second.png"]
+    for image_path in image_paths:
+        Image.new("RGB", (20, 30), "white").save(image_path)
+
+    import numpy as np
+
+    calls = []
+    masks = [np.zeros((30, 20), dtype=np.uint8) for _ in image_paths]
+    items = [
+        [{"box": [1, 1, 4, 4], "text": "one"}],
+        [{"box": [2, 2, 4, 4], "text": "two"}],
+    ]
+
+    def fake_batch(paths, **kwargs):
+        calls.append((list(paths), kwargs))
+        return list(zip(items, masks, strict=True))
+
+    monkeypatch.setattr(image_to_ppt, "detect_text_batch", fake_batch)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "detect_text",
+        lambda *args, **kwargs: pytest.fail(
+            "isolated batch must replace page OCR"
+        ),
+    )
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+
+    def fake_process(image_path, work_dir, lang, text_analysis, **kwargs):
+        return {
+            "original_image_path": str(image_path),
+            "_work_dir": str(work_dir),
+            "components": [],
+            "background_original_path": str(work_dir / "background.png"),
+            "text_items": text_analysis["items"],
+        }
+
+    monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_finalize_slide_quality",
+        lambda slide, lang, **kwargs: slide,
+    )
+
+    result = image_to_ppt._prepare_multiple_images(
+        image_paths,
+        "en",
+        _work_root=tmp_path / "work",
+        _resource_isolation=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] == image_paths
+    assert calls[0][1]["isolated"] is True
+    assert [slide["text_items"] for slide in result] == items
 
 
 def test_prepare_single_image_reuses_staged_resource_pipeline(
@@ -8793,6 +9026,11 @@ def _prepare_component_layers_fixture(
     before_visual_worker=None,
     before_prepare=None,
     ocr_rotation: int = 0,
+    pipeline_mode: str = "strict",
+    visual_worker_pool=None,
+    expected_calls: dict[str, int] | None = None,
+    visual_kwargs: list[dict] | None = None,
+    visual_text_analysis: list[dict] | None = None,
 ) -> tuple[dict, Path]:
     source_path = tmp_path / "outside-source.png"
     Image.new("RGB", (16, 10), "white").save(source_path)
@@ -8832,9 +9070,9 @@ def _prepare_component_layers_fixture(
         components_dir = target / "components"
         masks_dir = target / "element-masks"
         semantic_masks_dir = target / "semantic-masks"
-        components_dir.mkdir()
-        masks_dir.mkdir()
-        semantic_masks_dir.mkdir()
+        components_dir.mkdir(exist_ok=True)
+        masks_dir.mkdir(exist_ok=True)
+        semantic_masks_dir.mkdir(exist_ok=True)
         component_paths = []
         mask_paths = []
         semantic_mask_paths = []
@@ -8923,9 +9161,13 @@ def _prepare_component_layers_fixture(
         assert defer_quality is True
         return fake_slide(Path(path), Path(target), text_analysis)
 
-    def fake_process_isolated(path, target, lang, text_analysis):
+    def fake_process_isolated(path, target, lang, text_analysis, **kwargs):
         if before_visual_worker is not None:
             before_visual_worker()
+        if visual_kwargs is not None:
+            visual_kwargs.append(kwargs)
+        if visual_text_analysis is not None:
+            visual_text_analysis.append(text_analysis.copy())
         return fake_slide(Path(path), Path(target), text_analysis)
 
     monkeypatch.setattr(image_to_ppt, "detect_text", fake_detect)
@@ -8949,8 +9191,10 @@ def _prepare_component_layers_fixture(
         lang="en",
         resource_isolation=resource_isolation,
         ocr_rotation=ocr_rotation,
+        pipeline_mode=pipeline_mode,
+        visual_worker_pool=visual_worker_pool,
     )
-    assert calls == {"ocr": 1, "visual": 1}
+    assert calls == (expected_calls or {"ocr": 1, "visual": 1})
     return prepared, work_dir
 
 
@@ -9071,7 +9315,7 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     cleanup_path = Path(prepared["_text_cleanup_mask_path"])
     assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
     assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
@@ -9106,6 +9350,141 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
             assert_asset(value)
     for component in manifest["components"]:
         assert_asset(component["asset"])
+
+
+def test_prepare_fast_layers_persists_quality_escalation_route_in_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    policy = image_to_ppt.PagePolicy(
+        route="direct",
+        confidence=0.91,
+        reasons=("regular_geometry", "low_overlap"),
+        automatic_sam=False,
+        max_residual_rounds=0,
+        hole_recheck=False,
+        max_lama_calls=1,
+        host_agent_allowed=False,
+    )
+
+    def configure_fast_route(work_dir):
+        monkeypatch.setattr(
+            image_to_ppt,
+            "_infer_page_policy",
+            lambda *args, **kwargs: policy,
+        )
+
+    prepared, _ = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        before_prepare=configure_fast_route,
+        pipeline_mode="fast",
+    )
+
+    manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
+    assert manifest["page_policy"] == {
+        "schema_version": 1,
+        "route": "direct",
+        "confidence": 0.91,
+        "reasons": ["regular_geometry", "low_overlap"],
+    }
+
+
+def test_prepare_fast_direct_layers_run_visual_stage_inline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    policy = image_to_ppt.PagePolicy(
+        route="direct",
+        confidence=0.95,
+        reasons=("regular_geometry",),
+        automatic_sam=False,
+        max_residual_rounds=0,
+        hole_recheck=False,
+        max_lama_calls=1,
+        host_agent_allowed=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_infer_page_policy",
+        lambda *args, **kwargs: policy,
+    )
+    prepared, _ = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        resource_isolation=True,
+        pipeline_mode="fast",
+        before_visual_worker=lambda: pytest.fail(
+            "direct route must not start the isolated visual worker"
+        ),
+    )
+
+    assert prepared["_page_policy"]["route"] == "direct"
+
+
+def test_prepare_fast_layers_rebuilds_visuals_when_targeted_ocr_recovers_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    policy = image_to_ppt.PagePolicy(
+        route="local_refine",
+        confidence=0.75,
+        reasons=("high_ocr_confidence",),
+        automatic_sam=False,
+        max_residual_rounds=1,
+        hole_recheck=False,
+        max_lama_calls=1,
+        host_agent_allowed=False,
+    )
+    recovered = {
+        "box": [8, 6, 3, 2],
+        "text": "B",
+        "font_size": 12.0,
+        "color": "#000000",
+        "bold": False,
+        "font": "Arial",
+        "align": 1,
+        "confidence": 0.99,
+    }
+    visual_kwargs = []
+    visual_text_analysis = []
+
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_infer_page_policy",
+        lambda *args, **kwargs: policy,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_targeted_candidate_ocr_sweep",
+        lambda *args, **kwargs: {
+            "items": [recovered],
+            "text_mask": image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8),
+            "recovered_items": [recovered],
+            "diagnostics": [],
+        },
+    )
+
+    prepared, work_dir = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        resource_isolation=True,
+        pipeline_mode="fast",
+        visual_worker_pool=object(),
+        expected_calls={"ocr": 1, "visual": 2},
+        visual_kwargs=visual_kwargs,
+        visual_text_analysis=visual_text_analysis,
+    )
+
+    assert prepared["text_items"][0]["text"] == recovered["text"]
+    assert prepared["text_items"][0]["box"] == recovered["box"]
+    assert all(Path(path).is_file() for path in prepared["_element_mask_paths"])
+    manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
+    assert all((work_dir / record["path"]).is_file()
+               for record in manifest["assets"]["element_masks"])
+    assert [analysis.get("page_policy") for analysis in visual_text_analysis] == [
+        image_to_ppt.asdict(policy), image_to_ppt.asdict(policy)
+    ]
 
 
 def test_prepare_component_layers_rotates_ocr_and_restores_display_coordinates(
@@ -9590,8 +9969,9 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 6
+    assert manifest["schema_version"] == 7
     manifest["schema_version"] = 1
+    manifest.pop("page_policy")
     for item in manifest["text_items"]:
         item.pop("rotation")
     manifest.pop("initial_diagnostics")
@@ -9940,6 +10320,166 @@ def test_agent_managed_finalize_stages_components_before_quality_failure(
     assert hashlib.sha256(original_path.read_bytes()).hexdigest() == original_hash
     assert cleanup_calls == ["close"]
     assert not list(Path(prepared["_work_dir"]).glob("quality-components-*"))
+
+
+@pytest.mark.parametrize("resource_isolation", [False, True])
+def test_fast_finalize_escalates_quality_failure_to_one_strict_rebuild(
+    tmp_path: Path,
+    monkeypatch,
+    resource_isolation: bool,
+) -> None:
+    prepared, work_dir = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        resource_isolation=resource_isolation,
+        before_prepare=lambda work_dir: monkeypatch.setattr(
+            image_to_ppt,
+            "_infer_page_policy",
+            lambda *args, **kwargs: image_to_ppt.PagePolicy(
+                route="local_refine",
+                confidence=0.72,
+                reasons=("regular_geometry",),
+                automatic_sam=False,
+                max_residual_rounds=1,
+                hole_recheck=False,
+                max_lama_calls=1,
+                host_agent_allowed=False,
+            ),
+        ),
+        pipeline_mode="fast",
+    )
+    events = []
+
+    def fake_process(
+        image_path,
+        strict_work_dir,
+        object_detector,
+        mask_generator,
+        lang,
+        *,
+        text_analysis,
+        defer_quality,
+        page_policy,
+    ):
+        assert page_policy == image_to_ppt.strict_page_policy()
+        assert defer_quality is True
+        assert text_analysis["items"] == prepared["text_items"]
+        component_dir = Path(strict_work_dir) / "components"
+        component_dir.mkdir()
+        component_path = component_dir / "component_0000.png"
+        Image.new("RGBA", (4, 4), "green").save(component_path)
+        events.append("strict_rebuild")
+        return {
+            "candidate": "strict",
+            "components": [{"path": str(component_path)}],
+        }
+
+    def fake_process_isolated(
+        image_path,
+        strict_work_dir,
+        lang,
+        text_analysis,
+        *,
+        page_policy,
+    ):
+        return fake_process(
+            image_path,
+            strict_work_dir,
+            None,
+            None,
+            lang,
+            text_analysis=text_analysis,
+            defer_quality=True,
+            page_policy=page_policy,
+        )
+
+    def fake_finalize(slide_data, lang, **kwargs):
+        assert kwargs == {"_resource_isolation": resource_isolation}
+        if slide_data.get("candidate") != "strict":
+            events.append("fast_quality_failed")
+            raise image_to_ppt.VisualSegmentationError(
+                "component/page quality failed: background_residual"
+            )
+        events.append("strict_quality_passed")
+        return slide_data
+
+    monkeypatch.setattr(image_to_ppt, "_process_image", fake_process)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_process_image_isolated",
+        fake_process_isolated,
+    )
+    monkeypatch.setattr(image_to_ppt, "_finalize_slide_quality", fake_finalize)
+
+    result = image_to_ppt.finalize_component_layers(
+        prepared,
+        _accepted_component_layers(prepared),
+        lang="en",
+    )
+
+    assert events == [
+        "fast_quality_failed",
+        "strict_rebuild",
+        "strict_quality_passed",
+    ]
+    assert result["candidate"] == "strict"
+    assert result["phase"] == "quality_accepted"
+    assert Path(result["components"][0]["path"]).is_file()
+    assert not list(work_dir.glob("quality-components-*"))
+    assert len(list(work_dir.glob("quality-escalation-*"))) == 1
+
+
+def test_fast_finalize_strict_rebuild_reuses_visual_worker_pool(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    visual_kwargs = []
+    prepared, _ = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        resource_isolation=True,
+        pipeline_mode="fast",
+        visual_kwargs=visual_kwargs,
+        before_prepare=lambda work_dir: monkeypatch.setattr(
+            image_to_ppt,
+            "_infer_page_policy",
+            lambda *args, **kwargs: image_to_ppt.PagePolicy(
+                route="local_refine",
+                confidence=0.72,
+                reasons=("regular_geometry",),
+                automatic_sam=False,
+                max_residual_rounds=1,
+                hole_recheck=False,
+                max_lama_calls=1,
+                host_agent_allowed=False,
+            ),
+        ),
+    )
+    pool = object()
+    calls = []
+
+    def fake_finalize(slide_data, lang, **kwargs):
+        if not calls:
+            calls.append("fast")
+            raise image_to_ppt.VisualSegmentationError(
+                "component/page quality failed: background_residual"
+            )
+        calls.append("strict")
+        return slide_data
+
+    monkeypatch.setattr(image_to_ppt, "_finalize_slide_quality", fake_finalize)
+
+    result = image_to_ppt.finalize_component_layers(
+        prepared,
+        _accepted_component_layers(prepared),
+        lang="en",
+        visual_worker_pool=pool,
+    )
+
+    assert result["phase"] == "quality_accepted"
+    assert calls == ["fast", "strict"]
+    assert visual_kwargs[0] == {}
+    assert visual_kwargs[-1]["worker_pool"] is pool
 
 
 def test_agent_managed_finalize_success_keeps_staging_without_duplicate_loads(

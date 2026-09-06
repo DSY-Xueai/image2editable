@@ -1796,9 +1796,11 @@ def _component_batch_result_max_bytes(
     )
 
 
-def _validate_component_batch_request(
+def _load_component_batch_request(
     request_path: Path,
     result_path: Path,
+    *,
+    require_fresh_result: bool,
 ) -> tuple[np.ndarray, list[dict], dict]:
     request_path = Path(os.path.abspath(request_path))
     result_path = Path(os.path.abspath(result_path))
@@ -1813,8 +1815,11 @@ def _validate_component_batch_request(
         result_path.lstat()
     except FileNotFoundError:
         pass
+    except OSError as exc:
+        raise ValueError("SAM component batch result path is unsafe") from exc
     else:
-        raise ValueError("SAM component batch result already exists")
+        if require_fresh_result:
+            raise ValueError("SAM component batch result already exists")
     request_binding = _bind_batch_regular_file(
         request_path,
         _BATCH_MAX_REQUEST_BYTES,
@@ -1856,14 +1861,22 @@ def _validate_component_batch_request(
     return image, prompts, result_binding
 
 
-def _run_component_prompt_batch(request_path: Path, result_path: Path) -> int:
-    image, prompts, result_binding = _validate_component_batch_request(
-        request_path, result_path
+def _validate_component_batch_request(
+    request_path: Path,
+    result_path: Path,
+) -> tuple[np.ndarray, list[dict], dict]:
+    return _load_component_batch_request(
+        request_path,
+        result_path,
+        require_fresh_result=True,
     )
-    (
-        _, create_generator, _, _, resolve_checkpoint, _, _,
-    ) = _load_tools()
-    generator = create_generator(resolve_checkpoint(), resource_safe=True)
+
+
+def _component_prompt_batch_payload(
+    generator,
+    image: np.ndarray,
+    prompts: list[dict],
+) -> list[dict]:
     masks = component_prompt_masks(generator, image, prompts)
     if len(masks) != len(prompts) or any(
         not isinstance(mask, np.ndarray)
@@ -1873,16 +1886,96 @@ def _run_component_prompt_batch(request_path: Path, result_path: Path) -> int:
         for mask in masks
     ):
         raise RuntimeError("SAM component batch generated an invalid mask")
-    payload = [
+    return [
         {"component_id": prompt["component_id"], **_mask_record(mask)}
         for prompt, mask in zip(prompts, masks)
     ]
+
+
+def run_component_prompt_batch_with_generator(
+    request_path: Path,
+    result_path: Path,
+    generator,
+) -> int:
+    """Execute a bound component request with an already-loaded generator."""
+    image, prompts, result_binding = _validate_component_batch_request(
+        request_path, result_path
+    )
+    payload = _component_prompt_batch_payload(generator, image, prompts)
     _write_bound_json_result(
         result_binding,
         payload,
         _component_batch_result_max_bytes(tuple(image.shape[:2]), len(prompts)),
     )
     return 0
+
+
+def read_component_prompt_batch_result(
+    request_path: Path,
+    result_path: Path,
+) -> list[np.ndarray]:
+    """Read a bound component result while preserving its input contract."""
+    image, prompts, result_binding = _load_component_batch_request(
+        request_path,
+        result_path,
+        require_fresh_result=False,
+    )
+    result = _bind_batch_regular_file(
+        result_binding["path"],
+        _component_batch_result_max_bytes(tuple(image.shape[:2]), len(prompts)),
+        "SAM component batch result",
+    )
+    records = _read_batch_bound_json(result)
+    _verify_batch_result_parent(result_binding)
+    if not isinstance(records, list) or len(records) != len(prompts):
+        raise RuntimeError("SAM component worker returned an invalid result batch")
+    masks = []
+    for prompt, record in zip(prompts, records):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"component_id", "mask", "mask_shape"}
+            or record["component_id"] != prompt["component_id"]
+        ):
+            raise RuntimeError("SAM component worker returned results out of order")
+        mask = _decode_expected_mask(record, tuple(image.shape[:2])).copy()
+        if mask.shape != image.shape[:2] or not mask.any():
+            raise RuntimeError("SAM component worker returned an invalid mask")
+        masks.append(mask)
+    return masks
+
+
+def component_prompt_batch_request_bytes(
+    image_shape: tuple[int, int],
+    prompts: list[dict],
+) -> bytes:
+    """Build one bounded component request for a resident worker."""
+    validated_prompts = _validate_component_prompt_batch(
+        prompts,
+        image_shape,
+        max_prompts=_COMPONENT_BATCH_MAX_PROMPTS,
+    )
+    request_bytes = json.dumps(
+        {
+            "schema_version": _BATCH_SCHEMA_VERSION,
+            "image": "image.png",
+            "prompts": validated_prompts,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(request_bytes) > _BATCH_MAX_REQUEST_BYTES:
+        raise ValueError("SAM component prompt batch request is too large")
+    return request_bytes
+
+
+def _run_component_prompt_batch(request_path: Path, result_path: Path) -> int:
+    (
+        _, create_generator, _, _, resolve_checkpoint, _, _,
+    ) = _load_tools()
+    generator = create_generator(resolve_checkpoint(), resource_safe=True)
+    return run_component_prompt_batch_with_generator(
+        request_path, result_path, generator
+    )
 
 
 def run_component_prompt_worker(

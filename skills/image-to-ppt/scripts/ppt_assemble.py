@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from io import BytesIO
 from numbers import Integral, Real
 from pathlib import Path
 
@@ -97,7 +98,7 @@ def compute_contain_transform(img_width: int, img_height: int) -> ContainTransfo
 
 
 def assemble_pptx(
-    background_path: str | Path,
+    background_path: str | Path | None,
     components: list[dict],
     text_items: list[dict],
     img_width: int,
@@ -111,6 +112,7 @@ def assemble_pptx(
     content_offset_x: int = 0,
     content_offset_y: int = 0,
     visual_elements: list[dict] | None = None,
+    background_rgb: list[int] | None = None,
 ) -> str:
     """Assemble a PPTX from background, foreground components, and text.
 
@@ -165,10 +167,13 @@ def assemble_pptx(
     slide = prs.slides.add_slide(blank_layout)
 
     # Layer 1 (bottom): Background image
-    slide.shapes.add_picture(
-        str(background_path), 0, 0,
-        Inches(transform.slide_width), Inches(transform.slide_height)
-    )
+    if background_rgb is None:
+        slide.shapes.add_picture(
+            str(background_path), 0, 0,
+            Inches(transform.slide_width), Inches(transform.slide_height)
+        )
+    else:
+        _set_slide_background(slide, background_rgb)
     logger.info("Added background layer.")
 
     # Layer 2 (middle): Foreground visual objects
@@ -218,10 +223,13 @@ def assemble_pptx(
         original_image_path = Path(original_image_path)
         if original_image_path.exists():
             ref_slide = prs.slides.add_slide(blank_layout)
-            ref_slide.shapes.add_picture(
-                str(background_path), 0, 0,
-                Inches(transform.slide_width), Inches(transform.slide_height)
-            )
+            if background_rgb is None:
+                ref_slide.shapes.add_picture(
+                    str(background_path), 0, 0,
+                    Inches(transform.slide_width), Inches(transform.slide_height)
+                )
+            else:
+                _set_slide_background(ref_slide, background_rgb)
             left, top, width, height = _map_bbox(
                 0,
                 0,
@@ -380,7 +388,9 @@ def assemble_pptx_multi(
         slide = prs.slides.add_slide(blank_layout)
 
         # Layer 1: Background
-        if original_transform is None:
+        if data.get("background_rgb") is not None:
+            _set_slide_background(slide, data["background_rgb"])
+        elif original_transform is None:
             slide.shapes.add_picture(
                 str(data[background_key]), 0, 0,
                 Inches(transform.slide_width), Inches(transform.slide_height)
@@ -440,7 +450,9 @@ def assemble_pptx_multi(
             orig = Path(data["original_image_path"])
             if orig.exists():
                 ref_slide = prs.slides.add_slide(blank_layout)
-                if original_transform is None:
+                if data.get("background_rgb") is not None:
+                    _set_slide_background(ref_slide, data["background_rgb"])
+                elif original_transform is None:
                     ref_slide.shapes.add_picture(
                         str(data[background_key]), 0, 0,
                         Inches(transform.slide_width), Inches(transform.slide_height)
@@ -492,6 +504,12 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
         int(hex_color[2:4], 16),
         int(hex_color[4:6], 16),
     )
+
+
+def _set_slide_background(slide, rgb: list[int]) -> None:
+    fill = slide.background.fill
+    fill.solid()
+    fill.fore_color.rgb = RGBColor(*rgb)
 
 
 def _validate_canvas(
@@ -588,13 +606,38 @@ def _add_component(
         content_offset_x,
         content_offset_y,
     )
+    image_source = (
+        BytesIO(component["blob"])
+        if isinstance(component.get("blob"), bytes)
+        else component["path"]
+    )
     picture = slide.shapes.add_picture(
-        component["path"],
+        image_source,
         Inches(left),
         Inches(top),
         Inches(width),
         Inches(height),
     )
+    crop = component.get("crop")
+    if crop is not None:
+        if not isinstance(crop, dict) or set(crop) != {
+            "left", "top", "right", "bottom"
+        }:
+            raise ValueError("component crop is invalid")
+        values = [crop[name] for name in ("left", "top", "right", "bottom")]
+        if (
+            any(type(value) not in {int, float} or not math.isfinite(value) for value in values)
+            or any(value < 0 or value >= 1 for value in values)
+            or values[0] + values[2] >= 1
+            or values[1] + values[3] >= 1
+        ):
+            raise ValueError("component crop is invalid")
+        (
+            picture.crop_left,
+            picture.crop_top,
+            picture.crop_right,
+            picture.crop_bottom,
+        ) = (float(value) for value in values)
     component_id = component_id or component.get("component_id")
     if isinstance(component_id, str) and component_id:
         picture.name = f"image2editable:{component_id}"
@@ -629,6 +672,28 @@ def _add_visual_element(
             element.get("object_id"),
         )
         return
+    if route == "native_image":
+        _add_component(
+            slide,
+            element["component"],
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+            element.get("object_id"),
+        )
+        return
+    if route == "native_text":
+        box = _add_textbox(
+            slide,
+            element["text"],
+            img_w,
+            img_h,
+            transform,
+            *canvas_args,
+        )
+        box.name = f"image2editable:{element['object_id']}"
+        return
     if route == "native_shape":
         _add_native_shape(
             slide,
@@ -656,6 +721,7 @@ def _add_native_shape(
     payload = element["shape"]
     shape_type = payload["shape_type"]
     fill_rgb = payload["fill_rgb"]
+    stroke_rgb = payload.get("stroke_rgb")
     canvas_args = (
         canvas_width,
         canvas_height,
@@ -688,8 +754,12 @@ def _add_native_shape(
             Inches(end_left),
             Inches(end_top),
         )
-        shape.line.color.rgb = RGBColor(*fill_rgb)
+        shape.line.color.rgb = RGBColor(*(stroke_rgb or fill_rgb))
         shape.line.width = Inches(line_width)
+        _set_solid_fill_opacity(
+            shape._element.spPr.find(qn("a:ln")),
+            payload.get("stroke_opacity", 1.0),
+        )
     else:
         shape_types = {
             "rectangle": MSO_SHAPE.RECTANGLE,
@@ -712,9 +782,34 @@ def _add_native_shape(
         shape = slide.shapes.add_shape(
             shape_types[shape_type], *(Inches(value) for value in mapped)
         )
-        shape.fill.solid()
-        shape.fill.fore_color.rgb = RGBColor(*fill_rgb)
-        shape.line.fill.background()
+        if fill_rgb is None:
+            shape.fill.background()
+        else:
+            shape.fill.solid()
+            shape.fill.fore_color.rgb = RGBColor(*fill_rgb)
+            _set_solid_fill_opacity(
+                shape._element.spPr,
+                payload.get("fill_opacity", 1.0),
+            )
+        if stroke_rgb is None:
+            shape.line.fill.background()
+        else:
+            shape.line.color.rgb = RGBColor(*stroke_rgb)
+            _, _, line_width, _ = _map_bbox(
+                0,
+                0,
+                payload.get("line_width", 1.0),
+                payload.get("line_width", 1.0),
+                img_w,
+                img_h,
+                transform,
+                *canvas_args,
+            )
+            shape.line.width = Inches(line_width)
+            _set_solid_fill_opacity(
+                shape._element.spPr.find(qn("a:ln")),
+                payload.get("stroke_opacity", 1.0),
+            )
     shape.name = f"image2editable:{element['object_id']}"
 
 
@@ -784,17 +879,55 @@ def _add_textbox(
         font_scale = img_w / canvas_width
     else:
         font_scale = transform.content_width / SLIDE_WIDTH_INCHES
-    font_size = item.get("font_size", 12) * font_scale
+    if "font_size_pt" in item:
+        font_size = item["font_size_pt"] * transform.content_width * 72 / img_w
+    else:
+        font_size = item.get("font_size", 12) * font_scale
     font.size = Pt(font_size)
+    character_spacing = item.get("character_spacing_pt", 0.0)
+    if (
+        type(character_spacing) not in {int, float}
+        or not math.isfinite(character_spacing)
+        or not -4000.0 <= character_spacing <= 201168.0
+    ):
+        raise ValueError("text character spacing is invalid")
+    if character_spacing:
+        spacing = character_spacing * transform.content_width * 72 / img_w
+        run._r.get_or_add_rPr().set("spc", str(round(spacing * 100)))
     font.bold = item.get("bold", False)
+    font.italic = item.get("italic", False)
 
     color = _hex_to_rgb(item.get("color", "#000000"))
     font.color.rgb = RGBColor(*color)
+    _set_solid_fill_opacity(
+        run._r.get_or_add_rPr(), item.get("fill_opacity", 1.0)
+    )
 
     # Alignment: 0=left, 1=center, 2=right
     from pptx.enum.text import PP_ALIGN
     align_map = {0: PP_ALIGN.LEFT, 1: PP_ALIGN.CENTER, 2: PP_ALIGN.RIGHT}
     p.alignment = align_map.get(item.get("align", 1), PP_ALIGN.CENTER)
+    return box
+
+
+def _set_solid_fill_opacity(root, opacity: float) -> None:
+    if (
+        type(opacity) not in {int, float}
+        or not math.isfinite(opacity)
+        or not 0.0 <= opacity <= 1.0
+    ):
+        raise ValueError("fill opacity must be between 0 and 1")
+    if opacity == 1.0:
+        return
+    solid_fill = root.find(qn("a:solidFill")) if root is not None else None
+    color = solid_fill.find(qn("a:srgbClr")) if solid_fill is not None else None
+    if color is None:
+        raise ValueError("fill opacity requires an RGB solid fill")
+    alpha = color.find(qn("a:alpha"))
+    if alpha is None:
+        alpha = OxmlElement("a:alpha")
+        color.append(alpha)
+    alpha.set("val", str(round(float(opacity) * 100000)))
 
 
 def _set_run_font(run, font_name: str) -> None:

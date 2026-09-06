@@ -38,6 +38,37 @@ def _visual_metrics(
 
     height, width = visual_hole.shape
     inside_y, inside_x = np.nonzero(visual_hole)
+    donor_counts = np.zeros(len(inside_y), dtype=np.uint8)
+    donor_min = np.full((len(inside_y), 3), 255, dtype=np.int16)
+    donor_max = np.zeros((len(inside_y), 3), dtype=np.int16)
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        outside_y, outside_x = inside_y + dy, inside_x + dx
+        valid = (
+            (outside_y >= 0) & (outside_y < height)
+            & (outside_x >= 0) & (outside_x < width)
+        )
+        valid_indices = np.flatnonzero(valid)
+        if not valid_indices.size:
+            continue
+        oy, ox = outside_y[valid_indices], outside_x[valid_indices]
+        valid_indices = valid_indices[donor_mask[oy, ox]]
+        if not valid_indices.size:
+            continue
+        colors = source[
+            outside_y[valid_indices], outside_x[valid_indices]
+        ].astype(np.int16)
+        donor_counts[valid_indices] += 1
+        donor_min[valid_indices] = np.minimum(
+            donor_min[valid_indices], colors
+        )
+        donor_max[valid_indices] = np.maximum(
+            donor_max[valid_indices], colors
+        )
+    # A one-pixel antialias cannot satisfy two distinct adjacent surfaces.
+    conflicting_edges = (
+        (donor_counts >= 2)
+        & (np.max(donor_max - donor_min, axis=1) >= 48)
+    )
     boundary_errors: list[np.ndarray] = []
     gradient_errors: list[np.ndarray] = []
     for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -52,6 +83,7 @@ def _visual_metrics(
         oy, ox = outside_y[valid_indices], outside_x[valid_indices]
         visible = donor_mask[oy, ox]
         valid_indices = valid_indices[visible]
+        valid_indices = valid_indices[~conflicting_edges[valid_indices]]
         if not valid_indices.size:
             continue
         iy, ix = inside_y[valid_indices], inside_x[valid_indices]
@@ -478,7 +510,9 @@ def build_presentation_layer(
             },
         }
     text_hole = semantic & ~ownership & text
-    visual_hole = semantic & ~ownership & expanded_higher & ~text_hole
+    visual_hole = (
+        semantic & ~ownership & expanded_higher & ~higher_layer & ~text_hole
+    )
     generated = text_hole | visual_hole
     rgb = np.asarray(text_clean_rgb, dtype=np.uint8).copy()
     rgb[ownership] = source[ownership]

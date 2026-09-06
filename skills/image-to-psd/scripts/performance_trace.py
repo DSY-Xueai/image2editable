@@ -27,6 +27,16 @@ _EVENT_FIELDS = {
     "agent_request_published": ({"page_id", "operation_count"}, {"page_id"}),
     "agent_plan_recorded": ({"page_id", "operation_count", "duration_ms", "status"}, {"page_id", "duration_ms", "status"}),
     "device_summary": ({"platform", "device", "cuda_available", "mps_available"}, {"platform", "device", "cuda_available", "mps_available"}),
+    "page_summary": (
+        {
+            "page_id", "route", "duration_ms", "sam_calls", "lama_calls",
+            "worker_starts", "host_wait_ms", "token_count",
+        },
+        {
+            "page_id", "route", "duration_ms", "sam_calls", "lama_calls",
+            "worker_starts", "host_wait_ms", "token_count",
+        },
+    ),
 }
 
 
@@ -86,7 +96,7 @@ def _validate_event(event: object, fields: dict) -> None:
 def _validate_field(name: str, value: object) -> None:
     if isinstance(value, (list, dict, tuple, set)):
         raise ValueError(f"invalid performance field: {name}")
-    if name in {"page_id", "stage", "model"}:
+    if name in {"page_id", "stage", "model", "route"}:
         if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
             raise ValueError(f"invalid performance field: {name}")
     elif name == "platform":

@@ -1026,6 +1026,157 @@ def test_sparse_child_fails_against_its_text_excluded_parent() -> None:
     assert "incomplete_child" in report["violations"]
 
 
+def test_child_coverage_excludes_higher_presentation_alpha() -> None:
+    case = _synthetic_quality_case()
+    parent_mask = case["component_mask"].copy()
+    child_mask = np.zeros_like(parent_mask)
+    child_mask[20:24, 24:28] = True
+    higher_alpha = parent_mask & ~child_mask
+    case["node"]["kind"] = "child"
+    case["node"]["parent_id"] = "parent_0001"
+    case["graph"]["nodes"].append({
+        "id": "parent_0001", "kind": "parent", "parent_id": None,
+        "state": "inactive", "mask": "masks/parent_0001.png",
+        "mask_sha256": "b" * 64, "bbox": [16, 12, 48, 36],
+        "z_index": 0, "text_ids": [],
+    })
+    calibration = calibrate_page(case["source"], case["text_mask"])
+
+    report = evaluate_component(
+        case["source"], case["background"], case["reconstructed"],
+        case["node"], case["graph"], calibration,
+        component_mask=child_mask, parent_mask=parent_mask,
+        presentation_alpha_mask=child_mask,
+        generated_underlay_mask=np.zeros_like(child_mask),
+        underlay_metrics=_underlay_metrics(),
+        higher_presentation_alpha_mask=higher_alpha,
+        text_mask=case["text_mask"],
+        page_checks={"protected_native_overlap": "pass"},
+    )
+
+    assert report["metrics"]["parent_coverage_ratio"] == 1.0
+    assert "incomplete_child" not in report["violations"]
+
+
+def test_quality_round_passes_only_higher_presentation_alpha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shape = (16, 20)
+    source = np.full((*shape, 3), 128, dtype=np.uint8)
+    masks = {
+        "lower": _mask(shape, (1, 1, 7, 7)) > 0,
+        "current": _mask(shape, (4, 8, 12, 14)) > 0,
+        "higher": _mask(shape, (9, 2, 15, 8)) > 0,
+    }
+    graph_dir = tmp_path / "round"
+    masks_dir = graph_dir / "masks"
+    masks_dir.mkdir(parents=True)
+    nodes = []
+    for z_index, (component_id, mask) in enumerate(masks.items()):
+        path = masks_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+        ys, xs = np.nonzero(mask)
+        nodes.append({
+            "id": component_id, "kind": "parent", "parent_id": None,
+            "state": "pending_gate", "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+            "z_index": z_index, "text_ids": [],
+        })
+
+    received = {}
+
+    def capture_component(*args, **kwargs):
+        received[args[3]["id"]] = kwargs["higher_presentation_alpha_mask"]
+        return {
+            "component_id": args[3]["id"], "accepted": True,
+            "metrics": {}, "violations": [],
+        }
+
+    monkeypatch.setattr(component_quality, "evaluate_component", capture_component)
+    empty = np.zeros(shape, dtype=bool)
+    evaluate_component_quality_round(
+        source, source, source, {"nodes": nodes},
+        graph_dir=graph_dir, trusted_root=tmp_path,
+        text_mask=empty,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=3,
+        expected_component_ids=["lower", "current", "higher"],
+        presentation_layers=[{
+            "component_id": component_id,
+            "ownership_mask": mask,
+            "presentation_alpha_mask": mask,
+            "generated_underlay_mask": empty,
+            "metrics": _underlay_metrics(),
+        } for component_id, mask in masks.items()],
+    )
+
+    assert np.array_equal(received["lower"], masks["current"] | masks["higher"])
+    assert np.array_equal(received["current"], masks["higher"])
+    assert not np.any(received["higher"])
+
+
+def test_quality_round_uses_child_semantic_union_for_underlay_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shape = (12, 16)
+    source = np.full((*shape, 3), 128, dtype=np.uint8)
+    graph_dir = tmp_path / "round"
+    masks_dir = graph_dir / "masks"
+    masks_dir.mkdir(parents=True)
+    parent = np.zeros(shape, dtype=bool)
+    parent[2:10, 2:12] = True
+    child = parent.copy()
+    child[4:8, 12:15] = True
+    nodes = []
+    for component_id, kind, parent_id, mask in (
+        ("parent_0001", "parent", None, parent),
+        ("component_0001", "child", "parent_0001", child),
+    ):
+        path = masks_dir / f"{component_id}.png"
+        Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+        ys, xs = np.nonzero(mask)
+        nodes.append({
+            "id": component_id, "kind": kind, "parent_id": parent_id,
+            "state": "inactive" if kind == "parent" else "pending_gate",
+            "mask": f"masks/{component_id}.png",
+            "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
+            "z_index": 0, "text_ids": [],
+        })
+
+    received = {}
+
+    def capture_component(*args, **kwargs):
+        received[args[3]["id"]] = kwargs["parent_mask"]
+        return {
+            "component_id": args[3]["id"], "accepted": True,
+            "metrics": {}, "violations": [],
+        }
+
+    monkeypatch.setattr(component_quality, "evaluate_component", capture_component)
+    empty = np.zeros(shape, dtype=bool)
+    evaluate_component_quality_round(
+        source, source, source, {"nodes": nodes},
+        graph_dir=graph_dir, trusted_root=tmp_path,
+        text_mask=empty,
+        visual_metrics={"mae": 0.0, "p95": 0.0, "changed_ratio": 0.0},
+        page_checks={"protected_native_overlap": "pass", "pptx_reopen": "pass"},
+        initial_component_count=2,
+        expected_component_ids=["component_0001"],
+        presentation_layers=[{
+            "component_id": "component_0001",
+            "ownership_mask": parent,
+            "presentation_alpha_mask": parent,
+            "generated_underlay_mask": empty,
+            "metrics": _underlay_metrics(),
+        }],
+    )
+
+    assert np.array_equal(received["component_0001"], child)
+
+
 def test_generic_internal_duplicate_is_not_misclassified_as_shadow_or_alpha() -> None:
     case = _synthetic_quality_case()
     duplicate = np.zeros(case["component_mask"].shape, dtype=bool)
@@ -1612,6 +1763,33 @@ def test_background_with_source_glyph_pixels_fails_text_isolation_gate() -> None
     assert "background_text_residual" in report["violations"]
 
 
+def test_background_text_gate_ignores_decoration_inside_wide_ocr_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = np.full((32, 48, 3), 180, dtype=np.uint8)
+    text_mask = np.zeros(image.shape[:2], dtype=bool)
+    text_mask[8:24, 8:40] = True
+    glyph = np.zeros_like(text_mask)
+    glyph[12:16, 12:16] = True
+    decoration = np.zeros_like(text_mask)
+    decoration[12:16, 17:20] = True
+    image[glyph] = (40, 40, 40)
+    image[decoration] = (40, 40, 40)
+    calibration = component_quality.PageCalibration(0.0, 1.0, 1, 2, 1)
+
+    monkeypatch.setattr(component_quality, "_text_ink_mask", lambda *args: glyph)
+    context = component_quality._prepare_page_quality_context(
+        image,
+        image,
+        image,
+        text_mask,
+        calibration=calibration,
+    )
+
+    assert np.any(context.background_residual_text_ink & glyph)
+    assert not np.any(context.background_residual_text_ink & ~glyph)
+
+
 def test_page_background_residual_ignores_text_pixels_owned_by_a_component() -> None:
     case = _text_isolation_case()
     case["background"] = np.full_like(case["source"], 238)
@@ -1643,6 +1821,46 @@ def test_material_foreground_without_owner_fails_page_gate() -> None:
     assert metrics["largest_unexplained_region_pixels"] == 32 * 32
     assert metrics["visual_ownership_coverage"] == 0.0
     assert np.array_equal(unexplained, evidence)
+
+
+def test_material_edge_residual_adjacent_to_owned_component_is_ignored() -> None:
+    shape = (96, 160)
+    evidence = np.zeros(shape, dtype=bool)
+    owned = np.zeros(shape, dtype=bool)
+    owned[30:50, 40:70] = True
+    evidence[30:50, 40:70] = True
+    evidence[29, 40:70] = True
+    calibration = component_quality.PageCalibration(1.0, 20.0, 2, 3, 20)
+
+    metrics, unexplained = component_quality.material_ownership_metrics(
+        evidence,
+        [owned],
+        np.zeros(shape, dtype=bool),
+        calibration,
+    )
+
+    assert metrics["unexplained_visual_pixels"] == 0
+    assert not np.any(unexplained)
+
+
+def test_material_compact_residual_adjacent_to_owned_component_still_fails() -> None:
+    shape = (96, 160)
+    evidence = np.zeros(shape, dtype=bool)
+    owned = np.zeros(shape, dtype=bool)
+    owned[30:50, 40:70] = True
+    evidence[30:50, 40:70] = True
+    evidence[30:40, 70:80] = True
+    calibration = component_quality.PageCalibration(1.0, 20.0, 2, 3, 20)
+
+    metrics, unexplained = component_quality.material_ownership_metrics(
+        evidence,
+        [owned],
+        np.zeros(shape, dtype=bool),
+        calibration,
+    )
+
+    assert metrics["unexplained_visual_pixels"] == 100
+    assert np.array_equal(unexplained, evidence & ~owned)
 
 
 def test_material_evidence_ignores_flat_region_matching_background() -> None:

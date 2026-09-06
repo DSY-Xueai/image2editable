@@ -59,6 +59,29 @@ def test_event_and_span_reject_unknown_fields(tmp_path: Path) -> None:
         trace.span("inference", prompt="secret")
 
 
+def test_page_summary_contains_only_safe_metrics(tmp_path: Path) -> None:
+    performance_trace = _load_performance_trace()
+    trace = performance_trace.PerformanceTrace(tmp_path / "performance.jsonl")
+
+    trace.event(
+        "page_summary",
+        page_id="page_001",
+        route="strict",
+        duration_ms=1200,
+        sam_calls=2,
+        lama_calls=1,
+        worker_starts=4,
+        host_wait_ms=0,
+        token_count=0,
+    )
+
+    event = json.loads((tmp_path / "performance.jsonl").read_text().splitlines()[0])
+    assert event["route"] == "strict"
+    serialized = json.dumps(event)
+    for forbidden in ("source_path", "prompt", "response", "mask", "ocr"):
+        assert forbidden not in serialized.casefold()
+
+
 @pytest.mark.parametrize(
     ("event", "fields"),
     [

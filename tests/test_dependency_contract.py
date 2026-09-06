@@ -51,6 +51,7 @@ RUNTIME_REQUIREMENTS = [
     "Pillow>=10.4,<12",
     "numpy>=1.26.4,<2",
     "pypdfium2>=5.7.1,<6",
+    "pypdf>=5,<7",
     "torch>=2.5.1,<3",
     "torchvision>=0.20.1,<1",
     SAM_PIN,
@@ -263,7 +264,7 @@ def test_pyproject_reads_runtime_dependencies_without_agent_extra() -> None:
 
     assert project["project"]["dynamic"] == ["dependencies"]
     assert project["tool"]["setuptools"]["dynamic"]["dependencies"]["file"] == [
-        "requirements.txt"
+        "requirements-pypi.txt"
     ]
     assert "agent-local" not in project["project"]["optional-dependencies"]
 

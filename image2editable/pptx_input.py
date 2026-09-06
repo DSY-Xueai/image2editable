@@ -29,6 +29,7 @@ from image2editable.inputs import (
     new_job_id,
     sha256_file,
     validate_pptx_output_path,
+    validate_pipeline_mode,
 )
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
@@ -151,8 +152,10 @@ def prepare_pptx_job(
     slide_size: str = "both",
     lang: str = "ch",
     agent_provider: str = "host",
+    pipeline_mode: str = "strict",
 ) -> Path:
     agent_provider = validate_agent_provider(agent_provider)
+    pipeline_mode = validate_pipeline_mode(pipeline_mode)
     source_path = Path(source).resolve()
     if not source_path.is_file() or source_path.suffix.casefold() != ".pptx":
         raise ValueError(
@@ -274,6 +277,7 @@ def prepare_pptx_job(
                     else None
                 ),
                 "resource_policy": safe_default_policy(),
+                **({"pipeline_mode": pipeline_mode} if pipeline_mode != "strict" else {}),
             },
             "pages": pages,
         }

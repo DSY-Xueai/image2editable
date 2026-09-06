@@ -887,18 +887,25 @@ def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if original_area < 20:
         return original
 
-    dilated = cv2.dilate(binary, np.ones((5, 5), np.uint8), iterations=1)
-    eroded = cv2.erode(binary, np.ones((3, 3), np.uint8), iterations=1)
-    trimap = np.full(binary.shape, cv2.GC_BGD, dtype=np.uint8)
+    ys, xs = np.nonzero(original)
+    x1 = max(0, int(xs.min()) - 8)
+    y1 = max(0, int(ys.min()) - 8)
+    x2 = min(binary.shape[1], int(xs.max()) + 9)
+    y2 = min(binary.shape[0], int(ys.max()) + 9)
+    local_binary = binary[y1:y2, x1:x2]
+    local_original = original[y1:y2, x1:x2]
+    dilated = cv2.dilate(local_binary, np.ones((5, 5), np.uint8), iterations=1)
+    eroded = cv2.erode(local_binary, np.ones((3, 3), np.uint8), iterations=1)
+    trimap = np.full(local_binary.shape, cv2.GC_BGD, dtype=np.uint8)
     trimap[dilated > 0] = cv2.GC_PR_BGD
-    trimap[binary > 0] = cv2.GC_PR_FGD
+    trimap[local_binary > 0] = cv2.GC_PR_FGD
     trimap[eroded > 0] = cv2.GC_FGD
 
     bg_model = np.zeros((1, 65), dtype=np.float64)
     fg_model = np.zeros((1, 65), dtype=np.float64)
     try:
         cv2.grabCut(
-            img,
+            img[y1:y2, x1:x2],
             trimap,
             None,
             bg_model,
@@ -908,12 +915,14 @@ def _refine_visual_mask(img: np.ndarray, mask: np.ndarray) -> np.ndarray:
         )
     except cv2.error:
         return original
-    refined = (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
-    refined &= original
-    refined_area = int(np.count_nonzero(refined))
+    local_refined = (trimap == cv2.GC_FGD) | (trimap == cv2.GC_PR_FGD)
+    local_refined &= local_original
+    refined_area = int(np.count_nonzero(local_refined))
     if refined_area == 0 or refined_area < original_area * 0.5:
         return original
-    refined |= eroded > 0
+    local_refined |= eroded > 0
+    refined = np.zeros_like(original)
+    refined[y1:y2, x1:x2] = local_refined
     return refined
 
 

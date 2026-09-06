@@ -203,6 +203,22 @@ def advance_component_repair(
                 "repair_round": state["repair_round"]}
 
 
+def require_parent_fallback(
+    store,
+    page_id: str,
+    *,
+    reason: str,
+    _lease: ExecutionLease,
+) -> dict:
+    _require_held_execution_lease(store, _lease)
+    relative = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
+    state = validate_component_repair_state(store.read_json(relative))
+    _validate_repair_state_identity(store, state, page_id)
+    if state["phase"] != "freeze_committed":
+        raise RuntimeError("component repair is not ready for parent fallback")
+    return _commit_fallback_required(store, state, page_id, reason)
+
+
 def resume_round_limited_component_repair(store, page_id: str) -> bool:
     state_path = f"pages/{page_id}/reconstruction/{COMPONENT_STATE_NAME}"
     try:
@@ -2817,6 +2833,23 @@ def evaluate_component_quality_round(
             packed = np.frombuffer(packed_layers[component_id][name], dtype=np.uint8)
             return np.unpackbits(packed, count=shape[0] * shape[1]).reshape(shape).astype(bool)
 
+        higher_presentation_alpha_by_id = {}
+        higher_presentation_alpha = np.zeros(shape, dtype=bool)
+        for z_index in sorted(
+            {node["z_index"] for node in active_visual}, reverse=True
+        ):
+            z_nodes = [
+                node for node in active_visual if node["z_index"] == z_index
+            ]
+            for node in z_nodes:
+                higher_presentation_alpha_by_id[node["id"]] = (
+                    higher_presentation_alpha.copy()
+                )
+            for node in z_nodes:
+                higher_presentation_alpha |= unpack(
+                    node["id"], "presentation_alpha_mask"
+                )
+
         parents = [
             node for node in active_visual
             if node["kind"] == "parent"
@@ -3063,6 +3096,13 @@ def evaluate_component_quality_round(
                 trusted_chain=directory_chain,
                 shape=shape,
             )
+            if node.get("parent_id") is not None:
+                parent_mask |= _load_quality_graph_mask(
+                    node,
+                    graph_root=graph_root,
+                    trusted_chain=directory_chain,
+                    shape=shape,
+                )
             presentation_kwargs = {
                 "presentation_alpha_mask": unpack(
                     component_id, "presentation_alpha_mask"
@@ -3071,6 +3111,9 @@ def evaluate_component_quality_round(
                     component_id, "generated_underlay_mask"
                 ),
                 "underlay_metrics": packed_layers[component_id]["metrics"],
+                "higher_presentation_alpha_mask": (
+                    higher_presentation_alpha_by_id[component_id]
+                ),
             }
         reports.append(evaluate_component(
             source,

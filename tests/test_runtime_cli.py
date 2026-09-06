@@ -55,7 +55,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "image2editable": ["runtime_model_catalog.json"]
     }
     assert data["tool"]["setuptools"]["dynamic"]["dependencies"] == {
-        "file": ["requirements.txt"]
+        "file": ["requirements-pypi.txt"]
     }
     requirements = (root / "requirements.txt").read_text(encoding="utf-8")
     assert "aspose-psd" not in requirements.casefold()

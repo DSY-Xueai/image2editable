@@ -155,6 +155,36 @@ def test_targeted_ocr_recovers_consistent_candidate_with_source_style_and_mask(
     assert np.all(result["text_mask"][24:33, 45:80] == 255)
 
 
+def test_targeted_ocr_uses_task_worker_pool_for_candidate_views(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = _label_fixture(tmp_path)
+    received = []
+    pool = object()
+
+    def detect_batch(paths, **kwargs):
+        received.append((list(paths), kwargs))
+        return [([], np.zeros((1, 1), dtype=np.uint8)) for _ in paths]
+
+    monkeypatch.setattr(image_to_ppt, "detect_text_batch", detect_batch)
+
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source,
+        [_component()],
+        [],
+        np.zeros((70, 120), dtype=np.uint8),
+        tmp_path,
+        lang="en",
+        isolated=True,
+        ocr_worker_pool=pool,
+    )
+
+    assert result["recovered_items"] == []
+    assert len(received) == 1
+    assert received[0][1]["worker_pool"] is pool
+
+
 def test_targeted_ocr_rotates_views_and_matches_existing_vertical_text(
     tmp_path: Path,
     monkeypatch,
@@ -1480,6 +1510,12 @@ def _prepare_rerun_fixture(
     forbid_cache_cleanup: bool = False,
     replace_mask_after_first_worker: bool = False,
     unchanged_text_mask: bool = False,
+    stable_cleanup: bool = False,
+    ocr_mask_delta: bool = False,
+    shrink_ocr_mask: bool = False,
+    shrink_ocr_mask_outside_cleanup: bool = False,
+    visual_worker_pool=None,
+    include_text_clean: bool = False,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1505,7 +1541,9 @@ def _prepare_rerun_fixture(
 
     def fake_cleanup(image, text_mask, text_items):
         cleanup = np.zeros((70, 120), dtype=np.uint8)
-        if safe_text_delta and text_items:
+        if stable_cleanup:
+            cleanup[18:39, 40 if shrink_ocr_mask_outside_cleanup else 39:86] = 255
+        elif safe_text_delta and text_items:
             cleanup[18:39, 39:86] = 255
         if affected_text_delta and text_items:
             cleanup[12:20, 12:20] = 255
@@ -1615,6 +1653,10 @@ def _prepare_rerun_fixture(
     recovered["box"] = [45, 24, 35, 9]
     recovered_mask = np.zeros((70, 120), dtype=np.uint8)
     recovered_mask[18:39, 39:86] = 255
+    if ocr_mask_delta:
+        recovered_mask[50, 50] = 255
+    if shrink_ocr_mask:
+        recovered_mask[18, 39] = 0
     diagnostics = []
     if include_diagnostic or diagnostics_count:
         diagnostics = [{
@@ -1641,7 +1683,7 @@ def _prepare_rerun_fixture(
         },
     )
 
-    def fake_process(path, target, lang, text_analysis):
+    def fake_process(path, target, lang, text_analysis, **kwargs):
         pass_index = len(process_text_counts) + 1
         if check_first_pass_cleanup and pass_index == 2:
             assert not stale_component.exists()
@@ -1701,6 +1743,15 @@ def _prepare_rerun_fixture(
         Image.new("RGB", (120, 70), "black").save(
             target / "background-difference.png"
         )
+        text_clean_path = None
+        text_clean_sha256 = None
+        if include_text_clean:
+            text_clean_path = target / "text-clean.png"
+            text_clean = np.full((70, 120, 3), 255, dtype=np.uint8)
+            Image.fromarray(text_clean, mode="RGB").save(text_clean_path)
+            text_clean_sha256 = image_to_ppt.hashlib.sha256(
+                np.ascontiguousarray(text_clean).tobytes()
+            ).hexdigest()
         with Image.open(text_analysis["mask_path"]) as used_text_mask:
             used_text_mask_array = np.asarray(
                 used_text_mask.convert("L"), dtype=np.uint8
@@ -1729,11 +1780,13 @@ def _prepare_rerun_fixture(
             "_element_mask_paths": child_paths,
             "_semantic_mask_paths": parent_paths,
             "_foreground_evidence_mask_path": str(foreground_evidence_path),
+            **({"_text_clean_path": str(text_clean_path)}
+               if text_clean_path is not None else {}),
             "_visual_source_sha256": image_to_ppt.hashlib.sha256(
                 Path(path).read_bytes()
             ).hexdigest(),
             "_visual_text_mask_sha256": visual_text_mask_sha256,
-            "_visual_text_clean_sha256": None,
+            "_visual_text_clean_sha256": text_clean_sha256,
         }
 
     monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)
@@ -1742,6 +1795,7 @@ def _prepare_rerun_fixture(
         work_dir,
         lang="en",
         resource_isolation=True,
+        visual_worker_pool=visual_worker_pool,
     )
     return prepared, process_text_counts
 
@@ -1788,6 +1842,23 @@ def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
     assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
 
 
+def test_prepare_reuses_visual_assets_with_worker_pool_and_trusted_text_clean(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prepared, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        safe_text_delta=True,
+        visual_worker_pool=object(),
+        include_text_clean=True,
+    )
+
+    assert process_text_counts == [0]
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    assert Path(prepared["_text_clean_path"]).is_file()
+
+
 def test_prepare_reuses_visual_assets_when_targeted_ocr_keeps_exact_masks(
     tmp_path: Path,
     monkeypatch,
@@ -1802,6 +1873,68 @@ def test_prepare_reuses_visual_assets_when_targeted_ocr_keeps_exact_masks(
     assert [item["text"] for item in prepared["text_items"]] == ["NX"]
     with Image.open(prepared["components"][0]["path"]) as component:
         assert component.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+
+
+def test_prepare_reuses_visual_assets_when_ocr_mask_changes_but_cleanup_is_stable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+        stable_cleanup=True,
+        ocr_mask_delta=True,
+    )
+
+    assert process_text_counts == [0]
+
+
+def test_prepare_reuses_visual_assets_when_ocr_mask_shrinks_inside_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+        stable_cleanup=True,
+        shrink_ocr_mask=True,
+    )
+
+    assert process_text_counts == [0]
+
+
+def test_prepare_reuses_visual_assets_when_stable_cleanup_has_external_mask_shrink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+        stable_cleanup=True,
+        shrink_ocr_mask=True,
+        shrink_ocr_mask_outside_cleanup=True,
+    )
+
+    assert process_text_counts == [0]
+
+
+def test_stable_cleanup_reuse_does_not_rebuild_full_background(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _, process_text_counts = _prepare_rerun_fixture(
+        tmp_path,
+        monkeypatch,
+        unchanged_text_mask=True,
+        stable_cleanup=True,
+        ocr_mask_delta=True,
+        background_error=True,
+    )
+
+    assert process_text_counts == [0]
 
 
 def test_text_delta_mask_changed_after_first_worker_uses_full_visual_fallback(
@@ -2235,6 +2368,7 @@ def test_prepared_page_v2_loads_with_empty_initial_diagnostics(
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
     manifest["schema_version"] = 2
+    manifest.pop("page_policy")
     for item in manifest["text_items"]:
         item.pop("rotation")
     manifest.pop("initial_diagnostics")

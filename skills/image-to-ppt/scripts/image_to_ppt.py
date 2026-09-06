@@ -32,6 +32,7 @@ import sys
 import tempfile
 import traceback
 import unicodedata
+from dataclasses import asdict
 from difflib import SequenceMatcher
 from pathlib import Path, PureWindowsPath
 
@@ -40,6 +41,7 @@ import numpy as np
 from PIL import Image
 
 from scripts.bg_model import (
+    _inpaint,
     build_clean_background,
     build_removal_mask,
     build_widescreen_background,
@@ -72,9 +74,11 @@ from scripts.visual_segment import (
     MaskCandidate,
     VisualSegmentationError,
     background_residual_metrics,
+    complete_initial_visual_element_masks,
     combine_residual_candidates,
     create_sam_generator,
     filter_prompt_free_candidates,
+    generate_flat_color_candidates,
     generate_geometry_candidates,
     generate_mask_candidates,
     generate_prompted_mask_candidates,
@@ -96,8 +100,58 @@ from scripts.sam_worker import (
     sam_candidate_batch_max_proposals,
     sam_candidate_batch_result_max_bytes,
 )
+try:
+    from image2editable.page_routing import (
+        PagePolicy,
+        PageSignals,
+        classify_page,
+        strict_page_policy,
+    )
+    from image2editable.worker_pool import JsonLineWorker, TaskWorkerPool
+except ModuleNotFoundError as error:
+    if error.name not in {
+        "image2editable",
+        "image2editable.page_routing",
+        "image2editable.worker_pool",
+    }:
+        raise
+    from scripts.page_routing import (
+        PagePolicy,
+        PageSignals,
+        classify_page,
+        strict_page_policy,
+    )
+    from scripts.worker_pool import JsonLineWorker, TaskWorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_script_path(name: str) -> Path:
+    module_dir = Path(__file__).resolve().parent
+    worker_path = module_dir / "scripts" / name
+    if worker_path.is_file():
+        return worker_path
+    return module_dir / name
+
+
+def create_ocr_worker_pool() -> TaskWorkerPool:
+    """Create the one task-scoped resident PaddleOCR worker."""
+    worker_path = _worker_script_path("ocr_worker.py")
+    return TaskWorkerPool(
+        lambda: JsonLineWorker([sys.executable, str(worker_path), "--serve"]),
+        queue_limit=1,
+        worker_name="ocr",
+    )
+
+
+def create_visual_worker_pool() -> TaskWorkerPool:
+    """Create the one task-scoped resident DINO/SAM/LaMa worker."""
+    worker_path = _worker_script_path("visual_worker.py")
+    return TaskWorkerPool(
+        lambda: JsonLineWorker([sys.executable, str(worker_path), "--serve"]),
+        queue_limit=1,
+        worker_name="visual",
+    )
 
 
 def assemble_pptx(*args, **kwargs):
@@ -310,6 +364,9 @@ def _targeted_candidate_ocr_sweep(
     lang: str,
     isolated: bool,
     ocr_rotation: int = 0,
+    ocr_worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> dict:
     """Recheck bounded visual candidates without retaining page-size copies."""
     source_path = Path(image_path).resolve()
@@ -432,12 +489,21 @@ def _targeted_candidate_ocr_sweep(
                             finally:
                                 ocr_crop.close()
 
+            batch_kwargs = {
+                "lang": lang,
+                "confidence_threshold": 0.70,
+                "isolated": isolated,
+                "worker_root": work_dir if isolated else None,
+            }
+            if ocr_worker_pool is not None:
+                batch_kwargs.update({
+                    "worker_pool": ocr_worker_pool,
+                    "performance_trace": performance_trace,
+                    "page_id": page_id,
+                })
             view_results = detect_text_batch(
                 [view["path"] for view in pending_views],
-                lang=lang,
-                confidence_threshold=0.70,
-                isolated=isolated,
-                worker_root=work_dir if isolated else None,
+                **batch_kwargs,
             )
             recognized_by_component = {}
             for view, (items, _) in zip(pending_views, view_results):
@@ -2226,7 +2292,20 @@ def _process_image_isolated(
     work_dir: Path,
     lang: str,
     text_analysis: dict,
+    page_policy: PagePolicy | None = None,
+    *,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> dict:
+    if page_policy is None:
+        policy_payload = text_analysis.get("page_policy")
+        if isinstance(policy_payload, dict):
+            policy_payload = dict(policy_payload)
+            policy_payload["reasons"] = tuple(policy_payload.get("reasons", ()))
+            page_policy = PagePolicy(**policy_payload)
+        else:
+            page_policy = strict_page_policy()
     _, source_content = _read_prepared_owned_bytes(
         work_dir,
         image_path,
@@ -2247,52 +2326,74 @@ def _process_image_isolated(
         )
     request_path = (work_dir / "visual-worker-request.json").resolve()
     result_path = (work_dir / "visual-worker-result.json").resolve()
-    request_content = json.dumps({
-            "text_analysis": text_analysis,
-            "text_mask_sha256": hashlib.sha256(text_mask_content).hexdigest(),
-            "text_mask_size": len(text_mask_content),
-            "text_clean_sha256": (
-                hashlib.sha256(text_clean_content).hexdigest()
-                if text_clean_content is not None else None
-            ),
-            "text_clean_size": (
-                len(text_clean_content) if text_clean_content is not None else None
-            ),
-        }, ensure_ascii=False).encode("utf-8")
+    request = {
+        "text_analysis": text_analysis,
+        "text_mask_sha256": hashlib.sha256(text_mask_content).hexdigest(),
+        "text_mask_size": len(text_mask_content),
+        "text_clean_sha256": (
+            hashlib.sha256(text_clean_content).hexdigest()
+            if text_clean_content is not None else None
+        ),
+        "text_clean_size": (
+            len(text_clean_content) if text_clean_content is not None else None
+        ),
+    }
+    # Strict workers already know the legacy defaults; only fast routes need
+    # a serialized policy to select their cheaper visual path.
+    if page_policy.route != "strict":
+        request["page_policy"] = asdict(page_policy)
+    request_content = json.dumps(
+        request, ensure_ascii=False
+    ).encode("utf-8")
     request_path.write_bytes(request_content)
-    module_dir = Path(__file__).resolve().parent
-    worker_path = module_dir / "scripts" / "visual_worker.py"
-    if not worker_path.is_file():
-        worker_path = module_dir / "visual_worker.py"
-    completed = run_isolated_worker(
-        [
-            sys.executable,
-            str(worker_path),
-            "--image",
-            str(image_path),
-            "--work-dir",
-            str(work_dir),
-            "--lang",
-            lang,
-            "--request",
-            str(request_path),
-            "--request-sha256",
-            hashlib.sha256(request_content).hexdigest(),
-            "--request-size",
-            str(len(request_content)),
-            "--source-sha256",
-            source_sha256,
-            "--source-size",
-            str(len(source_content)),
-            "--result",
-            str(result_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"Isolated visual worker failed: {detail}")
+    worker_payload = {
+        "image": str(image_path),
+        "work_dir": str(work_dir),
+        "lang": lang,
+        "request": str(request_path),
+        "request_sha256": hashlib.sha256(request_content).hexdigest(),
+        "request_size": len(request_content),
+        "source_sha256": source_sha256,
+        "source_size": len(source_content),
+        "result": str(result_path),
+    }
+    if worker_pool is not None:
+        worker_pool.request(
+            worker_payload,
+            performance_trace=performance_trace,
+            page_id=page_id,
+        )
+    else:
+        worker_path = _worker_script_path("visual_worker.py")
+        completed = run_isolated_worker(
+            [
+                sys.executable,
+                str(worker_path),
+                "--image",
+                str(image_path),
+                "--work-dir",
+                str(work_dir),
+                "--lang",
+                lang,
+                "--request",
+                str(request_path),
+                "--request-sha256",
+                worker_payload["request_sha256"],
+                "--request-size",
+                str(worker_payload["request_size"]),
+                "--source-sha256",
+                source_sha256,
+                "--source-size",
+                str(worker_payload["source_size"]),
+                "--result",
+                str(result_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise RuntimeError(f"Isolated visual worker failed: {detail}")
     if not result_path.is_file():
         raise RuntimeError("Isolated visual worker did not create its result")
     slide_data = json.loads(result_path.read_text(encoding="utf-8"))
@@ -2328,6 +2429,135 @@ def _restore_mask_references(state) -> None:
         setattr(owner, attribute, restored[key])
 
 
+def _infer_page_policy(
+    image: np.ndarray,
+    text_items: list[dict],
+    *,
+    source_kind: str,
+    pipeline_mode: str,
+) -> PagePolicy:
+    """Infer a bounded page route from OCR and cheap image statistics."""
+    if pipeline_mode != "fast":
+        return strict_page_policy()
+    height, width = image.shape[:2]
+    area = max(1, height * width)
+    boxes = []
+    confidences = []
+    for item in text_items:
+        box = item.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        x, y, w, h = (float(value) for value in box)
+        if w <= 0 or h <= 0:
+            continue
+        boxes.append((x, y, w, h))
+        confidence = item.get("confidence", 0.0)
+        if isinstance(confidence, (int, float)) and math.isfinite(confidence):
+            confidences.append(float(confidence))
+    text_coverage = min(1.0, sum(w * h for _, _, w, h in boxes) / area)
+    overlap = 0.0
+    for index, (x1, y1, w1, h1) in enumerate(boxes):
+        a1 = w1 * h1
+        for x2, y2, w2, h2 in boxes[index + 1:]:
+            ix = max(0.0, min(x1 + w1, x2 + w2) - max(x1, x2))
+            iy = max(0.0, min(y1 + h1, y2 + h2) - max(y1, y2))
+            overlap = max(overlap, (ix * iy) / max(1.0, min(a1, w2 * h2)))
+    regular = 0.0
+    if len(boxes) >= 2:
+        widths = np.asarray([box[2] for box in boxes], dtype=np.float32)
+        heights = np.asarray([box[3] for box in boxes], dtype=np.float32)
+        regular = float(max(0.0, 1.0 - min(1.0, (np.std(widths) / max(1.0, np.mean(widths)) + np.std(heights) / max(1.0, np.mean(heights))) / 2.0)))
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    sample = cv2.resize(gray, (min(512, width), min(512, height)), interpolation=cv2.INTER_AREA)
+    edges = cv2.Canny(sample, 80, 160)
+    if boxes:
+        # OCR glyph edges are text evidence, not independent visual regions.
+        text_regions = np.zeros(sample.shape, dtype=np.uint8)
+        scale_x = sample.shape[1] / max(1, width)
+        scale_y = sample.shape[0] / max(1, height)
+        for x, y, box_width, box_height in boxes:
+            left = max(0, int(np.floor(x * scale_x)) - 2)
+            top = max(0, int(np.floor(y * scale_y)) - 2)
+            right = min(sample.shape[1], int(np.ceil((x + box_width) * scale_x)) + 2)
+            bottom = min(sample.shape[0], int(np.ceil((y + box_height) * scale_y)) + 2)
+            if left < right and top < bottom:
+                text_regions[top:bottom, left:right] = 1
+        edges[text_regions != 0] = 0
+    edge_density = float(np.count_nonzero(edges) / max(1, edges.size))
+    # Suppress one-pixel layout edges before estimating scan noise.  Raw
+    # Laplacian variance treats every crisp card border as scanner noise.
+    lap = cv2.Laplacian(cv2.GaussianBlur(sample, (3, 3), 0), cv2.CV_32F)
+    scan_noise = float(min(1.0, np.var(lap) / 4000.0))
+    contour_count, _ = cv2.findContours(
+        edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+    )
+    min_region_area = max(4.0, float(sample.size) * 0.0001)
+    visual_regions = min(
+        256,
+        sum(cv2.contourArea(contour) >= min_region_area for contour in contour_count),
+    )
+    return classify_page(PageSignals(
+        source_kind=source_kind,
+        ocr_items=len(boxes),
+        ocr_mean_confidence=(sum(confidences) / len(confidences) if confidences else 0.0),
+        text_coverage=text_coverage,
+        regular_geometry_ratio=regular,
+        overlap_ratio=overlap,
+        transparency_ratio=0.0,
+        edge_density=edge_density,
+        scan_noise=scan_noise,
+        visual_regions=visual_regions,
+    ))
+
+
+def _suppress_direct_geometry_duplicates(
+    candidates: list[MaskCandidate],
+) -> list[MaskCandidate]:
+    """Drop geometry outlines already represented by a flat-color region."""
+    flat = [candidate for candidate in candidates if candidate.source == "flat_color"]
+    if not flat:
+        return candidates
+    retained = []
+    for candidate in candidates:
+        if candidate.source != "geometry":
+            retained.append(candidate)
+            continue
+        geometry_mask = np.asarray(candidate.mask, dtype=bool)
+        geometry_area = int(np.count_nonzero(geometry_mask))
+        if geometry_area == 0:
+            continue
+        ys, xs = np.nonzero(geometry_mask)
+        geometry_box = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        duplicate = False
+        for flat_candidate in flat:
+            flat_mask = np.asarray(flat_candidate.mask, dtype=bool)
+            flat_area = int(np.count_nonzero(flat_mask))
+            if flat_area == 0:
+                continue
+            fys, fxs = np.nonzero(flat_mask)
+            flat_box = (int(fxs.min()), int(fys.min()), int(fxs.max()) + 1, int(fys.max()) + 1)
+            ix1 = max(geometry_box[0], flat_box[0])
+            iy1 = max(geometry_box[1], flat_box[1])
+            ix2 = min(geometry_box[2], flat_box[2])
+            iy2 = min(geometry_box[3], flat_box[3])
+            intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            union = (
+                (geometry_box[2] - geometry_box[0]) * (geometry_box[3] - geometry_box[1])
+                + (flat_box[2] - flat_box[0]) * (flat_box[3] - flat_box[1])
+                - intersection
+            )
+            pixel_overlap = int(np.count_nonzero(geometry_mask & flat_mask))
+            if (
+                pixel_overlap / geometry_area >= 0.45
+                and intersection / max(union, 1) >= 0.85
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            retained.append(candidate)
+    return retained
+
+
 def _process_image(
     image_path: Path,
     work_dir: Path,
@@ -2340,13 +2570,18 @@ def _process_image(
     _source_image: np.ndarray | None = None,
     _text_mask: np.ndarray | None = None,
     _text_clean_image: np.ndarray | None = None,
+    page_policy: PagePolicy | None = None,
 ) -> dict:
+    page_policy = page_policy or strict_page_policy()
     work_dir.mkdir(parents=True, exist_ok=True)
-    background_kwargs = (
-        {"large_inpainter": _isolated_large_inpainter(work_dir)}
-        if _resource_isolation
-        else {}
-    )
+    if _resource_isolation and page_policy.route == "direct":
+        background_kwargs = {"large_inpainter": _inpaint}
+    elif _resource_isolation:
+        background_kwargs = {
+            "large_inpainter": _isolated_large_inpainter(work_dir)
+        }
+    else:
+        background_kwargs = {}
     img = (
         np.asarray(_source_image, dtype=np.uint8).copy()
         if _source_image is not None
@@ -2411,7 +2646,25 @@ def _process_image(
     proposal_detector = (
         None if _resource_isolation else object_detector
     )
-    if _resource_isolation:
+    if page_policy.route == "direct":
+        # High-confidence layout pages can be represented by deterministic
+        # geometry without paying for DINO/SAM model startup.  The existing
+        # render-quality gate remains responsible for escalation.
+        proposals = []
+        candidates = filter_prompt_free_candidates(
+            _suppress_direct_geometry_duplicates([
+                *generate_flat_color_candidates(img, text_ink_mask),
+                *generate_geometry_candidates(
+                    img,
+                    text_mask=text_ink_mask,
+                    min_area_fraction=0.0005,
+                ),
+            ]),
+            [],
+            text_ink_mask,
+        )
+        prompt_free_candidates = []
+    elif _resource_isolation:
         proposals = _generate_filtered_object_proposals_isolated(
             img,
             text_mask,
@@ -2423,16 +2676,28 @@ def _process_image(
             text_mask,
             proposal_detector,
         )
-    if _resource_isolation:
-        (
-            candidates,
-            prompt_free_candidates,
-        ) = _generate_sam_candidate_stage_isolated(
-            img,
-            text_ink_mask,
-            proposals,
-            work_dir,
-        )
+    if page_policy.route == "direct":
+        pass
+    elif _resource_isolation:
+        if page_policy.automatic_sam:
+            (
+                candidates,
+                prompt_free_candidates,
+            ) = _generate_sam_candidate_stage_isolated(
+                img,
+                text_ink_mask,
+                proposals,
+                work_dir,
+            )
+        else:
+            candidates = _generate_sam_candidates_isolated(
+                img,
+                text_ink_mask,
+                proposals,
+                work_dir,
+                mode="prompted",
+            )
+            prompt_free_candidates = []
     else:
         candidates = generate_prompted_mask_candidates(
             img,
@@ -2440,12 +2705,16 @@ def _process_image(
             mask_generator,
             text_ink_mask,
         )
-        prompt_free_candidates = generate_mask_candidates(
-            img,
-            mask_generator,
-            crop_size=max(img.shape[:2]),
-            include_geometry=False,
-            min_score=0.90,
+        prompt_free_candidates = (
+            generate_mask_candidates(
+                img,
+                mask_generator,
+                crop_size=max(img.shape[:2]),
+                include_geometry=False,
+                min_score=0.90,
+            )
+            if page_policy.automatic_sam
+            else []
         )
     candidates.extend(
         filter_prompt_free_candidates(
@@ -2454,8 +2723,9 @@ def _process_image(
             text_ink_mask,
         )
     )
-    for round_index in range(3):
+    for round_index in range(page_policy.max_residual_rounds):
         elements = resolve_visual_elements(candidates)
+        complete_initial_visual_element_masks(elements, img)
         element_masks = [element.mask for element in elements]
         validate_visual_masks(element_masks)
         clean_background = build_clean_background(
@@ -2498,15 +2768,25 @@ def _process_image(
                 _restore_mask_references(packed_masks)
                 element_masks = [element.mask for element in elements]
         if _resource_isolation:
-            (
-                prompted_residual_candidates,
-                prompt_free_residual_candidates,
-            ) = _generate_sam_candidate_stage_isolated(
-                clean_background,
-                text_ink_mask,
-                residual_proposals,
-                work_dir,
-            )
+            if page_policy.automatic_sam:
+                (
+                    prompted_residual_candidates,
+                    prompt_free_residual_candidates,
+                ) = _generate_sam_candidate_stage_isolated(
+                    clean_background,
+                    text_ink_mask,
+                    residual_proposals,
+                    work_dir,
+                )
+            else:
+                prompted_residual_candidates = _generate_sam_candidates_isolated(
+                    clean_background,
+                    text_ink_mask,
+                    residual_proposals,
+                    work_dir,
+                    mode="prompted",
+                )
+                prompt_free_residual_candidates = []
             prompt_free_residual_candidates.extend(
                 generate_geometry_candidates(clean_background)
             )
@@ -2517,12 +2797,16 @@ def _process_image(
                 mask_generator,
                 text_ink_mask,
             )
-            prompt_free_residual_candidates = generate_mask_candidates(
-                clean_background,
-                mask_generator,
-                crop_size=max(clean_background.shape[:2]),
-                include_geometry=True,
-                min_score=0.90,
+            prompt_free_residual_candidates = (
+                generate_mask_candidates(
+                    clean_background,
+                    mask_generator,
+                    crop_size=max(clean_background.shape[:2]),
+                    include_geometry=True,
+                    min_score=0.90,
+                )
+                if page_policy.automatic_sam
+                else generate_geometry_candidates(clean_background)
             )
         residual_candidates, attached_count = combine_residual_candidates(
             source=img,
@@ -2535,6 +2819,7 @@ def _process_image(
         if not residual_candidates:
             if attached_count:
                 elements = resolve_visual_elements(candidates)
+                complete_initial_visual_element_masks(elements, img)
                 element_masks = [element.mask for element in elements]
                 validate_visual_masks(element_masks)
                 clean_background = build_clean_background(
@@ -2557,14 +2842,16 @@ def _process_image(
         candidates.extend(residual_candidates)
 
     elements = resolve_visual_elements(candidates)
-    if _resource_isolation:
-        _recheck_visual_element_holes_isolated(
-            img,
-            elements,
-            work_dir,
-        )
-    else:
-        recheck_visual_element_holes(img, elements, mask_generator)
+    complete_initial_visual_element_masks(elements, img)
+    if page_policy.hole_recheck:
+        if _resource_isolation:
+            _recheck_visual_element_holes_isolated(
+                img,
+                elements,
+                work_dir,
+            )
+        else:
+            recheck_visual_element_holes(img, elements, mask_generator)
     element_masks = [element.mask for element in elements]
     semantic_masks = [element.semantic_mask for element in elements]
     validate_visual_masks(element_masks)
@@ -2667,13 +2954,14 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 6
+_PREPARED_PAGE_SCHEMA_VERSION = 7
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
     "schema_version",
     "phase",
     "resource_isolation",
+    "page_policy",
     "initial_component_count",
     "components",
     "text_items",
@@ -2681,6 +2969,7 @@ _PREPARED_PAGE_FIELDS = {
     "dimensions",
     "assets",
 }
+_PREPARED_PAGE_FIELDS_V6 = _PREPARED_PAGE_FIELDS - {"page_policy"}
 _PREPARED_DIMENSION_FIELDS = {
     "img_width",
     "img_height",
@@ -3308,6 +3597,37 @@ def _validate_prepared_payload(manifest: dict) -> None:
         source_sha256=source_sha256,
         image_size=(image_width, image_height),
     )
+    if manifest["schema_version"] >= 7:
+        policy = manifest["page_policy"]
+        expected_policy_fields = {
+            "schema_version", "route", "confidence", "reasons",
+        }
+        if not isinstance(policy, dict) or set(policy) != expected_policy_fields:
+            raise ValueError("prepared page policy fields are invalid")
+        confidence = policy["confidence"]
+        reasons = policy["reasons"]
+        if (
+            policy["schema_version"] != 1
+            or policy["route"]
+            not in {"native", "direct", "local_refine", "strict"}
+            or not isinstance(confidence, (int, float))
+            or isinstance(confidence, bool)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+            or not isinstance(reasons, list)
+            or len(reasons) > 16
+            or not all(
+                isinstance(reason, str)
+                and 0 < len(reason) <= 64
+                and reason.isascii()
+                and all(
+                    character.isalnum() or character == "_"
+                    for character in reason
+                )
+                for reason in reasons
+            )
+        ):
+            raise ValueError("prepared page policy values are invalid")
 
 
 def _atomic_write_prepared_text(
@@ -3418,10 +3738,17 @@ def _write_prepared_page(slide_data: dict, work_dir: Path) -> Path:
             ),
             "metadata": metadata,
         })
+    page_policy = slide_data.get("_page_policy", strict_page_policy())
     manifest = {
         "schema_version": _PREPARED_PAGE_SCHEMA_VERSION,
         "phase": "initial_layers",
         "resource_isolation": slide_data["_resource_isolation"],
+        "page_policy": {
+            "schema_version": 1,
+            "route": page_policy.route,
+            "confidence": page_policy.confidence,
+            "reasons": list(page_policy.reasons),
+        },
         "initial_component_count": len(components),
         "components": components,
         "text_items": [
@@ -3489,16 +3816,33 @@ def _load_component_layer_state(
     if not isinstance(manifest, dict):
         raise ValueError("prepared page state fields are invalid")
     schema_version = manifest.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, 6}:
+    if (
+        type(schema_version) is not int
+        or schema_version not in {1, 2, 3, 4, 5, 6, 7}
+    ):
         raise ValueError("prepared page schema_version is invalid")
-    legacy_fields = _PREPARED_PAGE_FIELDS - {"initial_diagnostics"}
+    legacy_fields = _PREPARED_PAGE_FIELDS_V6 - {"initial_diagnostics"}
     expected_fields = (
-        _PREPARED_PAGE_FIELDS if schema_version >= 3 else legacy_fields
+        _PREPARED_PAGE_FIELDS
+        if schema_version >= 7
+        else _PREPARED_PAGE_FIELDS_V6
+        if schema_version >= 3
+        else legacy_fields
     )
     if set(manifest) != expected_fields:
         raise ValueError("prepared page state fields are invalid")
     if schema_version < 3:
         manifest = {**manifest, "initial_diagnostics": []}
+    if schema_version < 7:
+        manifest = {
+            **manifest,
+            "page_policy": {
+                "schema_version": 1,
+                "route": "strict",
+                "confidence": 0.0,
+                "reasons": ["legacy_strict"],
+            },
+        }
     if manifest["phase"] != "initial_layers":
         raise ValueError("prepared page phase is invalid")
     if type(manifest["resource_isolation"]) is not bool:
@@ -3655,6 +3999,7 @@ def _load_component_layer_state(
         "_prepared_schema_version": schema_version,
         "state_path": str(state_file),
         "_resource_isolation": manifest["resource_isolation"],
+        "_page_policy": manifest["page_policy"],
         **dimensions,
         "components": components,
         "text_items": manifest["text_items"],
@@ -3771,11 +4116,13 @@ def _reuse_disjoint_text_delta(
         with Image.open(io.BytesIO(cached_text_content)) as stored_text_mask:
             cached_text_mask = np.asarray(
                 stored_text_mask.convert("L"), dtype=np.uint8
-            ).copy()
+            ) > 0
         if (
             np.array_equal(old_cleanup_mask, new_cleanup_mask)
-            and np.array_equal(cached_text_mask, new_text_mask)
+            and not np.any(cached_text_mask)
         ):
+            return False
+        if np.array_equal(old_cleanup_mask, new_cleanup_mask):
             scope = set()
         else:
             scope = _text_delta_recompute_scope(
@@ -3804,19 +4151,32 @@ def _reuse_disjoint_text_delta(
     except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
         return False
 
-    background_kwargs = (
-        {"large_inpainter": _isolated_large_inpainter(work_dir)}
-        if resource_isolation
-        else {}
-    )
-    clean_background = build_clean_background(
-        source_image,
-        element_masks,
-        new_cleanup_mask,
-        text_clean_image=text_clean_image,
-        text_restore_mask=new_text_mask,
-        **background_kwargs,
-    )
+    background_kwargs = {}
+    if np.array_equal(old_cleanup_mask, new_cleanup_mask):
+        clean_background = _reuse_text_only_background(
+            slide_data,
+            work_dir,
+            new_text_mask,
+            text_clean_image,
+            manifest,
+            old_cleanup_mask,
+        )
+        if clean_background is None:
+            return False
+    else:
+        background_kwargs = (
+            {"large_inpainter": _isolated_large_inpainter(work_dir)}
+            if resource_isolation
+            else {}
+        )
+        clean_background = build_clean_background(
+            source_image,
+            element_masks,
+            new_cleanup_mask,
+            text_clean_image=text_clean_image,
+            text_restore_mask=new_text_mask,
+            **background_kwargs,
+        )
     background_original_path = work_dir / "targeted-background-original.png"
     background_widescreen_path = work_dir / "targeted-background-16x9.png"
     background_removal_mask_path = work_dir / "targeted-background-removal-mask.png"
@@ -3868,6 +4228,42 @@ def _reuse_disjoint_text_delta(
         "_semantic_mask_paths": verified["_semantic_mask_paths"],
     })
     return True
+
+
+def _reuse_text_only_background(
+    slide_data: dict,
+    work_dir: Path,
+    new_text_mask: np.ndarray,
+    text_clean_image: np.ndarray,
+    manifest: dict,
+    cleanup_mask: np.ndarray,
+) -> np.ndarray | None:
+    """Update only OCR pixels when the visual cleanup dependency is unchanged."""
+    try:
+        background = _load_rgb(slide_data["background_original_path"])
+        _, old_mask_content = _read_prepared_asset_bytes(
+            work_dir,
+            manifest["assets"]["ocr_mask"],
+            "first visual OCR mask",
+        )
+        with Image.open(io.BytesIO(old_mask_content)) as stored_mask:
+            old_text_mask = np.asarray(stored_mask.convert("L"), dtype=np.uint8) > 0
+        new_text = np.asarray(new_text_mask, dtype=np.uint8) > 0
+        cleanup = np.asarray(cleanup_mask, dtype=np.uint8) > 0
+        trusted = np.asarray(text_clean_image, dtype=np.uint8)
+        if (
+            background.shape != trusted.shape
+            or background.shape[:2] != new_text.shape
+            or old_text_mask.shape != new_text.shape
+            or cleanup.shape != new_text.shape
+        ):
+            return None
+        # The caller has already proved cleanup is unchanged, so pixels that
+        # leave the OCR mask outside cleanup were never altered in this background.
+        background[new_text] = trusted[new_text]
+        return background
+    except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
+        return None
 
 
 def _restore_rotated_ocr_analysis(
@@ -3929,6 +4325,14 @@ def prepare_component_layers(
     lang: str,
     resource_isolation: bool,
     ocr_rotation: int = 0,
+    pipeline_mode: str = "strict",
+    source_kind: str = "image",
+    ocr_result: tuple[list[dict], np.ndarray] | None = None,
+    ocr_worker_pool=None,
+    visual_worker_pool=None,
+    visual_worker_pool_factory=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> dict:
     """Persist recoverable OCR and visual layers for Agent review."""
     source = _resolve_image_path(image_path)
@@ -3953,6 +4357,12 @@ def prepare_component_layers(
             if resource_isolation
             else {}
         )
+        if ocr_worker_pool is not None:
+            ocr_kwargs.update({
+                "worker_pool": ocr_worker_pool,
+                "performance_trace": performance_trace,
+                "page_id": page_id,
+            })
         ocr_source = owned_source
         with Image.open(owned_source) as source_image:
             source_size = source_image.size
@@ -3976,7 +4386,10 @@ def prepare_component_layers(
                     finally:
                         upright.close()
                 ocr_source = temporary_ocr_source
-        text_items, text_mask = detect_text(ocr_source, lang=lang, **ocr_kwargs)
+        if ocr_result is None:
+            text_items, text_mask = detect_text(ocr_source, lang=lang, **ocr_kwargs)
+        else:
+            text_items, text_mask = ocr_result
         text_items, text_mask = _filter_probable_icon_text_analysis(
             text_items,
             text_mask,
@@ -4024,7 +4437,32 @@ def prepare_component_layers(
                     exception_boundary,
                 )
 
-    if resource_isolation and text_items and all("box" in item for item in text_items):
+    if pipeline_mode == "fast":
+        with Image.open(owned_source) as stored_source:
+            policy_source = np.asarray(stored_source.convert("RGB")).copy()
+        page_policy = _infer_page_policy(
+            policy_source,
+            text_items,
+            source_kind=source_kind,
+            pipeline_mode=pipeline_mode,
+        )
+        del policy_source
+    else:
+        page_policy = strict_page_policy()
+    text_analysis["page_policy"] = asdict(page_policy)
+    if (
+        visual_worker_pool is None
+        and visual_worker_pool_factory is not None
+        and page_policy.route != "direct"
+    ):
+        visual_worker_pool = visual_worker_pool_factory()
+
+    if (
+        resource_isolation
+        and visual_worker_pool is None
+        and text_items
+        and all("box" in item for item in text_items)
+    ):
         source_image = None
         stored_text_mask = None
         stored_mask = None
@@ -4074,7 +4512,8 @@ def prepare_component_layers(
             )
 
     initial_diagnostics = []
-    for visual_pass in range(2):
+    visual_pass_count = 2
+    for visual_pass in range(visual_pass_count):
         object_detector = None
         mask_generator = None
         visual_source_image = None
@@ -4085,16 +4524,41 @@ def prepare_component_layers(
         primary_exception = None
         primary_traceback = None
         try:
-            if resource_isolation:
+            if resource_isolation and page_policy.route != "direct":
+                isolated_kwargs = {}
+                if visual_worker_pool is not None:
+                    isolated_kwargs = {
+                        "worker_pool": visual_worker_pool,
+                        "performance_trace": performance_trace,
+                        "page_id": page_id,
+                    }
                 slide_data = _process_image_isolated(
                     owned_source,
                     owned_work_dir,
                     lang,
                     text_analysis,
+                    **isolated_kwargs,
                 )
                 visual_source_sha256 = slide_data.pop(
                     "_visual_source_sha256", None
                 )
+            elif resource_isolation:
+                visual_source_image = _load_rgb(owned_source)
+                slide_data = _process_image(
+                    owned_source,
+                    owned_work_dir,
+                    None,
+                    None,
+                    lang,
+                    text_analysis=text_analysis,
+                    defer_quality=True,
+                    _resource_isolation=True,
+                    _source_image=visual_source_image,
+                    page_policy=page_policy,
+                )
+                visual_source_sha256 = hashlib.sha256(
+                    owned_source.read_bytes()
+                ).hexdigest()
             else:
                 _, visual_source_content = _read_prepared_owned_bytes(
                     owned_work_dir,
@@ -4119,6 +4583,7 @@ def prepare_component_layers(
                     text_analysis=text_analysis,
                     defer_quality=True,
                     _source_image=visual_source_image,
+                    page_policy=page_policy,
                 )
             visual_text_mask_sha256 = slide_data.pop(
                 "_visual_text_mask_sha256", None
@@ -4142,6 +4607,7 @@ def prepare_component_layers(
                 exception_boundary,
             )
 
+        slide_data["_page_policy"] = page_policy
         if visual_pass:
             break
         with Image.open(text_analysis["mask_path"]) as stored_text_mask:
@@ -4155,6 +4621,9 @@ def prepare_component_layers(
             lang=lang,
             isolated=resource_isolation,
             ocr_rotation=ocr_rotation,
+            ocr_worker_pool=ocr_worker_pool,
+            performance_trace=performance_trace,
+            page_id=page_id,
         )
         initial_diagnostics = sweep["diagnostics"]
         if not sweep["recovered_items"]:
@@ -4189,6 +4658,9 @@ def prepare_component_layers(
         cache_path = None
         first_text_mask_sha256 = None
         first_text_clean_sha256 = None
+        first_text_clean_record = None
+        first_text_clean_path = None
+        first_text_clean_content = None
         try:
             _, first_text_mask_content = _read_prepared_asset_bytes(
                 owned_work_dir,
@@ -4202,7 +4674,7 @@ def prepare_component_layers(
                 ).hexdigest()
             first_text_clean_record = first_manifest["assets"]["text_clean"]
             if first_text_clean_record is not None:
-                _, first_text_clean_content = _read_prepared_asset_bytes(
+                first_text_clean_path, first_text_clean_content = _read_prepared_asset_bytes(
                     owned_work_dir,
                     first_text_clean_record,
                     "first visual text clean image",
@@ -4234,6 +4706,7 @@ def prepare_component_layers(
         text_analysis = {
             "items": text_items,
             "mask_path": str(text_mask_path),
+            "page_policy": asdict(page_policy),
         }
         source_image = source_for_delta
         stored_mask = sweep["text_mask"]
@@ -4252,21 +4725,59 @@ def prepare_component_layers(
                 owned_work_dir / "text-clean-removal-mask.png"
             ).resolve()
             Image.fromarray(removal_mask, mode="L").save(cleanup_mask_path)
-            text_clean_path = owned_work_dir / "targeted-text-clean.png"
-            repair_kwargs = (
-                {"large_inpainter": _isolated_large_inpainter(owned_work_dir)}
-                if resource_isolation
-                else {}
-            )
-            text_clean = _repair_text_background(
-                source_image,
-                removal_mask,
-                text_items=text_items,
-                **repair_kwargs,
-            )
-            _save_rgb(text_clean_path, text_clean)
-            text_analysis["text_clean_path"] = str(text_clean_path)
-            reused = cache_path is not None and _reuse_disjoint_text_delta(
+            reused = False
+            if (
+                visual_worker_pool is not None
+                and cache_path is not None
+                and first_text_clean_record is not None
+                and first_text_clean_path is not None
+                and first_text_clean_content is not None
+            ):
+                try:
+                    with Image.open(io.BytesIO(first_text_clean_content)) as stored_clean:
+                        text_clean = np.asarray(
+                            stored_clean.convert("RGB")
+                        ).copy()
+                    text_clean_path = first_text_clean_path
+                    text_analysis["text_clean_path"] = str(text_clean_path)
+                    reused = _reuse_disjoint_text_delta(
+                        cache_path=cache_path,
+                        prepared_state_path=first_state_path,
+                        slide_data=slide_data,
+                        work_dir=owned_work_dir,
+                        source_image=source_image,
+                        old_cleanup_mask=old_cleanup_mask,
+                        new_cleanup_mask=removal_mask,
+                        new_text_mask=stored_mask,
+                        new_text_items=text_items,
+                        text_clean_image=text_clean,
+                        text_clean_path=text_clean_path,
+                        resource_isolation=resource_isolation,
+                    )
+                except (
+                    OSError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    Image.UnidentifiedImageError,
+                ):
+                    reused = False
+            elif visual_worker_pool is None:
+                text_clean_path = owned_work_dir / "targeted-text-clean.png"
+                repair_kwargs = (
+                    {"large_inpainter": _isolated_large_inpainter(owned_work_dir)}
+                    if resource_isolation
+                    else {}
+                )
+                text_clean = _repair_text_background(
+                    source_image,
+                    removal_mask,
+                    text_items=text_items,
+                    **repair_kwargs,
+                )
+                _save_rgb(text_clean_path, text_clean)
+                text_analysis["text_clean_path"] = str(text_clean_path)
+                reused = cache_path is not None and _reuse_disjoint_text_delta(
                     cache_path=cache_path,
                     prepared_state_path=first_state_path,
                     slide_data=slide_data,
@@ -4376,7 +4887,84 @@ def _snapshot_prepared_asset(
     return str(staged_path)
 
 
-def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
+def _rebuild_strict_page_candidate(
+    prepared: dict,
+    work_dir: Path,
+    *,
+    lang: str,
+    visual_worker_pool=None,
+) -> dict:
+    source = Path(prepared["original_image_path"])
+    strict_source = work_dir / f"source-image{source.suffix.lower()}"
+    strict_text_mask = work_dir / "source-text-mask.png"
+    shutil.copyfile(source, strict_source)
+    shutil.copyfile(prepared["_text_mask_path"], strict_text_mask)
+    text_analysis = {
+        "items": prepared["text_items"],
+        "mask_path": str(strict_text_mask),
+    }
+    if prepared.get("_text_clean_path") is not None:
+        strict_text_clean = work_dir / "text-clean.png"
+        shutil.copyfile(prepared["_text_clean_path"], strict_text_clean)
+        text_analysis["text_clean_path"] = str(strict_text_clean)
+
+    object_detector = None
+    mask_generator = None
+    exception_boundary = sys.exc_info()[1]
+    primary_exception = None
+    primary_traceback = None
+    try:
+        if prepared["_resource_isolation"]:
+            isolated_kwargs = {}
+            if visual_worker_pool is not None:
+                isolated_kwargs["worker_pool"] = visual_worker_pool
+            slide_data = _process_image_isolated(
+                strict_source,
+                work_dir,
+                lang,
+                text_analysis,
+                page_policy=strict_page_policy(),
+                **isolated_kwargs,
+            )
+            slide_data.pop("_visual_source_sha256", None)
+            slide_data.pop("_visual_text_mask_sha256", None)
+            slide_data.pop("_visual_text_clean_sha256", None)
+            return slide_data
+        object_detector = create_object_detector()
+        mask_generator = create_sam_generator(resolve_sam_checkpoint())
+        return _process_image(
+            strict_source,
+            work_dir,
+            object_detector,
+            mask_generator,
+            lang,
+            text_analysis=text_analysis,
+            defer_quality=True,
+            page_policy=strict_page_policy(),
+        )
+    except BaseException as exc:
+        primary_exception = exc
+        primary_traceback = exc.__traceback__
+        raise
+    finally:
+        mask_generator = None
+        object_detector = None
+        _run_cleanup_preserving_exception(
+            _release_visual_resources,
+            "strict escalation visual resources",
+            primary_exception,
+            primary_traceback,
+            exception_boundary,
+        )
+
+
+def finalize_component_layers(
+    prepared: dict,
+    accepted,
+    *,
+    lang: str,
+    visual_worker_pool=None,
+) -> dict:
     """Finalize the exact current components and ``_element_mask_paths``.
 
     ``accepted`` must map ``components`` to ``prepared["components"]`` and
@@ -4409,9 +4997,13 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
     work_dir = Path(fresh["_work_dir"])
     components = fresh["components"]
     initial_count = fresh["initial_component_count"]
+    route = fresh["_page_policy"]["route"]
+    fast_route = route if route in {"direct", "local_refine"} else None
 
     staged_dir = None
     keep_staging = False
+    escalation_dir = None
+    keep_escalation = False
     try:
         staged_dir = Path(
             tempfile.mkdtemp(prefix="quality-components-", dir=work_dir)
@@ -4487,7 +5079,9 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
         slide_data = {
             key: value
             for key, value in fresh.items()
-            if key not in {"phase", "initial_component_count", "state_path"}
+            if key not in {
+                "phase", "initial_component_count", "state_path", "_page_policy",
+            }
         }
         slide_data.update({
             "original_image_path": staged_assets["source_image"],
@@ -4515,11 +5109,29 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
         primary_exception = None
         primary_traceback = None
         try:
-            result = _finalize_slide_quality(
-                slide_data,
-                lang,
-                _resource_isolation=fresh["_resource_isolation"],
-            )
+            try:
+                result = _finalize_slide_quality(
+                    slide_data,
+                    lang,
+                    _resource_isolation=fresh["_resource_isolation"],
+                )
+            except VisualSegmentationError:
+                if fast_route is None:
+                    raise
+                escalation_dir = Path(tempfile.mkdtemp(
+                    prefix="quality-escalation-", dir=work_dir
+                ))
+                strict_slide_data = _rebuild_strict_page_candidate(
+                    fresh,
+                    escalation_dir,
+                    lang=lang,
+                    visual_worker_pool=visual_worker_pool,
+                )
+                result = _finalize_slide_quality(
+                    strict_slide_data,
+                    lang,
+                    _resource_isolation=fresh["_resource_isolation"],
+                )
         except BaseException as exc:
             primary_exception = exc
             primary_traceback = exc.__traceback__
@@ -4541,11 +5153,16 @@ def finalize_component_layers(prepared: dict, accepted, *, lang: str) -> dict:
             "initial_component_count": initial_count,
             "state_path": fresh["state_path"],
         })
-        keep_staging = True
+        if escalation_dir is None:
+            keep_staging = True
+        else:
+            keep_escalation = True
         return result
     finally:
         if staged_dir is not None and not keep_staging:
             shutil.rmtree(staged_dir, ignore_errors=True)
+        if escalation_dir is not None and not keep_escalation:
+            shutil.rmtree(escalation_dir, ignore_errors=True)
 
 
 def _resolve_image_path(image_path: str | Path) -> Path:
@@ -4657,8 +5274,27 @@ def _prepare_multiple_images(
     primary_exception = None
     primary_traceback = None
     try:
-        for image_path, work_dir in prepared_pages:
-            if _resource_isolation:
+        batch_results = None
+        if _resource_isolation and len(prepared_pages) > 1:
+            try:
+                batch_results = detect_text_batch(
+                    [image_path for image_path, _ in prepared_pages],
+                    lang=lang,
+                    isolated=True,
+                    worker_root=prepared_pages[0][1].parent,
+                )
+                if len(batch_results) != len(prepared_pages):
+                    raise RuntimeError("OCR batch returned the wrong page count")
+            except Exception as error:
+                logger.warning(
+                    "Isolated OCR batch failed; falling back to page OCR: %s",
+                    error,
+                )
+                batch_results = None
+        for index, (image_path, work_dir) in enumerate(prepared_pages):
+            if batch_results is not None:
+                text_items, text_mask = batch_results[index]
+            elif _resource_isolation:
                 text_items, text_mask = detect_text(
                     image_path,
                     lang=lang,
@@ -4868,6 +5504,7 @@ def _assemble_prepared_slide(
         content_offset_x=slide_data.get("content_offset_x", 0) if use_canvas else 0,
         content_offset_y=slide_data.get("content_offset_y", 0) if use_canvas else 0,
         visual_elements=slide_data.get("visual_elements"),
+        background_rgb=slide_data.get("background_rgb"),
     )
 
 

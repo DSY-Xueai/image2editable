@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"
+
+def _cpu_threads() -> int:
+    for name in ("FLAGS_paddle_num_threads", "OMP_NUM_THREADS"):
+        try:
+            value = int(os.environ.get(name, ""))
+        except ValueError:
+            continue
+        if 1 <= value <= 8:
+            return value
+    return min(8, max(1, (os.cpu_count() or 1) // 2))
+
+
+os.environ.setdefault("OMP_NUM_THREADS", str(_cpu_threads()))
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 import argparse
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
 import sys
@@ -71,6 +84,53 @@ def _write_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+class _ResidentOcrProcessor:
+    """Keep PaddleOCR detector and recognizers alive for one task."""
+
+    def __init__(self) -> None:
+        self._detector = None
+        self._sorter_type = None
+        self._cropper_type = None
+        self._recognizers: dict[str, object] = {}
+
+    def detection_tools(self):
+        if self._detector is None:
+            detector_type, self._sorter_type, self._cropper_type = (
+                _load_detection_tools()
+            )
+            self._detector = detector_type(
+                model_name="PP-OCRv5_mobile_det",
+                cpu_threads=_cpu_threads(),
+                enable_mkldnn=False,
+                limit_side_len=64,
+                limit_type="min",
+                thresh=0.3,
+                box_thresh=0.6,
+                unclip_ratio=1.5,
+            )
+        return self._detector, self._sorter_type, self._cropper_type
+
+    def recognizer(self, lang: str):
+        recognizer = self._recognizers.get(lang)
+        if recognizer is None:
+            recognizer_type = _load_recognition_model()
+            recognizer = recognizer_type(
+                model_name=_resolve_recognition_model_name(lang),
+                cpu_threads=_cpu_threads(),
+                enable_mkldnn=False,
+            )
+            self._recognizers[lang] = recognizer
+        return recognizer
+
+    def close(self) -> None:
+        if self._detector is not None:
+            self._detector.close()
+            self._detector = None
+        for recognizer in self._recognizers.values():
+            recognizer.close()
+        self._recognizers.clear()
+
+
 def run_detection(
     image_path: str | Path,
     work_dir: str | Path,
@@ -82,7 +142,7 @@ def run_detection(
     detector_type, sorter_type, cropper_type = _load_detection_tools()
     detector = detector_type(
         model_name="PP-OCRv5_mobile_det",
-        cpu_threads=1,
+        cpu_threads=_cpu_threads(),
         enable_mkldnn=False,
         limit_side_len=64,
         limit_type="min",
@@ -142,7 +202,7 @@ def run_recognition(
     recognizer_type = _load_recognition_model()
     recognizer = recognizer_type(
         model_name=_resolve_recognition_model_name(lang),
-        cpu_threads=1,
+        cpu_threads=_cpu_threads(),
         enable_mkldnn=False,
     )
     try:
@@ -165,18 +225,23 @@ def run_batch(
     image_paths: list[str | Path],
     result_path: str | Path,
     lang: str = "ch",
+    *,
+    processor: _ResidentOcrProcessor | None = None,
 ) -> None:
-    detector_type, sorter_type, cropper_type = _load_detection_tools()
-    detector = detector_type(
-        model_name="PP-OCRv5_mobile_det",
-        cpu_threads=1,
-        enable_mkldnn=False,
-        limit_side_len=64,
-        limit_type="min",
-        thresh=0.3,
-        box_thresh=0.6,
-        unclip_ratio=1.5,
-    )
+    if processor is None:
+        detector_type, sorter_type, cropper_type = _load_detection_tools()
+        detector = detector_type(
+            model_name="PP-OCRv5_mobile_det",
+            cpu_threads=_cpu_threads(),
+            enable_mkldnn=False,
+            limit_side_len=64,
+            limit_type="min",
+            thresh=0.3,
+            box_thresh=0.6,
+            unclip_ratio=1.5,
+        )
+    else:
+        detector, sorter_type, cropper_type = processor.detection_tools()
     records = []
     all_crops = []
     try:
@@ -201,7 +266,8 @@ def run_batch(
                 "crop_indices": crop_indices,
             })
     finally:
-        detector.close()
+        if processor is None:
+            detector.close()
 
     recognized = [None] * len(all_crops)
     if all_crops:
@@ -209,12 +275,15 @@ def run_batch(
             range(len(all_crops)),
             key=lambda index: all_crops[index].shape[1] / all_crops[index].shape[0],
         )
-        recognizer_type = _load_recognition_model()
-        recognizer = recognizer_type(
-            model_name=_resolve_recognition_model_name(lang),
-            cpu_threads=1,
-            enable_mkldnn=False,
-        )
+        if processor is None:
+            recognizer_type = _load_recognition_model()
+            recognizer = recognizer_type(
+                model_name=_resolve_recognition_model_name(lang),
+                cpu_threads=_cpu_threads(),
+                enable_mkldnn=False,
+            )
+        else:
+            recognizer = processor.recognizer(lang)
         try:
             for start in range(0, len(order), 64):
                 batch = order[start:start + 64]
@@ -227,7 +296,8 @@ def run_batch(
                         "score": float(_value(result, "rec_score", 0.0)),
                     }
         finally:
-            recognizer.close()
+            if processor is None:
+                recognizer.close()
 
     images = []
     for record in records:
@@ -241,7 +311,8 @@ def run_batch(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    subparsers = parser.add_subparsers(dest="mode", required=True)
+    parser.add_argument("--serve", action="store_true")
+    subparsers = parser.add_subparsers(dest="mode")
     detect = subparsers.add_parser("detect")
     detect.add_argument("--image", required=True)
     detect.add_argument("--work-dir", required=True)
@@ -257,8 +328,60 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _serve() -> int:
+    processor = _ResidentOcrProcessor()
+    try:
+        for line in sys.stdin:
+            request_id = None
+            try:
+                envelope = json.loads(line)
+                if envelope == {"control": "close"}:
+                    break
+                if not isinstance(envelope, dict):
+                    raise ValueError("OCR worker envelope is invalid")
+                request_id = envelope.get("request_id")
+                payload = envelope.get("payload")
+                if not isinstance(request_id, str) or not request_id:
+                    raise ValueError("OCR worker request id is invalid")
+                if not isinstance(payload, dict) or set(payload) != {
+                    "images", "result", "lang",
+                }:
+                    raise ValueError("OCR worker payload is invalid")
+                if (
+                    not isinstance(payload["images"], list)
+                    or not payload["images"]
+                    or any(not isinstance(path, str) or not path for path in payload["images"])
+                    or not isinstance(payload["result"], str)
+                    or not isinstance(payload["lang"], str)
+                ):
+                    raise ValueError("OCR worker payload is invalid")
+                with redirect_stdout(sys.stderr):
+                    run_batch(
+                        payload["images"],
+                        payload["result"],
+                        payload["lang"],
+                        processor=processor,
+                    )
+                response = {"request_id": request_id, "result": {}}
+            except Exception as error:
+                response = {
+                    "request_id": request_id,
+                    "error": {"type": type(error).__name__, "message": str(error)},
+                }
+            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+    finally:
+        processor.close()
+    return 0
+
+
 def main() -> int:
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.serve:
+        return _serve()
+    if args.mode is None:
+        parser.error("OCR worker requires a mode or --serve")
     try:
         if args.mode == "detect":
             run_detection(args.image, args.work_dir, args.result)

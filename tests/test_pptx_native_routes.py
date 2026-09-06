@@ -1,3 +1,4 @@
+import zipfile
 from pathlib import Path
 
 from PIL import Image
@@ -157,3 +158,24 @@ def test_unsupported_visual_route_fails(tmp_path: Path) -> None:
             slide_size="original",
             visual_elements=[{"route": "svg", "z_index": 1}],
         )
+
+
+def test_textbox_preserves_unicode_in_pptx_xml(tmp_path: Path) -> None:
+    output = tmp_path / "unicode.pptx"
+    expected = "\u6d45\u8272\u6587\u5b57 \u00d7 \u56fa\u5b9a\u6e10\u53d8 \u00d7 \u5927\u7559\u767d"
+
+    assemble_pptx(
+        _background(tmp_path),
+        [],
+        [{"box": [20, 20, 280, 30], "text": expected}],
+        400,
+        300,
+        output,
+        slide_size="original",
+    )
+
+    presentation = Presentation(output)
+    assert presentation.slides[0].shapes[1].text == expected
+    with zipfile.ZipFile(output) as archive:
+        slide_xml = archive.read("ppt/slides/slide1.xml")
+    assert expected.encode("utf-8") in slide_xml

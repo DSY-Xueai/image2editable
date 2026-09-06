@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import BinaryIO, Literal, Sequence
 
 import pypdfium2 as pdfium
+from PIL import Image
 
 from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
@@ -18,9 +19,11 @@ from image2editable.inputs import (
     new_job_id,
     sha256_file,
     validate_pptx_output_path,
+    validate_pipeline_mode,
 )
 from image2editable.resources import safe_default_policy
 from image2editable.store import RunStore
+from image2editable.pdf_objects import analyze_pdf_document
 
 
 STANDARD_DPI = 200.0
@@ -68,8 +71,10 @@ def prepare_pdf_job(
     slide_size: str = "both",
     lang: str = "ch",
     agent_provider: str = "host",
+    pipeline_mode: str = "strict",
 ) -> Path:
     agent_provider = validate_agent_provider(agent_provider)
+    pipeline_mode = validate_pipeline_mode(pipeline_mode)
     source_path = Path(source).resolve()
     if not source_path.is_file() or source_path.suffix.casefold() != ".pdf":
         raise ValueError(f"PDF input must be an existing .pdf file: {source_path}")
@@ -90,10 +95,19 @@ def prepare_pdf_job(
         shutil.copy2(source_path, copied_path)
         digest = sha256_file(copied_path)
         page_ids = [f"page_{index:03d}" for index in range(1, page_count + 1)]
+        try:
+            analyses = analyze_pdf_document(
+                copied_path,
+                asset_root=store.root / "pages",
+            )
+        except Exception:
+            analyses = None
         output_paths = [
             store.root / "pages" / page_id / "source.png" for page_id in page_ids
         ]
         renders = render_pdf_document(copied_path, output_paths, profile="standard")
+        if analyses is None:
+            analyses = [_analysis_error_result(render) for render in renders]
         ratios = [record["width_pt"] / record["height_pt"] for record in renders]
         page_ratios_equal = math.isfinite(ratios[0]) and all(
             math.isfinite(ratio)
@@ -101,7 +115,10 @@ def prepare_pdf_job(
             for ratio in ratios[1:]
         )
         page_aspect_ratio = ratios[0] if page_ratios_equal else None
-        for page_id, render in zip(page_ids, renders):
+        for page_id, render, analysis, source_image in zip(
+            page_ids, renders, analyses, output_paths, strict=True
+        ):
+            analysis = _prepare_pdf_analysis(store, analysis, source_image)
             source_relative = (Path("pages") / page_id / "source.png").as_posix()
             store.write_json(
                 Path("pages") / page_id / "page_request.json",
@@ -112,6 +129,7 @@ def prepare_pdf_job(
                     "source": source_relative,
                     "sha256": render["sha256"],
                     "render": render,
+                    "pdf_analysis": analysis,
                 },
             )
             store.write_json(
@@ -143,6 +161,7 @@ def prepare_pdf_job(
                     str(resolved_output) if resolved_output is not None else None
                 ),
                 "resource_policy": safe_default_policy(),
+                **({"pipeline_mode": pipeline_mode} if pipeline_mode != "strict" else {}),
             },
             "pages": page_ids,
         }
@@ -163,6 +182,97 @@ def prepare_pdf_job(
         if cleanup_error is not None:
             raise error from cleanup_error
         raise
+
+
+def _prepare_pdf_analysis(
+    store: RunStore, analysis: dict, source_image: Path
+) -> dict:
+    prepared = {**analysis, "objects": []}
+    keep_assets = analysis.get("requires_visual") is False
+    for item in analysis.get("objects", []):
+        prepared_item = dict(item)
+        if keep_assets and prepared_item.get("type") == "patch":
+            prepared_item["asset_path"] = str(
+                _write_pdf_patch(store, analysis, source_image, prepared_item)
+            )
+        asset_value = prepared_item.get("asset_path")
+        if isinstance(asset_value, str):
+            asset_path = Path(asset_value).resolve()
+            if not asset_path.is_relative_to(store.root):
+                raise ValueError("PDF analysis asset is outside run directory")
+            if keep_assets:
+                prepared_item["asset_path"] = asset_path.relative_to(
+                    store.root
+                ).as_posix()
+                prepared_item["asset_sha256"] = sha256_file(asset_path)
+            else:
+                asset_path.unlink(missing_ok=True)
+                prepared_item.pop("asset_path", None)
+        prepared["objects"].append(prepared_item)
+    if not keep_assets:
+        directory = (
+            store.root / "pages" / f"page_{analysis['page_index'] + 1:03d}"
+            / "pdf-assets"
+        )
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return prepared
+
+
+def _write_pdf_patch(
+    store: RunStore,
+    analysis: dict,
+    source_image: Path,
+    item: dict,
+) -> Path:
+    width_pt = float(analysis["width_pt"])
+    height_pt = float(analysis["height_pt"])
+    left, bottom, right, top = (float(value) for value in item["bbox_pt"])
+    with Image.open(source_image) as source:
+        scale_x = source.width / width_pt
+        scale_y = source.height / height_pt
+        pixel_left = max(0, math.floor(left * scale_x) - 2)
+        pixel_top = max(0, math.floor((height_pt - top) * scale_y) - 2)
+        pixel_right = min(source.width, math.ceil(right * scale_x) + 2)
+        pixel_bottom = min(
+            source.height, math.ceil((height_pt - bottom) * scale_y) + 2
+        )
+        crop = source.crop((pixel_left, pixel_top, pixel_right, pixel_bottom))
+        try:
+            target = (
+                store.root / "pages"
+                / f"page_{analysis['page_index'] + 1:03d}"
+                / "pdf-assets" / f"{item['id']}.png"
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            crop.save(target, format="PNG")
+        finally:
+            crop.close()
+    item["bbox_pt"] = [
+        pixel_left / scale_x,
+        height_pt - pixel_bottom / scale_y,
+        pixel_right / scale_x,
+        height_pt - pixel_top / scale_y,
+    ]
+    return target
+
+
+def _analysis_error_result(render: dict[str, object]) -> dict[str, object]:
+    width = float(render["width_pt"])
+    height = float(render["height_pt"])
+    return {
+        "schema_version": 1,
+        "page_index": render["page_index"],
+        "width_pt": width,
+        "height_pt": height,
+        "objects": [],
+        "unsupported_features": ["analysis_error"],
+        "classification": "raster",
+        "requires_visual": True,
+        "visual_regions": [[0.0, 0.0, width, height]],
+    }
 
 
 def _remove_files(paths: Sequence[Path]) -> Exception | None:

@@ -492,10 +492,10 @@ def _prepare_page_quality_context(
         np.ones((2 * alignment_radius + 1,) * 2, dtype=np.uint8),
     ) > 0
     background_residual_text_ink = _residual_text_ink_mask(
-        background_rgb, text, text_ink_neighborhood, calibration
+        background_rgb, text_ink, text_ink_neighborhood, calibration
     )
     reconstructed_residual_text_ink = _residual_text_ink_mask(
-        reconstructed_rgb, text, text_ink_neighborhood, calibration
+        reconstructed_rgb, text_ink, text_ink_neighborhood, calibration
     )
     text_count, text_labels = _text_region_labels(text, text_items)
     reconstructed_residual_region_counts = np.bincount(
@@ -663,6 +663,7 @@ def component_metrics(
     *,
     component_mask: np.ndarray,
     parent_mask: np.ndarray | None = None,
+    higher_presentation_alpha_mask: np.ndarray | None = None,
     text_mask: np.ndarray,
     _page_context: _PageQualityContext | None = None,
 ) -> dict:
@@ -677,9 +678,18 @@ def component_metrics(
     support &= ~context.text
     support_pixels = int(np.count_nonzero(support))
     parent_coverage_ratio = 1.0
+    higher_presentation_alpha = None
+    if higher_presentation_alpha_mask is not None:
+        higher_presentation_alpha = _strict_binary_mask(
+            higher_presentation_alpha_mask,
+            shape,
+            "higher presentation alpha mask",
+        )
     if parent_mask is not None:
         parent_support, _ = _project_component_mask(parent_mask, shape)
         parent_support &= ~context.text
+        if higher_presentation_alpha is not None:
+            parent_support &= ~higher_presentation_alpha
         child_support = support & ~context.text
         parent_pixels = int(np.count_nonzero(parent_support))
         if parent_pixels:
@@ -826,6 +836,7 @@ def evaluate_component(
     *,
     component_mask: np.ndarray,
     parent_mask: np.ndarray | None = None,
+    higher_presentation_alpha_mask: np.ndarray | None = None,
     presentation_alpha_mask: np.ndarray | None = None,
     generated_underlay_mask: np.ndarray | None = None,
     underlay_metrics: dict | None = None,
@@ -907,6 +918,7 @@ def evaluate_component(
     metrics = component_metrics(
         source, background, reconstructed, node, graph, calibration,
         component_mask=component_mask, parent_mask=parent_mask,
+        higher_presentation_alpha_mask=higher_presentation_alpha_mask,
         text_mask=text_mask, _page_context=_page_context,
     )
     if presentation_alpha_mask is not None:
@@ -1199,11 +1211,31 @@ def material_ownership_metrics(
     )
     keep = np.zeros(material.shape, dtype=bool)
     largest = 0
+    boundary_radius = max(1, min(3, calibration.edge_width_px))
+    boundary_thickness = min(
+        4, max(2, int(round(calibration.edge_width_px * 0.35)))
+    )
+    owned_neighborhood = cv2.dilate(
+        owned.astype(np.uint8),
+        np.ones((2 * boundary_radius + 1,) * 2, dtype=np.uint8),
+    ) > 0
+    boundary_area_limit = max(calibration.min_component_pixels * 8, 64)
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < calibration.min_component_pixels:
             continue
-        keep |= labels == label
+        region = labels == label
+        thickness = 2.0 * float(
+            cv2.distanceTransform(region.astype(np.uint8), cv2.DIST_L2, 5).max()
+        )
+        is_boundary_residual = (
+            area <= boundary_area_limit
+            and np.any(region & owned_neighborhood)
+            and thickness <= boundary_thickness
+        )
+        if is_boundary_residual:
+            continue
+        keep |= region
         largest = max(largest, area)
     material_pixels = int(np.count_nonzero(material))
     unexplained_pixels = int(np.count_nonzero(keep))

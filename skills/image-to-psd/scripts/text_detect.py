@@ -52,6 +52,9 @@ def detect_text(
     isolated: bool = False,
     worker_root: str | Path | None = None,
     style_reference_width: int | None = None,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect text regions and estimate styling.
 
@@ -76,6 +79,9 @@ def detect_text(
         confidence_threshold,
         isolated=isolated,
         worker_root=worker_root,
+        worker_pool=worker_pool,
+        performance_trace=performance_trace,
+        page_id=page_id,
     )
 
     return _build_text_result(
@@ -95,6 +101,9 @@ def detect_text_batch(
     *,
     isolated: bool = False,
     worker_root: str | Path | None = None,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> list[tuple[list[dict], np.ndarray]]:
     """Detect text in several images while sharing one isolated OCR lifecycle."""
     paths = [Path(path) for path in image_paths]
@@ -109,13 +118,24 @@ def detect_text_batch(
             for path in paths
         ]
     raw_results = _try_isolated_paddleocr_batch(
-        paths, lang, confidence_threshold, worker_root=worker_root,
+        paths,
+        lang,
+        confidence_threshold,
+        worker_root=worker_root,
+        worker_pool=worker_pool,
+        performance_trace=performance_trace,
+        page_id=page_id,
     )
     if raw_results is None:
         return [
             detect_text(
                 path, lang=lang, confidence_threshold=confidence_threshold,
-                mask_padding=mask_padding, isolated=True, worker_root=worker_root,
+                mask_padding=mask_padding,
+                isolated=True,
+                worker_root=worker_root,
+                worker_pool=worker_pool,
+                performance_trace=performance_trace,
+                page_id=page_id,
             )
             for path in paths
         ]
@@ -227,6 +247,9 @@ def _ocr_detect(
     *,
     isolated: bool = False,
     worker_root: str | Path | None = None,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> list[dict]:
     """Try PaddleOCR first, fall back to pytesseract."""
     if isolated:
@@ -235,6 +258,9 @@ def _ocr_detect(
             lang,
             conf_threshold,
             worker_root=worker_root,
+            worker_pool=worker_pool,
+            performance_trace=performance_trace,
+            page_id=page_id,
         )
     else:
         results = _try_paddleocr(image_path, lang, conf_threshold)
@@ -255,7 +281,21 @@ def _try_isolated_paddleocr(
     conf_threshold: float,
     *,
     worker_root: str | Path | None,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> list[dict] | None:
+    if worker_pool is not None:
+        results = _try_isolated_paddleocr_batch(
+            [image_path],
+            lang,
+            conf_threshold,
+            worker_root=worker_root,
+            worker_pool=worker_pool,
+            performance_trace=performance_trace,
+            page_id=page_id,
+        )
+        return None if results is None else results[0]
     try:
         with tempfile.TemporaryDirectory(
             prefix="ocr-",
@@ -340,35 +380,48 @@ def _try_isolated_paddleocr_batch(
     conf_threshold: float,
     *,
     worker_root: str | Path | None,
+    worker_pool=None,
+    performance_trace=None,
+    page_id: str | None = None,
 ) -> list[list[dict]] | None:
     try:
         with tempfile.TemporaryDirectory(
             prefix="ocr-batch-", dir=worker_root,
         ) as temporary:
             work_dir = Path(temporary)
-            manifest_path = work_dir / "manifest.json"
             result_path = work_dir / "result.json"
-            manifest_path.write_text(
-                json.dumps({"images": [str(path.resolve()) for path in image_paths]}),
-                encoding="utf-8",
-            )
-            command = [
-                sys.executable,
-                str(Path(__file__).with_name("ocr_worker.py").resolve()),
-                "batch",
-                "--manifest", str(manifest_path),
-                "--result", str(result_path),
-                "--lang", lang,
-            ]
-            completed = run_isolated_worker(
-                command, capture_output=True, text=True, check=False,
-            )
-            if completed.returncode or not result_path.is_file():
-                logger.warning(
-                    "Isolated OCR batch failed (exit=%s): %s",
-                    completed.returncode,
-                    completed.stderr.strip() or f"missing result {result_path}",
+            resolved_paths = [str(path.resolve()) for path in image_paths]
+            if worker_pool is not None:
+                worker_pool.request(
+                    {"images": resolved_paths, "result": str(result_path), "lang": lang},
+                    performance_trace=performance_trace,
+                    page_id=page_id,
                 )
+            else:
+                manifest_path = work_dir / "manifest.json"
+                manifest_path.write_text(
+                    json.dumps({"images": resolved_paths}), encoding="utf-8",
+                )
+                command = [
+                    sys.executable,
+                    str(Path(__file__).with_name("ocr_worker.py").resolve()),
+                    "batch",
+                    "--manifest", str(manifest_path),
+                    "--result", str(result_path),
+                    "--lang", lang,
+                ]
+                completed = run_isolated_worker(
+                    command, capture_output=True, text=True, check=False,
+                )
+                if completed.returncode or not result_path.is_file():
+                    logger.warning(
+                        "Isolated OCR batch failed (exit=%s): %s",
+                        completed.returncode,
+                        completed.stderr.strip() or f"missing result {result_path}",
+                    )
+                    return None
+            if not result_path.is_file():
+                logger.warning("Isolated OCR batch did not create its result")
                 return None
             payload = json.loads(result_path.read_text(encoding="utf-8"))
     except Exception as error:

@@ -19,6 +19,13 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp"}
 _HASH_CHUNK_SIZE = 1024 * 1024
 InputType = Literal["images", "pdf", "pptx"]
 OutputFormat = Literal["pptx", "psd"]
+PipelineMode = Literal["fast", "strict"]
+
+
+def validate_pipeline_mode(value: object) -> PipelineMode:
+    if value not in {"fast", "strict"}:
+        raise ValueError(f"Unsupported pipeline_mode: {value}")
+    return value
 
 
 def validate_output_format(value: object) -> OutputFormat:
@@ -169,9 +176,11 @@ def prepare_image_job(
     lang: str = "ch",
     agent_provider: str = "host",
     output_format: str = "pptx",
+    pipeline_mode: str = "strict",
 ) -> Path:
     agent_provider = validate_agent_provider(agent_provider)
     output_format = validate_output_format(output_format)
+    pipeline_mode = validate_pipeline_mode(pipeline_mode)
     if slide_size not in {"original", "16:9", "both"}:
         raise ValueError(f"Unsupported slide_size: {slide_size}")
 
@@ -231,6 +240,7 @@ def prepare_image_job(
                     str(resolved_output) if resolved_output is not None else None
                 ),
                 "resource_policy": safe_default_policy(),
+                **({"pipeline_mode": pipeline_mode} if pipeline_mode != "strict" else {}),
             },
             "pages": page_ids,
         }
