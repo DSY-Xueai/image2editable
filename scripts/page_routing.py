@@ -111,6 +111,29 @@ def classify_page(signals: PageSignals) -> PagePolicy:
         confidence += 0.10
     confidence = min(1.0, max(0.0, confidence))
 
+    # Raster PDFs often contain repeated OCR boxes over a clean, structured
+    # page. Their overlap is not enough evidence to justify the full strict
+    # repair loop; keep one bounded local refinement for this case.
+    if (
+        signals.source_kind == "pdf"
+        and signals.ocr_items >= 3
+        and signals.ocr_mean_confidence >= 0.85
+        and signals.text_coverage >= 0.03
+        and signals.edge_density <= 0.65
+        and signals.scan_noise <= 0.20
+        and signals.visual_regions < 128
+    ):
+        return PagePolicy(
+            route="local_refine",
+            confidence=max(confidence, 0.55),
+            reasons=tuple(reasons + ["pdf_raster_structured"]),
+            automatic_sam=False,
+            max_residual_rounds=1,
+            hole_recheck=False,
+            max_lama_calls=1,
+            host_agent_allowed=False,
+        )
+
     difficult = (
         signals.ocr_mean_confidence < 0.55
         or signals.overlap_ratio > 0.30

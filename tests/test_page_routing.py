@@ -69,6 +69,18 @@ def test_medium_confidence_page_uses_one_local_refinement():
     assert result.automatic_sam is False
 
 
+def test_pdf_raster_with_duplicate_ocr_boxes_does_not_force_strict():
+    result = classify_page(PageSignals(
+        source_kind="pdf", ocr_items=21, ocr_mean_confidence=0.978,
+        text_coverage=0.23, regular_geometry_ratio=0.0,
+        overlap_ratio=1.0, transparency_ratio=0.0,
+        edge_density=0.059, scan_noise=0.076, visual_regions=73,
+    ))
+    assert result.route == "local_refine"
+    assert result.max_residual_rounds == 1
+    assert result.automatic_sam is False
+
+
 def test_strict_policy_keeps_legacy_defaults():
     policy = strict_page_policy()
     assert policy.route == "strict"
