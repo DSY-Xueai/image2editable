@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import logging
 import json
+from functools import lru_cache
 from pathlib import Path
 import sys
 import tempfile
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import re
 
@@ -30,6 +31,7 @@ if not sys.path or sys.path[0] != _MODULE_ROOT:
     sys.path.insert(0, _MODULE_ROOT)
 
 from scripts.worker_resources import run_isolated_worker
+from scripts.ocr_worker import _validated_words, _words_from_polys
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ def detect_text(
     worker_pool=None,
     performance_trace=None,
     page_id: str | None = None,
+    recover_empty: bool = False,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect text regions and estimate styling.
 
@@ -82,6 +85,7 @@ def detect_text(
         worker_pool=worker_pool,
         performance_trace=performance_trace,
         page_id=page_id,
+        **({"recover_empty": True} if recover_empty else {}),
     )
 
     return _build_text_result(
@@ -104,6 +108,7 @@ def detect_text_batch(
     worker_pool=None,
     performance_trace=None,
     page_id: str | None = None,
+    recover_empty: bool = False,
 ) -> list[tuple[list[dict], np.ndarray]]:
     """Detect text in several images while sharing one isolated OCR lifecycle."""
     paths = [Path(path) for path in image_paths]
@@ -114,6 +119,7 @@ def detect_text_batch(
             detect_text(
                 path, lang=lang, confidence_threshold=confidence_threshold,
                 mask_padding=mask_padding,
+                **({"recover_empty": True} if recover_empty else {}),
             )
             for path in paths
         ]
@@ -125,6 +131,7 @@ def detect_text_batch(
         worker_pool=worker_pool,
         performance_trace=performance_trace,
         page_id=page_id,
+        **({"recover_empty": True} if recover_empty else {}),
     )
     if raw_results is None:
         return [
@@ -136,6 +143,7 @@ def detect_text_batch(
                 worker_pool=worker_pool,
                 performance_trace=performance_trace,
                 page_id=page_id,
+                **({"recover_empty": True} if recover_empty else {}),
             )
             for path in paths
         ]
@@ -169,17 +177,20 @@ def _build_text_result(
 
     # Clean up OCR edge noise while preserving semantic sentence endings.
     for rb in raw_boxes:
-        rb["text"] = (
-            rb["text"]
-            .strip()
-            .lstrip("|/\\-_=.,:;!?~`'\"")
-            .rstrip("|/\\-_=,:;~`'\"")
-        )
+        original_box = tuple(rb["box"])
+        text = rb["text"].strip()
+        if len(text) == 1 and text in "?!" and rb.get("confidence", 0) >= .9:
+            rb["text"] = text
+        else:
+            rb["text"] = text.lstrip("|/\\-_=.,:;!?~`'\"").rstrip("|/\\-_=,:;~`'\"")
         rb["text"], rb["box"] = _recover_trailing_heading_period(
             img_rgb,
             rb["text"],
             rb["box"],
         )
+
+        if tuple(rb["box"]) != original_box:
+            rb.pop("words", None)
 
     # Remove boxes that became empty after cleanup
     raw_boxes = [rb for rb in raw_boxes if rb["text"]]
@@ -192,20 +203,21 @@ def _build_text_result(
     text_items = []
     for rb in raw_boxes:
         box = rb["box"]  # (x, y, w, h) in pixels
+        text = rb["text"]
         if style_reference_width is None:
-            style = _estimate_style(img_rgb, box)
+            style = _estimate_style(img_rgb, box, text=text)
         else:
             style = _estimate_style(
                 img_rgb,
                 box,
                 reference_width=style_reference_width,
+                text=text,
             )
 
-        # Filter out tiny text (likely decorative labels, icon text, noise)
-        if style["font_size"] < 8.0:
+        # Retain confident small labels; size alone is not evidence of noise.
+        if style["font_size"] < 8.0 and rb["confidence"] < 0.9:
             continue
 
-        text = rb["text"]
         font_size = _adjust_font_size(
             text,
             style["font_size"],
@@ -222,6 +234,10 @@ def _build_text_result(
             "align": 1,  # default center; refined below
             "confidence": rb["confidence"],
         })
+
+        words = _validated_words(text, rb.get("words"))
+        if words:
+            text_items[-1]["words"] = words
 
     text_items = _merge_adjacent_text_items(text_items)
 
@@ -250,6 +266,7 @@ def _ocr_detect(
     worker_pool=None,
     performance_trace=None,
     page_id: str | None = None,
+    recover_empty: bool = False,
 ) -> list[dict]:
     """Try PaddleOCR first, fall back to pytesseract."""
     if isolated:
@@ -261,9 +278,13 @@ def _ocr_detect(
             worker_pool=worker_pool,
             performance_trace=performance_trace,
             page_id=page_id,
+            **({"recover_empty": True} if recover_empty else {}),
         )
     else:
-        results = _try_paddleocr(image_path, lang, conf_threshold)
+        results = _try_paddleocr(
+            image_path, lang, conf_threshold,
+            **({"recover_empty": True} if recover_empty else {}),
+        )
     if results is not None:
         return results
 
@@ -284,6 +305,7 @@ def _try_isolated_paddleocr(
     worker_pool=None,
     performance_trace=None,
     page_id: str | None = None,
+    recover_empty: bool = False,
 ) -> list[dict] | None:
     if worker_pool is not None:
         results = _try_isolated_paddleocr_batch(
@@ -294,6 +316,7 @@ def _try_isolated_paddleocr(
             worker_pool=worker_pool,
             performance_trace=performance_trace,
             page_id=page_id,
+            **({"recover_empty": True} if recover_empty else {}),
         )
         return None if results is None else results[0]
     try:
@@ -332,6 +355,8 @@ def _try_isolated_paddleocr(
                 ("detection", commands[0], detection_result),
                 ("recognition", commands[1], recognition_result),
             ):
+                if recover_empty and stage == "detection":
+                    command.append("--recover-empty")
                 completed = run_isolated_worker(
                     command,
                     capture_output=True,
@@ -371,6 +396,9 @@ def _try_isolated_paddleocr(
                 "confidence": confidence,
             }
         )
+        words = _validated_words(text, item.get("words"))
+        if words:
+            boxes[-1]["words"] = words
     return boxes
 
 
@@ -383,6 +411,8 @@ def _try_isolated_paddleocr_batch(
     worker_pool=None,
     performance_trace=None,
     page_id: str | None = None,
+    recover_empty: bool = False,
+    recognition_only: bool = False,
 ) -> list[list[dict]] | None:
     try:
         with tempfile.TemporaryDirectory(
@@ -393,7 +423,9 @@ def _try_isolated_paddleocr_batch(
             resolved_paths = [str(path.resolve()) for path in image_paths]
             if worker_pool is not None:
                 worker_pool.request(
-                    {"images": resolved_paths, "result": str(result_path), "lang": lang},
+                    {"images": resolved_paths, "result": str(result_path), "lang": lang,
+                     **({"recover_empty": True} if recover_empty else {}),
+                     **({"recognition_only": True} if recognition_only else {})},
                     performance_trace=performance_trace,
                     page_id=page_id,
                 )
@@ -410,6 +442,10 @@ def _try_isolated_paddleocr_batch(
                     "--result", str(result_path),
                     "--lang", lang,
                 ]
+                if recover_empty:
+                    command.append("--recover-empty")
+                if recognition_only:
+                    command.append("--recognition-only")
                 completed = run_isolated_worker(
                     command, capture_output=True, text=True, check=False,
                 )
@@ -448,6 +484,9 @@ def _try_isolated_paddleocr_batch(
                 "text": text,
                 "confidence": confidence,
             })
+            words = _validated_words(text, item.get("words"))
+            if words:
+                boxes[-1]["words"] = words
         results.append(boxes)
     return results
 
@@ -466,7 +505,8 @@ def _poly_to_box(poly: object) -> tuple[int, int, int, int]:
 
 
 def _try_paddleocr(
-    image_path: Path, lang: str, conf_threshold: float
+    image_path: Path, lang: str, conf_threshold: float,
+    *, recover_empty: bool = False,
 ) -> list[dict] | None:
     """Detect text with PaddleOCR. Returns None if unavailable."""
     try:
@@ -479,7 +519,17 @@ def _try_paddleocr(
         return None
 
     try:
-        result = ocr.predict(str(image_path))
+        result = list(ocr.predict(str(image_path), return_word_box=True))
+        if recover_empty and not any(
+            item.get("rec_texts", []) if isinstance(item, dict)
+            else getattr(item, "rec_texts", [])
+            for item in result
+        ):
+            result = list(ocr.predict(
+                str(image_path), text_det_thresh=0.15, text_det_box_thresh=0.3,
+                return_word_box=True,
+            ))
+            conf_threshold = max(conf_threshold, 0.9)
         if not result:
             return []
 
@@ -488,7 +538,7 @@ def _try_paddleocr(
             # PaddleOCR v3.5+ returns dict-like OCRResult
             texts = item.get("rec_texts", []) if isinstance(item, dict) else getattr(item, "rec_texts", [])
             scores = item.get("rec_scores", []) if isinstance(item, dict) else getattr(item, "rec_scores", [])
-            polys = item.get("dt_polys", []) if isinstance(item, dict) else getattr(item, "dt_polys", [])
+            polys = item.get("rec_polys", item.get("dt_polys", [])) if isinstance(item, dict) else getattr(item, "rec_polys", getattr(item, "dt_polys", []))
 
             if not texts:
                 continue
@@ -509,6 +559,12 @@ def _try_paddleocr(
                     "text": text,
                     "confidence": conf,
                 })
+                tokens = item.get("text_word", []) if isinstance(item, dict) else getattr(item, "text_word", [])
+                regions = item.get("text_word_region", []) if isinstance(item, dict) else getattr(item, "text_word_region", [])
+                if i < len(tokens) and i < len(regions):
+                    words = _words_from_polys(text, tokens[i], regions[i], (bx, by, bw, bh))
+                    if words:
+                        boxes[-1]["words"] = words
         return boxes
     except Exception as exc:
         logger.warning("PaddleOCR failed: %s", exc)
@@ -729,8 +785,11 @@ def _filter_noise(
         if float(b.get("confidence", 0.0)) < confidence_threshold:
             continue
 
-        # Skip pure symbol/punctuation lines
-        if _NOISE_PATTERN.match(text):
+        preserve_symbol = len(text) == 1 and text in "?!" and float(b.get("confidence", 0.0)) >= .9
+        if preserve_symbol:
+            filtered.append(b)
+            continue
+        if _NOISE_PATTERN.match(text) and not preserve_symbol:
             continue
 
         if _is_likely_vertical_decorative_fragment(b):
@@ -743,6 +802,13 @@ def _filter_noise(
             or '\u3400' <= c <= '\u4dbf'  # CJK extension A
         )
         total = len(text.replace(" ", ""))
+
+        # Paired brackets delimit labels; they are not noise in the label content.
+        if meaningful and text[0] + text[-1] in (
+            "[]", "()", "{}", "\uff08\uff09", "\u3010\u3011",
+            "\u3014\u3015", "\u3008\u3009", "\u300a\u300b",
+        ):
+            total -= 2
 
         # If less than 60% of characters are meaningful, it's likely noise
         if total > 0 and meaningful / total < 0.6:
@@ -773,7 +839,7 @@ def _filter_noise(
             continue
 
         # Skip single-char lines that are common OCR artifacts
-        if len(text) == 1 and not text.isalnum() and not ('\u4e00' <= text <= '\u9fff'):
+        if len(text) == 1 and not text.isalnum() and not ('\u4e00' <= text <= '\u9fff') and not preserve_symbol:
             continue
 
         # Skip garbled text: mostly uppercase with separators, e.g.
@@ -888,6 +954,7 @@ def _estimate_style(
     box: tuple,
     *,
     reference_width: int | None = None,
+    text: str = "",
 ) -> dict:
     """Estimate font_size, color, bold from the image region."""
     if reference_width is not None and (
@@ -930,7 +997,26 @@ def _estimate_style(
     color_hex = _sample_text_color(region)
 
     # --- Bold estimation ---
-    bold = _estimate_bold(region)
+    bold = _estimate_bold(region, text=text)
+
+    # OCR rectangles include variable padding; measure glyphs for known fonts.
+    reference_font = _weight_reference_font(_has_cjk(text), bold) if text and "\n" not in text else None
+    if reference_font is not None:
+        gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+        contrast = np.abs(gray - float(np.median(border)))
+        foreground = (contrast > float(contrast.max()) * 0.1).astype(np.uint8)
+        horizontal = cv2.morphologyEx(
+            foreground, cv2.MORPH_OPEN,
+            np.ones((1, max(13, int(region.shape[1] * 0.8) | 1)), dtype=np.uint8),
+        )
+        contrast[horizontal > 0] = 0
+        rows = np.flatnonzero(np.any(contrast > float(contrast.max()) * 0.5, axis=1))
+        bounds = reference_font.getbbox(text)
+        glyph_height = bounds[3] - bounds[1]
+        if len(rows) and glyph_height > 0:
+            size_px = (rows[-1] - rows[0] + 1) * reference_font.size / glyph_height
+            font_size = max(6.0, min(size_px * 72.0 / pixels_per_inch, 200.0))
 
     return {"font_size": round(font_size, 1), "color": color_hex, "bold": bold}
 
@@ -1001,6 +1087,22 @@ def _sample_text_color(region: np.ndarray) -> str:
 
     flat = region.reshape(-1, 3).astype(np.float32)
     gray_flat = gray.reshape(-1).astype(np.float32)
+    contrast = np.abs(gray.astype(np.float32) - float(np.median(border_vals)))
+    foreground = (contrast > float(contrast.max()) * 0.1).astype(np.uint8)
+    structure = np.zeros(gray.shape, dtype=np.uint8)
+    for shape in ((1, max(13, int(w * 0.8) | 1)),
+                  (max(13, int(h * 0.8) | 1), 1)):
+        structure |= cv2.morphologyEx(
+            foreground, cv2.MORPH_OPEN, np.ones(shape, dtype=np.uint8),
+            borderType=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+    non_structure = structure.reshape(-1) == 0
+    # A narrow glyph can itself resemble a rule; retain the dominant foreground.
+    if np.count_nonzero(foreground.reshape(-1) & non_structure) >= (
+        0.5 * np.count_nonzero(foreground)
+    ):
+        flat = flat[non_structure]
+        gray_flat = gray_flat[non_structure]
 
     if border_mean > thresh_val:
         # Border is bright → background is bright → text is dark class
@@ -1021,13 +1123,88 @@ def _sample_text_color(region: np.ndarray) -> str:
     if len(text_pixels) == 0:
         return "#000000"
 
+    # Ink cores preserve the original color; antialiased edges blend with the background.
+    text_luma = text_pixels @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    contrast = np.abs(text_luma - border_mean)
+    text_pixels = text_pixels[contrast >= np.percentile(contrast, 90)]
     median_color = np.median(text_pixels, axis=0).astype(int)
     r, g, b = np.clip(median_color, 0, 255)
     return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
 
 
-def _estimate_bold(region: np.ndarray) -> bool:
+def _normalized_ink(contrast: np.ndarray) -> np.ndarray | None:
+    """Keep fractional edge coverage and remove background-only padding."""
+    if contrast.size == 0 or float(contrast.max()) == 0:
+        return None
+    foreground = contrast[contrast > float(contrast.max()) * 0.1]
+    ink = np.clip(contrast / float(np.percentile(foreground, 95)), 0, 1)
+    ys, xs = np.nonzero(ink > 0.2)
+    return ink[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+
+@lru_cache(maxsize=4)
+def _weight_reference_font(cjk: bool, bold: bool):
+    filenames = (
+        ("msyhbd.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
+        if bold else
+        ("msyh.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
+    ) if cjk else (
+        ("arialbd.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf")
+        if bold else
+        ("arial.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf")
+    )
+    for filename in filenames:
+        try:
+            return ImageFont.truetype(filename, 128)
+        except OSError:
+            continue
+    return None
+
+
+def _estimate_reference_bold(region: np.ndarray, text: str) -> bool | None:
+    """Compare the same glyphs in the editable regular and bold fallback fonts."""
+    if not text.strip() or region.size == 0:
+        return None
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    border = np.concatenate([gray[0], gray[-1], gray[:, 0], gray[:, -1]])
+    difference = gray - float(np.median(border))
+    magnitude = np.abs(difference)
+    foreground = difference[magnitude > float(magnitude.max()) * 0.1]
+    if foreground.size == 0:
+        return None
+    polarity = 1 if float(np.median(foreground)) > 0 else -1
+    ink = _normalized_ink(np.maximum(difference * polarity, 0))
+    if ink is None:
+        return None
+    height, width = ink.shape
+    densities = []
+    for bold in (False, True):
+        font = _weight_reference_font(_has_cjk(text), bold)
+        if font is None:
+            return None
+        left, top, right, bottom = font.getbbox(text)
+        if right <= left or bottom <= top:
+            return None
+        reference = Image.new("L", (right - left + 8, bottom - top + 8), 0)
+        ImageDraw.Draw(reference).text((4 - left, 4 - top), text, font=font, fill=255)
+        reference_ink = _normalized_ink(np.asarray(reference, dtype=np.float32))
+        if reference_ink is None:
+            return None
+        # Match raster scale before normalizing so small antialiased glyphs are comparable.
+        reference_ink = _normalized_ink(cv2.resize(
+            reference_ink, (width, height), interpolation=cv2.INTER_AREA,
+        ))
+        densities.append(float(reference_ink.mean()))
+    observed = float(ink.mean())
+    return abs(observed - densities[1]) < abs(observed - densities[0])
+
+
+def _estimate_bold(region: np.ndarray, *, text: str = "") -> bool:
     """Estimate bold weight from ink density and relative stroke width."""
+    if text:
+        reference_bold = _estimate_reference_bold(region, text)
+        if reference_bold is not None:
+            return reference_bold
     if region.size == 0 or region.shape[0] < 5 or region.shape[1] < 5:
         return False
 
@@ -1093,6 +1270,10 @@ def _merge_adjacent_text_items(text_items: list[dict]) -> list[dict]:
 
 
 def _can_merge_text_items(left: dict, right: dict) -> bool:
+    if "runs" in left or "runs" in right:
+        return False
+    if bool(left.get("words")) != bool(right.get("words")):
+        return False
     lx, ly, lw, lh = left["box"]
     rx, ry, rw, rh = right["box"]
     if rx < lx:
@@ -1147,6 +1328,19 @@ def _merge_text_pair(left: dict, right: dict) -> dict:
     merged["font_size"] = max(float(left.get("font_size", 12)), float(right.get("font_size", 12)))
     merged["font"] = _select_font(merged["text"], merged["font_size"])
     merged["confidence"] = min(float(left.get("confidence", 1)), float(right.get("confidence", 1)))
+    merged.pop("words", None)
+    if left.get("words") and right.get("words"):
+        mx, my, mw, mh = merged["box"]
+        words = []
+        for item in (left, right):
+            x, y, width, height = item["box"]
+            for word in _validated_words(item["text"], item["words"]):
+                wx, wy, ww, wh = word["box"]
+                words.append({"text": word["text"], "box": [(x + wx * width - mx) / mw,
+                    (y + wy * height - my) / mh, ww * width / mw, wh * height / mh]})
+        words = _validated_words(merged["text"], words)
+        if words:
+            merged["words"] = words
     return merged
 
 

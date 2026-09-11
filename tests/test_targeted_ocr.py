@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -124,7 +125,7 @@ def test_targeted_ocr_recovers_consistent_candidate_with_source_style_and_mask(
     monkeypatch.setattr(
         image_to_ppt.text_detection,
         "_estimate_style",
-        lambda pixels, box, *, reference_width: (
+        lambda pixels, box, *, reference_width, text="": (
             style_calls.append((pixels.shape, box, reference_width))
             or {"font_size": 22.0, "color": "#fefefe", "bold": True}
         ),
@@ -244,7 +245,7 @@ def test_targeted_ocr_sizes_rotated_text_against_display_page_width(
     monkeypatch.setattr(
         image_to_ppt.text_detection,
         "_estimate_style",
-        lambda pixels, box, *, reference_width: (
+        lambda pixels, box, *, reference_width, text="": (
             style_calls.append(reference_width)
             or {"font_size": 18.0, "color": "#ffffff", "bold": False}
         ),
@@ -291,11 +292,32 @@ def test_targeted_ocr_sizes_recovered_text_against_page_width(
         isolated=True,
     )
 
+    with Image.open(source) as image:
+        pixels = np.asarray(image.convert("RGB"))
+    recovered = result["recovered_items"][0]
     expected = image_to_ppt.text_detection._estimate_style(
-        np.zeros((21, 120, 3), dtype=np.uint8),
-        (6, 6, 35, 9),
+        pixels, recovered["box"], reference_width=120, text="NX",
     )["font_size"]
     assert result["recovered_items"][0]["font_size"] == expected
+
+
+def test_targeted_ocr_keeps_relative_word_geometry(tmp_path, monkeypatch):
+    source = _label_fixture(tmp_path)
+    words = [{"text": "NX", "box": [0.1, 0.1, 0.8, 0.8]}]
+
+    def detect(path, **kwargs):
+        with Image.open(path) as crop:
+            item = _ocr_item("NX", 0.99, crop.width // 50)
+            item["words"] = words
+            return [item], np.zeros((crop.height, crop.width), dtype=np.uint8)
+
+    monkeypatch.setattr(image_to_ppt, "detect_text", detect)
+    monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
+    result = image_to_ppt._targeted_candidate_ocr_sweep(
+        source, [_component()], [], np.zeros((70, 120), dtype=np.uint8),
+        tmp_path, lang="en", isolated=True,
+    )
+    assert result["recovered_items"][0]["words"] == words
 
 
 def test_estimate_style_default_reference_width_preserves_full_image_behavior() -> None:
@@ -419,7 +441,7 @@ def test_detect_text_uses_explicit_display_width_for_style_estimation(
     monkeypatch.setattr(
         image_to_ppt.text_detection,
         "_estimate_style",
-        lambda pixels, box, *, reference_width=None: (
+        lambda pixels, box, *, reference_width=None, text="": (
             style_calls.append(reference_width)
             or {"font_size": 18.0, "color": "#000000", "bold": False}
         ),
@@ -498,7 +520,7 @@ def test_targeted_ocr_large_candidate_uses_two_distinct_bounded_views(
     monkeypatch.setattr(
         image_to_ppt.text_detection,
         "_estimate_style",
-        lambda pixels, box, *, reference_width: {
+        lambda pixels, box, *, reference_width, text="": {
             "font_size": 18.0, "color": "#ffffff", "bold": False,
         },
     )
@@ -557,7 +579,7 @@ def test_targeted_ocr_matches_multiple_items_by_space_and_filters_known_line(
     monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
     monkeypatch.setattr(
         image_to_ppt.text_detection, "_estimate_style",
-        lambda pixels, box, *, reference_width: {
+        lambda pixels, box, *, reference_width, text="": {
             "font_size": 18.0, "color": "#000000", "bold": False,
         },
     )
@@ -939,7 +961,7 @@ def test_targeted_ocr_keeps_recovery_signal_when_new_text_merges_with_known_line
     monkeypatch.setattr(
         image_to_ppt.text_detection,
         "_estimate_style",
-        lambda pixels, box, *, reference_width: {
+        lambda pixels, box, *, reference_width, text="": {
             "font_size": 18.0, "color": "#ffffff", "bold": False,
         },
     )
@@ -1516,6 +1538,8 @@ def _prepare_rerun_fixture(
     shrink_ocr_mask_outside_cleanup: bool = False,
     visual_worker_pool=None,
     include_text_clean: bool = False,
+    direct: bool = False,
+    resource_isolation: bool = True,
 ) -> tuple[dict, list[int]]:
     source = _label_fixture(tmp_path)
     work_dir = tmp_path / "prepared"
@@ -1537,6 +1561,19 @@ def _prepare_rerun_fixture(
     )
     monkeypatch.setattr(image_to_ppt, "close_ocr_engines", lambda: None)
     monkeypatch.setattr(image_to_ppt, "_release_visual_resources", lambda: None)
+    monkeypatch.setattr(image_to_ppt, "create_object_detector", lambda: None)
+    monkeypatch.setattr(image_to_ppt, "create_sam_generator", lambda path: None)
+    monkeypatch.setattr(image_to_ppt, "resolve_sam_checkpoint", lambda: None)
+    if direct:
+        monkeypatch.setattr(
+            image_to_ppt,
+            "_infer_page_policy",
+            lambda *args, **kwargs: image_to_ppt.PagePolicy(
+                route="direct", confidence=0.95, reasons=("regular_geometry",),
+                automatic_sam=False, max_residual_rounds=0, hole_recheck=False,
+                max_lama_calls=1, host_agent_allowed=False,
+            ),
+        )
     cleanup_calls = []
 
     def fake_cleanup(image, text_mask, text_items):
@@ -1790,14 +1827,83 @@ def _prepare_rerun_fixture(
         }
 
     monkeypatch.setattr(image_to_ppt, "_process_image_isolated", fake_process)
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_process_image",
+        lambda path, target, detector, generator, lang, *, text_analysis, **kwargs:
+            fake_process(path, target, lang, text_analysis, **kwargs),
+    )
     prepared = image_to_ppt.prepare_component_layers(
-        source,
-        work_dir,
-        lang="en",
-        resource_isolation=True,
+        source, work_dir, lang="en", resource_isolation=resource_isolation,
         visual_worker_pool=visual_worker_pool,
+        pipeline_mode="fast" if direct else "strict",
     )
     return prepared, process_text_counts
+
+
+def test_build_text_result_keeps_confident_standalone_question_mark():
+    from scripts.text_detect import _build_text_result
+    items, _ = _build_text_result(
+        np.full((80, 100, 3), 240, dtype=np.uint8),
+        [{"box": [20, 10, 40, 50], "text": "?", "confidence": .97}],
+        .5, 4,
+    )
+    assert items and items[0]["text"] == "?"
+
+
+@pytest.fixture(params=[
+    "image_to_ppt.py",
+    "skills/image-to-ppt/scripts/image_to_ppt.py",
+    "skills/image-to-psd/scripts/image_to_ppt.py",
+])
+def prepare_entrypoint(request, monkeypatch):
+    script = Path(__file__).resolve().parents[1] / request.param
+    spec = importlib.util.spec_from_file_location("prepare_entrypoint", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setitem(globals(), "image_to_ppt", module)
+    return module
+
+
+@pytest.mark.parametrize("resource_isolation", [False, True])
+def test_direct_prepare_rebuilds_assets_after_recovered_text_changes_masks(
+    tmp_path: Path, monkeypatch, prepare_entrypoint, resource_isolation: bool,
+) -> None:
+    prepared, passes = _prepare_rerun_fixture(
+        tmp_path, monkeypatch, direct=True,
+        resource_isolation=resource_isolation,
+        affected_text_delta=True, check_first_pass_cleanup=True,
+    )
+
+    assert passes == [0, 1]
+    assert prepared["_page_policy"]["route"] == "direct"
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (0, 128, 0)
+    with Image.open(prepared["_text_mask_path"]) as mask:
+        assert mask.getpixel((50, 25)) == 255
+    with Image.open(prepared["_text_cleanup_mask_path"]) as mask:
+        assert mask.getpixel((15, 15)) == 255
+    assert all(Path(path).is_file() for path in prepared["_element_mask_paths"])
+    assert all(Path(path).is_file() for path in prepared["_semantic_mask_paths"])
+    assert (tmp_path / "outside-component.png").is_file()
+
+
+@pytest.mark.parametrize("resource_isolation", [False, True])
+def test_direct_prepare_reuses_verified_assets_for_disjoint_recovered_text(
+    tmp_path: Path, monkeypatch, prepare_entrypoint, resource_isolation: bool,
+) -> None:
+    prepared, passes = _prepare_rerun_fixture(
+        tmp_path, monkeypatch, direct=True,
+        resource_isolation=resource_isolation, safe_text_delta=True,
+    )
+
+    assert passes == [0]
+    assert [item["text"] for item in prepared["text_items"]] == ["NX"]
+    with Image.open(prepared["components"][0]["path"]) as component:
+        assert component.convert("RGB").getpixel((0, 0)) == (255, 0, 0)
+    with Image.open(prepared["background_removal_mask_path"]) as mask:
+        assert mask.getpixel((50, 25)) == 255
 
 
 def test_prepare_reruns_all_visual_assets_after_targeted_text_recovery(

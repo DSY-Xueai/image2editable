@@ -3461,9 +3461,11 @@ def test_rebind_strict_pending_masks_marks_absorbed_component(
     )) == {"schema_version": 1, "component_ids": ["absorbed"]}
 
 
+@pytest.mark.parametrize("empty_presentation", [False, True])
 def test_deterministic_fast_plan_discards_strict_absorbed_component(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    empty_presentation: bool,
 ) -> None:
     reconstruction = tmp_path / "reconstruction"
     metadata = reconstruction / "strict-escalation-02" / "graph"
@@ -3472,7 +3474,7 @@ def test_deterministic_fast_plan_discards_strict_absorbed_component(
         json.dumps({"nodes": []}), encoding="utf-8",
     )
     (metadata / "absorbed-component-ids.json").write_text(
-        json.dumps({"schema_version": 1, "component_ids": ["absorbed"]}),
+        json.dumps({"schema_version": 1, "component_ids": [] if empty_presentation else ["absorbed"]}),
         encoding="utf-8",
     )
     store = RunStore(tmp_path)
@@ -3480,6 +3482,21 @@ def test_deterministic_fast_plan_discards_strict_absorbed_component(
         "repair_round": 2,
         "candidate_ids": ["absorbed", "retained"],
     }
+    if empty_presentation:
+        empty = reconstruction / "empty.png"
+        Image.new("L", (8, 8), 0).save(empty)
+        manifest_path = reconstruction / "presentation.json"
+        manifest_path.write_text(json.dumps({"components": [{
+            "component_id": "absorbed",
+            "ownership_mask": {
+                "path": "reconstruction/empty.png",
+                "sha256": hashlib.sha256(empty.read_bytes()).hexdigest(),
+            },
+        }]}), encoding="utf-8")
+        request["evidence"] = {"presentation-manifest.json": {
+            "path": manifest_path.name,
+            "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }}
     captured: dict[str, object] = {}
     monkeypatch.setattr(legacy, "advance_component_repair", lambda *args, **kwargs: {})
     monkeypatch.setattr(
@@ -3571,7 +3588,7 @@ def test_deterministic_fast_plan_rejects_invalid_absorbed_metadata(
         )
 
 
-def test_rebind_strict_pending_masks_rejects_zero_overlap(
+def test_rebind_strict_pending_masks_preserves_unmatched_component(
     tmp_path: Path,
 ) -> None:
     old_dir = tmp_path / "old"
@@ -3597,14 +3614,18 @@ def test_rebind_strict_pending_masks_rejects_zero_overlap(
         "z_index": 0, "text_ids": [],
     }]}
 
-    with pytest.raises(ValueError, match="could not be mapped"):
-        legacy._rebind_strict_pending_masks(
-            graph,
-            {"components": [{}], "_element_mask_paths": [strict]},
-            old_graph_dir=old_dir,
-            strict_graph_dir=strict_dir / "graph",
-            pending_ids=["component"],
-        )
+    rebound = legacy._rebind_strict_pending_masks(
+        graph,
+        {"components": [{}], "_element_mask_paths": [strict]},
+        old_graph_dir=old_dir,
+        strict_graph_dir=strict_dir / "graph",
+        pending_ids=["component"],
+    )
+    assert rebound == graph
+    assert (strict_dir / "graph" / "masks" / "old.png").read_bytes() == old.read_bytes()
+    assert json.loads((strict_dir / "graph" / "absorbed-component-ids.json").read_text(
+        encoding="utf-8"
+    ))["component_ids"] == []
 
 
 def test_fast_strict_round_reuses_persistent_source_and_semantic_parent(
@@ -3706,7 +3727,7 @@ def test_fast_strict_round_reuses_persistent_source_and_semantic_parent(
     assert rebound_by_id["parent"]["mask_sha256"] != parent_digest
 
 
-def test_fast_strict_failure_commits_local_fidelity_without_a_third_round(
+def test_fast_strict_failure_continues_third_round_after_quality_rejection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3744,7 +3765,7 @@ def test_fast_strict_failure_commits_local_fidelity_without_a_third_round(
     monkeypatch.setattr(
         legacy,
         "_publish_next_legacy_request",
-        lambda *args: published.append(args),
+        lambda *args, **kwargs: published.append((args, kwargs)),
     )
     fidelity_requests = []
     monkeypatch.setattr(
@@ -3752,7 +3773,7 @@ def test_fast_strict_failure_commits_local_fidelity_without_a_third_round(
         "_commit_local_fidelity_result",
         lambda store, page_id, *, _lease: (
             fidelity_requests.append((store, page_id, _lease))
-            or {"status": "ready_for_assembly", "page_id": page_id}
+            or {"status": "needs_next_round", "page_id": page_id, "repair_round": 3}
         ),
         raising=False,
     )
@@ -3760,15 +3781,88 @@ def test_fast_strict_failure_commits_local_fidelity_without_a_third_round(
     with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
         outcome = legacy.advance_legacy_page(store, "page_001", _lease=lease)
 
-    assert outcome == {"status": "ready_for_assembly", "page_id": "page_001"}
-    assert published == []
+    assert outcome == {"status": "processing", "page_id": "page_001"}
+    assert len(published) == 1
+    assert published[0][0][2] == 3
     assert fidelity_requests == [(store, "page_001", lease)]
 
 
-def test_commit_local_fidelity_result_covers_non_text_residuals(
+@pytest.mark.parametrize("route", ["local_refine", "direct"])
+def test_pdf_raster_structured_routes_continue_repair_after_quality_rejection(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
+) -> None:
+    source = tmp_path / "source.png"
+    _image(source)
+    run_dir = runtime.prepare_job(
+        source, run_dir=tmp_path / "run", pipeline_mode="fast"
+    )
+    store = RunStore.open(run_dir)
+    manifest = store.read_json("job_manifest.json")
+    manifest["input"]["type"] = "pdf"
+    store.write_json("job_manifest.json", manifest)
+    reconstruction = run_dir / "pages" / "page_001" / "reconstruction"
+    reconstruction.mkdir(parents=True, exist_ok=True)
+    (reconstruction / "initial").mkdir(parents=True, exist_ok=True)
+    (reconstruction / "initial" / "prepared_page.json").write_text(
+        json.dumps({"_page_policy": {"route": route}}),
+        encoding="utf-8",
+    )
+
+    class FakeImageModule:
+        @staticmethod
+        def load_component_layers(path: Path) -> dict:
+            return {"_page_policy": {"route": route}}
+
+    monkeypatch.setattr(
+        legacy.importlib, "import_module", lambda name: FakeImageModule,
+    )
+    monkeypatch.setattr(
+        legacy,
+        "advance_component_repair",
+        lambda *args, **kwargs: {
+            "status": "needs_next_round",
+            "page_id": "page_001",
+            "repair_round": 2,
+        },
+    )
+    published = []
+    monkeypatch.setattr(
+        legacy,
+        "_publish_next_legacy_request",
+        lambda *args, **kwargs: published.append((args, kwargs)),
+    )
+    fidelity_requests = []
+    monkeypatch.setattr(
+        legacy,
+        "_commit_local_fidelity_result",
+        lambda store, page_id, *, _lease: (
+            fidelity_requests.append((store, page_id, _lease))
+            or {"status": "needs_next_round", "page_id": page_id, "repair_round": 2}
+        ),
+        raising=False,
+    )
+
+    with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
+        outcome = legacy.advance_legacy_page(store, "page_001", _lease=lease)
+
+    assert outcome == {"status": "processing", "page_id": "page_001"}
+    assert len(published) == 1
+    assert published[0][0][2] == 2
+    assert fidelity_requests == [(store, "page_001", lease)]
+
+
+@pytest.mark.parametrize("violation", ["unexplained_visual_residual", "component_text_residual"])
+@pytest.mark.parametrize("through_advance", [False, True])
+def test_local_fidelity_does_not_bypass_failed_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    violation: str,
+    through_advance: bool,
 ) -> None:
     store, reconstruction, accepted, _, _ = _accepted_presentation_case(tmp_path)
+    store.write_json("job_manifest.json", {"options": {"agent_provider": "host"}})
 
     def ref(path: Path) -> dict[str, str]:
         return {
@@ -3780,6 +3874,7 @@ def test_commit_local_fidelity_result_covers_non_text_residuals(
         "input_graph_sha256": accepted["accepted_graph_sha256"],
         "input_refs": accepted["accepted_asset_refs"],
         "text_items": [{"text": "editable", "box": [0, 0, 2, 1]}],
+        "report": {"violations": [violation]},
     }
     quality_path = reconstruction / "component-quality.json"
     quality_path.write_text(json.dumps(quality), encoding="utf-8")
@@ -3793,12 +3888,12 @@ def test_commit_local_fidelity_result_covers_non_text_residuals(
         "revision": 1,
         "phase": "freeze_committed",
         "status": "active",
-        "repair_round": 2,
-        "plan_count": 2,
+        "repair_round": 1,
+        "plan_count": 1,
         "stop_reason": None,
         "graph_ref": accepted["graph_ref"],
         "current_round": {
-            "round": 2,
+            "round": 1,
             "request_ref": ref(quality_path),
             "plan_ref": ref(quality_path),
             "execution_ref": ref(quality_path),
@@ -3830,30 +3925,29 @@ def test_commit_local_fidelity_result_covers_non_text_residuals(
         "pages/page_001/reconstruction/component_state.json", state
     )
 
+    published = []
+    monkeypatch.setattr(legacy, "_fast_strict_escalation_exhausted", lambda *args: True)
+    monkeypatch.setattr(
+        legacy, "_publish_next_legacy_request",
+        lambda *args, **kwargs: published.append(args[2]),
+    )
+    advance = legacy.advance_legacy_page if through_advance else legacy._commit_local_fidelity_result
     with ExecutionLease(store.root / "execution.lock", run_root=store.root) as lease:
-        outcome = legacy._commit_local_fidelity_result(
-            store, "page_001", _lease=lease
-        )
+        outcome = advance(store, "page_001", _lease=lease)
 
-    assert outcome == {"status": "ready_for_assembly", "page_id": "page_001"}
+    if through_advance:
+        assert outcome["status"] == "processing"
+        assert published == [2]
+    else:
+        assert outcome["status"] == "needs_next_round"
+        assert outcome["repair_round"] == 2
+        assert published == []
     committed = store.read_json(
         "pages/page_001/reconstruction/component_state.json"
     )
-    assert committed["phase"] == "ready_for_assembly"
-    result = store.read_json(
-        "pages/page_001/reconstruction/component_result.json"
-    )
-    assert result["route"] == "local_fidelity"
-    fidelity_path, fidelity_payload = legacy._load_legacy_ref(
-        store, result["local_fidelity_ref"]
-    )
-    fidelity = json.loads(fidelity_payload.decode("utf-8"))
-    assert fidelity_path.name == "local_fidelity_page.json"
-    assert fidelity["residual_pixels"] == 16
-    assert fidelity["uncovered_pixels"] == 0
-    assert fidelity["components"]
-    assert all(item["coverage"] <= 0.35 for item in fidelity["components"])
-    assert all(item["bbox"] != [0, 0, 4, 4] for item in fidelity["components"])
+    assert committed == state
+    assert not (reconstruction / "component_result.json").exists()
+    assert not (reconstruction / "local_fidelity_page.json").exists()
 
 
 def test_execute_legacy_round_aggregates_background_actions(
@@ -6143,7 +6237,9 @@ def test_background_rebuild_restores_selected_text_inside_active_visual(
     dirty.save(current)
     Image.new("RGB", (40, 30), "white").save(restored)
     page_mask = masks / "page.png"
-    Image.new("L", (40, 30), 255).save(page_mask)
+    surface = Image.new("L", (40, 30), 0)
+    ImageDraw.Draw(surface).rectangle((3, 3, 36, 26), fill=255)
+    surface.save(page_mask)
     frozen_text_mask = masks / "text.png"
     selected = Image.new("L", (40, 30), 0)
     ImageDraw.Draw(selected).rectangle((14, 10, 25, 19), fill=255)
@@ -6181,6 +6277,34 @@ def test_background_rebuild_restores_selected_text_inside_active_visual(
 
     with Image.open(output) as rebuilt:
         assert rebuilt.getpixel((20, 15)) == expected
+
+
+def test_background_rebuild_without_donors_does_not_retain_foreground(tmp_path: Path) -> None:
+    source = tmp_path / "source.png"
+    current = tmp_path / "current.png"
+    text_mask = tmp_path / "text.png"
+    mask_path = tmp_path / "mask.png"
+    pixels = np.full((40, 60, 3), (225, 242, 238), np.uint8)
+    pixels[10:30, 15:45] = (30, 70, 180)
+    Image.fromarray(pixels).save(source)
+    Image.fromarray(pixels).save(current)
+    Image.new("L", (60, 40), 0).save(text_mask)
+    Image.new("L", (60, 40), 255).save(mask_path)
+    graph = {"nodes": [{
+        "id": "component", "kind": "parent", "parent_id": None,
+        "state": "pending", "mask": "mask.png",
+        "mask_sha256": hashlib.sha256(mask_path.read_bytes()).hexdigest(),
+        "bbox": [0, 0, 60, 40], "z_index": 0, "text_ids": [],
+    }]}
+    output = tmp_path / "rebuilt.png"
+    legacy._rebuild_canvas_background(
+        source_path=source, current_background_path=current,
+        restore_background_path=current, repair_requests=[], graph=graph,
+        graph_dir=tmp_path, text_mask_path=text_mask, output_path=output,
+    )
+    with Image.open(output) as rebuilt:
+        assert rebuilt.getpixel((30, 20)) == (225, 242, 238)
+        assert rebuilt.getpixel((0, 0)) == (225, 242, 238)
 
 
 def test_background_rebuild_preserves_local_tinted_surface(tmp_path: Path) -> None:
@@ -6499,7 +6623,7 @@ def test_accepted_presentation_assembly_preserves_bound_underlay_and_text_clean_
     assert not np.array_equal(rgba[0, 0, :3], source_pixels[0, 0])
 
 
-def _accepted_presentation_case(tmp_path: Path) -> tuple[
+def _accepted_presentation_case(tmp_path: Path, *, component_state: str = "frozen") -> tuple[
     RunStore, Path, dict, Path, Path
 ]:
     run_root = tmp_path / "run"
@@ -6523,7 +6647,7 @@ def _accepted_presentation_case(tmp_path: Path) -> tuple[
     Image.new("L", (4, 4), 255).save(mask)
     graph = {"nodes": [{
         "id": "component_0001", "kind": "parent", "parent_id": None,
-        "state": "frozen", "mask": "masks/component_0001.png",
+        "state": component_state, "mask": "masks/component_0001.png",
         "mask_sha256": hashlib.sha256(mask.read_bytes()).hexdigest(),
         "bbox": [0, 0, 4, 4], "z_index": 0, "text_ids": [],
     }]}
@@ -6594,10 +6718,12 @@ def test_accepted_slide_rejects_quality_only_background_responsibility(
         )
 
 
-def _accepted_assembly_job(tmp_path: Path) -> tuple[RunStore, Path, Path]:
+def _accepted_assembly_job(tmp_path: Path, *, component_state: str = "frozen") -> tuple[RunStore, Path, Path]:
     import image_to_ppt
 
-    store, reconstruction, result, _, _ = _accepted_presentation_case(tmp_path)
+    store, reconstruction, result, _, _ = _accepted_presentation_case(
+        tmp_path, component_state=component_state,
+    )
     output = tmp_path / "accepted-output.pptx"
     initial = reconstruction / "initial"
     initial.mkdir()
@@ -6791,10 +6917,16 @@ def test_accepted_presentation_pptx_e2e_cleans_temporary_assets(
     assert output.is_file()
 
 
+@pytest.mark.parametrize("component_state", ["frozen", "pending"])
 def test_accepted_presentation_adds_hash_bound_local_fidelity_patch(
-    tmp_path: Path,
+    tmp_path: Path, component_state: str,
 ) -> None:
-    store, reconstruction, _ = _accepted_assembly_job(tmp_path)
+    from image2editable.route_execution import RouteContext, finalize_page_route
+    from image2editable.powerpoint_renderer import PowerPointRenderer
+
+    store, reconstruction, _ = _accepted_assembly_job(
+        tmp_path, component_state=component_state,
+    )
     fidelity_dir = reconstruction / "local-fidelity"
     fidelity_dir.mkdir()
     patch_path = fidelity_dir / "component-0001.png"
@@ -6836,10 +6968,31 @@ def test_accepted_presentation_adds_hash_bound_local_fidelity_patch(
         "pages/page_001/reconstruction/component_state.json", state
     )
 
+    context = RouteContext(
+        store=store, page_id="page_001", component_result_path=result_path,
+        adapter="pptx", capabilities=frozenset({"editable_text", "raster_component"}),
+        source_image_path=store.root / source_ref["path"],
+        assemble_page=lambda plan, output: legacy.assemble_route_candidate(
+            store, result_path, plan, output,
+        ),
+    )
+    route = finalize_page_route(context, renderer=PowerPointRenderer(None), policy={
+        "schema_version": 1, "native_shape_enabled": False,
+        "allowed_shapes": ["rectangle", "rounded_rectangle", "ellipse", "line"],
+        "min_geometry_score": 0.99, "max_color_mad": 3.0,
+    })
+    plan = store.read_json(route["plan_ref"]["path"])
+    candidate = tmp_path / "candidate.pptx"
+    legacy.assemble_route_candidate(store, result_path, plan, candidate)
+    candidate_names = {shape.name for shape in Presentation(candidate).slides[0].shapes}
+    assert "image2editable:component_0001" in candidate_names
+    assert "image2editable:local_fidelity_0001" in candidate_names
+
     outputs = legacy.assemble_legacy_results(store)
 
     reopened = Presentation(outputs["16:9"])
     slide = reopened.slides[0]
+    assert "image2editable:component_0001" in {shape.name for shape in slide.shapes}
     fidelity_shape = next(
         shape for shape in slide.shapes
         if shape.name == "image2editable:local_fidelity_0001"

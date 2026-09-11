@@ -570,6 +570,19 @@ def _text_ink_mask(
         )
     local_ink = local_delta > ink_threshold
     structural_line = np.zeros(shape, dtype=bool)
+    # Separate grid directions before labeling: crossing lines are not glyphs.
+    line_length = max(32, text_radius * 5)
+    for kernel_shape in ((1, line_length), (line_length, 1)):
+        opened = cv2.morphologyEx(
+            local_ink.astype(np.uint8), cv2.MORPH_OPEN,
+            np.ones(kernel_shape, dtype=np.uint8),
+        )
+        count, labels = cv2.connectedComponents(opened, 8)
+        inside = np.bincount(labels[text], minlength=count)
+        outside = np.bincount(labels[~text], minlength=count)
+        keep = (inside > 0) & (outside > 0)
+        keep[0] = False
+        structural_line |= keep[labels]
     line_count, line_labels, line_stats, _ = cv2.connectedComponentsWithStats(
         local_ink.astype(np.uint8), 8
     )
@@ -1224,18 +1237,24 @@ def material_ownership_metrics(
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < calibration.min_component_pixels:
             continue
-        region = labels == label
+        x, y, width, height = stats[label, :4]
+        # One pixel of context preserves distance-transform boundaries.
+        bounds = (
+            slice(max(0, y - 1), min(labels.shape[0], y + height + 1)),
+            slice(max(0, x - 1), min(labels.shape[1], x + width + 1)),
+        )
+        region = labels[bounds] == label
         thickness = 2.0 * float(
             cv2.distanceTransform(region.astype(np.uint8), cv2.DIST_L2, 5).max()
         )
         is_boundary_residual = (
             area <= boundary_area_limit
-            and np.any(region & owned_neighborhood)
+            and np.any(region & owned_neighborhood[bounds])
             and thickness <= boundary_thickness
         )
         if is_boundary_residual:
             continue
-        keep |= region
+        keep[bounds] |= region
         largest = max(largest, area)
     material_pixels = int(np.count_nonzero(material))
     unexplained_pixels = int(np.count_nonzero(keep))

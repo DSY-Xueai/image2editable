@@ -164,7 +164,7 @@ class _ResidentVisualProcessor:
                 self._detector = self._create_detector()
             if self._generator is None:
                 self._generator = self._create_generator(
-                    self._resolve_checkpoint()
+                    self._resolve_checkpoint(), resource_safe=True,
                 )
             detector = self._detector
             generator = self._generator
@@ -185,7 +185,9 @@ class _ResidentVisualProcessor:
 
     def component_prompts(self, request_path: Path, result_path: Path) -> None:
         if self._generator is None:
-            self._generator = self._create_generator(self._resolve_checkpoint())
+            self._generator = self._create_generator(
+                self._resolve_checkpoint(), resource_safe=True,
+            )
         from scripts.sam_worker import run_component_prompt_batch_with_generator
 
         run_component_prompt_batch_with_generator(

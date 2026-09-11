@@ -36,8 +36,18 @@ def _visual_metrics(
     if not np.any(visual_hole):
         return empty
 
-    height, width = visual_hole.shape
     inside_y, inside_x = np.nonzero(visual_hole)
+    # Two-pixel donor ring plus one pixel for its gradient/erosion support.
+    top = max(0, int(inside_y.min()) - 3)
+    bottom = min(visual_hole.shape[0], int(inside_y.max()) + 4)
+    left = max(0, int(inside_x.min()) - 3)
+    right = min(visual_hole.shape[1], int(inside_x.max()) + 4)
+    candidate = candidate[top:bottom, left:right]
+    source = source[top:bottom, left:right]
+    donor_mask = donor_mask[top:bottom, left:right]
+    visual_hole = visual_hole[top:bottom, left:right]
+    inside_y, inside_x = inside_y - top, inside_x - left
+    height, width = visual_hole.shape
     donor_counts = np.zeros(len(inside_y), dtype=np.uint8)
     donor_min = np.full((len(inside_y), 3), 255, dtype=np.int16)
     donor_max = np.zeros((len(inside_y), 3), dtype=np.int16)
@@ -143,6 +153,7 @@ def _visual_metrics(
     ).astype(bool)
     high_frequency = float(np.count_nonzero(
         interior & (candidate_detail > detail_threshold)
+        & (candidate_detail > source_detail + 12.0)
     ))
     return {
         "boundary_color_mae": boundary_mae,
@@ -440,19 +451,17 @@ def _embedded_higher_layer(
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         higher_layer.astype(np.uint8), 8,
     )
-    embedded_labels = []
-    for label in range(1, count):
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        interior_pixels = int(np.count_nonzero((labels == label) & interior))
-        if interior_pixels * 2 >= area:
-            embedded_labels.append(label)
-    return np.isin(labels, embedded_labels)
+    interior_pixels = np.bincount(labels[interior], minlength=count)
+    embedded = interior_pixels * 2 >= stats[:, cv2.CC_STAT_AREA]
+    embedded[0] = False
+    return embedded[labels]
 
 
 def _higher_layer_halo(
     ownership: np.ndarray,
     semantic: np.ndarray,
     higher_layer: np.ndarray,
+    source_rgb: np.ndarray,
 ) -> np.ndarray:
     ys, xs = np.nonzero(semantic)
     if not len(ys) or not np.any(higher_layer):
@@ -462,11 +471,53 @@ def _higher_layer_halo(
         return np.zeros_like(semantic)
     radius = max(1, min(4, int(np.ceil(short_side * 0.02))))
     kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
-    return (
+    halo = (
         cv2.dilate(higher_layer.astype(np.uint8), kernel).astype(bool)
         & ownership
         & semantic
     )
+    if not np.any(halo):
+        return halo
+    y0, y1 = max(0, int(ys.min()) - radius), min(halo.shape[0], int(ys.max()) + radius + 1)
+    x0, x1 = max(0, int(xs.min()) - radius), min(halo.shape[1], int(xs.max()) + radius + 1)
+    higher_crop = higher_layer[y0:y1, x0:x1]
+    _, nearest = cv2.distanceTransformWithLabels(
+        (~higher_crop).astype(np.uint8), cv2.DIST_L2, 5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    colors = source_rgb[y0:y1, x0:x1]
+    higher_colors = colors[higher_crop]
+    # Geometric proximity alone cannot distinguish a lower outline from bleed.
+    halo_crop = halo[y0:y1, x0:x1]
+    color_delta = np.max(np.abs(
+        colors[halo_crop].astype(np.int16)
+        - higher_colors[nearest[halo_crop] - 1].astype(np.int16)
+    ), axis=1)
+    # Shared outlines need an interior surface match before counting as bleed.
+    higher_interior = cv2.erode(higher_crop.astype(np.uint8), kernel).astype(bool)
+    if not np.any(higher_interior):
+        return np.zeros_like(halo)
+    _, nearest_interior = cv2.distanceTransformWithLabels(
+        (~higher_interior).astype(np.uint8), cv2.DIST_L2, 5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    interior_delta = np.max(np.abs(
+        colors[halo_crop].astype(np.int16)
+        - colors[higher_interior][nearest_interior[halo_crop] - 1].astype(np.int16)
+    ), axis=1)
+    donor = ownership[y0:y1, x0:x1] & semantic[y0:y1, x0:x1] & ~higher_crop & ~halo_crop
+    if not np.any(donor):
+        return np.zeros_like(halo)
+    _, nearest_donor = cv2.distanceTransformWithLabels(
+        (~donor).astype(np.uint8), cv2.DIST_L2, 5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    donor_delta = np.max(np.abs(
+        colors[halo_crop].astype(np.int16)
+        - colors[donor][nearest_donor[halo_crop] - 1].astype(np.int16)
+    ), axis=1)
+    halo_crop[halo_crop] = (color_delta <= 3) & (interior_delta <= 3) & (donor_delta > 6)
+    return halo
 
 
 def build_presentation_layer(
@@ -493,9 +544,13 @@ def build_presentation_layer(
 
     embedded_higher = _embedded_higher_layer(semantic, higher_layer)
     expanded_higher = embedded_higher | _higher_layer_halo(
-        ownership, semantic, embedded_higher,
+        ownership, semantic, embedded_higher, source,
     )
-    ownership = ownership & ~higher_layer & ~expanded_higher & ~text
+    visible_ownership = ownership & ~higher_layer & ~text
+    # A halo is only a repair hint; it must not erase the entire visible rim.
+    if np.any(visible_ownership) and not np.any(visible_ownership & ~expanded_higher):
+        expanded_higher = embedded_higher
+    ownership = visible_ownership & ~expanded_higher
     if not np.any(ownership):
         empty = np.zeros(shape, dtype=bool)
         return {
@@ -509,7 +564,7 @@ def build_presentation_layer(
                 "added_high_frequency_pixels": 0.0,
             },
         }
-    text_hole = semantic & ~ownership & text
+    text_hole = semantic & ~ownership & text & ~higher_layer
     visual_hole = (
         semantic & ~ownership & expanded_higher & ~higher_layer & ~text_hole
     )

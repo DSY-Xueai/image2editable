@@ -14,11 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "image-to-psd"
 PSD_COMMON_ENGINE_FILES = {
     "__init__.py",
+    "art_text.py",
     "bg_model.py",
     "component_contracts.py",
     "component_quality.py",
     "component_underlay.py",
     "fg_extract.py",
+    "font_match.py",
     "image_to_ppt.py",
     "initial_diagnostics.py",
     "lama_inpaint.py",
@@ -31,6 +33,8 @@ PSD_COMMON_ENGINE_FILES = {
     "runtime_model_paths.py",
     "sam_worker.py",
     "text_detect.py",
+    "text_context.py",
+    "text_runs.py",
     "visual_compare_qa.py",
     "visual_segment.py",
     "visual_worker.py",
@@ -132,6 +136,14 @@ def test_psd_common_engine_matches_ppt_skill() -> None:
 
     for name in PSD_COMMON_ENGINE_FILES:
         assert (psd_scripts / name).read_bytes() == (ppt_scripts / name).read_bytes()
+
+
+@pytest.mark.parametrize("skill_name", ["image-to-ppt", "image-to-psd"])
+def test_skill_underlay_matches_runtime(skill_name: str) -> None:
+    runtime = ROOT / "scripts" / "component_underlay.py"
+    bundled = ROOT / "skills" / skill_name / "scripts" / "component_underlay.py"
+
+    assert bundled.read_text(encoding="utf-8") == runtime.read_text(encoding="utf-8")
 
 
 def test_ppt_writer_is_loaded_only_for_ppt_assembly() -> None:

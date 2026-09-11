@@ -68,6 +68,102 @@ def _read_bgr(path: Path) -> np.ndarray:
     return image
 
 
+def _validated_words(text: str, words: object) -> list[dict]:
+    if not isinstance(words, list) or not words:
+        return []
+    cleaned = []
+    for word in words:
+        if not isinstance(word, dict) or not isinstance(word.get("text"), str):
+            return []
+        try:
+            box = np.asarray(word.get("box"), dtype=float)
+        except (TypeError, ValueError):
+            return []
+        if box.shape != (4,) or not np.isfinite(box).all():
+            return []
+        x, y, width, height = box.tolist()
+        if width <= 0 or height <= 0 or min(x, y) < -0.01 or max(x + width, y + height) > 1.01:
+            return []
+        x1, y1 = max(0.0, x), max(0.0, y)
+        x2, y2 = min(1.0, x + width), min(1.0, y + height)
+        if x2 <= x1 or y2 <= y1:
+            return []
+        cleaned.append({"text": word["text"], "box": [x1, y1, x2 - x1, y2 - y1]})
+    if "".join("".join(word["text"].split()) for word in cleaned) != "".join(text.split()):
+        return []
+    return cleaned
+
+
+def _words_from_polys(text: str, tokens: object, regions: object, box: object) -> list[dict]:
+    if tokens is None or regions is None or len(tokens) != len(regions):
+        return []
+    x, y, width, height = box
+    if width <= 0 or height <= 0:
+        return []
+    words = []
+    for token, region in zip(tokens, regions):
+        points = np.asarray(region, dtype=float)
+        if points.shape != (4, 2) or not np.isfinite(points).all():
+            return []
+        low, high = points.min(axis=0), points.max(axis=0)
+        words.append({"text": token, "box": [(low[0] - x) / width, (low[1] - y) / height,
+                                                (high[0] - low[0]) / width, (high[1] - low[1]) / height]})
+    axis = 1 if height / width >= 1.5 else 0
+    centers = [word["box"][axis] + word["box"][axis + 2] / 2 for word in words]
+    if any(a > b + 1e-6 for a, b in zip(centers, centers[1:])):
+        return []
+    return _validated_words(text, words)
+
+
+def _recognition_item(result: object, poly: object) -> dict:
+    rec_text = _value(result, "rec_text", "")
+    word_info = None
+    if isinstance(rec_text, (tuple, list)) and len(rec_text) == 2:
+        rec_text, word_info = rec_text
+    item = {"text": str(rec_text), "score": float(_value(result, "rec_score", 0.0))}
+    if word_info is None:
+        return item
+    from paddlex.inference.pipelines.components import cal_ocr_word_box
+
+    columns, groups, positions, states = word_info
+    if not columns or len(groups) != len(positions) or len(groups) != len(states):
+        return item
+    decoded_positions = [position for group in positions for position in group]
+    if (not decoded_positions or min(decoded_positions) < 0 or max(decoded_positions) >= columns
+            or any(a >= b for a, b in zip(decoded_positions, decoded_positions[1:]))):
+        return item
+    tokens, regions = [], []
+    # The Paddle helper sorts boxes separately from text. Calculate each decoded
+    # group on a horizontal crop before projecting it back to the source quad.
+    crop_quad = np.asarray([[0, 0], [1000, 0], [1000, 100], [0, 100]], dtype=np.float32)
+    for group, position, state in zip(groups, positions, states):
+        if not group or len(group) != len(position) or any(a >= b for a, b in zip(position, position[1:])):
+            return item
+        group_tokens, group_regions = cal_ocr_word_box(
+            item["text"], crop_quad, [columns, [group], [position], [state]],
+        )
+        tokens.extend(group_tokens)
+        regions.extend(group_regions)
+    points = sorted(cv2.boxPoints(cv2.minAreaRect(np.asarray(poly, dtype=np.int32))), key=lambda point: point[0])
+    left = sorted(points[:2], key=lambda point: point[1])
+    right = sorted(points[2:], key=lambda point: point[1])
+    quad = np.asarray([left[0], right[0], right[1], left[1]], dtype=np.float32)
+    width = max(np.linalg.norm(quad[0] - quad[1]), np.linalg.norm(quad[2] - quad[3]))
+    height = max(np.linalg.norm(quad[0] - quad[3]), np.linalg.norm(quad[1] - quad[2]))
+    if width <= 0 or height <= 0 or not regions:
+        return item
+    if height / width >= 1.5:
+        quad = quad[[1, 2, 3, 0]]
+    transform = cv2.getPerspectiveTransform(crop_quad, quad)
+    projected = cv2.perspectiveTransform(np.asarray(regions, dtype=np.float32).reshape(-1, 1, 2), transform).reshape(-1, 4, 2)
+    low, high = np.asarray(poly).min(axis=0), np.asarray(poly).max(axis=0)
+    box = [int(low[0]), int(low[1]), int(high[0] - low[0]), int(high[1] - low[1])]
+    words = _words_from_polys(item["text"], tokens, projected, box)
+    if words:
+        item["words"] = words
+    return item
+
+
 def _write_image(path: Path, image: np.ndarray) -> None:
     success, encoded = cv2.imencode(".png", image)
     if not success:
@@ -135,6 +231,7 @@ def run_detection(
     image_path: str | Path,
     work_dir: str | Path,
     result_path: str | Path,
+    *, recover_empty: bool = False,
 ) -> None:
     image_path = Path(image_path)
     work_dir = Path(work_dir)
@@ -151,14 +248,10 @@ def run_detection(
         unclip_ratio=1.5,
     )
     try:
-        results = detector.predict(
-            str(image_path),
-            max_side_limit=4000,
-        )
+        polys, recovered = _detect_polys(detector, image_path, recover_empty)
     finally:
         detector.close()
-    result = results[0] if results else {}
-    polys = list(sorter_type()(_value(result, "dt_polys", [])))
+    polys = list(sorter_type()(polys))
     image = _read_bgr(image_path)
     crops = cropper_type(det_box_type="quad")(
         image,
@@ -175,7 +268,8 @@ def run_detection(
         crop_paths.append(str(crop_path))
     _write_json(
         result_path,
-        {"polys": saved_polys, "crops": crop_paths},
+        {"polys": saved_polys, "crops": crop_paths,
+         **({"recovered": True} if recovered else {})},
     )
 
 
@@ -206,7 +300,7 @@ def run_recognition(
         enable_mkldnn=False,
     )
     try:
-        results = recognizer.predict([crops[index] for index in order])
+        results = list(recognizer.predict([crops[index] for index in order], return_word_box=True))
     finally:
         recognizer.close()
     if len(results) != len(order):
@@ -215,10 +309,23 @@ def run_recognition(
     for index, result in zip(order, results):
         mapped[index] = {
             "poly": polys[index],
-            "text": str(_value(result, "rec_text", "")),
-            "score": float(_value(result, "rec_score", 0.0)),
+            **_recognition_item(result, polys[index]),
         }
+    if detection.get("recovered"):
+        mapped = [item for item in mapped if item["score"] >= 0.9]
     _write_json(result_path, {"items": mapped})
+
+
+def _detect_polys(detector, image_path: Path, recover_empty: bool):
+    results = list(detector.predict(str(image_path), max_side_limit=4000))
+    polys = _value(results[0], "dt_polys", []) if results else []
+    recovered = recover_empty and len(polys) == 0
+    if recovered:
+        results = list(detector.predict(
+            str(image_path), max_side_limit=4000, thresh=0.15, box_thresh=0.3,
+        ))
+        polys = _value(results[0], "dt_polys", []) if results else []
+    return polys, recovered
 
 
 def run_batch(
@@ -227,8 +334,12 @@ def run_batch(
     lang: str = "ch",
     *,
     processor: _ResidentOcrProcessor | None = None,
+    recover_empty: bool = False,
+    recognition_only: bool = False,
 ) -> None:
-    if processor is None:
+    if recognition_only:
+        detector = None
+    elif processor is None:
         detector_type, sorter_type, cropper_type = _load_detection_tools()
         detector = detector_type(
             model_name="PP-OCRv5_mobile_det",
@@ -246,12 +357,17 @@ def run_batch(
     all_crops = []
     try:
         for image_path in map(Path, image_paths):
-            results = detector.predict(str(image_path), max_side_limit=4000)
-            result = results[0] if results else {}
-            polys = list(sorter_type()(_value(result, "dt_polys", [])))
-            crops = cropper_type(det_box_type="quad")(
-                _read_bgr(image_path), polys,
-            )
+            if recognition_only:
+                image = _read_bgr(image_path)
+                height, width = image.shape[:2]
+                polys = [[[0, 0], [width, 0], [width, height], [0, height]]]
+                crops, recovered = [image], False
+            else:
+                polys, recovered = _detect_polys(detector, image_path, recover_empty)
+                polys = list(sorter_type()(polys))
+                crops = cropper_type(det_box_type="quad")(
+                    _read_bgr(image_path), polys,
+                )
             kept_polys = []
             crop_indices = []
             for crop, poly in zip(crops, polys):
@@ -264,9 +380,10 @@ def run_batch(
                 "path": str(image_path),
                 "polys": kept_polys,
                 "crop_indices": crop_indices,
+                "recovered": recovered,
             })
     finally:
-        if processor is None:
+        if processor is None and detector is not None:
             detector.close()
 
     recognized = [None] * len(all_crops)
@@ -287,14 +404,11 @@ def run_batch(
         try:
             for start in range(0, len(order), 64):
                 batch = order[start:start + 64]
-                results = list(recognizer.predict([all_crops[index] for index in batch]))
+                results = list(recognizer.predict([all_crops[index] for index in batch], return_word_box=True))
                 if len(results) != len(batch):
                     raise RuntimeError("OCR recognition result count does not match crops")
                 for index, result in zip(batch, results):
-                    recognized[index] = {
-                        "text": str(_value(result, "rec_text", "")),
-                        "score": float(_value(result, "rec_score", 0.0)),
-                    }
+                    recognized[index] = result
         finally:
             if processor is None:
                 recognizer.close()
@@ -303,7 +417,9 @@ def run_batch(
     for record in records:
         items = []
         for poly, crop_index in zip(record["polys"], record["crop_indices"]):
-            item = recognized[crop_index]
+            item = _recognition_item(recognized[crop_index], poly)
+            if record["recovered"] and item["score"] < 0.9:
+                continue
             items.append({"poly": poly, **item})
         images.append({"path": record["path"], "items": items})
     _write_json(Path(result_path), {"images": images})
@@ -317,6 +433,7 @@ def _build_parser() -> argparse.ArgumentParser:
     detect.add_argument("--image", required=True)
     detect.add_argument("--work-dir", required=True)
     detect.add_argument("--result", required=True)
+    detect.add_argument("--recover-empty", action="store_true")
     recognize = subparsers.add_parser("recognize")
     recognize.add_argument("--detection-result", required=True)
     recognize.add_argument("--result", required=True)
@@ -325,6 +442,8 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--manifest", required=True)
     batch.add_argument("--result", required=True)
     batch.add_argument("--lang", default="ch")
+    batch.add_argument("--recover-empty", action="store_true")
+    batch.add_argument("--recognition-only", action="store_true")
     return parser
 
 
@@ -343,7 +462,7 @@ def _serve() -> int:
                 payload = envelope.get("payload")
                 if not isinstance(request_id, str) or not request_id:
                     raise ValueError("OCR worker request id is invalid")
-                if not isinstance(payload, dict) or set(payload) != {
+                if not isinstance(payload, dict) or set(payload) - {"recover_empty", "recognition_only"} != {
                     "images", "result", "lang",
                 }:
                     raise ValueError("OCR worker payload is invalid")
@@ -353,6 +472,8 @@ def _serve() -> int:
                     or any(not isinstance(path, str) or not path for path in payload["images"])
                     or not isinstance(payload["result"], str)
                     or not isinstance(payload["lang"], str)
+                    or type(payload.get("recover_empty", False)) is not bool
+                    or type(payload.get("recognition_only", False)) is not bool
                 ):
                     raise ValueError("OCR worker payload is invalid")
                 with redirect_stdout(sys.stderr):
@@ -361,6 +482,8 @@ def _serve() -> int:
                         payload["result"],
                         payload["lang"],
                         processor=processor,
+                        **({"recover_empty": True} if payload.get("recover_empty") else {}),
+                        **({"recognition_only": True} if payload.get("recognition_only") else {}),
                     )
                 response = {"request_id": request_id, "result": {}}
             except Exception as error:
@@ -384,12 +507,13 @@ def main() -> int:
         parser.error("OCR worker requires a mode or --serve")
     try:
         if args.mode == "detect":
-            run_detection(args.image, args.work_dir, args.result)
+            run_detection(args.image, args.work_dir, args.result, recover_empty=args.recover_empty)
         elif args.mode == "recognize":
             run_recognition(args.detection_result, args.result, args.lang)
         else:
             manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
-            run_batch(manifest["images"], args.result, args.lang)
+            run_batch(manifest["images"], args.result, args.lang, recover_empty=args.recover_empty,
+                      recognition_only=args.recognition_only)
     except Exception as error:
         print(f"OCR {args.mode} worker failed: {error}", file=sys.stderr)
         return 1

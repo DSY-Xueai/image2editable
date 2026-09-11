@@ -509,6 +509,29 @@ def build_clean_background(
     if restore_source_mask.shape != repaired.shape[:2]:
         raise ValueError("text restore mask must match the image height and width")
     text_removal = build_removal_mask([], restore_source_mask) > 0
+    # Text cleanup preserves graphics, so never restore it over removed elements.
+    element_removal = build_removal_mask(element_masks, np.zeros_like(text_mask)) > 0
+    text_removal &= ~element_removal
+    if np.any(text_removal):
+        try:
+            from scripts.component_quality import (
+                _residual_text_ink_mask, _text_ink_mask, calibrate_page,
+            )
+        except ModuleNotFoundError as error:
+            if error.name != "scripts.component_quality":
+                raise
+            from image2editable.component_quality import (
+                _residual_text_ink_mask, _text_ink_mask, calibrate_page,
+            )
+
+        calibration = calibrate_page(img, restore_source_mask)
+        ink = _text_ink_mask(img, restore_source_mask > 0, calibration)
+        residual = _residual_text_ink_mask(trusted, ink, ink, calibration)
+        # A failed text-clean region must not overwrite a repaired background.
+        _, labels = cv2.connectedComponents(text_removal.astype(np.uint8), 8)
+        dirty_labels = np.unique(labels[residual])
+        dirty_labels = dirty_labels[dirty_labels > 0]
+        text_removal &= ~np.isin(labels, dirty_labels)
     repaired[text_removal] = trusted[text_removal]
     return repaired
 

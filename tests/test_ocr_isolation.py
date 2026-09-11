@@ -234,7 +234,7 @@ def test_worker_sorts_crops_and_maps_recognition_to_sorted_polys(
         def __init__(self, **kwargs):
             captured["recognizer_kwargs"] = kwargs
 
-        def predict(self, crops):
+        def predict(self, crops, *, return_word_box=False):
             captured["recognition_ratios"] = [
                 crop.shape[1] / crop.shape[0] for crop in crops
             ]
@@ -333,7 +333,7 @@ def test_batch_worker_loads_each_model_once_for_multiple_images(
         def __init__(self, **kwargs):
             loads["recognizer"] += 1
 
-        def predict(self, crops):
+        def predict(self, crops, *, return_word_box=False):
             return [
                 {"rec_text": f"T{index}", "rec_score": 0.99}
                 for index, _ in enumerate(crops, start=1)
@@ -476,7 +476,7 @@ def test_build_text_result_preserves_internal_semantic_separator(
     monkeypatch.setattr(
         text_detect,
         "_estimate_style",
-        lambda *_: {"font_size": 24.0, "color": (0, 0, 0), "bold": True},
+        lambda *_, **kwargs: {"font_size": 24.0, "color": (0, 0, 0), "bold": True},
     )
     image = np.full((80, 280, 3), 255, dtype=np.uint8)
     raw_boxes = [
@@ -500,7 +500,7 @@ def test_build_text_result_preserves_mixed_technical_separator(
     monkeypatch.setattr(
         text_detect,
         "_estimate_style",
-        lambda *_: {"font_size": 12.6, "color": "#3f576f", "bold": False},
+        lambda *_, **kwargs: {"font_size": 12.6, "color": "#3f576f", "bold": False},
     )
     image = np.full((80, 700, 3), 255, dtype=np.uint8)
     raw_boxes = [
@@ -1533,10 +1533,11 @@ def test_resource_safe_pipeline_isolates_all_lama_background_calls(
     )
 
     if persistent_residual:
-        assert sam_calls == ["batch"] * 4
-        assert resolved_candidate_counts[-1] == 4
-        assert background_calls == ["clean"] * 4 + ["widescreen"]
-        assert len(isolated_calls) == 5
+        # Identical residual masks are not re-added on the second repair pass.
+        assert sam_calls == ["batch"] * 3
+        assert resolved_candidate_counts[-1] == 2
+        assert background_calls == ["clean"] * 3 + ["widescreen"]
+        assert len(isolated_calls) == 4
     else:
         assert sam_calls == ["batch", "batch"]
         assert background_calls == ["clean", "clean", "clean", "widescreen"]
@@ -1816,7 +1817,7 @@ def test_resident_visual_worker_reuses_sam_generator_for_component_prompts(
     processor = visual_worker._ResidentVisualProcessor(
         process_image=lambda *args, **kwargs: {},
         create_detector=lambda: object(),
-        create_generator=lambda checkpoint: created.append(checkpoint) or generator,
+        create_generator=lambda checkpoint, **kwargs: created.append((checkpoint, kwargs)) or generator,
         resolve_checkpoint=lambda: tmp_path / "sam.pt",
     )
 
@@ -1844,7 +1845,7 @@ def test_resident_visual_worker_reuses_sam_generator_for_component_prompts(
             sam_worker.read_component_prompt_batch_result(request_path, result_path)
         )
 
-    assert created == [tmp_path / "sam.pt"]
+    assert created == [(tmp_path / "sam.pt", {"resource_safe": True})]
     assert [int(np.where(batch[0])[1].min()) for batch in masks] == [1, 2]
 
 

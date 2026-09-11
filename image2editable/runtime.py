@@ -804,7 +804,6 @@ def _batch_legacy_ocr(
     page_jobs = store.read_json("page_jobs.json")["pages"]
     completed = {
         PageStatus.VALIDATED.value,
-        PageStatus.PRESERVED_WITH_WARNING.value,
     }
     eligible = []
     for page_id in page_ids:
@@ -855,7 +854,6 @@ def _advance_legacy_pages(
 ) -> dict[str, Any] | None:
     completed = {
         PageStatus.VALIDATED.value,
-        PageStatus.PRESERVED_WITH_WARNING.value,
     }
     visual_page_ids = [
         page_id for page_id in page_ids
@@ -899,6 +897,21 @@ def _advance_legacy_pages(
             if store.read_json("page_jobs.json")["pages"][page_id]["status"] in completed:
                 continue
             reconstruction = store.root / "pages" / page_id / "reconstruction"
+            page_status = store.read_json("page_jobs.json")["pages"][page_id]["status"]
+            if page_status == PageStatus.PRESERVED_WITH_WARNING.value:
+                # Warning is an internal repair boundary, not a user-visible
+                # terminal result. Reopen the next bounded repair round before
+                # attempting assembly.
+                if not resume_round_limited_component_repair(store, page_id):
+                    raise RuntimeError(
+                        f"Automatic repair could not resume page {page_id}"
+                    )
+                page_jobs = store.read_json("page_jobs.json")
+                page_jobs["pages"][page_id].update({
+                    "status": PageStatus.PROCESSING.value,
+                    "updated_at": utc_now(),
+                })
+                store.write_json("page_jobs.json", page_jobs)
             if not (reconstruction / "component_state.json").is_file():
                 initialize_kwargs = {
                     "_lease": lease,

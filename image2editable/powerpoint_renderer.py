@@ -70,6 +70,7 @@ class PowerPointRenderer:
             output.unlink()
         application = None
         presentation = None
+        slide = None
         initialized = False
         try:
             if self._co_initialize is not None:
@@ -104,15 +105,24 @@ class PowerPointRenderer:
         finally:
             active_error = sys.exc_info()[0] is not None
             cleanup_error = None
-            for action in (
-                presentation.Close if presentation is not None else None,
-                application.Quit if application is not None else None,
-                self._co_uninitialize if initialized else None,
-            ):
-                if action is None:
-                    continue
+            # Release child proxies while their PowerPoint parent is still alive.
+            slide = None
+            if presentation is not None:
                 try:
-                    action()
+                    presentation.Close()
+                except Exception as error:
+                    cleanup_error = error
+            presentation = None
+            if application is not None:
+                try:
+                    application.Quit()
+                except Exception as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+            application = None
+            if initialized and self._co_uninitialize is not None:
+                try:
+                    self._co_uninitialize()
                 except Exception as error:
                     if cleanup_error is None:
                         cleanup_error = error

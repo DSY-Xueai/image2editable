@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from io import BytesIO
 from numbers import Integral, Real
 from pathlib import Path
@@ -813,6 +814,34 @@ def _add_native_shape(
     shape.name = f"image2editable:{element['object_id']}"
 
 
+@lru_cache(maxsize=32)
+def _ocr_measurement_font(font_name: str, bold: bool, italic: bool):
+    from PIL import ImageFont
+    names = {
+        "Arial": "arialbi.ttf" if bold and italic else "arialbd.ttf" if bold else "ariali.ttf" if italic else "arial.ttf",
+        "Microsoft YaHei": "msyhbd.ttc" if bold else "msyh.ttc",
+    }
+    if font_name in names:
+        try:
+            return ImageFont.truetype(names[font_name], 1000)
+        except OSError:
+            pass
+    from scripts.font_match import resolve_font
+    return resolve_font(font_name, bold, italic)
+
+
+def _fit_ocr_font_size(text, font_name, bold, italic, font_size, width):
+    font = _ocr_measurement_font(font_name, bold, italic)
+    if font is None or not text:
+        return font_size
+    # Measure advances and italic overhangs; keep the detected frame unchanged.
+    measured = max(
+        max(font.getlength(line), font.getbbox(line)[2] - min(0, font.getbbox(line)[0]))
+        for line in text.split("\n")
+    )
+    return min(font_size, width * 72 * 1000 / measured) if measured > 0 else font_size
+
+
 def _add_textbox(
     slide,
     item: dict,
@@ -829,6 +858,11 @@ def _add_textbox(
     Alignment is applied inside the OCR-detected bounds so nearby text keeps
     its original horizontal position.
     """
+    if "runs" in item:
+        return _add_positioned_text(
+            slide, item, img_w, img_h, transform, canvas_width, canvas_height,
+            content_offset_x, content_offset_y,
+        )
     x, y, w, h = item["box"]
 
     left, top, width, height = _map_bbox(
@@ -883,7 +917,35 @@ def _add_textbox(
         font_size = item["font_size_pt"] * transform.content_width * 72 / img_w
     else:
         font_size = item.get("font_size", 12) * font_scale
+        if item.get("box_kind") != "ink":
+            font_size = _fit_ocr_font_size(
+                run.text, item.get("font", "Microsoft YaHei"),
+                item.get("bold", False), item.get("italic", False), font_size, width,
+            )
+        if 0 < font_size < 1:
+            from pptx.enum.text import MSO_AUTO_SIZE
+            tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+            tf.word_wrap = True
+            font_size = 1
     font.size = Pt(font_size)
+    if item.get("box_kind") == "ink":
+        measured_font = _ocr_measurement_font(
+            item.get("font", "Microsoft YaHei"), item.get("bold", False), item.get("italic", False),
+        )
+        if measured_font is None:
+            raise ValueError("text runs ink layout requires installed font metrics")
+        mask, offset = measured_font.getmask2(run.text)
+        bounds = mask.getbbox()
+        if bounds is None:
+            raise ValueError("text runs ink layout requires visible glyphs")
+        ink_left, ink_top, ink_right, ink_bottom = bounds
+        scale = font_size / 72000
+        ascent, descent = measured_font.getmetrics()
+        # A tight ink box locates visible strokes, not the font's advance box.
+        box.left = Inches(left + width / 2 - (ink_left + ink_right + 2 * offset[0]) * scale / 2)
+        box.top = Inches(top + height / 2 - (ink_top + ink_bottom + 2 * offset[1]) * scale / 2)
+        box.width = Inches(max(measured_font.getlength(run.text), ink_right + offset[0]) * scale)
+        box.height = Inches((ascent + descent) * scale)
     character_spacing = item.get("character_spacing_pt", 0.0)
     if (
         type(character_spacing) not in {int, float}
@@ -902,12 +964,87 @@ def _add_textbox(
     _set_solid_fill_opacity(
         run._r.get_or_add_rPr(), item.get("fill_opacity", 1.0)
     )
+    if "gradient" in item:
+        rpr = run._r.get_or_add_rPr()
+        solid = rpr.find(qn("a:solidFill"))
+        gradient = OxmlElement("a:gradFill")
+        gradient.set("rotWithShape", "1")
+        stops = OxmlElement("a:gsLst")
+        for position, value in zip((0, 100000), item["gradient"]["colors"]):
+            stop = OxmlElement("a:gs")
+            stop.set("pos", str(position))
+            color = OxmlElement("a:srgbClr")
+            color.set("val", value.lstrip("#"))
+            stop.append(color)
+            stops.append(stop)
+        gradient.append(stops)
+        linear = OxmlElement("a:lin")
+        linear.set("ang", str(round(item["gradient"]["angle"]*60000)))
+        linear.set("scaled", "0")
+        gradient.append(linear)
+        rpr.replace(solid, gradient)
+    if item.get("outline_width", 0):
+        outline = OxmlElement("a:ln")
+        outline.set("w", str(round(item["outline_width"] * font_scale * 12700)))
+        fill = OxmlElement("a:solidFill")
+        stroke_color = OxmlElement("a:srgbClr")
+        stroke_color.set("val", item["outline_color"].lstrip("#"))
+        fill.append(stroke_color)
+        outline.append(fill)
+        outline.append(OxmlElement("a:round"))
+        run._r.get_or_add_rPr().insert(0, outline)
 
     # Alignment: 0=left, 1=center, 2=right
     from pptx.enum.text import PP_ALIGN
     align_map = {0: PP_ALIGN.LEFT, 1: PP_ALIGN.CENTER, 2: PP_ALIGN.RIGHT}
-    p.alignment = align_map.get(item.get("align", 1), PP_ALIGN.CENTER)
+    p.alignment = PP_ALIGN.LEFT if item.get("box_kind") == "ink" else align_map.get(item.get("align", 1), PP_ALIGN.CENTER)
     return box
+
+
+def _add_positioned_text(
+    slide, item, img_w, img_h, transform, canvas_width, canvas_height,
+    content_offset_x, content_offset_y,
+):
+    from scripts.text_runs import validate_text_runs
+
+    validate_text_runs(item)
+    rotation = item.get("rotation", 0)
+    if type(rotation) is not int or rotation not in {0, 90, 180, 270}:
+        raise ValueError("text rotation must be one of 0, 90, 180, or 270")
+    x, y, width, height = item["box"]
+    logical_width, logical_height = (height, width) if rotation in {90, 270} else (width, height)
+    cosine, sine = math.cos(math.radians(rotation)), math.sin(math.radians(rotation))
+    group = slide.shapes.add_group_shape()
+    for run in item["runs"]:
+        rx, ry, rw, rh = run["box"]
+        dx = (rx + rw / 2 - 0.5) * logical_width
+        dy = (ry + rh / 2 - 0.5) * logical_height
+        center_x = x + width / 2 + dx * cosine - dy * sine
+        center_y = y + height / 2 + dx * sine + dy * cosine
+        run_width, run_height = rw * logical_width, rh * logical_height
+        child_item = {key: value for key, value in item.items() if key not in {"runs", "words"}}
+        child_item.update(run)
+        child_item.update({
+            "box": [center_x - run_width / 2, center_y - run_height / 2, run_width, run_height],
+            "rotation": 0,
+        })
+        child = _add_textbox(
+            group, child_item, img_w, img_h, transform, canvas_width, canvas_height,
+            content_offset_x, content_offset_y,
+        )
+        child.rotation = (rotation + run.get("rotation", 0)) % 360
+        if run.get("box_kind") == "ink":
+            mapped_x, mapped_y, _, _ = _map_bbox(
+                center_x, center_y, 0, 0, img_w, img_h, transform,
+                canvas_width, canvas_height, content_offset_x, content_offset_y,
+            )
+            dx = child.left + child.width / 2 - Inches(mapped_x)
+            dy = child.top + child.height / 2 - Inches(mapped_y)
+            angle = math.radians(child.rotation)
+            child.left += round(dx * math.cos(angle) - dy * math.sin(angle) - dx)
+            child.top += round(dx * math.sin(angle) + dy * math.cos(angle) - dy)
+            group.shapes._recalculate_extents()
+    return group
 
 
 def _set_solid_fill_opacity(root, opacity: float) -> None:

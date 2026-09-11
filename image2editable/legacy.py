@@ -765,6 +765,17 @@ def _record_deterministic_fast_plan(
             ):
                 raise ValueError("strict absorbed component metadata is invalid")
             absorbed_ids = set(component_ids)
+    presentation_ref = request.get("evidence", {}).get("presentation-manifest.json")
+    if presentation_ref is not None:
+        _, payload = _request_evidence_ref(store, request_path, presentation_ref)
+        presentation = json.loads(payload.decode("utf-8"))
+        for component in presentation["components"]:
+            if component["component_id"] not in request["candidate_ids"]:
+                continue
+            _, mask_payload = _load_legacy_ref(store, component["ownership_mask"])
+            with Image.open(io.BytesIO(mask_payload)) as mask:
+                if mask.getbbox() is None:
+                    absorbed_ids.add(component["component_id"])
     active_candidate_ids = [
         object_id for object_id in request["candidate_ids"]
         if object_id not in absorbed_ids
@@ -783,6 +794,26 @@ def _record_deterministic_fast_plan(
         }
         for object_id in request["candidate_ids"]
     ]
+    quality_ref = request.get("evidence", {}).get("quality-report.json")
+    if request["repair_round"] > 1 and quality_ref is not None:
+        from image2editable.component_repair import _page_residual_owner_ids
+
+        _, quality_payload = _request_evidence_ref(store, request_path, quality_ref)
+        previous_quality = json.loads(quality_payload.decode("utf-8"))
+        if "unexplained_visual_residual" in previous_quality.get("report", {}).get("violations", []):
+            repair_graph = {
+                **graph,
+                "nodes": [node for node in graph["nodes"] if node["id"] in active_candidate_ids],
+            }
+            residual_ids = _page_residual_owner_ids(
+                store, quality=previous_quality, graph=repair_graph,
+                graph_root=request_path.parent,
+            )
+            actions.extend({
+                "action": "absorb_residual", "object_ids": [object_id],
+                "parameters": {}, "confidence": 1.0,
+                "evidence": ["signed residual adjacent to component"],
+            } for object_id in sorted(residual_ids))
     if active_candidate_ids:
         actions.append({
             "action": "rebuild_background",
@@ -1064,6 +1095,7 @@ def _build_presentation_assets(
     text_mask_path: Path | None = None,
     graph_path: Path,
     output_dir: Path,
+    frozen_components: dict[str, dict] | None = None,
 ) -> Path:
     import numpy as np
 
@@ -1105,6 +1137,9 @@ def _build_presentation_assets(
         if text_mask.shape != source.shape[:2]:
             raise ValueError("presentation text mask dimensions differ")
     active_nodes = _active_visual_nodes(graph)
+    frozen_components = frozen_components or {}
+    if set(frozen_components) - {node["id"] for node in active_nodes}:
+        raise ValueError("frozen presentation component is missing")
     text_owners = {
         text_id: component_index
         for component_index, node in enumerate(active_nodes)
@@ -1149,6 +1184,9 @@ def _build_presentation_assets(
         for z_index in sorted(groups, reverse=True):
             group = groups[z_index]
             for index, node, ownership in group:
+                if node["id"] in frozen_components:
+                    components_by_id[node["id"]] = frozen_components[node["id"]]
+                    continue
                 semantic = assigned_by_id[node["id"]]
                 if node["parent_id"] is not None:
                     semantic = masks[node["parent_id"]] | semantic
@@ -1691,9 +1729,13 @@ def advance_legacy_page(
         if _fast_strict_escalation_exhausted(
             store, page_id, outcome["repair_round"],
         ):
-            return _commit_local_fidelity_result(
+            outcome = _commit_local_fidelity_result(
                 store, page_id, _lease=_lease,
             )
+            if outcome["status"] == "fallback_required":
+                return {"status": "processing", "page_id": page_id}
+            if outcome["status"] != "needs_next_round":
+                return outcome
         _publish_next_legacy_request(
             store,
             page_id,
@@ -1755,6 +1797,7 @@ def _rebuild_canvas_background(
     by_id = {node["id"]: node for node in graph["nodes"]}
     masks_by_id = {}
     repairable_visual = np.zeros(text_repair.shape, dtype=bool)
+    visible_coverage = np.zeros(text_repair.shape, dtype=bool)
     for object_id, node in by_id.items():
         mask_path = (graph_dir / Path(node["mask"])).resolve()
         if not mask_path.is_relative_to(graph_root):
@@ -1766,6 +1809,10 @@ def _rebuild_canvas_background(
         if mask.shape != text_repair.shape:
             raise ValueError("background rebuild mask dimensions differ")
         masks_by_id[object_id] = mask
+        if node["kind"] != "text" and node["state"] in {
+            "pending", "pending_gate", "frozen",
+        }:
+            visible_coverage |= mask
     edge_margin = max(1, round(min(text_repair.shape) * 0.01))
     inactive_page_surfaces = {
         object_id
@@ -1830,6 +1877,22 @@ def _rebuild_canvas_background(
                 repair |= request_mask
     if restored is None:
         repair |= text_repair
+    elif np.any(text_repair):
+        from image2editable.component_quality import (
+            _prepare_page_quality_context, calibrate_page,
+        )
+
+        # Preserve recovered structure, but never reuse residual ink as a donor.
+        text_context = _prepare_page_quality_context(
+            source, restored, restored, text_repair,
+            calibration=calibrate_page(source, text_repair),
+        )
+        _, text_labels = cv2.connectedComponents(text_repair.astype(np.uint8), 8)
+        touched = np.unique(text_labels[text_context.background_residual_text_ink])
+        touched = touched[touched > 0]
+        residual_text_repair = np.isin(text_labels, touched)
+        repair |= residual_text_repair
+        restore_repair &= ~residual_text_repair
     rebuilt = current.copy()
     if restored is not None:
         restore_canvas = source.copy()
@@ -1837,7 +1900,12 @@ def _rebuild_canvas_background(
         rebuilt[~repairable_visual] = restore_canvas[~repairable_visual]
         rebuilt[restore_repair] = restored[restore_repair]
         repair &= ~restore_repair
-    if np.any(repair):
+    if np.all(repair):
+        # Inpainting without a donor silently returns the foreground unchanged.
+        # The canvas is fully covered by movable layers; infer its base tone.
+        border = np.concatenate((source[0], source[-1], source[:, 0], source[:, -1]))
+        rebuilt[:] = np.median(border, axis=0).astype(np.uint8)
+    elif np.any(repair):
         from scripts.component_underlay import _choose_visual_fill
 
         rebuilt, _ = _choose_visual_fill(
@@ -1849,6 +1917,10 @@ def _rebuild_canvas_background(
             allow_smooth_surface=True,
             allow_original=False,
         )
+    if restored is not None:
+        # Expanded donor exclusion must not erase uncovered source texture.
+        uncovered = ~(visible_coverage | text_repair | restore_repair)
+        rebuilt[uncovered] = source[uncovered]
     Image.fromarray(rebuilt, mode="RGB").save(output_path)
     return output_path
 
@@ -2270,10 +2342,12 @@ def _effective_text_context(
             active_visual_mask.astype(np.uint8),
             np.ones((5, 5), dtype=np.uint8),
         ).astype(bool)
-        effective_clean[protected_visual_mask] = cleaned[protected_visual_mask]
         effective_mask = _quality_text_repair_mask(
             effective_mask, effective_items
         )
+        if refine_cleanup_mask:
+            protected_visual_mask &= ~effective_mask
+        effective_clean[protected_visual_mask] = cleaned[protected_visual_mask]
     return effective_items, effective_mask, effective_clean
 
 
@@ -2628,6 +2702,22 @@ def _quality_assets(
         component_nodes, component_masks
     )
     graph_path = graph_dir / "component-graph.json"
+    frozen_ids = set() if frozen_component_ids is None else frozen_component_ids
+    presentation_options = {}
+    if frozen_ids:
+        if frozen_manifest_path is None:
+            raise ValueError("frozen presentation manifest is missing")
+        previous_manifest = json.loads(
+            frozen_manifest_path.read_text(encoding="utf-8")
+        )
+        frozen_records = {
+            component["component_id"]: component
+            for component in previous_manifest["components"]
+            if component["component_id"] in frozen_ids
+        }
+        if frozen_ids - set(frozen_records):
+            raise ValueError("frozen presentation component is missing")
+        presentation_options["frozen_components"] = frozen_records
     presentation_manifest = _build_presentation_assets(
         store,
         source_path=source_path,
@@ -2635,16 +2725,11 @@ def _quality_assets(
         text_mask_path=text_mask_output,
         graph_path=graph_path,
         output_dir=output_dir,
+        **presentation_options,
     )
-    frozen_ids = set() if frozen_component_ids is None else frozen_component_ids
     if frozen_ids:
-        if frozen_manifest_path is None:
-            raise ValueError("frozen presentation manifest is missing")
         current_manifest = json.loads(
             presentation_manifest.read_text(encoding="utf-8")
-        )
-        previous_manifest = json.loads(
-            frozen_manifest_path.read_text(encoding="utf-8")
         )
         reused_manifest = _reuse_frozen_presentation_records(
             current_manifest, previous_manifest, frozen_ids
@@ -2904,9 +2989,7 @@ def _rebind_strict_pending_masks(
             for index, candidate in enumerate(strict_masks)
         ):
             absorbed_ids.append(component_id)
-    if len(assignments) + len(absorbed_ids) != len(pending_ids):
-        raise ValueError("strict visual candidates could not be mapped")
-
+    # Unmatched components retain their original masks and still face the gate.
     replacements = {
         component_id: strict_masks[index]
         for component_id, index in assignments.items()
@@ -3054,8 +3137,6 @@ def _prepare_fast_strict_round(
 def _fast_strict_escalation_exhausted(
     store: RunStore, page_id: str, next_repair_round: int,
 ) -> bool:
-    if next_repair_round != 3:
-        return False
     manifest = store.read_json("job_manifest.json")
     if manifest.get("options", {}).get("pipeline_mode", "strict") != "fast":
         return False
@@ -3063,9 +3144,17 @@ def _fast_strict_escalation_exhausted(
     prepared = importlib.import_module("image_to_ppt").load_component_layers(
         reconstruction / "initial" / "prepared_page.json"
     )
-    if prepared.get("_page_policy", {}).get("route") not in {
-        "direct", "local_refine",
-    }:
+    route = prepared.get("_page_policy", {}).get("route")
+    if route not in {"direct", "local_refine"}:
+        return False
+    # The former local-fidelity boundary now returns to full quality repair.
+    if (
+        next_repair_round == 2
+        and manifest.get("input", {}).get("type") == "pdf"
+        and route in {"direct", "local_refine"}
+    ):
+        return True
+    if next_repair_round != 3:
         return False
     graph_path = reconstruction / "strict-escalation-02/graph/component-graph.json"
     if not graph_path.is_file():
@@ -3079,7 +3168,7 @@ def _commit_local_fidelity_result(
     page_id: str,
     *,
     _lease: ExecutionLease,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     _require_held_execution_lease(store, _lease)
     state_relative = (
         Path("pages") / page_id / "reconstruction" / COMPONENT_STATE_NAME
@@ -3092,124 +3181,8 @@ def _commit_local_fidelity_result(
     ):
         raise RuntimeError("component repair is not ready for local fidelity")
 
-    _, quality_payload = _load_legacy_ref(
-        store, state["current_round"]["quality_ref"], max_bytes=16 * 1024 * 1024
-    )
-    quality = json.loads(quality_payload.decode("utf-8"))
-    refs = quality.get("input_refs")
-    required_refs = {
-        "source", "background", "reconstructed", "text_mask",
-        "native_check", "presentation_manifest",
-    }
-    if not isinstance(refs, dict) or not required_refs <= set(refs):
-        raise ValueError("local fidelity quality references are invalid")
-    if refs["source"]["sha256"] != state["source_sha256"]:
-        raise ValueError("local fidelity source hash is invalid")
-    source_path = _state_artifact(store, refs["source"])
-    candidate_path = _state_artifact(store, refs["reconstructed"])
-    text_mask_path = _state_artifact(store, refs["text_mask"])
-
-    reconstruction = store.root / "pages" / page_id / "reconstruction"
-    component_dir = reconstruction / f"local-fidelity-{uuid.uuid4().hex[:12]}"
-    manifest_path = reconstruction / "local_fidelity_page.json"
-    manifest_published = False
-    try:
-        from image2editable.local_fidelity import build_local_fidelity_components
-
-        fidelity = build_local_fidelity_components(
-            source_path=source_path,
-            candidate_path=candidate_path,
-            reliable_text_mask_path=text_mask_path,
-            output_dir=component_dir,
-        )
-        if fidelity["uncovered_pixels"] != 0:
-            raise RuntimeError("local fidelity left uncovered residual pixels")
-        component_records = []
-        for component in fidelity["components"]:
-            path = Path(component["path"]).resolve()
-            if not path.is_relative_to(component_dir.resolve()):
-                raise ValueError("local fidelity component escapes output directory")
-            component_records.append({
-                "ref": {
-                    "path": path.relative_to(store.root.resolve()).as_posix(),
-                    "sha256": component["sha256"],
-                },
-                "bbox": component["bbox"],
-                "coverage": component["coverage"],
-            })
-        manifest = {
-            "schema_version": 1,
-            "page_id": page_id,
-            "source_sha256": state["source_sha256"],
-            "components": component_records,
-            "residual_pixels": fidelity["residual_pixels"],
-            "uncovered_pixels": fidelity["uncovered_pixels"],
-        }
-        manifest_payload = json.dumps(
-            manifest, ensure_ascii=False, indent=2, sort_keys=True
-        ).encode("utf-8") + b"\n"
-        _write_exclusive(manifest_path, manifest_payload, reconstruction)
-        manifest_published = True
-    except BaseException:
-        if not manifest_published and component_dir.is_dir():
-            _safe_rmtree(
-                component_dir, _directory_identity(component_dir.lstat())
-            )
-        raise
-
-    graph_payload = _load_legacy_ref(
-        store, state["graph_ref"], max_bytes=16 * 1024 * 1024
-    )[1]
-    graph = validate_component_graph(json.loads(graph_payload.decode("utf-8")))
-    result = {
-        "schema_version": 1,
-        "page_id": page_id,
-        "status": "ready_for_assembly",
-        "provider": state["provider"],
-        "repair_rounds": state["plan_count"],
-        "initial_component_count": state["initial_component_count"],
-        "final_component_ids": sorted(
-            node["id"] for node in _active_visual_nodes(graph)
-        ),
-        "graph_ref": state["graph_ref"],
-        "round_history": state["round_history"],
-        "accepted_graph_sha256": quality["input_graph_sha256"],
-        "fallback": state["fallback"],
-        "accepted_asset_refs": {
-            key: value for key, value in refs.items()
-            if key != "background_responsibility"
-        },
-        "text_items": quality.get("text_items", []),
-        "raster_text_preserved": False,
-        "warning": None,
-        "delivery_checks": {"pptx_reopen": "unknown"},
-        "route": "local_fidelity",
-        "local_fidelity_ref": {
-            "path": manifest_path.relative_to(store.root).as_posix(),
-            "sha256": hashlib.sha256(manifest_payload).hexdigest(),
-        },
-    }
-    result_payload = json.dumps(
-        result, ensure_ascii=False, indent=2, sort_keys=True
-    ).encode("utf-8") + b"\n"
-    result_path = reconstruction / "component_result.json"
-    _write_exclusive(result_path, result_payload, reconstruction)
-
-    updated = dict(state)
-    updated.update({
-        "phase": "ready_for_assembly",
-        "status": "ready_for_assembly",
-        "stop_reason": None,
-        "result_ref": {
-            "path": result_path.relative_to(store.root).as_posix(),
-            "sha256": hashlib.sha256(result_payload).hexdigest(),
-        },
-        "revision": state["revision"] + 1,
-        "updated_at": utc_now(),
-    })
-    validate_component_repair_state(updated)
-    store.write_json(state_relative, updated)
-    return {"status": "ready_for_assembly", "page_id": page_id}
+    # Only the component quality state machine may authorize assembly.
+    return advance_component_repair(store, page_id, _lease=_lease)
 
 
 def _request_evidence_ref(
@@ -4637,6 +4610,12 @@ def _load_local_fidelity_components(
     return components
 
 
+def _replace_visual_routes(elements: list[dict], routed: list[dict]) -> list[dict]:
+    # Routing covers frozen objects; locally preserved objects still need delivery.
+    replacements = {item["object_id"]: item for item in routed}
+    return [replacements.get(item["object_id"], item) for item in elements]
+
+
 def _accepted_slide_data(
     store: RunStore,
     reconstruction: Path,
@@ -4781,10 +4760,11 @@ def _accepted_slide_data(
                 page_id=result["page_id"],
             )
             if published_route is not None:
-                visual_elements = route_visual_elements(
-                    store,
-                    published_route["ir"],
-                    published_route["plan"],
+                visual_elements = _replace_visual_routes(
+                    visual_elements,
+                    route_visual_elements(
+                        store, published_route["ir"], published_route["plan"],
+                    ),
                 )
                 route_result_ref = published_route["result_ref"]
         fidelity_components = _load_local_fidelity_components(
@@ -4857,8 +4837,9 @@ def assemble_route_candidate(
         )
         from image2editable.route_execution import route_visual_elements
 
-        slide["visual_elements"] = route_visual_elements(
-            store, json.loads(ir_payload.decode("utf-8")), plan
+        slide["visual_elements"] = _replace_visual_routes(
+            slide["visual_elements"],
+            route_visual_elements(store, json.loads(ir_payload.decode("utf-8")), plan),
         )
         module._assemble_prepared_slide(slide, output_path, False, "original")
     finally:

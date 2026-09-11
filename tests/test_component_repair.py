@@ -5,6 +5,7 @@ import io
 import json
 import hashlib
 import hmac
+import importlib.util
 import multiprocessing
 import os
 from pathlib import Path
@@ -261,6 +262,24 @@ def test_presentation_layer_removes_active_text_from_visual_ownership() -> None:
     assert np.array_equal(layer["rgb"][text], text_clean[text])
 
 
+def test_presentation_layer_retains_source_detail_inside_cleaned_text_region(underlay_engine) -> None:
+    clean = np.full((100, 160, 3), 255, np.uint8)
+    clean[30:70, 78:80] = 180
+    text = np.zeros(clean.shape[:2], dtype=bool)
+    text[20:80, 20:140] = True
+    semantic = np.ones_like(text)
+    layer = underlay_engine.build_presentation_layer(
+        source_rgb=clean,
+        text_clean_rgb=clean,
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=np.zeros_like(text),
+        text_mask=text,
+    )
+    assert np.array_equal(layer["rgb"][text], clean[text])
+    assert layer["metrics"]["added_high_frequency_pixels"] == 0
+
+
 def test_presentation_layer_preserves_verified_text_clean_underlay() -> None:
     from scripts.component_underlay import build_presentation_layer
 
@@ -346,6 +365,7 @@ def test_presentation_layer_offers_smooth_repair_for_visual_holes(
     semantic = np.ones(source.shape[:2], dtype=bool)
     higher = np.zeros_like(semantic)
     higher[7:13, 11:19] = True
+    source[6:14, 10:20] = (30, 80, 190)
     calls: list[bool] = []
     real_choose = component_underlay._choose_visual_fill
 
@@ -354,7 +374,7 @@ def test_presentation_layer_offers_smooth_repair_for_visual_holes(
         return real_choose(**kwargs)
 
     monkeypatch.setattr(component_underlay, "_choose_visual_fill", observe)
-    component_underlay.build_presentation_layer(
+    layer = component_underlay.build_presentation_layer(
         source_rgb=source,
         text_clean_rgb=source,
         ownership_mask=semantic & ~higher,
@@ -364,10 +384,24 @@ def test_presentation_layer_offers_smooth_repair_for_visual_holes(
     )
 
     assert calls == [True]
+    halo = np.zeros_like(higher)
+    halo[6:14, 10:20] = True
+    halo &= ~higher
+    assert not np.any(layer["ownership_mask"] & halo)
+    assert np.max(np.abs(layer["rgb"][halo].astype(int) - 180)) <= 8
 
 
-def test_presentation_layer_leaves_higher_owned_pixels_to_higher_layer() -> None:
-    from scripts.component_underlay import build_presentation_layer
+@pytest.fixture(params=["scripts", "skills/image-to-ppt/scripts", "skills/image-to-psd/scripts"])
+def underlay_engine(request):
+    path = Path(__file__).resolve().parents[1] / request.param / "component_underlay.py"
+    spec = importlib.util.spec_from_file_location("underlay_engine", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_presentation_layer_leaves_higher_owned_pixels_to_higher_layer(underlay_engine) -> None:
+    build_presentation_layer = underlay_engine.build_presentation_layer
 
     height, width = 48, 72
     y, x = np.mgrid[:height, :width]
@@ -409,6 +443,56 @@ def test_visual_metrics_ignore_conflicting_donor_directions_at_visual_edge() -> 
 
     assert metrics["boundary_color_mae"] == 0.0
     assert metrics["gradient_jump_p95"] == 0.0
+
+
+@pytest.mark.parametrize("origin,gradient,detail", [
+    ((0, 0), 129.0, 120.0),
+    ((40, 70), 117.0, 80.0),
+    ((308, 406), 169.75, 120.0),
+])
+def test_visual_metrics_limit_filters_to_local_hole(underlay_engine, monkeypatch, origin, gradient, detail):
+    y, x = np.mgrid[:320, :420]
+    source = np.repeat((100 + x // 8 + y // 8)[..., None], 3, axis=2).astype(np.uint8)
+    hole = np.zeros(source.shape[:2], dtype=bool)
+    top, left = origin
+    hole[top:top + 12, left:left + 14] = True
+    candidate = source.copy()
+    candidate[hole] = np.where((x[hole] + y[hole]) % 2 == 0, 20, 230)[:, None]
+    areas = []
+    laplacian = cv2.Laplacian
+
+    def observe(image, *args, **kwargs):
+        areas.append(image.size)
+        return laplacian(image, *args, **kwargs)
+
+    monkeypatch.setattr(underlay_engine.cv2, "Laplacian", observe)
+    result = underlay_engine._visual_metrics(candidate, source, ~hole, hole)
+    assert result == {
+        "boundary_color_mae": 105.0,
+        "gradient_jump_p95": gradient,
+        "added_high_frequency_pixels": detail,
+    }
+    assert areas and max(areas) <= (12 + 6) * (14 + 6)
+
+
+def test_embedded_higher_regions_do_not_rescan_page_per_component(underlay_engine, monkeypatch):
+    semantic = np.zeros((160, 240), dtype=bool)
+    semantic[10:150, 10:230] = True
+    higher = np.zeros_like(semantic)
+    higher[::7, ::7] = True
+    interior = cv2.erode(semantic.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    expected = higher & interior
+    scanned = []
+    count_nonzero = np.count_nonzero
+
+    def observe(array, *args, **kwargs):
+        scanned.append(array.size)
+        return count_nonzero(array, *args, **kwargs)
+
+    monkeypatch.setattr(underlay_engine.np, "count_nonzero", observe)
+    actual = underlay_engine._embedded_higher_layer(semantic, higher)
+    assert np.array_equal(actual, expected)
+    assert sum(scanned) <= higher.size * 2
 
 
 def test_underlay_gradient_avoids_nearest_donor_seams() -> None:
@@ -781,6 +865,39 @@ def test_presentation_layer_removes_higher_layer_antialias_halo() -> None:
         - truth[visible_halo].astype(np.int16)
     )
     assert repaired_error.mean() <= 8.0
+
+
+@pytest.mark.parametrize("size", [40, 80])
+@pytest.mark.parametrize("text_position", ["rim", "higher", "crossing"])
+def test_presentation_layer_preserves_thin_visible_rim(size: int, text_position: str, underlay_engine) -> None:
+    build_presentation_layer = underlay_engine.build_presentation_layer
+
+    source = np.full((size, size, 3), (20, 90, 160), dtype=np.uint8)
+    semantic = np.zeros((size, size), dtype=bool)
+    semantic[5:-5, 5:-5] = True
+    higher = np.zeros_like(semantic)
+    higher[6:-6, 6:-6] = True
+    text = np.zeros_like(semantic)
+    if text_position == "rim":
+        text[5, 8:12] = True
+    elif text_position == "higher":
+        text[10:12, 10:12] = True
+    else:
+        text[5:8, 8:12] = True
+    visible = semantic & ~higher & ~text
+
+    layer = build_presentation_layer(
+        source_rgb=source,
+        text_clean_rgb=np.zeros_like(source),
+        ownership_mask=semantic,
+        semantic_mask=semantic,
+        higher_layer_mask=higher,
+        text_mask=text,
+    )
+
+    assert np.array_equal(layer["ownership_mask"], visible)
+    assert np.array_equal(layer["rgb"][visible], source[visible])
+    assert not np.any(layer["presentation_alpha_mask"] & higher)
 
 
 def test_presentation_layer_ignores_adjacent_higher_layer_at_semantic_edge() -> None:
@@ -2879,10 +2996,35 @@ def test_fallback_state_requires_dedicated_refs(page_session: dict) -> None:
         validate_component_repair_state(state)
 
 
-def test_same_normalized_plan_twice_stops_before_execution(page_session: dict) -> None:
+@pytest.mark.parametrize("repair_round", [2, 3])
+@pytest.mark.parametrize("changed_input", [
+    None, "reconstructed.png", "component-graph.json", "background",
+])
+def test_same_normalized_plan_requires_repeated_inputs_before_stopping(
+    page_session: dict, repair_round: int, changed_input: str | None,
+) -> None:
     from image2editable.store import RunStore
 
     request_path = build_component_agent_request(page_session, repair_round=1)
+    if changed_input == "reconstructed.png":
+        Image.new("RGB", (2, 2), "red").save(page_session["evidence"][changed_input])
+    elif changed_input == "component-graph.json":
+        graph_path = Path(page_session["evidence"][changed_input])
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["nodes"][0]["z_index"] += 1
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        _refresh_test_presentation_manifest(page_session)
+    elif changed_input == "background":
+        quality_path = Path(page_session["evidence"]["quality-report.json"])
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        background_path = quality_path.with_name("changed-background.png")
+        Image.new("RGB", (2, 2), "red").save(background_path)
+        quality["input_refs"] = {"background": {
+            "path": background_path.relative_to(request_path.parents[5]).as_posix(),
+            "sha256": hashlib.sha256(background_path.read_bytes()).hexdigest(),
+        }}
+        quality_path.write_text(json.dumps(quality), encoding="utf-8")
+    request_path = build_component_agent_request(page_session, repair_round=repair_round)
     store = RunStore(request_path.parents[5])
     store.write_json("job_manifest.json", {
         "schema_version": 1, "pages": ["page_001"],
@@ -2897,26 +3039,36 @@ def test_same_normalized_plan_twice_stops_before_execution(page_session: dict) -
     )
     plan = {
         "schema_version": 1, "kind": "component_plan", "page_id": "page_001",
-        "provider": "host", "repair_round": 1,
+        "provider": "host", "repair_round": repair_round,
         "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
         "actions": [_action("accept", ["candidate_b"])],
     }
     plan_path = store.root / "same-plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
     state["phase"] = "plan_recorded"
-    state["plan_count"] = 1
+    state["plan_count"] = repair_round
     state["current_round"]["plan_ref"] = {
         "path": "same-plan.json",
         "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
     }
-    state["last_normalized_plan_sha256"] = component_repair._normalized_plan_sha256(plan)
+    normalized = component_repair._normalized_plan_sha256(plan)
+    state["round_history"] = [{
+        "round": previous_round, "plan_sha256": "a" * 64,
+        "normalized_plan_sha256": normalized if previous_round == 1 else "b" * 64,
+        "execution_sha256": "c" * 64, "quality_sha256": None,
+        "frozen_ids": [], "failed_ids": [],
+    } for previous_round in range(1, repair_round)]
+    state["last_normalized_plan_sha256"] = state["round_history"][-1]["normalized_plan_sha256"]
     store.write_json("pages/page_001/reconstruction/component_state.json", state)
 
     outcome = advance_component_repair(store, "page_001")
 
-    assert outcome["status"] == "fallback_required"
-    assert outcome["stop_reason"] == "repeated_plan"
-    assert not (request_path.parents[1] / "execution-01").exists()
+    if changed_input is None:
+        assert outcome["status"] == "fallback_required"
+        assert outcome["stop_reason"] == "repeated_plan"
+    else:
+        assert outcome["status"] == "needs_execution"
+    assert not (request_path.parents[1] / f"execution-{repair_round:02d}").exists()
 
 
 def test_zero_executable_actions_stops_without_quality(page_session: dict) -> None:
@@ -5678,6 +5830,7 @@ def test_retry_outside_semantic_parent_builds_bound_presentation_assets(
 
 def test_presentation_assets_use_refined_text_mask_instead_of_ocr_box(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import types
     from image2editable import legacy
@@ -5738,6 +5891,24 @@ def test_presentation_assets_use_refined_text_mask_instead_of_ocr_box(
     generated = np.asarray(Image.open(generated_path).convert("L")) > 0
     assert np.all(generated[refined])
     assert not np.any(generated[ocr_box & ~refined])
+
+    from scripts import component_underlay
+
+    def unexpected_rebuild(**kwargs):
+        raise AssertionError("frozen presentation layer must not be rebuilt")
+
+    monkeypatch.setattr(component_underlay, "build_presentation_layer", unexpected_rebuild)
+    reused_output = tmp_path / "reuse"
+    reused_output.mkdir()
+    reused_path = legacy._build_presentation_assets(
+        types.SimpleNamespace(root=tmp_path),
+        source_path=source_path, text_clean_path=source_path,
+        text_mask_path=refined_path, graph_path=graph_path, output_dir=reused_output,
+        frozen_components={"visual": manifest["components"][0]},
+    )
+    reused = json.loads(reused_path.read_text(encoding="utf-8"))
+    assert reused["components"] == manifest["components"]
+    assert list(reused_output.rglob("*.png")) == []
 
 
 def test_opaque_mask_completion_repairs_solid_holes_but_keeps_line_art() -> None:

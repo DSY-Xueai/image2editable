@@ -1823,6 +1823,27 @@ def test_material_foreground_without_owner_fails_page_gate() -> None:
     assert np.array_equal(unexplained, evidence)
 
 
+def test_material_residual_distance_transform_uses_local_bounds(monkeypatch):
+    import cv2
+
+    evidence = np.zeros((300, 500), dtype=bool)
+    evidence[140:145, 220:225] = True
+    shapes = []
+    original = cv2.distanceTransform
+
+    def measured(mask, *args, **kwargs):
+        shapes.append(mask.shape)
+        return original(mask, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "distanceTransform", measured)
+    metrics, residual = component_quality.material_ownership_metrics(
+        evidence, [], np.zeros_like(evidence), _leaf_calibration(),
+    )
+    assert metrics["unexplained_visual_pixels"] == 25
+    assert np.array_equal(residual, evidence)
+    assert shapes and max(h * w for h, w in shapes) <= 7 * 7
+
+
 def test_material_edge_residual_adjacent_to_owned_component_is_ignored() -> None:
     shape = (96, 160)
     evidence = np.zeros(shape, dtype=bool)
@@ -2019,6 +2040,23 @@ def test_text_ghost_is_only_attributed_to_the_adjacent_component() -> None:
     )
     assert "text_ghost" in adjacent["violations"]
     assert "text_ghost" not in remote["violations"]
+
+
+def test_text_ink_excludes_crossing_table_grid_but_retains_glyphs() -> None:
+    from image2editable.component_quality import _text_ink_mask, calibrate_page
+
+    source = np.full((100, 150, 3), 255, np.uint8)
+    grid = np.zeros(source.shape[:2], dtype=bool)
+    grid[40, 10:140] = True
+    grid[10:90, 50] = True
+    source[grid] = 80
+    source[25:34, 70:73] = 0
+    source[31:34, 70:79] = 0
+    text = np.zeros_like(grid)
+    text[20:65, 30:105] = True
+    ink = _text_ink_mask(source, text, calibrate_page(source, text))
+    assert not np.any(ink & grid)
+    assert np.any(ink[25:34, 70:79])
 
 
 def test_text_ink_excludes_flat_fill_pixels_beside_large_glyphs() -> None:

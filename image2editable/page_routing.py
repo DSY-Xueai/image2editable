@@ -88,6 +88,22 @@ def classify_page(signals: PageSignals) -> PagePolicy:
             max_lama_calls=0, host_agent_allowed=False,
         )
 
+    # A raster page with no usable OCR is commonly an illustration/photo. OCR
+    # recovery cannot add information here; route it through deterministic
+    # geometry once and let the normal quality gate decide acceptance.
+    if (
+        signals.source_kind == "pdf"
+        and signals.ocr_items == 0
+        and signals.text_coverage < 0.01
+        and signals.scan_noise <= 0.30
+    ):
+        return PagePolicy(
+            route="direct", confidence=0.40,
+            reasons=("pdf_no_ocr_visual",), automatic_sam=False,
+            max_residual_rounds=0, hole_recheck=False,
+            max_lama_calls=1, host_agent_allowed=False,
+        )
+
     confidence = 0.0
     reasons: list[str] = []
     if signals.ocr_items and signals.ocr_mean_confidence >= 0.90:
@@ -113,7 +129,7 @@ def classify_page(signals: PageSignals) -> PagePolicy:
 
     # Raster PDFs often contain repeated OCR boxes over a clean, structured
     # page. Their overlap is not enough evidence to justify the full strict
-    # repair loop; keep one bounded local refinement for this case.
+    # repair loop; start with deterministic geometry and retain the quality gate.
     if (
         signals.source_kind == "pdf"
         and signals.ocr_items >= 3
@@ -124,11 +140,11 @@ def classify_page(signals: PageSignals) -> PagePolicy:
         and signals.visual_regions < 128
     ):
         return PagePolicy(
-            route="local_refine",
+            route="direct",
             confidence=max(confidence, 0.55),
             reasons=tuple(reasons + ["pdf_raster_structured"]),
             automatic_sam=False,
-            max_residual_rounds=1,
+            max_residual_rounds=0,
             hole_recheck=False,
             max_lama_calls=1,
             host_agent_allowed=False,
@@ -142,6 +158,18 @@ def classify_page(signals: PageSignals) -> PagePolicy:
         or signals.edge_density > 0.75
         or signals.visual_regions >= 128
     )
+    if (
+        signals.ocr_items >= 8
+        and signals.ocr_mean_confidence >= 0.90
+        and signals.text_coverage >= 0.04
+        and signals.regular_geometry_ratio < 0.70
+    ):
+        return PagePolicy(
+            route="local_refine", confidence=max(confidence, 0.55),
+            reasons=tuple(reasons + ["high_confidence_structured_visual"]),
+            automatic_sam=False, max_residual_rounds=1,
+            hole_recheck=False, max_lama_calls=1, host_agent_allowed=False,
+        )
     if difficult or confidence < 0.35:
         return PagePolicy(
             route="strict", confidence=confidence,

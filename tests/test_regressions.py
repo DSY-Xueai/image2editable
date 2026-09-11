@@ -1235,7 +1235,7 @@ def test_paddleocr_session_is_reused_per_language(monkeypatch) -> None:
     created = []
 
     class FakeOCR:
-        def predict(self, image_path):
+        def predict(self, image_path, *, return_word_box=False):
             return []
 
     def fake_create(lang):
@@ -1260,7 +1260,7 @@ def test_paddleocr_session_is_reused_per_language(monkeypatch) -> None:
 @pytest.mark.parametrize("failure", ["construction", "predict", "conversion"])
 def test_paddleocr_falls_back_on_engine_errors(monkeypatch, failure) -> None:
     class FakeOCR:
-        def predict(self, image_path):
+        def predict(self, image_path, *, return_word_box=False):
             if failure == "predict":
                 raise RuntimeError("predict failed")
             return [{
@@ -5953,7 +5953,8 @@ def test_clean_background_restores_trusted_text_dilation_after_component_inpaint
     import numpy as np
 
     source = np.zeros((20, 30, 3), dtype=np.uint8)
-    component_mask = np.full((20, 30), 255, dtype=np.uint8)
+    component_mask = np.zeros((20, 30), dtype=np.uint8)
+    component_mask[:, :3] = 255
     text_mask = np.zeros((20, 30), dtype=np.uint8)
     text_mask[6:14, 8:22] = 255
     text_removal = bg_model.build_removal_mask([], text_mask) > 0
@@ -5976,14 +5977,17 @@ def test_clean_background_restores_trusted_text_dilation_after_component_inpaint
     assert np.any(text_halo)
     np.testing.assert_array_equal(cleaned[text_halo], text_clean[text_halo])
     np.testing.assert_array_equal(cleaned[text_removal], text_clean[text_removal])
-    assert np.all(cleaned[~text_removal] == 127)
+    component_removal = bg_model.build_removal_mask([component_mask], np.zeros_like(text_mask)) > 0
+    assert np.all(cleaned[component_removal] == 127)
+    assert np.all(cleaned[~text_removal & ~component_removal] == 0)
 
 
 def test_clean_background_restores_independent_text_exclusion_mask() -> None:
     import numpy as np
 
     source = np.zeros((20, 30, 3), dtype=np.uint8)
-    component_mask = np.full(source.shape[:2], 255, dtype=np.uint8)
+    component_mask = np.zeros(source.shape[:2], dtype=np.uint8)
+    component_mask[:, :2] = 255
     cleanup_mask = np.zeros(source.shape[:2], dtype=np.uint8)
     cleanup_mask[8:12, 13:17] = 255
     text_restore_mask = np.zeros(source.shape[:2], dtype=np.uint8)
@@ -6001,7 +6005,9 @@ def test_clean_background_restores_independent_text_exclusion_mask() -> None:
     )
 
     np.testing.assert_array_equal(cleaned[restore_region], text_clean[restore_region])
-    assert np.all(cleaned[~restore_region] == 127)
+    component_removal = bg_model.build_removal_mask([component_mask], np.zeros_like(cleanup_mask)) > 0
+    assert np.all(cleaned[component_removal] == 127)
+    assert np.all(cleaned[~restore_region & ~component_removal] == 0)
 
 
 def test_clean_background_rejects_mismatched_trusted_text_clean_shape() -> None:
@@ -9027,6 +9033,7 @@ def _prepare_component_layers_fixture(
     before_prepare=None,
     ocr_rotation: int = 0,
     pipeline_mode: str = "strict",
+    source_kind: str = "image",
     visual_worker_pool=None,
     expected_calls: dict[str, int] | None = None,
     visual_kwargs: list[dict] | None = None,
@@ -9192,6 +9199,7 @@ def _prepare_component_layers_fixture(
         resource_isolation=resource_isolation,
         ocr_rotation=ocr_rotation,
         pipeline_mode=pipeline_mode,
+        source_kind=source_kind,
         visual_worker_pool=visual_worker_pool,
     )
     assert calls == (expected_calls or {"ocr": 1, "visual": 1})
@@ -9203,6 +9211,19 @@ def _accepted_component_layers(prepared: dict) -> dict:
         "components": prepared["components"],
         "element_masks": prepared["_element_mask_paths"],
     }
+
+
+def test_prepared_positioned_text_roundtrips_authenticated_cache(tmp_path, monkeypatch):
+    prepared, work_dir = _prepare_component_layers_fixture(tmp_path, monkeypatch)
+    item = prepared["text_items"][0]
+    item["words"] = [{"text": item["text"], "box": [0.1, 0.1, 0.8, 0.8]}]
+    item["runs"] = [{"text": item["text"], "box": [0.1, 0.1, 0.8, 0.8],
+        "color": "#1288aa", "outline_width": 1.5, "outline_color": "#123456", "rotation": -8.5}]
+    prepared["_page_policy"] = image_to_ppt.strict_page_policy()
+    state_path = image_to_ppt._write_prepared_page(prepared, work_dir)
+    restored = image_to_ppt.load_component_layers(state_path)
+    assert restored["text_items"] == prepared["text_items"]
+    assert restored["_prepared_schema_version"] == 8
 
 
 def _write_prepared_manifest(state_path: Path, manifest: dict) -> None:
@@ -9315,7 +9336,7 @@ def test_prepare_component_layers_persists_initial_components_without_quality(
     assert len(prepared["components"]) == 2
     assert Path(prepared["state_path"]) == (work_dir / "prepared_page.json").resolve()
     manifest = json.loads(Path(prepared["state_path"]).read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 7
+    assert manifest["schema_version"] == 8
     cleanup_path = Path(prepared["_text_cleanup_mask_path"])
     assert cleanup_path == (work_dir / "text-clean-removal-mask.png").resolve()
     assert manifest["assets"]["text_cleanup_mask"]["path"] == cleanup_path.name
@@ -9485,6 +9506,50 @@ def test_prepare_fast_layers_rebuilds_visuals_when_targeted_ocr_recovers_text(
     assert [analysis.get("page_policy") for analysis in visual_text_analysis] == [
         image_to_ppt.asdict(policy), image_to_ppt.asdict(policy)
     ]
+
+
+def test_prepare_pdf_local_refine_keeps_targeted_ocr_quality_pass(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    policy = image_to_ppt.PagePolicy(
+        route="local_refine",
+        confidence=0.6,
+        reasons=("pdf_raster_structured",),
+        automatic_sam=False,
+        max_residual_rounds=1,
+        hole_recheck=False,
+        max_lama_calls=1,
+        host_agent_allowed=False,
+    )
+    monkeypatch.setattr(
+        image_to_ppt,
+        "_infer_page_policy",
+        lambda *args, **kwargs: policy,
+    )
+    recovered = {
+        "box": [8, 6, 3, 2], "text": "B", "font_size": 12.0,
+        "color": "#000000", "bold": False, "font": "Arial", "align": 1,
+        "confidence": 0.99,
+    }
+    monkeypatch.setattr(image_to_ppt, "_targeted_candidate_ocr_sweep", lambda *args, **kwargs: {
+        "items": [recovered],
+        "text_mask": image_to_ppt.np.zeros((10, 16), dtype=image_to_ppt.np.uint8),
+        "recovered_items": [recovered],
+        "diagnostics": [],
+    })
+
+    prepared, _ = _prepare_component_layers_fixture(
+        tmp_path,
+        monkeypatch,
+        resource_isolation=True,
+        pipeline_mode="fast",
+        source_kind="pdf",
+        visual_worker_pool=object(),
+        expected_calls={"ocr": 1, "visual": 2},
+    )
+
+    assert prepared["_page_policy"]["route"] == "local_refine"
 
 
 def test_prepare_component_layers_rotates_ocr_and_restores_display_coordinates(
@@ -9969,7 +10034,7 @@ def test_load_component_layers_reads_v1_without_fabricating_semantic_masks(
     prepared, _ = _prepare_component_layers_fixture(tmp_path, monkeypatch)
     state_path = Path(prepared["state_path"])
     manifest = json.loads(state_path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 7
+    assert manifest["schema_version"] == 8
     manifest["schema_version"] = 1
     manifest.pop("page_policy")
     for item in manifest["text_items"]:

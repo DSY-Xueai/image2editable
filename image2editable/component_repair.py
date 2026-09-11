@@ -141,7 +141,9 @@ def advance_component_repair(
             graph = json.loads(graph_payload.decode("utf-8"))
             validate_component_plan(plan, request=request, graph=graph)
             normalized = _normalized_plan_sha256(plan)
-            if not plan["actions"] or normalized == state["last_normalized_plan_sha256"]:
+            if not plan["actions"] or _repeated_component_plan(
+                store, state, request, normalized
+            ):
                 updated = dict(state)
                 updated["last_normalized_plan_sha256"] = normalized
                 return _commit_fallback_required(
@@ -2386,7 +2388,7 @@ def _page_residual_owner_ids(
                 key=lambda item: (
                     float(np.min(item[1][region])),
                     item[2],
-                    -item[0]["z_index"],
+                    # Fast absorb actions execute in component-ID order.
                     item[0]["id"],
                 ),
             )
@@ -2492,9 +2494,66 @@ def _page_quality_progressed(store, state: dict) -> bool:
 
 
 def _next_round_progress_allowed(store, state: dict) -> bool:
+    if _repeated_component_output(store, state):
+        return False
     return state.get("stop_reason") in {
         "round_limit", "no_quality_improvement",
     } or _page_quality_progressed(store, state)
+
+
+def _repeated_component_output(store, state: dict) -> bool:
+    matching_rounds = [
+        entry for entry in state.get("round_history", [])
+        if entry["round"] < state["repair_round"]
+        and entry["quality_sha256"] is not None
+        and set(entry["failed_ids"]) == set(state["failed_ids"])
+    ]
+    if not matching_rounds:
+        return False
+    current = json.loads(_load_state_artifact(
+        store.root, state["current_round"]["quality_ref"]
+    ).decode("utf-8"))
+    current_output = _component_quality_output(store, current)
+    if current_output is None:
+        return False
+    request_path = store.root / state["current_round"]["request_ref"]["path"]
+    for entry in matching_rounds:
+        # The next signed request retains this round's complete quality output.
+        next_request = request_path.parent.parent / f"round-{entry['round'] + 1:02d}" / REQUEST_NAME
+        request = load_component_agent_request(next_request)
+        reference = request["evidence"]["quality-report.json"]
+        if reference["sha256"] != entry["quality_sha256"]:
+            raise RuntimeError("previous round quality history hash mismatch")
+        previous = json.loads(_load_state_artifact(store.root, {
+            "path": (next_request.parent / reference["path"]).relative_to(store.root).as_posix(),
+            "sha256": reference["sha256"],
+        }).decode("utf-8"))
+        if _component_quality_output(store, previous) == current_output:
+            return True
+    return False
+
+
+def _component_quality_output(store, quality: dict) -> dict | None:
+    references = quality.get("input_refs", {})
+    if not _LEGACY_QUALITY_INPUT_NAMES <= references.keys():
+        return None
+    presentation = json.loads(_load_state_artifact(
+        store.root, references["presentation_manifest"], max_bytes=GRAPH_JSON_LIMIT,
+    ).decode("utf-8"))
+    return {
+        "assets": {
+            name: reference["sha256"] for name, reference in references.items()
+            if name != "presentation_manifest"
+        },
+        "components": {
+            component["component_id"]: {
+                name: component[name]["sha256"] for name in (
+                    "rgba", "ownership_mask", "presentation_alpha_mask", "generated_underlay_mask",
+                )
+            } for component in presentation["components"]
+        },
+        "violations": sorted(quality["report"]["violations"]),
+    }
 
 
 def _commit_ready_result(store, state: dict, page_id: str) -> dict:
@@ -2625,6 +2684,55 @@ def _load_state_artifact(
 def _utc_now() -> str:
     from image2editable.contracts import utc_now
     return utc_now()
+
+
+def _repeated_component_plan(store, state: dict, request: dict, normalized: str) -> bool:
+    matching_rounds = [
+        entry["round"] for entry in state["round_history"]
+        if entry["normalized_plan_sha256"] == normalized
+        and entry["round"] < state["repair_round"]
+    ]
+    if not matching_rounds:
+        return False
+    request_path = store.root / state["current_round"]["request_ref"]["path"]
+    current_inputs = _component_request_inputs(store, request_path, request)
+    for repair_round in matching_rounds:
+        previous_path = request_path.parent.parent / f"round-{repair_round:02d}" / REQUEST_NAME
+        previous = load_component_agent_request(previous_path)
+        if _component_request_inputs(store, previous_path, previous) == current_inputs:
+            return True
+    return False
+
+
+def _component_request_inputs(store, request_path: Path, request: dict) -> dict:
+    # Round reports and asset paths change even when the actual inputs repeat.
+    inputs = {
+        name: reference["sha256"]
+        for name, reference in request["evidence"].items()
+        if name not in {
+            "quality-report.json", "presentation-manifest.json", ROUND_REVIEW_EVIDENCE_NAME,
+        }
+    }
+    artifacts = {}
+    for name in ("presentation-manifest.json", "quality-report.json"):
+        reference = request["evidence"][name]
+        artifacts[name] = json.loads(_load_state_artifact(store.root, {
+            "path": (request_path.parent / reference["path"]).relative_to(store.root).as_posix(),
+            "sha256": reference["sha256"],
+        }).decode("utf-8"))
+    inputs["presentation"] = {
+        component["component_id"]: {
+            name: component[name]["sha256"]
+            for name in ("rgba", "ownership_mask", "presentation_alpha_mask", "generated_underlay_mask")
+        }
+        for component in artifacts["presentation-manifest.json"]["components"]
+    }
+    inputs["quality_inputs"] = {
+        name: reference["sha256"]
+        for name, reference in artifacts["quality-report.json"].get("input_refs", {}).items()
+        if name in {"background", "text_mask", "foreground_evidence", "background_responsibility"}
+    }
+    return inputs
 
 
 def _normalized_plan_sha256(plan: dict) -> str:

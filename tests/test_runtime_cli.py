@@ -791,7 +791,7 @@ def test_module_help_starts() -> None:
     assert "doctor" in result.stdout
 
 
-def test_cli_warning_image_exits_nonzero_without_pptx(tmp_path: Path) -> None:
+def test_cli_invalid_warning_state_cannot_publish_pptx(tmp_path: Path) -> None:
     source = tmp_path / "source.png"
     source.write_bytes(b"image")
     run_dir = prepare_image_job(source, run_dir=tmp_path / "run")
@@ -822,7 +822,7 @@ def test_cli_warning_image_exits_nonzero_without_pptx(tmp_path: Path) -> None:
     )
 
     assert result.returncode != 0
-    assert "editable reconstruction incomplete" in result.stderr
+    assert "Automatic repair could not resume page page_001" in result.stderr
     assert store.read_json("run_summary.json")["status"] == "failed"
     assert not (run_dir / "final/output_original.pptx").exists()
     assert not (run_dir / "final/output_16x9.pptx").exists()

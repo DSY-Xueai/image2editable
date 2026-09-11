@@ -26,6 +26,13 @@ assert _IMAGE_TO_PPT_SPEC.loader is not None
 _IMAGE_TO_PPT_SPEC.loader.exec_module(image_to_ppt)
 
 
+def test_runtime_and_standalone_routing_sources_match():
+    root = Path(__file__).resolve().parents[1]
+    expected = (root / "image2editable/page_routing.py").read_text(encoding="utf-8")
+    for folder in ("scripts", "skills/image-to-ppt/scripts", "skills/image-to-psd/scripts"):
+        assert (root / folder / "page_routing.py").read_text(encoding="utf-8") == expected
+
+
 def test_high_confidence_regular_page_uses_direct_policy():
     result = classify_page(PageSignals(
         source_kind="image", ocr_items=14, ocr_mean_confidence=0.96,
@@ -57,15 +64,15 @@ def test_native_pdf_bypasses_visual_models():
     assert result.max_lama_calls == 0
 
 
-def test_medium_confidence_page_uses_one_local_refinement():
+def test_medium_confidence_structured_pdf_uses_direct_geometry():
     result = classify_page(PageSignals(
         source_kind="pdf", ocr_items=3, ocr_mean_confidence=0.95,
         text_coverage=0.2, regular_geometry_ratio=0.45,
         overlap_ratio=0.15, transparency_ratio=0.2,
         edge_density=0.5, scan_noise=0.15,
     ))
-    assert result.route == "local_refine"
-    assert result.max_residual_rounds == 1
+    assert result.route == "direct"
+    assert result.max_residual_rounds == 0
     assert result.automatic_sam is False
 
 
@@ -76,9 +83,40 @@ def test_pdf_raster_with_duplicate_ocr_boxes_does_not_force_strict():
         overlap_ratio=1.0, transparency_ratio=0.0,
         edge_density=0.059, scan_noise=0.076, visual_regions=73,
     ))
+    assert result.route == "direct"
+    assert result.max_residual_rounds == 0
+    assert result.automatic_sam is False
+
+
+def test_pdf_visual_page_without_ocr_uses_one_pass_route():
+    result = classify_page(PageSignals(
+        source_kind="pdf", ocr_items=0, text_coverage=0.0,
+        scan_noise=0.08, edge_density=0.40,
+    ))
+    assert result.route == "direct"
+    assert result.max_residual_rounds == 0
+    assert result.automatic_sam is False
+
+
+def test_structured_high_confidence_page_avoids_strict_loop():
+    result = classify_page(PageSignals(
+        source_kind="pdf", ocr_items=17, ocr_mean_confidence=0.99,
+        text_coverage=0.18, transparency_ratio=0.02,
+        visual_regions=180, edge_density=0.55, scan_noise=0.08,
+    ))
     assert result.route == "local_refine"
     assert result.max_residual_rounds == 1
     assert result.automatic_sam is False
+
+
+def test_high_confidence_text_page_with_transparency_avoids_strict_loop():
+    result = classify_page(PageSignals(
+        source_kind="pdf", ocr_items=17, ocr_mean_confidence=0.99,
+        text_coverage=0.18, transparency_ratio=0.45,
+        visual_regions=180, edge_density=0.55, scan_noise=0.08,
+    ))
+    assert result.route == "local_refine"
+    assert result.max_residual_rounds == 1
 
 
 def test_strict_policy_keeps_legacy_defaults():

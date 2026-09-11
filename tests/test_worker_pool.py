@@ -392,7 +392,7 @@ def test_resident_ocr_processor_reuses_models_and_closes_once(
         def __init__(self, **kwargs) -> None:
             loaded.append("recognizer")
 
-        def predict(self, crops):
+        def predict(self, crops, *, return_word_box=False):
             return [{"rec_text": "text", "rec_score": 0.99} for _ in crops]
 
         def close(self) -> None:
@@ -560,7 +560,7 @@ def test_resident_visual_processor_reuses_dino_sam_and_lama_models(monkeypatch) 
     processor = visual_worker._ResidentVisualProcessor(
         process_image=fake_process,
         create_detector=lambda: loaded.append("dino") or detector,
-        create_generator=lambda checkpoint: loaded.append("sam") or generator,
+        create_generator=lambda checkpoint, **kwargs: loaded.append(("sam", kwargs)) or generator,
         resolve_checkpoint=lambda: "checkpoint",
     )
     try:
@@ -580,7 +580,7 @@ def test_resident_visual_processor_reuses_dino_sam_and_lama_models(monkeypatch) 
         lama_inpaint.release_model()
 
     assert loaded == [
-        "dino", "sam", (False, detector, generator), "lama",
+        "dino", ("sam", {"resource_safe": True}), (False, detector, generator), "lama",
         (False, detector, generator),
     ]
 

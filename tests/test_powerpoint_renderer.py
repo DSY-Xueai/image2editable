@@ -1,4 +1,5 @@
 from pathlib import Path
+import weakref
 
 from PIL import Image
 from pptx import Presentation
@@ -119,6 +120,72 @@ def test_renderer_cleans_up_when_export_fails(tmp_path: Path) -> None:
 
     assert fake_dispatch.presentation.closed is True
     assert fake_dispatch.application.quit_called is True
+
+
+def test_renderer_releases_objects_before_uninitializing_com(tmp_path: Path) -> None:
+    references = []
+    events = []
+
+    def dispatch(prog_id: str) -> _FakeApplication:
+        presentation = _FakePresentation()
+        application = _FakeApplication(presentation)
+        references.extend(
+            weakref.ref(value)
+            for value in (application, presentation, presentation.slide)
+        )
+        return application
+
+    def uninitialize() -> None:
+        assert all(reference() is None for reference in references)
+        events.append("uninitialized")
+
+    renderer = PowerPointRenderer(
+        dispatch,
+        co_initialize=lambda: events.append("initialized"),
+        co_uninitialize=uninitialize,
+    )
+    renderer.render_page(
+        tmp_path / "input.pptx", 1, tmp_path / "page.png", width=400, height=300
+    )
+
+    assert events == ["initialized", "uninitialized"]
+
+
+def test_renderer_releases_children_before_closing_parents(tmp_path: Path) -> None:
+    references = {}
+    events = []
+
+    class PresentationProxy:
+        def Slides(self, page_number):
+            slide = _FakeSlide()
+            references["slide"] = weakref.ref(slide)
+            return slide
+
+        def Close(self):
+            assert references["slide"]() is None
+            events.append("closed")
+
+    class ApplicationProxy:
+        Version = "16.0"
+
+        @property
+        def Presentations(self):
+            return self
+
+        def Open(self, *args, **kwargs):
+            presentation = PresentationProxy()
+            references["presentation"] = weakref.ref(presentation)
+            return presentation
+
+        def Quit(self):
+            assert references["presentation"]() is None
+            events.append("quit")
+
+    PowerPointRenderer(lambda _: ApplicationProxy()).render_page(
+        tmp_path / "input.pptx", 1, tmp_path / "page.png", width=400, height=300
+    )
+
+    assert events == ["closed", "quit"]
 
 
 def test_renderer_rejects_wrong_export_size(tmp_path: Path) -> None:

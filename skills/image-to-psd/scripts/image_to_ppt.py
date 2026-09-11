@@ -312,16 +312,67 @@ def _extends_known_text_with_terminal_punctuation(
     return False
 
 
+def _split_cross_style_ocr(items: list[dict]) -> list[dict]:
+    """Keep independently styled lines when a wider OCR view joins them."""
+    result = []
+    for item in items:
+        text, box = item.get("text", ""), item.get("box")
+        if not text or not box or item.get("rotation") or "runs" in item:
+            result.append(item)
+            continue
+        fragments = []
+        for other in items:
+            part, bounds = other.get("text", ""), other.get("box")
+            if (other is item or not part or not bounds or len(part) >= len(text)
+                    or other.get("rotation") or "runs" in other):
+                continue
+            start = text.find(part)
+            if start >= 0 and _box_intersection_ratio(box, bounds) >= .8:
+                fragments.append((start, start + len(part), other))
+        fragments.sort(key=lambda fragment: (fragment[2]["box"][0], -len(fragment[2]["text"])))
+        selected, cursor = [], 0
+        for start, end, other in fragments:
+            start = text.find(other["text"], cursor)
+            end = start + len(other["text"])
+            if (start < cursor or any(char.isalnum() for char in text[cursor:start])
+                    or selected and selected[-1][2]["box"][0] + selected[-1][2]["box"][2] > other["box"][0]):
+                continue
+            selected.append((start, end, other))
+            cursor = end
+        if (len(selected) < 2 or any(char.isalnum() for char in text[cursor:])
+                or any(a[2]["box"][0] + a[2]["box"][2] > b[2]["box"][0]
+                       for a, b in zip(selected, selected[1:]))):
+            result.append(item)
+            continue
+        heights = [fragment[2]["box"][3] for fragment in selected]
+        separated = any(
+            b[2]["box"][0] - (a[2]["box"][0] + a[2]["box"][2]) > max(6, .45 * max(heights))
+            or a[2].get("color") and b[2].get("color") and a[2]["color"] != b[2]["color"]
+            for a, b in zip(selected, selected[1:])
+        )
+        if min(heights) / max(1, max(heights)) >= .65 and not separated:
+            result.append(item)
+            continue
+        for index, (start, end, other) in enumerate(selected):
+            stop = selected[index + 1][0] if index + 1 < len(selected) else len(text)
+            replacement = dict(other)
+            replacement["text"] = text[0 if index == 0 else start:stop].strip()
+            if replacement["text"] != other["text"]:
+                replacement.pop("words", None)
+            result.append(replacement)
+    return result
+
+
 def _deduplicate_overlapping_text_items(items: list[dict]) -> list[dict]:
     """Keep the most complete OCR reading for the same spatial text line."""
     kept: list[dict] = []
-    for item in items:
+    for item in _split_cross_style_ocr(items):
         text = _normalized_candidate_text(item.get("text", ""))
         box = item.get("box")
         if not text or not isinstance(box, (list, tuple)) or len(box) != 4:
             kept.append(item)
             continue
-        duplicate_index = None
+        duplicate_indices = []
         for index, existing in enumerate(kept):
             existing_text = _normalized_candidate_text(existing.get("text", ""))
             existing_box = existing.get("box")
@@ -338,19 +389,22 @@ def _deduplicate_overlapping_text_items(items: list[dict]) -> list[dict]:
             if overlap >= 0.80 and (
                 text in existing_text or existing_text in text
             ):
-                duplicate_index = index
-                break
-        if duplicate_index is None:
+                duplicate_indices.append(index)
+        if not duplicate_indices:
             kept.append(item)
             continue
-        existing = kept[duplicate_index]
-        existing_text = _normalized_candidate_text(existing.get("text", ""))
-        if (
-            len(text), float(item.get("confidence", 0.0))
-        ) > (
-            len(existing_text), float(existing.get("confidence", 0.0))
+        rank = (len(text), float(item.get("confidence", 0.0)))
+        if any(
+            rank <= (
+                len(_normalized_candidate_text(kept[index].get("text", ""))),
+                float(kept[index].get("confidence", 0.0)),
+            )
+            for index in duplicate_indices
         ):
-            kept[duplicate_index] = item
+            continue
+        kept[duplicate_indices[0]] = item
+        for index in reversed(duplicate_indices[1:]):
+            kept.pop(index)
     return kept
 
 
@@ -407,12 +461,20 @@ def _targeted_candidate_ocr_sweep(
             or (
                 page_pixels >= 200_000
                 and width * height > page_pixels * 0.10
+                and width < height * 3
             )
             or width * height > page_pixels * 0.25
             or max(width / height, height / width) > 14
             or alpha_area / max(width * height, 1) < 0.04
         ):
             continue
+        if width * height > page_pixels * 0.10 and width >= height * 3:
+            # Segmentation can omit punctuation at the edge of a wide heading.
+            padding = max(8, int(round(height * 0.25)))
+            right = min(page_width, x + width + padding)
+            bottom = min(page_height, y + height + padding)
+            x, y = max(0, x - padding), max(0, y - padding)
+            width, height = right - x, bottom - y
         selected.append((index, [x, y, width, height]))
         if len(selected) >= candidate_limit:
             break
@@ -494,6 +556,7 @@ def _targeted_candidate_ocr_sweep(
                 "confidence_threshold": 0.70,
                 "isolated": isolated,
                 "worker_root": work_dir if isolated else None,
+                "recover_empty": True,
             }
             if ocr_worker_pool is not None:
                 batch_kwargs.update({
@@ -557,6 +620,9 @@ def _targeted_candidate_ocr_sweep(
                             "confidence": confidence,
                             "box": mapped_box,
                         }
+                        words = text_detection._validated_words(mapped_item["text"], item.get("words"))
+                        if words:
+                            mapped_item["words"] = words
                         if ocr_rotation:
                             mapped_item["rotation"] = ocr_rotation
                         mapped_items.append(mapped_item)
@@ -701,6 +767,7 @@ def _targeted_candidate_ocr_sweep(
                     pixels,
                     local_box,
                     reference_width=page_width,
+                    text=item["text"],
                 )
                 font_size = text_detection._adjust_font_size(
                     item["text"],
@@ -726,8 +793,18 @@ def _targeted_candidate_ocr_sweep(
                 }
                 if ocr_rotation:
                     recovered_item["rotation"] = ocr_rotation
+                if item.get("words"):
+                    recovered_item["words"] = item["words"]
                 recovered.append(recovered_item)
     combined_items = [dict(item) for item in known_items] + recovered
+    if isolated and not ocr_rotation:
+        from scripts.text_context import refine_overlapping_text
+
+        combined_items = refine_overlapping_text(
+            source_path, _deduplicate_overlapping_text_items(combined_items), work_dir,
+            lang=lang, worker_pool=ocr_worker_pool,
+            performance_trace=performance_trace, page_id=page_id,
+        )
     if ocr_rotation:
         all_items = _deduplicate_overlapping_text_items(combined_items)
     else:
@@ -909,6 +986,11 @@ def _build_text_cleanup_mask(
         y1 = max(0, y - search_pad)
         x2 = min(source.shape[1], x + box_width + search_pad)
         y2 = min(source.shape[0], y + box_height + search_pad)
+        from scripts.art_text import _outlined_ink
+
+        outlined = _outlined_ink(source[y1:y2, x1:x2], return_mask=True)
+        if outlined is not None:
+            extended_ink[y1:y2, x1:x2] |= outlined
         target = np.asarray(
             [int(color[index:index + 2], 16) for index in (1, 3, 5)],
             dtype=np.float32,
@@ -919,6 +1001,14 @@ def _build_text_cleanup_mask(
             axis=0,
         )
         background = np.median(border_pixels, axis=0)
+        if outlined is not None:
+            # A low-contrast offset shadow can lie outside the dark stroke.
+            radius = max(3, min(14, round(box_height * .12)))
+            nearby = cv2.dilate(outlined, cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))) > 0
+            delta = background - region
+            shadow = nearby & (delta.mean(axis=2) > 5) & (delta.min(axis=2) > -5)
+            extended_ink[y1:y2, x1:x2][shadow] = 255
         target_distance = float(np.linalg.norm(target - background))
         color_axis = target - background
         axis_length = float(np.dot(color_axis, color_axis))
@@ -2454,14 +2544,15 @@ def _infer_page_policy(
         confidence = item.get("confidence", 0.0)
         if isinstance(confidence, (int, float)) and math.isfinite(confidence):
             confidences.append(float(confidence))
-    text_coverage = min(1.0, sum(w * h for _, _, w, h in boxes) / area)
-    overlap = 0.0
+    text_area = sum(w * h for _, _, w, h in boxes)
+    text_coverage = min(1.0, text_area / area)
+    overlap_area = 0.0
     for index, (x1, y1, w1, h1) in enumerate(boxes):
-        a1 = w1 * h1
         for x2, y2, w2, h2 in boxes[index + 1:]:
             ix = max(0.0, min(x1 + w1, x2 + w2) - max(x1, x2))
             iy = max(0.0, min(y1 + h1, y2 + h2) - max(y1, y2))
-            overlap = max(overlap, (ix * iy) / max(1.0, min(a1, w2 * h2)))
+            overlap_area += ix * iy
+    overlap = min(1.0, 2.0 * overlap_area / max(1.0, text_area))
     regular = 0.0
     if len(boxes) >= 2:
         widths = np.asarray([box[2] for box in boxes], dtype=np.float32)
@@ -2605,6 +2696,15 @@ def _process_image(
         text_items = text_analysis["items"]
         text_mask_path = Path(text_analysis["mask_path"]).resolve()
         text_mask = np.asarray(_text_mask, dtype=np.uint8).copy()
+    # Promote confidently outlined OCR lines to character-level editable runs
+    # before raster reconstruction; this keeps the production path aligned
+    # with the validated real-corpus flow without extra model calls.
+    from scripts.art_text import estimate_art_text_runs
+    for item in text_items:
+        if "runs" not in item and item.get("words"):
+            runs = estimate_art_text_runs(img, item, reference_width=img_w)
+            if runs:
+                item["runs"] = runs
     text_ink_mask = _build_text_ink_mask(img, text_mask)
     valid_text_items = bool(text_items) and all(
         "box" in item for item in text_items
@@ -2723,6 +2823,7 @@ def _process_image(
             text_ink_mask,
         )
     )
+    previous_residual_signature = None
     for round_index in range(page_policy.max_residual_rounds):
         elements = resolve_visual_elements(candidates)
         complete_initial_visual_element_masks(elements, img)
@@ -2816,6 +2917,15 @@ def _process_image(
             existing=candidates,
             text_mask=text_ink_mask,
         )
+        residual_signature = tuple(
+            hashlib.sha256(np.asarray(candidate.mask, dtype=np.uint8).tobytes()).hexdigest()
+            for candidate in residual_candidates
+        )
+        if residual_signature == previous_residual_signature:
+            # The residual detector returned the same masks again. Repeating
+            # SAM/inpainting cannot improve quality and can consume minutes.
+            break
+        previous_residual_signature = residual_signature
         if not residual_candidates:
             if attached_count:
                 elements = resolve_visual_elements(candidates)
@@ -2954,7 +3064,7 @@ def _process_image(
     return _finalize_slide_quality(slide_data, lang)
 
 
-_PREPARED_PAGE_SCHEMA_VERSION = 7
+_PREPARED_PAGE_SCHEMA_VERSION = 8
 _PREPARED_PAGE_NAME = "prepared_page.json"
 _PREPARED_PAGE_SIDECAR_NAME = "prepared_page.sha256"
 _PREPARED_PAGE_FIELDS = {
@@ -3524,8 +3634,17 @@ def _validate_prepared_payload(manifest: dict) -> None:
         else _PREPARED_TEXT_FIELDS
     )
     for item in text_items:
-        if not isinstance(item, dict) or set(item) != expected_text_fields:
+        optional_text_fields = {"words", "runs"} if manifest["schema_version"] >= 8 else set()
+        if not isinstance(item, dict) or not (
+            expected_text_fields <= set(item) <= expected_text_fields | optional_text_fields
+        ):
             raise ValueError("prepared page text item fields are invalid")
+        if "words" in item:
+            from scripts.text_runs import validate_text_words
+            validate_text_words(item)
+        if "runs" in item:
+            from scripts.text_runs import validate_text_runs
+            validate_text_runs(item)
         _validate_prepared_box(item["box"], image_width, image_height, "text item")
         font_size = item["font_size"]
         confidence = item["confidence"]
@@ -3818,7 +3937,7 @@ def _load_component_layer_state(
     schema_version = manifest.get("schema_version")
     if (
         type(schema_version) is not int
-        or schema_version not in {1, 2, 3, 4, 5, 6, 7}
+        or schema_version not in {1, 2, 3, 4, 5, 6, 7, 8}
     ):
         raise ValueError("prepared page schema_version is invalid")
     legacy_fields = _PREPARED_PAGE_FIELDS_V6 - {"initial_diagnostics"}
@@ -4512,8 +4631,8 @@ def prepare_component_layers(
             )
 
     initial_diagnostics = []
-    visual_pass_count = 2
-    for visual_pass in range(visual_pass_count):
+    # Recovered text needs a second visual pass unless verified assets are reused.
+    for visual_pass in range(2):
         object_detector = None
         mask_generator = None
         visual_source_image = None
