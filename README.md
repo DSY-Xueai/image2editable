@@ -47,6 +47,10 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 - **⚠️ 复杂视觉元素通常会以可移动图片组件保留**，不能保证其内部元素都能恢复为原生 PowerPoint 形状。
 - **🔒 Host Agent 模式可能把诊断图交由当前宿主服务处理**；处理敏感文件前，请确认宿主服务的数据策略符合要求。
 
+## 网页端图片转 PPT 方法
+
+需要在 ChatGPT 网页版中将单张图片拆分并重建为可编辑 PPT 时，可参考[网页端图片转 PPT 方法](Webpage__chunking_prompt.md)。
+
 ## 快速上手
 
 ### 使用 **Skills CLI** 安装
@@ -120,7 +124,7 @@ image2editable/
 | PDF | Skill | 按页渲染并按顺序重建为多页 PPTX。 |
 | 图片版 PPTX、混合 PPTX | Skill | 会识别可处理的图片页；未命中的原生对象保持不变。 |
 
-其他第三方依赖及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，引用信息见 [CITATION.cff](CITATION.cff)。
+其他第三方依赖及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，引用信息见 [CITATION.cff](CITATION.cff)。
 
 ## 许可证
 

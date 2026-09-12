@@ -1,0 +1,48 @@
+# 更新日志
+
+项目版本变更记录。正式版本通过 Git tag（例如 `v0.3.0`）发布。
+
+## [Unreleased]
+
+## [0.3.0]
+
+### 新增与变更
+
+- 引入按页面内容信号进行路由的快速转换流程，减少不必要的 SAM、LaMa 和重复 OCR 工作。
+- 增加 OCR 重叠去重、词级几何保留、字符级可编辑文字运行，以及艺术字字体、旋转、填充、描边和渐变识别。
+- 增强背景恢复、视觉组件所有权、旧缓存 manifest 校验和缓存复用，避免重复计算与无效产物。
+- 保留穿过文字区域的独立细线，避免 OCR 清理误删结构线；完成转换后清理中间图像并保留最终质量记录。
+- 质量门禁失败后自动执行针对性修复并重新验证，检测无进展循环；只有通过验收的 PPTX 才作为最终结果交付。
+- 同步 `image-to-ppt` 与 `image-to-psd` skills 的生产脚本和运行约束。
+
+### 质量与性能
+
+- 所有识别文字以可编辑文本对象装配，艺术字保留可编辑字符及其样式信息。
+- 严格质量门禁继续检查 manifest、warning、fallback、未解释像素和组件质量，不通过时自动修复，不降低门槛。
+- 复用有效 OCR、视觉分析和背景结果，减少 token、模型调用和整体转换时间。
+- 持续计算的模型请求不再受默认五分钟总时限限制；发送或接收期间长时间没有 CPU／I/O 活动会触发停滞检测，显式超时和取消仍生效。
+
+## [0.2.0]
+
+### 发布范围
+
+- v0.2 核心门禁是严格的 14 页 benchmark：8 个图片页、`pdf-rotated-page` 的完整 2 页、`pptx-mixed-screenshot-candidates` 的完整 4 页。
+- 核心集合包含 10 个 case；每个 case 执行 3 次独立重复，共 30 次尝试和 42 个累计页面。
+- 受保护的 GitHub-hosted Windows 门禁把 case 分成 5 组并行运行，再由独立步骤核对完整覆盖、运行环境和性能。只有最终聚合报告可以代表 benchmark 通过。
+- 仓库中的其他生成语料用于补充覆盖，不计入 v0.2 核心成功率。
+
+### 严格门禁
+
+每页必须同时满足 manifest 约束、预期状态、0 warning、0 fallback、0 unexplained pixels 和 0 quality violations；任一重复失败都会使报告失败。核心 runner 使用已安装发行包和固定 plan 证据。diagnostic 只用于审核 GitHub-hosted 环境的 plan 绑定，不能生成正式通过报告。
+
+### 运行与发布边界
+
+- `image2editable --version` 从已安装 distribution metadata 读取版本；当前版本为 `0.2.0`。
+- `image2editable doctor` 用于检查转换依赖和固定运行时模型；组件决策统一由 Host Agent 完成。
+- 发行包契约矩阵覆盖 Windows、Linux、macOS 的 Python 3.10–3.12；真实性能比较只接受与 manifest、依赖约束和运行环境完全一致的基线。
+- 运行时模型权重、模型缓存、临时 workspace 和生成的 PPTX 不进入 wheel、Git 或 benchmark 工件；Release Gate 只保存必要的 JSON 证据。
+- PowerPoint 原生对象、截图候选和 OCR 文本的边界保持严格校验；不以 warning、fallback 或未解释像素换取通过。
+
+### 安全与版本
+
+`SECURITY.md` 定义 0.2.x 的私密漏洞报告流程：48 小时内确认、7 天内完成初步评估。发布 workflow 只响应 `v0.2.0` tag，验证同一 commit 的 release-gate 产物后创建 draft release，不自动发布。
