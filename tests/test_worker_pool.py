@@ -210,6 +210,81 @@ def test_task_worker_pool_rebuilds_after_real_worker_deadline(
         pool.close()
 
 
+@pytest.mark.parametrize("in_child", [False, True])
+def test_active_worker_can_outlast_default_timeout(tmp_path, monkeypatch, in_child):
+    import image2editable.worker_pool as workers
+
+    monkeypatch.setattr(workers, "_DEFAULT_REQUEST_TIMEOUT_SECONDS", 0.75)
+    computation = "import time\nend = time.monotonic() + 2.5\nwhile time.monotonic() < end: pass\n"
+    work = (
+        f"subprocess.run([sys.executable, '-c', {computation!r}], check=True)"
+        if in_child else f"exec({computation!r})"
+    )
+    script = tmp_path / "active_worker.py"
+    script.write_text(
+        "import json, subprocess, sys\n"
+        "for line in sys.stdin:\n"
+        "    envelope = json.loads(line)\n"
+        "    if envelope == {'control': 'close'}: break\n"
+        f"    {work}\n"
+        "    print(json.dumps({'request_id': envelope['request_id'], 'result': {'done': True}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    pool = TaskWorkerPool(
+        lambda: JsonLineWorker([sys.executable, str(script)]), worker_name="visual",
+    )
+    try:
+        assert pool.request({}) == {"done": True}
+    finally:
+        pool.close()
+
+
+def test_idle_worker_times_out_and_next_request_rebuilds(tmp_path, monkeypatch):
+    import image2editable.worker_pool as workers
+
+    monkeypatch.setattr(workers, "_DEFAULT_REQUEST_TIMEOUT_SECONDS", 0.75)
+    script = tmp_path / "idle_worker.py"
+    script.write_text(
+        "import json, sys, time\n"
+        "for line in sys.stdin:\n"
+        "    envelope = json.loads(line)\n"
+        "    if envelope == {'control': 'close'}: break\n"
+        "    if envelope['payload'].get('block'): time.sleep(20)\n"
+        "    print(json.dumps({'request_id': envelope['request_id'], 'result': {'done': True}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    pool = TaskWorkerPool(
+        lambda: JsonLineWorker([sys.executable, str(script)]), worker_name="visual",
+    )
+    try:
+        started = time.monotonic()
+        with pytest.raises(WorkerDeadlineExceeded, match="inactive"):
+            pool.request({"block": True})
+        assert time.monotonic() - started < 10
+        assert pool.request({}) == {"done": True}
+    finally:
+        pool.close()
+
+
+def test_default_inactivity_timeout_covers_blocked_request_write(monkeypatch):
+    import image2editable.worker_pool as workers
+
+    monkeypatch.setattr(workers, "_DEFAULT_REQUEST_TIMEOUT_SECONDS", 0.75)
+    pool = TaskWorkerPool(
+        lambda: JsonLineWorker([sys.executable, "-c", "import time; time.sleep(20)"]),
+        worker_name="ocr",
+    )
+    cancel = threading.Event()
+    guard = threading.Timer(4, cancel.set)
+    guard.start()
+    try:
+        with pytest.raises(WorkerDeadlineExceeded, match="inactive"):
+            pool.request({"paths": "x" * (1024 * 1024)}, cancel=cancel)
+    finally:
+        guard.cancel()
+        pool.close()
+
+
 def test_task_worker_pool_keeps_following_requests_after_remote_failure() -> None:
     worker = _FakeWorker()
     pool = TaskWorkerPool(lambda: worker, worker_name="ocr")

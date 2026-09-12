@@ -83,23 +83,45 @@ class JsonLineWorker:
                 raise WorkerPoolError("worker process exited before its request")
             if self._process.stdin is None or self._process.stdout is None:
                 raise WorkerPoolError("worker process streams are unavailable")
-            self._process.stdin.write(json.dumps(envelope, ensure_ascii=False) + "\n")
-            self._process.stdin.flush()
-            received: queue.Queue[str] = queue.Queue(maxsize=1)
+            received: queue.Queue[str | BaseException] = queue.Queue(maxsize=1)
 
             def read_response() -> None:
-                line = self._process.stdout.readline()
-                received.put(line)
+                try:
+                    self._process.stdin.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+                    self._process.stdin.flush()
+                    received.put(self._process.stdout.readline())
+                except BaseException as exc:
+                    received.put(exc)
 
             reader = threading.Thread(target=read_response, daemon=True)
             reader.start()
-            reader.join(_deadline_remaining(deadline))
-            if reader.is_alive():
-                raise WorkerDeadlineExceeded("worker request deadline exceeded")
+            if deadline is not None:
+                reader.join(_deadline_remaining(deadline))
+                if reader.is_alive():
+                    raise WorkerDeadlineExceeded("worker request deadline exceeded")
+            else:
+                # A CPU model may legitimately compute for longer than five
+                # minutes. Bound inactivity, not the total inference duration.
+                activity = self._activity()
+                last_active = time.monotonic()
+                interval = min(1.0, _DEFAULT_REQUEST_TIMEOUT_SECONDS / 4)
+                while reader.is_alive():
+                    reader.join(interval)
+                    if not reader.is_alive():
+                        break
+                    current = self._activity()
+                    now = time.monotonic()
+                    if current != activity:
+                        activity = current
+                        last_active = now
+                    elif now - last_active >= _DEFAULT_REQUEST_TIMEOUT_SECONDS:
+                        raise WorkerDeadlineExceeded("worker process is inactive")
             try:
                 line = received.get_nowait()
             except queue.Empty as exc:
                 raise WorkerPoolError("worker did not return a response") from exc
+            if isinstance(line, BaseException):
+                raise WorkerPoolError("worker request I/O failed") from line
             if not line:
                 raise WorkerPoolError("worker process exited without a response")
             try:
@@ -109,6 +131,28 @@ class JsonLineWorker:
             if not isinstance(response, dict):
                 raise WorkerPoolError("worker returned an invalid response")
             return response
+
+    def _activity(self) -> dict[int, tuple]:
+        import psutil
+
+        activity = {}
+        try:
+            process = psutil.Process(self._process.pid)
+            processes = [process, *process.children(recursive=True)]
+        except psutil.Error:
+            return activity
+        for process in processes:
+            try:
+                cpu = process.cpu_times()
+                counters = (cpu.user, cpu.system)
+                # macOS does not expose per-process I/O counters.
+                if hasattr(process, "io_counters"):
+                    io = process.io_counters()
+                    counters += (io.read_bytes, io.write_bytes)
+                activity[process.pid] = counters
+            except psutil.Error:
+                continue
+        return activity
 
     def close(self) -> None:
         if self._process.poll() is not None:
@@ -165,6 +209,7 @@ class TaskWorkerPool:
     ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("worker payload must be a mapping")
+        explicit_deadline = deadline is not None
         if deadline is None:
             deadline = time.monotonic() + _DEFAULT_REQUEST_TIMEOUT_SECONDS
         queued_at = time.monotonic()
@@ -240,11 +285,14 @@ class TaskWorkerPool:
                     operation_count=1,
                 )
             started = time.monotonic()
+            request_deadline = deadline
+            if not explicit_deadline and isinstance(self._worker, JsonLineWorker):
+                request_deadline = None
             try:
                 response = self._request_worker(
                     self._worker,
                     {"request_id": request_id, "payload": payload},
-                    deadline=deadline,
+                    deadline=request_deadline,
                     cancel=cancel,
                 )
             except WorkerCancelled:

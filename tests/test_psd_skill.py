@@ -81,6 +81,7 @@ def test_psd_skill_requirements_cover_standalone_runtime_without_ppt_or_pdf() ->
         "opencv-python>=4.10.0.84,<5",
         "Pillow>=10.4,<12",
         "numpy>=1.26.4,<2",
+        "psutil>=7,<8",
         "torch>=2.5.1,<3",
         "torchvision>=0.20.1,<1",
         "SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4",

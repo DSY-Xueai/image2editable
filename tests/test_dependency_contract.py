@@ -52,6 +52,7 @@ RUNTIME_REQUIREMENTS = [
     "numpy>=1.26.4,<2",
     "pypdfium2>=5.7.1,<6",
     "pypdf>=5,<7",
+    "psutil>=7,<8",
     "torch>=2.5.1,<3",
     "torchvision>=0.20.1,<1",
     SAM_PIN,
