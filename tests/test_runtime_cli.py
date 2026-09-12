@@ -24,7 +24,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
 
     assert data["project"] == {
         "name": "image2editable",
-            "version": "0.2.0",
+            "version": "0.3.0",
         "description": "Image to editable PPTX and layered PSD runtime",
         "readme": "README_EN.md",
         "requires-python": ">=3.10,<3.13",

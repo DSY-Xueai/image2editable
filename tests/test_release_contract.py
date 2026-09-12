@@ -36,15 +36,15 @@ def test_citation_version_matches_project_version() -> None:
     citation = yaml.safe_load((ROOT / "CITATION.cff").read_text(encoding="utf-8"))
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    assert citation["version"] == "0.2.0"
-    assert 'version = "0.2.0"' in project
+    assert citation["version"] == "0.3.0"
+    assert 'version = "0.3.0"' in project
 
 
 def test_security_policy_uses_private_single_maintainer_process() -> None:
     policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     folded = policy.casefold()
 
-    assert "0.2.x" in policy
+    assert "0.3.x" in policy
     assert "private vulnerability reporting" in folded
     assert "public issue" in folded
     assert "48 hours" in folded
@@ -52,13 +52,13 @@ def test_security_policy_uses_private_single_maintainer_process() -> None:
     assert "maintainers" not in folded
 
 
-def test_release_workflow_only_creates_v020_draft_from_same_commit_gate() -> None:
+def test_release_workflow_only_creates_v030_draft_from_same_commit_gate() -> None:
     path = ROOT / ".github/workflows/release.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     raw = path.read_text(encoding="utf-8")
 
     trigger = workflow.get("on", workflow.get(True))
-    assert trigger == {"push": {"tags": ["v0.2.0"]}}
+    assert trigger == {"push": {"tags": ["v0.3.0"]}}
     assert workflow["permissions"] == {"actions": "read", "contents": "write"}
     assert set(workflow["jobs"]) == {"draft-release"}
     job = workflow["jobs"]["draft-release"]

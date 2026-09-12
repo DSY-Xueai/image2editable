@@ -1,9 +1,9 @@
-name: Draft v0.2.0 release
+name: Draft v0.3.0 release
 
 on:
   push:
     tags:
-      - v0.2.0
+      - v0.3.0
 
 permissions:
   actions: read
@@ -40,7 +40,7 @@ jobs:
           from zipfile import ZipFile
 
           expected = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          if os.environ["GITHUB_REF_NAME"] != "v0.2.0":
+          if os.environ["GITHUB_REF_NAME"] != "v0.3.0":
               raise SystemExit("unexpected tag")
           root = Path(os.environ["ARTIFACT_ROOT"])
           wheels = list((root / "distribution").glob("*.whl"))
@@ -85,5 +85,5 @@ jobs:
           --draft
           --verify-tag
           --latest=false
-          --title "image2editable v0.2.0"
-          --notes-file RELEASE_NOTES_v0.2.0.md
+          --title "image2editable v0.3.0"
+          --notes-file RELEASE_NOTES_v0.3.0.md

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the `0.2.x` release line receives security fixes.
+Only the `0.3.x` release line receives security fixes.
 
 ## Reporting a Vulnerability
 
