@@ -39,6 +39,7 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
                 "PyYAML>=6,<7",
                 "pypdf>=5",
                 "reportlab>=4",
+                "fonttools>=4.50,<5",
                 "tomli>=2; python_version < '3.11'",
             ],
         },

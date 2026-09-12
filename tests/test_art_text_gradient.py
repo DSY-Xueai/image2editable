@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from pptx import Presentation
 from pptx.oxml.ns import qn
 
 
-def _gradient_letter(texture=False):
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 100)
+def _gradient_letter(art_font, texture=False):
+    font = art_font(100)
     fill = Image.new("L", (180, 160))
     outline = Image.new("L", fill.size)
     ImageDraw.Draw(fill).text((40, 10), "R", font=font, fill=255)
@@ -20,14 +20,14 @@ def _gradient_letter(texture=False):
         amount = ((xx//8+yy//8)%2).astype(float)
     colors = np.array([255, 245, 170])+amount[..., None]*np.array([-25, -95, -70])
     pixels[mask] = np.clip(colors[mask], 0, 255)
-    item = {"text": "R", "font": "Arial", "box": [0, 0, 180, 160],
+    item = {"text": "R", "font": font.getname()[0], "box": [0, 0, 180, 160],
             "words": [{"text": "R", "box": [0, 0, 1, 1]}]}
     return pixels, item
 
 
-def test_linear_gradient_is_preserved_as_native_text_style():
+def test_linear_gradient_is_preserved_as_native_text_style(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _gradient_letter()
+    pixels, item = _gradient_letter(art_font)
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
     assert runs is not None
     gradient = runs[0].get("gradient")
@@ -37,17 +37,17 @@ def test_linear_gradient_is_preserved_as_native_text_style():
     assert colors[0][1] - colors[1][1] > 80
 
 
-def test_complex_fill_texture_is_not_accepted_as_a_linear_gradient():
+def test_complex_fill_texture_is_not_accepted_as_a_linear_gradient(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _gradient_letter(texture=True)
+    pixels, item = _gradient_letter(art_font, texture=True)
     assert estimate_art_text_runs(pixels, item, reference_width=960) is None
 
 
-def test_gradient_text_uses_drawingml_stops_and_remains_editable(tmp_path):
+def test_gradient_text_uses_drawingml_stops_and_remains_editable(tmp_path, art_font):
     from scripts import ppt_assemble as assembler
     deck = Presentation()
     item = {"text": "图", "box": [20, 20, 140, 140], "runs": [{
-        "text": "图", "box": [0, 0, 1, 1], "box_kind": "ink", "font": "KaiTi",
+        "text": "图", "box": [0, 0, 1, 1], "box_kind": "ink", "font": art_font(100).getname()[0],
         "font_size": 100, "rotation": -12, "color": "#ffeaaa",
         "gradient": {"angle": 102, "colors": ["#fff0b0", "#e79965"]},
     }]}

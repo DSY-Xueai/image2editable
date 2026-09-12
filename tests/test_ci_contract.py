@@ -72,7 +72,8 @@ CORE_DIAGNOSTIC_SINGLE_MATRIX = {
 }
 FAST_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML "
-    "pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch"
+    "pypdf reportlab python-pptx opencv-contrib-python==4.10.0.84 Pillow numpy pypdfium2 torch "
+    'paddlex==3.7.2 "shapely>=2,<3" "fonttools>=4.50,<5"'
 )
 PROJECT_METADATA_INSTALL_COMMAND = (
     "python -m pip install --constraint constraints/runtime.txt --no-deps "

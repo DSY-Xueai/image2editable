@@ -404,6 +404,7 @@ def test_resident_ocr_processor_reuses_models_and_closes_once(
         lambda: (Detector, lambda: lambda polys: polys, lambda **kwargs: lambda image, polys: [np.zeros((2, 3, 3), dtype=np.uint8) for _ in polys]),
     )
     monkeypatch.setattr(ocr_worker, "_load_recognition_model", lambda: Recognizer)
+    monkeypatch.setattr(ocr_worker, "_resolve_recognition_model_name", lambda lang: "test-recognizer")
     monkeypatch.setattr(
         ocr_worker,
         "_read_bgr",

@@ -1,28 +1,22 @@
-from pathlib import Path
-
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-import pytest
+from PIL import Image, ImageDraw
 
 
-def _outlined_line():
-    font_path = Path("C:/Windows/Fonts/arialbd.ttf")
-    if not font_path.exists():
-        pytest.skip("Requires a known outline font")
+def _outlined_line(art_font):
     image = Image.new("RGB", (250, 120), (235, 201, 164))
-    font = ImageFont.truetype(str(font_path), 66)
+    font = art_font(66)
     draw = ImageDraw.Draw(image)
     draw.text((20, 25), "A", font=font, fill=(95, 200, 210), stroke_width=3, stroke_fill=(40, 30, 20))
     draw.text((150, 5), "B", font=font, fill=(230, 130, 160), stroke_width=3, stroke_fill=(40, 30, 20))
-    item = {"text": "AB", "box": [0, 0, 250, 120], "font": "Arial", "font_size": 50,
+    item = {"text": "AB", "box": [0, 0, 250, 120], "font": font.getname()[0], "font_size": 50,
         "words": [{"text": "A", "box": [0, 0, 0.45, 1]},
                   {"text": "B", "box": [0.5, 0, 0.5, 1]}]}
     return np.asarray(image).copy(), item
 
 
-def test_extracts_fill_and_outline_instead_of_using_outline_as_text_color():
+def test_extracts_fill_and_outline_instead_of_using_outline_as_text_color(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
     assert runs is not None
     assert [run["text"] for run in runs] == ["A", "B"]
@@ -37,19 +31,19 @@ def test_extracts_fill_and_outline_instead_of_using_outline_as_text_color():
     assert runs[0]["box"][1] > runs[1]["box"][1]
 
 
-def test_plain_text_does_not_require_positioned_runs():
+def test_plain_text_does_not_require_positioned_runs(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     pixels[:] = (255, 255, 255)
     assert estimate_art_text_runs(pixels, item, reference_width=960) is None
     assert estimate_art_text_runs(pixels, {"box": [0, 0, 250, 120], "text": "AB"}, reference_width=960) is None
 
 
-def test_cleanup_removes_light_fill_inside_dark_letter_outline():
+def test_cleanup_removes_light_fill_inside_dark_letter_outline(art_font):
     import image_to_ppt
     from scripts.text_detect import _build_text_mask
     image = Image.new("RGB", (220, 150), (232, 164, 161))
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 110)
+    font = art_font(110)
     ImageDraw.Draw(image).text((25, 5), "HI", font=font, fill=(245, 225, 146),
                               stroke_width=5, stroke_fill=(90, 48, 27))
     pixels = np.asarray(image)
@@ -61,10 +55,10 @@ def test_cleanup_removes_light_fill_inside_dark_letter_outline():
     assert np.all(mask[fill] > 0)
 
 
-def test_cleanup_includes_attached_letter_shadow():
+def test_cleanup_includes_attached_letter_shadow(art_font):
     import image_to_ppt
     from scripts.text_detect import _build_text_mask
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 100)
+    font = art_font(100)
     image = Image.new("RGB", (240, 180), (235, 170, 165))
     draw = ImageDraw.Draw(image)
     draw.text((40, 39), "H", font=font, fill=(232, 161, 155), stroke_width=4,
@@ -80,9 +74,9 @@ def test_cleanup_includes_attached_letter_shadow():
     assert np.mean(mask[shadow] > 0) > .98
 
 
-def test_narrow_ocr_word_boxes_do_not_clip_letter_outlines():
+def test_narrow_ocr_word_boxes_do_not_clip_letter_outlines(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     item["words"] = [{"text": "A", "box": [.12, .3, .08, .55]},
                      {"text": "B", "box": [.64, .15, .08, .55]}]
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
@@ -94,9 +88,9 @@ def test_narrow_ocr_word_boxes_do_not_clip_letter_outlines():
     assert runs[1]["color"] == "#e682a0"
 
 
-def test_colored_image_border_does_not_become_text_fill():
+def test_colored_image_border_does_not_become_text_fill(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     pixels[:5] = (180, 220, 250)
     pixels[-5:] = (180, 220, 250)
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
@@ -134,10 +128,10 @@ def test_nested_letter_strokes_compare_to_external_background():
     assert not np.any(fill[85:94, 52:98])
 
 
-def test_pastel_fill_components_are_not_dropped_by_global_threshold():
+def test_pastel_fill_components_are_not_dropped_by_global_threshold(art_font):
     from scripts.art_text import _line_ink
     image = Image.new("RGB", (600, 150), (252, 253, 248))
-    font = ImageFont.truetype("C:/Windows/Fonts/msyhbd.ttc", 100)
+    font = art_font(100)
     draw = ImageDraw.Draw(image)
     draw.text((15, 5), "哪些玩具是", font=font, fill=(243, 169, 176),
               stroke_width=4, stroke_fill=(136, 89, 78))
@@ -163,9 +157,9 @@ def test_faint_enclosed_decoration_does_not_become_glyph_fill():
     assert not np.any(fill[100:130, 180:220])
 
 
-def test_word_crops_cutting_outline_use_full_line_context():
+def test_word_crops_cutting_outline_use_full_line_context(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     item["words"][0]["box"] = [0.12, 0, 0.11, 1]
     item["words"][1]["box"] = [0.65, 0, 0.12, 1]
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
@@ -189,11 +183,11 @@ def test_neighbor_outline_does_not_inflate_short_glyph_box():
     assert bounds[1] + bounds[3] < 35
 
 
-def test_grouped_punctuation_gets_individual_pixel_positions():
+def test_grouped_punctuation_gets_individual_pixel_positions(art_font):
     from scripts.art_text import estimate_art_text_runs
     image = Image.new("RGB", (140, 120), (235, 201, 164))
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 66)
+    font = art_font(66)
     draw.text((15, 10), "!", font=font, fill=(230, 130, 160), stroke_width=3, stroke_fill=(40, 30, 20))
     draw.text((90, 30), "!", font=font, fill=(230, 130, 160), stroke_width=3, stroke_fill=(40, 30, 20))
     item = {"text": "!!", "box": [0, 0, 140, 120], "words": [{"text": "!!", "box": [0, 0, 1, 1]}]}
@@ -203,24 +197,24 @@ def test_grouped_punctuation_gets_individual_pixel_positions():
     assert runs[0]["box"][1] < runs[1]["box"][1]
 
 
-def test_cjk_horizontal_stroke_uses_font_metrics_not_ink_height():
+def test_cjk_horizontal_stroke_uses_font_metrics_not_ink_height(art_font):
     from scripts.art_text import estimate_art_text_runs
     image = Image.new("RGB", (160, 100), (235, 201, 164))
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("C:/Windows/Fonts/msyhbd.ttc", 80)
+    font = art_font(80)
     draw.text((25, 0), "\u4e00", font=font, fill=(95, 200, 210), stroke_width=3, stroke_fill=(40, 30, 20))
-    item = {"text": "\u4e00", "font": "Microsoft YaHei", "box": [0, 0, 160, 100],
+    item = {"text": "\u4e00", "font": font.getname()[0], "box": [0, 0, 160, 100],
             "words": [{"text": "\u4e00", "box": [0, 0, 1, 1]}]}
     runs = estimate_art_text_runs(np.asarray(image), item, reference_width=960)
     assert runs is not None
     assert 65 <= runs[0]["font_size"] <= 95
 
 
-def test_solid_text_with_counters_is_not_mistaken_for_outlined_text():
+def test_solid_text_with_counters_is_not_mistaken_for_outlined_text(art_font):
     from scripts.art_text import estimate_art_text_runs
-    pixels, item = _outlined_line()
+    pixels, item = _outlined_line(art_font)
     image = Image.fromarray(pixels)
     ImageDraw.Draw(image).rectangle((0, 0, 250, 120), fill=(235, 201, 164))
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 66)
+    font = art_font(66)
     ImageDraw.Draw(image).text((20, 25), "AB", font=font, fill=(40, 30, 20))
     assert estimate_art_text_runs(np.asarray(image), item, reference_width=960) is None

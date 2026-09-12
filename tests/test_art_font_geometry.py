@@ -51,17 +51,17 @@ def test_matching_uses_installed_cjk_face_instead_of_default_font():
     assert result["fit_iou"] > .85
 
 
-def test_grouped_letters_with_different_angles_get_individual_native_runs():
+def test_grouped_letters_with_different_angles_get_individual_native_runs(art_font):
     from scripts.art_text import estimate_art_text_runs
     image = Image.new("RGB", (350, 220), (235, 201, 164))
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 100)
+    font = art_font(100)
     for text, angle, left in (("R", -20, 0), ("B", 15, 160)):
         glyph = Image.new("RGBA", (150, 150))
         ImageDraw.Draw(glyph).text((35, 10), text, font=font, fill=(95, 200, 210),
                                   stroke_width=3, stroke_fill=(40, 30, 20))
         glyph = glyph.rotate(-angle, Image.Resampling.BICUBIC, expand=True)
         image.paste(glyph, (left, 0), glyph)
-    item = {"text": "RB", "font": "Arial", "box": [0, 0, *image.size],
+    item = {"text": "RB", "font": font.getname()[0], "box": [0, 0, *image.size],
             "words": [{"text": "RB", "box": [0, 0, 1, 1]}]}
     runs = estimate_art_text_runs(np.asarray(image), item, reference_width=960)
     assert runs is not None
@@ -70,11 +70,11 @@ def test_grouped_letters_with_different_angles_get_individual_native_runs():
     assert abs(runs[1]["rotation"] - 15) <= 2
 
 
-def test_centered_outline_recovers_font_before_stroke_occlusion():
+def test_centered_outline_recovers_font_before_stroke_occlusion(art_font):
     import cv2
     from scripts.art_text import estimate_art_text_runs
     glyph = Image.new("L", (180, 170))
-    font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 110)
+    font = art_font(110)
     ImageDraw.Draw(glyph).text((35, 10), "H", font=font, fill=255)
     base = np.asarray(glyph) > 127
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -83,11 +83,11 @@ def test_centered_outline_recovers_font_before_stroke_occlusion():
     pixels = np.full((170, 180, 3), (235, 201, 164), dtype=np.uint8)
     pixels[ink] = (40, 30, 20)
     pixels[fill] = (95, 200, 210)
-    item = {"text": "H", "font": "Arial", "box": [0, 0, 180, 170],
+    item = {"text": "H", "font": font.getname()[0], "box": [0, 0, 180, 170],
             "words": [{"text": "H", "box": [0, 0, 1, 1]}]}
     runs = estimate_art_text_runs(pixels, item, reference_width=960)
     assert runs is not None
     run = runs[0]
-    assert run["font"] == "Arial" and run["bold"]
+    assert run["font"] == font.getname()[0] and run["bold"]
     assert abs(run["font_size"] - 110) < 4
     assert 3 <= run["outline_width"] <= 5

@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install model-free test dependencies
-        run: python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML pypdf reportlab python-pptx opencv-python-headless Pillow numpy pypdfium2 torch
+        run: python -m pip install --constraint constraints/runtime.txt setuptools==84.0.0 pytest PyYAML pypdf reportlab python-pptx opencv-contrib-python==4.10.0.84 Pillow numpy pypdfium2 torch paddlex==3.7.2 "shapely>=2,<3" "fonttools>=4.50,<5"
       - name: Install project metadata
         run: python -m pip install --constraint constraints/runtime.txt --no-deps --no-build-isolation -e .
       - name: Run model-free tests
