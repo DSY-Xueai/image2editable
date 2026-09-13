@@ -865,6 +865,13 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
     diagnostic_job = jobs["core-benchmark-diagnostic"]
     diagnostic_upload = _action_step(diagnostic_job, "actions/upload-artifact")
     aggregate_job = jobs["core-benchmark-aggregate"]
+    renderer_steps = [
+        _named_step(job, "Install native PDF renderer")
+        for job in (core_job, diagnostic_job)
+    ]
+    for step in renderer_steps:
+        assert step["if"] == "${{ matrix.shard == 'pdf-network' }}"
+        assert step["run"] == "./scripts/install_release_renderer.ps1"
     for mapping in _all_mappings(workflow):
         assert "continue-on-error" not in mapping
         if not any(
@@ -876,6 +883,7 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
                 core_job,
                 core_upload,
                 aggregate_job,
+                *renderer_steps,
             )
         ):
             assert "if" not in mapping
@@ -892,7 +900,9 @@ def test_release_gate_cannot_hide_failures_or_use_unpinned_actions() -> None:
                 "Aggregate strict core benchmark shards",
             }:
                 assert step.get("shell") == "python"
-            elif step.get("name") == "Require protected core-benchmark approval":
+            elif step.get("name") in {
+                "Require protected core-benchmark approval", "Install native PDF renderer",
+            }:
                 assert step.get("shell") == "pwsh"
             else:
                 assert "shell" not in step

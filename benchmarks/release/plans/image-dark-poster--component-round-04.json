@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 4,
+  "request_sha256": "d311846c48052c63b866ac47da336b5bfc689a0b6a2e62f2a51b6c11ff6fe7dd",
+  "graph_sha256": "f5b026467f0814da1cf791a66f24eb8baa616291d112102045c4760db19095aa",
+  "actions": [
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This dark canvas surface duplicates the restored slide background. All foreground rings, line fragments and editable text remain separate."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "text_0001",
+        "text_0002",
+        "text_0003",
+        "text_0004",
+        "text_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Remove remaining background ink under the editable text using surrounding dark canvas donors."
+      ]
+    }
+  ]
+}

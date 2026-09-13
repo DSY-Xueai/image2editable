@@ -28,6 +28,35 @@ def _batch_ocr_uses_the_test_single_image_detector(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("text", ["+7", "-3", "+18", "-2.5%"])
+def test_signed_numeric_labels_are_not_filtered_or_stripped(text):
+    from scripts import text_detect
+
+    image = np.full((60, 100, 3), 255, dtype=np.uint8)
+    raw = [{"text": text, "box": [10, 10, 50, 20], "confidence": .999}]
+    items, _ = text_detect._build_text_result(image, raw, .7, 6)
+    assert [item["text"] for item in items] == [text]
+
+
+@pytest.mark.parametrize("slash", ["/", "\\"])
+def test_terminal_slash_ink_extends_box_without_absorbing_neighbors(slash):
+    import cv2
+    from scripts.text_detect import refine_text_ink_bounds
+
+    image = np.full((70, 180, 3), 245, dtype=np.uint8)
+    points = ((114, 20), (106, 44)) if slash == "/" else ((106, 20), (114, 44))
+    cv2.line(image, *points, (60, 90, 120), 2)
+    item = {"text": "Label " + slash, "box": [10, 16, 90, 32], "color": "#3c5a78"}
+    fixed = refine_text_ink_bounds(image, [item])[0]
+    assert fixed["text"] == item["text"]
+    assert fixed["box"][0] + fixed["box"][2] >= 116
+    assert refine_text_ink_bounds(image, [fixed])[0] == fixed
+    neighbor = {"text": slash, "box": [103, 16, 16, 32], "color": "#3c5a78"}
+    assert refine_text_ink_bounds(image, [item, neighbor])[0] == item
+    plain = {**item, "text": "Label"}
+    assert refine_text_ink_bounds(image, [plain])[0] == plain
+
+
 def _label_fixture(tmp_path: Path) -> Path:
     path = tmp_path / "generic-technical-label.png"
     image = Image.new("RGB", (120, 70), "white")

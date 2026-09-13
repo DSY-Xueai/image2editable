@@ -6,16 +6,214 @@
   "repair_round": 5,
   "request_sha256": "902c5e4afb1f90d82281ce7838015bc891b7aa38f5ef13f162f8164f4ad39b39",
   "actions": [
-    {"action":"accept","object_ids":["component_0010"],"parameters":{},"confidence":0.99,"evidence":["The vertical network edge passes the current component quality checks."]},
-    {"action":"absorb_residual","object_ids":["component_0010"],"parameters":{},"confidence":0.99,"evidence":["The bound unexplained mask contains an adjacent structural fragment assigned to the vertical network edge."]},
-    {"action":"accept","object_ids":["component_0015"],"parameters":{},"confidence":0.99,"evidence":["The right-lower network edge passes the current component quality checks."]},
-    {"action":"absorb_residual","object_ids":["component_0015"],"parameters":{},"confidence":0.99,"evidence":["The bound unexplained mask contains an adjacent structural fragment assigned to the right-lower network edge."]},
-    {"action":"accept","object_ids":["component_0017"],"parameters":{},"confidence":0.99,"evidence":["The CORE A hub passes the current component quality checks."]},
-    {"action":"absorb_residual","object_ids":["component_0017"],"parameters":{},"confidence":0.99,"evidence":["The bound unexplained mask contains an adjacent structural fragment assigned to the CORE A hub."]},
-    {"action":"accept","object_ids":["component_0023"],"parameters":{},"confidence":0.99,"evidence":["The right-side node and edge pass the current component quality checks."]},
-    {"action":"absorb_residual","object_ids":["component_0023"],"parameters":{},"confidence":0.99,"evidence":["The bound unexplained mask contains an adjacent structural fragment assigned to the right-side node and edge."]},
-    {"action":"retry_with_box","object_ids":["component_0001"],"parameters":{"box":[0.974,0.929,1.0,0.996],"independent":true},"confidence":0.99,"evidence":["The 860-pixel unexplained region is an isolated white triangular corner mark at x=1567..1599 and y=841..892; recover it independently from the inactive full-page proposal."]},
-    {"action":"rebuild_background","object_ids":["component_0010","component_0015","component_0017","component_0023","component_0001"],"parameters":{"margin_ratio":0.003},"confidence":0.99,"evidence":["A bounded three-pixel rebuild removes the old raster pixels under the four absorbed network fragments and the recovered corner mark."]}
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Restore the source-consistent silhouette trimmed by the earlier shrink operation."
+      ]
+    },
+    {
+      "action": "retry_with_points",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {
+        "independent": true,
+        "positive": [
+          [
+            0.39462163852407756,
+            0.4849833147942158
+          ],
+          [
+            0.3964978111319575,
+            0.4883203559510567
+          ],
+          [
+            0.39399624765478425,
+            0.489432703003337
+          ],
+          [
+            0.3689806128830519,
+            0.5339265850945495
+          ],
+          [
+            0.3420888055034397,
+            0.5817575083426029
+          ],
+          [
+            0.3151969981238274,
+            0.6295884315906563
+          ],
+          [
+            0.2876797998749218,
+            0.6774193548387096
+          ]
+        ],
+        "negative": [
+          [
+            0.4065040650406504,
+            0.4671857619577308
+          ]
+        ]
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed residual contains a separate lower-left diagonal edge."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "independent": true,
+        "box": [
+          0.39375,
+          0.7733333333333333,
+          0.73125,
+          0.8044444444444444
+        ]
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed residual contains the lower-right horizontal edge."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "independent": true,
+        "box": [
+          0.73875,
+          0.6533333333333333,
+          0.879375,
+          0.7822222222222223
+        ]
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed residual contains a separate lower-right diagonal edge."
+      ]
+    },
+    {
+      "action": "retry_with_points",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "independent": true,
+        "positive": [
+          [
+            0.3808630393996248,
+            0.4471635150166852
+          ],
+          [
+            0.38398999374609133,
+            0.44938820912124583
+          ],
+          [
+            0.38711694809255787,
+            0.45161290322580644
+          ],
+          [
+            0.3902439024390244,
+            0.45383759733036705
+          ],
+          [
+            0.39274546591619763,
+            0.4549499443826474
+          ]
+        ],
+        "negative": [
+          [
+            0.4065040650406504,
+            0.4671857619577308
+          ],
+          [
+            0.3814884302689181,
+            0.43492769744160176
+          ],
+          [
+            0.37523452157598497,
+            0.43270300333704115
+          ],
+          [
+            0.28142589118198874,
+            0.6896551724137931
+          ],
+          [
+            0.3877423389618512,
+            0.8008898776418243
+          ],
+          [
+            0.7379612257661038,
+            0.778642936596218
+          ],
+          [
+            0.8818011257035647,
+            0.6562847608453838
+          ],
+          [
+            0.2313946216385241,
+            0.3225806451612903
+          ],
+          [
+            0.15634771732332708,
+            0.8120133481646273
+          ]
+        ]
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed residual contains a short edge beside CORE A; negative points exclude native text and nodes."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {
+        "independent": true,
+        "box": [
+          0.164375,
+          0.7933333333333333,
+          0.38,
+          0.8166666666666667
+        ]
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed residual contains the lower-left horizontal edge."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0001",
+        "component_0002",
+        "component_0003",
+        "component_0004",
+        "component_0005",
+        "component_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Remove source pixels beneath the recovered independent edges and restored silhouettes."
+      ]
+    }
   ],
   "graph_sha256": "a3fd4b2bbfe7756ba956fe286d6c12fcf49773f72fb7bc68612c7b7447449f45"
 }

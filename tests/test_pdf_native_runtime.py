@@ -18,6 +18,24 @@ from image2editable.runtime import run_job
 from image2editable.store import RunStore
 
 
+@pytest.fixture(autouse=True)
+def native_unit_renderer(monkeypatch):
+    """Keep assembly/ownership tests independent of an installed office suite."""
+    from image2editable import native_pdf_quality
+
+    class Renderer:
+        def available(self):
+            return True
+
+        def render_page(self, pptx_path, page_number, output_path, *, width, height):
+            with Image.open(output_path.parent / "native-source.png") as source:
+                pixels = native_pdf_quality._source_canvas(source.convert("RGB"), (width, height))
+            Image.fromarray(pixels).save(output_path)
+            return {"renderer": "unit-test"}
+
+    monkeypatch.setattr(native_pdf_quality, "_native_renderers", lambda: (Renderer(),))
+
+
 def _write_cropped_spacing_pdf(source: Path, image: Path) -> None:
     document = canvas.Canvas(str(source), pagesize=(200, 120))
     document.saveState()
@@ -89,6 +107,10 @@ def test_native_pdf_bypasses_visual_workers_and_builds_editable_pptx(
         "image2editable:text-0004",
     ]
     picture = named[0]
+    from pptx.enum.text import MSO_AUTO_SIZE
+
+    assert named[-1].text_frame.auto_size == MSO_AUTO_SIZE.NONE
+    assert named[-1].text_frame.word_wrap is False
     assert abs(picture.left - Inches(1.25)) < 2
     assert abs(picture.top - Inches(4.5625)) < 2
     state = RunStore.open(run).read_json(
@@ -98,6 +120,11 @@ def test_native_pdf_bypasses_visual_workers_and_builds_editable_pptx(
     assert state["status"] == "ready_for_assembly"
     native_path, _ = legacy._load_legacy_ref(RunStore.open(run), state["native_page_ref"])
     assert native_path.is_file()
+    delivery = RunStore.open(run).read_json("pages/page_001/reconstruction/component_delivery.json")
+    quality_path, _ = legacy._load_legacy_ref(RunStore.open(run), delivery["native_quality_ref"])
+    assert quality_path.is_file()
+    assert (quality_path.parent / "native-source.png").is_file()
+    assert (quality_path.parent / "native-render-original.png").is_file()
     assert not (run / "pages/page_001/source.png").exists()
     assert not (run / "pages/page_001/pdf-assets").exists()
 

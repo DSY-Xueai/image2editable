@@ -502,7 +502,7 @@ def test_core_v020_pptx_replay_plans_match_authored_requests() -> None:
         ("page_002", "cc2d8482b48fd32f9920cf0092da88ad16d345821db0d0f98b11103b09871900", "7fa090a9f03eef6ec086214c8c9639197369193d850c72d51faa241b617c5c18"),
         ("page_003", "65eafdda6be280feceee856cda45b76a68e2e9cf1f82646abed7c1dadacab798", "0030b760342c417d22d0b35e2ece11c7adfc1c65dde72018bd93ed61f8e63c02"),
     ]
-    assert len(component_plans) == 11
+    assert len(component_plans) == 12
     assert all(runner._valid_component_plan(plan) for plan in component_plans)
     assert [
         (plan["page_id"], plan["repair_round"], plan["request_sha256"], plan["graph_sha256"])
@@ -511,12 +511,13 @@ def test_core_v020_pptx_replay_plans_match_authored_requests() -> None:
         ("page_001", 1, "24185f07f11855780141dcd851bb0d96a256194bc2abfe8bcd23996f9c160bb0", "047df8ef508cf23eb7280963f2ceea816b252b2d0a9e1d9fb077426d6d608628"),
         ("page_001", 2, "6202fe0d9f9f6c31dd59d47fca39660b9a2b0b6c4b4cd02fa9c3bbfc1b7efe20", "e630d52184ec4c498e095e82432f563253490550d10bdca11a76516439d746b3"),
         ("page_001", 3, "bcba8d9f50dd6932d8696395bdc2f2c9182e0bb4cf3caba5184a4c5ab6eaad50", "fbf0a49079c99395d6ef1f9ff2b8374d0a517de64f73ddcaa00209e9d97ba194"),
-        ("page_001", 4, "7a726142d6b973eb46084d978edc9f62d87a0d9dd0a7c298962f3eba17051abc", "59e852e5a394bdff979dabe9f80928f1cec7f1ae8fdef83c53b2c66371c55175"),
+        ("page_001", 4, "4d782c3e9e8b9f64a475208b5b3ad376fd3acd9a1f381888c9b68f22f5c8a9e2", "91122365b367e6dd91f432ba28c4ead29b5debf948bd61e25cd5b3b2a928c261"),
+        ("page_001", 5, "d6497c662789e2d888a7216c582249daf6b58d56f2c08179fb3e41fb3b05d1c4", "4dd5ed32bfb8146d4ff8c92cf1f05a0782f9bda7ac6adac488a6745e20dfd5a5"),
         ("page_002", 1, "d124520930be78fa42a275a10604426a73c555f6e8fe6d2f230bbbce8c511ca0", "14c6305d6e1f3a3ec966f4b218186d5f0a48aa11872171b5b60c43431639756a"),
-        ("page_002", 2, "b280a53626cbdd9fe331a31b5b30988ae02ddcf9ef9c7adb784d853fadf39a7c", "37aec06e3ce7d98602a2d4f85050be559f767a684dae2e64c7be098706eef7da"),
+        ("page_002", 2, "0480325808d3c777cb9604cb1721bb6fdaafaf48dbb46c01a4118b1593c88ebd", "25181493b0e64f04de756033b377af2089fc247121a8a5516a673bdcdf8e6a4e"),
         ("page_002", 3, "4c0fecf5705cda34bbad48eca8b223f6f8c09fee314561ab8112b0e84078e382", "ddc1b99bdea467ac116df5e4144a12271fc8507ca84d8fa82c422dabf2d33090"),
-        ("page_003", 1, "2edd9fcdfe62eeac56afbc0f299a076b6f604d1d0baaef755ec3837ead44af59", "c6f7ccf4c5ce928242841297b5f76cc059f417e4c08a8064d9998a84449dd4f6"),
-        ("page_003", 2, "f16861801c987e00427c18b9a7b2f939ca62421638ae7f515be2ef4874960474", "eabb6e008ab8fb528d08bfe3c8dd6babe309cb08cb3cfb4c25fd959ad4e45e5d"),
+        ("page_003", 1, "3aa2a206c406b38aca2e8e479ce1508bb3be806f9ce32d8471934b2783708952", "cf9f5b05a3f875505bd7f19e36ab50255b4f9be2a7dbc41107d2788f7c6b050c"),
+        ("page_003", 2, "14d43bebed0c6722276c40ed8b5251750cee9fdb63e27ff17f77fb3f8d6c5df1", "2e8533c9607594e3b96a8c9aed5853766fc8359eea725844680c5b160ebd4111"),
         ("page_003", 3, "aefc7f8b2ea9264ac205807e4c9c0bd85bbf9d88b92de23b1a735c767e6cc5a7", "0bbc6904d38b036700dbaa2b6d3f118e0e02c4984b4c6a020ddf8593cfb666f9"),
         ("page_003", 4, "41a4627b8c909193d70f2b1ad3f60f4fc71216a12d62d4ecd986fed9034cc929", "d4b580ca78872dcc6e1c62ae13640f0e25063e566ae3736c214bbae3c6c927f1"),
     ]

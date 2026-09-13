@@ -4,30 +4,55 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "7a726142d6b973eb46084d978edc9f62d87a0d9dd0a7c298962f3eba17051abc",
+  "request_sha256": "4d782c3e9e8b9f64a475208b5b3ad376fd3acd9a1f381888c9b68f22f5c8a9e2",
   "actions": [
     {
-      "action": "accept",
+      "action": "absorb_into_parent",
       "object_ids": [
+        "parent_0002",
         "parent_0005"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "Page background has zero component violations after underlay rebuild."
+        "Consolidate the lower table surface and page frame while reserving an independent complete header."
       ]
     },
     {
-      "action": "absorb_residual",
+      "action": "retry_with_box",
       "object_ids": [
-        "parent_0005"
+        "component_0005"
       ],
-      "parameters": {},
+      "parameters": {
+        "box": [0.049375, 0.22555555555555556, 0.951875, 0.31],
+        "independent": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Signed unexplained mask contains only 581 visual pixels adjacent to the accepted page background."
+        "The complete dark five-column header is a separate semantic object above the table body."
       ]
+    },
+    {
+      "action": "accept",
+      "object_ids": ["parent_0003"],
+      "parameters": {"preserve_mask": true},
+      "confidence": 0.99,
+      "evidence": ["Preserve the verified left table-body support while separating the complete header."]
+    },
+    {
+      "action": "accept",
+      "object_ids": ["component_0004"],
+      "parameters": {"preserve_mask": true},
+      "confidence": 0.99,
+      "evidence": ["Preserve the verified right table-body support while separating the complete header."]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": ["parent_0005", "component_0005"],
+      "parameters": {"margin_ratio": 0.005},
+      "confidence": 0.99,
+      "evidence": ["Clear the recovered header and adjacent original frame pixels from the canvas background."]
     }
   ],
-  "graph_sha256": "59e852e5a394bdff979dabe9f80928f1cec7f1ae8fdef83c53b2c66371c55175"
+  "graph_sha256": "91122365b367e6dd91f432ba28c4ead29b5debf948bd61e25cd5b3b2a928c261"
 }

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 1,
+  "request_sha256": "634fcb10fe0cc49d1580f1f190e8d5f7cb5afd9a0afd654c9110e89df94bd48e",
+  "graph_sha256": "39472f576e47d71a8e8b290d2ae1ce56bc56c3c37c79909563dfd9cb09161001",
+  "actions": [
+    {"action":"accept","object_ids":["component_0001"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows the unique dark canvas owner surrounding all foreground artwork and text."]},
+    {"action":"accept","object_ids":["component_0002"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows the dark circular interior as a distinct background region beneath the rings."]},
+    {"action":"accept","object_ids":["component_0003"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique blue outer-ring arc."]},
+    {"action":"discard","object_ids":["component_0004"],"parameters":{},"confidence":0.99,"evidence":["Isolation contains only dark text/background pixels from the removed heading area."]},
+    {"action":"accept","object_ids":["component_0005"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique blue outer-ring arc."]},
+    {"action":"accept","object_ids":["component_0006"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique blue outer-ring segment."]},
+    {"action":"accept","object_ids":["component_0007"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique blue outer-ring segment."]},
+    {"action":"discard","object_ids":["component_0008"],"parameters":{},"confidence":0.99,"evidence":["Isolation contains only dark subtitle-shadow/background pixels."]},
+    {"action":"accept","object_ids":["component_0009"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique red-ring arc."]},
+    {"action":"accept","object_ids":["component_0010"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique red-ring crossing fragment."]},
+    {"action":"accept","object_ids":["component_0011"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows a unique diagonal line segment."]},
+    {"action":"accept","object_ids":["component_0012"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Isolation shows the remaining unique diagonal line segment."]}
+  ]
+}

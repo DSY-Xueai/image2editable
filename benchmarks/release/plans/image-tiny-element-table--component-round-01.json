@@ -1,15 +1,14 @@
 {
   "actions": [
     {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0001"],"parameters":{}},
-    {"action":"split","confidence":0.99,"evidence":["connected-component analysis of the bound CPU round-01 mask finds exactly 156 proposals; split creates temporary retry targets without accepting text or border fragments as final visuals"],"object_ids":["component_0002"],"parameters":{"parts":156}},
-    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0003"],"parameters":{}},
-    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0004"],"parameters":{}}
+    {"action":"split","confidence":0.99,"evidence":["The authenticated mask has 119 disconnected regions. Split exposes the existing regions for table-row and grid-line reconstruction; no text or border fragment is accepted as a final visual."],"object_ids":["component_0002"],"parameters":{"parts":119}},
+    {"action":"discard","confidence":0.99,"evidence":["round-01 numbered-masks.png","round-01 component-graph.json"],"object_ids":["component_0003"],"parameters":{}}
   ],
-  "graph_sha256":"cd7de4639c7ab250dd7b6fa90ca8c5390505bebd222f4ef04c52f9434e555463",
+  "graph_sha256":"bff83e3483e2193b5ff10f0d6608fa269803a3c48aa0ca29c552e2dbcfb59f62",
   "kind":"component_plan",
   "page_id":"page_001",
   "provider":"host",
   "repair_round":1,
-  "request_sha256":"81986271acef41dda55fbf3440a7eafdc438c2b69219bf8bd3c7bf5afe688c2e",
+  "request_sha256":"f2034566e8897334403ab5afac80df0aa27e9bb38f364129c2e27298cdd42919",
   "schema_version":1
 }

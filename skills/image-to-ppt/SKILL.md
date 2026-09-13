@@ -15,6 +15,7 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 - 本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。
 - 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
+- 产品 Runtime 的原生 PDF 路径在最终装配后核验实际 PPTX。先复用已安装的 PowerPoint（Windows 加装 `image2editable[render-qa]`）或 LibreOffice；均不可用时按当前平台安装 LibreOffice，再继续原 Run，不重新执行已有效的 OCR 或分割。将其 `program` 目录加入当前任务 PATH；安装完成后用 `soffice --version` 验证。Windows 发布基准使用已校验的 LibreOffice 26.8.0。只有实际渲染与原生对象检查通过，才能交付。
 - 先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`。缺少转换依赖时，运行 `python -m pip install -r "<skill-root>/references/requirements.txt"`，安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1；不得依赖调用者的当前工作目录。
 - LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
 - OCR 不可用时，默认运行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`。PaddleOCR 是本 Skill 的固定默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
@@ -124,6 +125,8 @@ prepare 会在全页 OCR 和首轮视觉候选完成后，对小型候选做两�
 组件计划固定包含 `schema_version/kind/page_id/provider/repair_round/request_sha256/actions`；每个 action 固定包含 `action/object_ids/parameters/confidence/evidence`。只使用请求组件图中的候选 ID；`collapse_to_parent` 和 `absorb_into_parent` 可使用候选子组件关联的父 ID。既定十四类动作包括 `accept/discard/merge/split/expand/shrink/retry_with_box/retry_with_points/attach_text/suppress_text/collapse_to_parent/rebuild_background/absorb_residual/absorb_into_parent`，不添加未知字段。`accept`、`retry_with_box` 和 `retry_with_points` 仅在视觉证据确认对象是可单独移动的视觉元素、而非当前语义父级的子组件时，才可在既有参数中额外写入 `"independent": true`；不得按固定面积自动解除父关系。`rebuild_background` 可把已冻结视觉组件列为仅清理背景重复像素的对象，不得改变其冻结资产。
 
 当 `quality-report.json` 包含 `unexplained_visual_residual` 时，必须查看 `unexplained-mask.png`。每个显著区域都必须由 active visual owner 覆盖；若区域是候选边界框内经验证的结构碎片，使用 `absorb_residual` 将绑定残差精确并入最小包含候选。若请求图中的 inactive visual 保留了该结构的来源证据，也可使用 `absorb_residual`，仅恢复绑定残差，不恢复整个已停用复合对象，不调用 SAM；随后按需 `rebuild_background`。只有残差证据不足以确定结构时才使用 `retry_with_box` / `retry_with_points`。不得用 accept、discard 或将其归为背景来消除违规。当 `background_text_residual` 是唯一阻断项时，对诊断命中的冻结文字或视觉 ID 执行 `rebuild_background`。
+
+`split` 先使用已有连通区域；当卡片底色连接了多个独立纯色图形时，可根据原图色块边界拆分，保留全部像素，不调用 SAM。`parts` 应对应实际完整单元，包含底色部分；不得按期望数量任意切块。文字框外的标点仍属于文字，先检查 OCR 内容与实际字形范围，不得用 `absorb_residual` 将其包装成图形。
 
 PPTX 的整页截图候选先使用决策路由：
 

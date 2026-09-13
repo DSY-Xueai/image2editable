@@ -914,6 +914,11 @@ def _add_textbox(
     else:
         font_scale = transform.content_width / SLIDE_WIDTH_INCHES
     if "font_size_pt" in item:
+        from pptx.enum.text import MSO_AUTO_SIZE
+
+        # Native PDF text already has explicit geometry and point size.
+        # LibreOffice otherwise imports spAutoFit as a wrapping text box.
+        tf.auto_size = MSO_AUTO_SIZE.NONE
         font_size = item["font_size_pt"] * transform.content_width * 72 / img_w
     else:
         font_size = item.get("font_size", 12) * font_scale

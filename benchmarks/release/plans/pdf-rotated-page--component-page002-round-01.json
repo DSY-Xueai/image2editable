@@ -114,7 +114,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "This footer raster strip duplicates complete native editable text_0011."
+        "The current isolated candidate is a narrow second-card fragment already covered by parent_0005."
       ],
       "object_ids": [
         "component_0011"
@@ -125,21 +125,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "This narrow second-card edge fragment duplicates the complete parent_0005 owner."
+        "The current isolated footer glyphs are already represented by the bound editable native footer text."
       ],
       "object_ids": [
         "component_0012"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "This footer glyph fragment duplicates complete native editable text_0011."
-      ],
-      "object_ids": [
-        "component_0013"
       ],
       "parameters": {}
     }
@@ -148,7 +137,7 @@
   "page_id": "page_002",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "0f8e165a5991e6bbbe5454d58d384f6ebf3b2c6bd292a0cff88ee51d9318cdaa",
+  "request_sha256": "f22301f4aea07839ed06823387c974bff66b3ee1089c28b5e96430cd154bc7ae",
   "schema_version": 1,
-  "graph_sha256": "2827f32af969fbd8905ffb537ce8f984ed70fb927a25ad768fe345764307b8cc"
+  "graph_sha256": "dc55b7dc68d595482eeafddf0a4fa5012c7a9aaca1a3e82acbc09fa914fae9f7"
 }

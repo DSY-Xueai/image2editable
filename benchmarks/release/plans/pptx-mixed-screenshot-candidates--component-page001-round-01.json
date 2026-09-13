@@ -62,17 +62,6 @@
       "evidence": [
         "Child is an incomplete page-background fragment; its parent restores the complete background region."
       ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0006"
-      ],
-      "parameters": {},
-      "confidence": 0.98,
-      "evidence": [
-        "Complete title background is separated from frozen OCR text."
-      ]
     }
   ],
   "graph_sha256": "047df8ef508cf23eb7280963f2ceea816b252b2d0a9e1d9fb077426d6d608628"

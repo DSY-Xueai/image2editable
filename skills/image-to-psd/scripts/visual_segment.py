@@ -461,7 +461,14 @@ def execute_component_actions(
             masks[new_id] = merged
         elif name == "split":
             component_id = object_ids[0]
-            parts = _connected_action_parts(masks[component_id], action["parameters"]["parts"])
+            text_mask = np.zeros(image.shape[:2], dtype=bool)
+            for node in nodes.values():
+                if node["kind"] == "text" and node["state"] == "frozen":
+                    text_mask |= masks[node["id"]]
+            parts = _connected_action_parts(
+                masks[component_id], action["parameters"]["parts"],
+                image=image, text_mask=text_mask,
+            )
             nodes[component_id]["state"] = "inactive"
             next_z = max(node["z_index"] for node in nodes.values()) + 1
             for index, part in enumerate(parts, start=1):
@@ -993,10 +1000,47 @@ def _new_action_id(nodes: dict[str, dict], prefix: str) -> str:
     return f"{prefix}_{index:04d}"
 
 
-def _connected_action_parts(mask: np.ndarray, expected: int) -> list[np.ndarray]:
+def _connected_action_parts(
+    mask: np.ndarray, expected: int, *, image: np.ndarray | None = None,
+    text_mask: np.ndarray | None = None,
+) -> list[np.ndarray]:
     from scripts.fg_extract import connected_mask_proposals
 
     parts = connected_mask_proposals(mask, expected)
+    if parts and len(parts) != expected and image is not None:
+        # A flat card can connect several distinct graphics through its fill.
+        # Reuse local color boundaries; never cut it into arbitrary rectangles.
+        ys, xs = np.nonzero(mask)
+        top, bottom, left, right = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+        region = np.s_[top:bottom, left:right]
+        crop = image[region]
+        support = mask[region]
+        ignored = np.zeros(support.shape, dtype=bool) if text_mask is None else text_mask[region]
+        visible = support & ~ignored
+        if visible.any():
+            base = np.median(crop[visible], axis=0)
+            separated = []
+            occupied = np.zeros(support.shape, dtype=bool)
+            for candidate in generate_flat_color_candidates(crop, ignored):
+                foreground = candidate.mask & ~ignored
+                owned = foreground & support
+                if (
+                    np.count_nonzero(owned) < 100
+                    or np.count_nonzero(owned) < 0.98 * np.count_nonzero(foreground)
+                    or np.max(np.abs(np.median(crop[owned], axis=0) - base)) <= 16
+                    or np.any(candidate.mask & occupied)
+                ):
+                    continue
+                selected = candidate.mask & support
+                separated.append(selected)
+                occupied |= selected
+            remainder = support & ~occupied
+            if len(separated) == expected - 1 and remainder.any():
+                parts = []
+                for selected in [remainder, *separated]:
+                    part = np.zeros(mask.shape, dtype=bool)
+                    part[region] = selected
+                    parts.append(part)
     if len(parts) != expected:
         raise RecoverableComponentPlanError(
             "split did not find exact connected proposals",

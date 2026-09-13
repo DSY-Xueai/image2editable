@@ -77,6 +77,8 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 
 With a full repository or an installed `image2editable` Runtime, the Skill automatically prepares the pinned dependencies, OCR, and runtime models, then completes the conversion through the current Host Agent. A standalone Skill installation requires absolute local paths in `SAM2_MODEL`, `LAMA_MODEL`, and `GROUNDING_DINO_MODEL`; if any path is missing, the Skill lists the missing variables and stops.
 
+Native PDF pages retain text and drawing objects and undergo a render check before export. This path requires Microsoft PowerPoint (Windows, with `image2editable[render-qa]`) or LibreOffice with `soffice` available on the command line.
+
 ## Project layout
 
 ```

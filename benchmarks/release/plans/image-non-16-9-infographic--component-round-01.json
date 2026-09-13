@@ -4,96 +4,8 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "22574a30024e4e67b428af536b9f581aa66b33ab31e334e09846801928a2fe59",
+  "request_sha256": "8886e8dc2b48f4ffe6828004c1c567851acef04080044737b639cd325670bf8a",
   "actions": [
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0002"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The header background is a distinct page region."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0005"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The first card skeleton is a distinct movable visual layer without native text."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0009"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The second card skeleton is a distinct movable visual layer without native text."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0010"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The third card skeleton is a distinct movable visual layer without native text."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0011"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The blue circle is an independent visual element."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0012"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The yellow circle is an independent visual element."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0014"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The red circle is an independent visual element."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0015"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "The full footer divider is the complete distinct line element."
-      ]
-    },
     {
       "action": "discard",
       "object_ids": [
@@ -102,40 +14,7 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This is a cross-card composite that overlaps independent card elements."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0003"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This candidate duplicates the third card structure."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0004"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This non-overlapping card fill partition completes the first card as a distinct visual layer."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0006"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This non-overlapping card fill partition completes the corresponding card as a distinct visual layer."
+        "The candidate is a duplicate composite or footer background; foreground objects are retained separately."
       ]
     },
     {
@@ -146,7 +25,7 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This footer composite contains text and reconstruction artifacts."
+        "The candidate is a duplicate composite or footer background; foreground objects are retained separately."
       ]
     },
     {
@@ -157,42 +36,162 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This footer background duplicate is not an independent foreground object."
+        "The candidate is a duplicate composite or footer background; foreground objects are retained separately."
       ]
     },
     {
-      "action": "discard",
+      "action": "accept",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the visible header, card fill or colored circle shown in the bound source."
+      ]
+    },
+    {
+      "action": "accept",
       "object_ids": [
         "component_0013"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This candidate duplicates the red circle region."
+        "Retain the visible header, card fill or colored circle shown in the bound source."
       ]
     },
     {
-      "action": "discard",
+      "action": "split",
       "object_ids": [
-        "component_0016"
+        "component_0005"
+      ],
+      "parameters": {
+        "parts": 5
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Separate the four distinct progress bars from their flat card fill using the source color boundaries."
+      ]
+    },
+    {
+      "action": "split",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {
+        "parts": 5
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Separate the four distinct progress bars from their flat card fill using the source color boundaries."
+      ]
+    },
+    {
+      "action": "split",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {
+        "parts": 5
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Separate the four distinct progress bars from their flat card fill using the source color boundaries."
+      ]
+    },
+    {
+      "action": "absorb_into_parent",
+      "object_ids": [
+        "parent_0014",
+        "component_0014",
+        "component_0015"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This is a partial duplicate of the full footer divider."
+        "Join the two complementary fragments into the complete footer divider."
       ]
     },
     {
-      "action": "accept",
+      "action": "rebuild_background",
       "object_ids": [
-        "component_0017"
+        "component_0002",
+        "component_0003",
+        "component_0004",
+        "component_0005",
+        "component_0006",
+        "component_0009",
+        "component_0010",
+        "component_0011",
+        "component_0012",
+        "component_0013",
+        "component_0014",
+        "component_0015"
       ],
-      "parameters": {},
+      "parameters": {
+        "margin_ratio": 0.005
+      },
       "confidence": 0.99,
       "evidence": [
-        "This non-overlapping footer divider partition is a distinct line layer."
+        "Remove duplicate card, circle and divider pixels from the background."
       ]
     }
   ],
-  "graph_sha256": "6fb163bdf4dc28ece555b23da7b52106377c2528647315434964bb0e973ebaf6"
+  "graph_sha256": "a2d3ebbd2e97062c8c7b8924995acb60cba660e4036a2d2af4e39e3a7162f4e3"
 }

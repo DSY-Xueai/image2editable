@@ -1,227 +1,262 @@
 {
-  "actions": [
-    {
-      "action": "retry_with_box",
-      "confidence": 0.99,
-      "evidence": [
-        "source evidence isolates the left non-overlapping third of the table header"
-      ],
-      "object_ids": [
-        "split_0001"
-      ],
-      "parameters": {
-        "box": [
-          0.04375,
-          0.22777777777777777,
-          0.325,
-          0.2811111111111111
-        ],
-        "independent": true
-      }
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 1"
-      ],
-      "object_ids": [
-        "split_0009"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 2"
-      ],
-      "object_ids": [
-        "split_0028"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 3"
-      ],
-      "object_ids": [
-        "split_0023"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 4"
-      ],
-      "object_ids": [
-        "split_0037"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 5"
-      ],
-      "object_ids": [
-        "split_0029"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 6"
-      ],
-      "object_ids": [
-        "split_0030"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 7"
-      ],
-      "object_ids": [
-        "split_0041"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 8"
-      ],
-      "object_ids": [
-        "split_0042"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 9"
-      ],
-      "object_ids": [
-        "split_0053"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 10"
-      ],
-      "object_ids": [
-        "split_0096"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 11"
-      ],
-      "object_ids": [
-        "split_0118"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": [
-        "round-three isolation shows complete non-overlapping data row 12"
-      ],
-      "object_ids": [
-        "split_0011"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "retry_with_box",
-      "confidence": 0.99,
-      "evidence": [
-        "source evidence isolates the middle non-overlapping third of the table header"
-      ],
-      "object_ids": [
-        "split_0006"
-      ],
-      "parameters": {
-        "box": [
-          0.325,
-          0.22777777777777777,
-          0.646875,
-          0.2811111111111111
-        ],
-        "independent": true
-      }
-    },
-    {
-      "action": "retry_with_box",
-      "confidence": 0.99,
-      "evidence": [
-        "source evidence isolates the right non-overlapping third of the table header"
-      ],
-      "object_ids": [
-        "split_0002"
-      ],
-      "parameters": {
-        "box": [
-          0.646875,
-          0.22777777777777777,
-          0.940625,
-          0.2811111111111111
-        ],
-        "independent": true
-      }
-    },
-    {
-      "action": "rebuild_background",
-      "confidence": 0.99,
-      "evidence": [
-        "CPU quality diagnostics show duplicate, halo, and underlay pixels beneath the twelve row visuals and three non-overlapping header segments"
-      ],
-      "object_ids": [
-        "split_0001",
-        "split_0002",
-        "split_0006",
-        "split_0009",
-        "split_0011",
-        "split_0023",
-        "split_0028",
-        "split_0029",
-        "split_0030",
-        "split_0037",
-        "split_0041",
-        "split_0042",
-        "split_0053",
-        "split_0096",
-        "split_0118"
-      ],
-      "parameters": {
-        "margin_ratio": 0.005
-      }
-    }
-  ],
+  "schema_version": 1,
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "e0405a626c0051e79245885039f46da1c983d00f071f6bebe3a6891269f0b29c",
-  "schema_version": 1,
-  "graph_sha256": "b2eb57ebb5d35e144fd8eeb458ed73c6b8375eff284706ab22351f3b35776996"
+  "request_sha256": "0c60622bf9cc25ce66940e3c0a5285562920b9b0f0e8849eb56173080d23719a",
+  "graph_sha256": "12e2d5c8e12bb887f59b7af924cd633b6368843807d6a94f22e270ffe103b7dc",
+  "actions": [
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0002"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0003"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0013"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0015"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0016"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0018"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "split_0019"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "split_0001",
+        "split_0002",
+        "split_0003",
+        "split_0004",
+        "split_0005",
+        "split_0006",
+        "split_0007",
+        "split_0008",
+        "split_0009",
+        "split_0010",
+        "split_0011",
+        "split_0012",
+        "split_0013",
+        "split_0014",
+        "split_0015",
+        "split_0016",
+        "split_0017",
+        "split_0018",
+        "split_0019"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound graph and quality report show a remaining composite under the reconstructed header cells and complete rows. Remove the duplicate composite; preserve existing row geometry and independently assess uncovered grid edges."
+      ]
+    }
+  ]
 }

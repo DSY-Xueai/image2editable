@@ -5453,6 +5453,29 @@ def test_split_two_connected_proposals_preserves_pixels_and_layer(tmp_path: Path
     assert np.array_equal(union, mask > 0)
 
 
+def test_split_flat_card_separates_graphics_without_model_or_pixel_loss() -> None:
+    from scripts.visual_segment import _connected_action_parts
+
+    image = np.full((200, 320, 3), 255, dtype=np.uint8)
+    mask = np.zeros(image.shape[:2], dtype=bool)
+    mask[10:190, 10:310] = True
+    image[110:140, 40:120] = [30, 130, 180]
+    image[110:140, 180:260] = [210, 220, 230]
+    text = np.zeros(mask.shape, dtype=bool)
+    text[35:60, 40:180] = True
+    image[text] = 0
+
+    parts = _connected_action_parts(mask, 3, image=image, text_mask=text)
+
+    assert len(parts) == 3
+    assert np.array_equal(np.logical_or.reduce(parts), mask)
+    assert np.max(np.sum(parts, axis=0)) == 1
+    assert any(part[120, 60] and not part[120, 200] for part in parts)
+    assert any(part[120, 200] and not part[120, 60] for part in parts)
+    with pytest.raises(RecoverableComponentPlanError, match="exact connected proposals"):
+        _connected_action_parts(mask, 2, image=image, text_mask=text)
+
+
 def test_action_failure_does_not_delete_replacement_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

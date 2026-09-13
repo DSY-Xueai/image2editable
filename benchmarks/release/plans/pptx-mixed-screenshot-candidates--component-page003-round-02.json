@@ -4,14 +4,16 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "f16861801c987e00427c18b9a7b2f939ca62421638ae7f515be2ef4874960474",
+  "request_sha256": "14d43bebed0c6722276c40ed8b5251750cee9fdb63e27ff17f77fb3f8d6c5df1",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "parent_0004"
+        "parent_0005"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
         "The complete lower-left circle has zero missing pixels; its halo and text residual are generated-background defects addressed by the same-round rebuild."
@@ -22,7 +24,9 @@
       "object_ids": [
         "parent_0007"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
         "The complete horizontal rule has zero component violations and complete source-backed ownership."
@@ -31,7 +35,7 @@
     {
       "action": "rebuild_background",
       "object_ids": [
-        "parent_0004",
+        "parent_0005",
         "parent_0007"
       ],
       "parameters": {
@@ -43,5 +47,5 @@
       ]
     }
   ],
-  "graph_sha256": "eabb6e008ab8fb528d08bfe3c8dd6babe309cb08cb3cfb4c25fd959ad4e45e5d"
+  "graph_sha256": "2e8533c9607594e3b96a8c9aed5853766fc8359eea725844680c5b160ebd4111"
 }

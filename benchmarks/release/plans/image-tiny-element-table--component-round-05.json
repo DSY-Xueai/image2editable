@@ -1,27 +1,107 @@
 {
-  "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this non-overlapping table-header segment"], "object_ids": ["split_0001"], "parameters": {"independent": true}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 2196 adjacent pixels to this owner"], "object_ids": ["split_0001"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this non-overlapping table-header segment"], "object_ids": ["split_0002"], "parameters": {"independent": true}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 35 adjacent pixels to this owner"], "object_ids": ["split_0002"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0009"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 622 adjacent pixels to this owner"], "object_ids": ["split_0009"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0023"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 199 adjacent pixels to this owner"], "object_ids": ["split_0023"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0029"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 52 adjacent pixels to this owner"], "object_ids": ["split_0029"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0041"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 67317 adjacent pixels to this owner"], "object_ids": ["split_0041"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0053"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 371 adjacent pixels to this owner"], "object_ids": ["split_0053"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["final component quality accepts this semantic table row"], "object_ids": ["split_0118"], "parameters": {}},
-    {"action": "absorb_residual", "confidence": 0.99, "evidence": ["signed final residual partition assigns 32 adjacent pixels to this owner"], "object_ids": ["split_0118"], "parameters": {}}
-  ],
-  "graph_sha256": "33a724dfb3a50b6d612d795ed12b67f8db5b5c24cbcffa90f06a3bb724cff662",
+  "schema_version": 1,
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 5,
-  "request_sha256": "44b0a8aaba71bc82c4ac6b0811333fa03fd41d5ec5be5fa07f37b83ec8e142da",
-  "schema_version": 1
+  "request_sha256": "9d3cce3ca71e13083364059853301fb995149581a2f12db475e4f63de547b95d",
+  "graph_sha256": "ff4bcc0ede9489729e0d83614d512f22843d976f4594a78d20d4a2dd7912f4a3",
+  "actions": [
+    {
+      "action": "expand",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0010"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0012"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0018"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0004",
+        "split_0010",
+        "split_0012",
+        "split_0014",
+        "split_0016",
+        "split_0018"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The bound report localizes duplicate and orphan pixels to pale row borders. Extend only into unowned border pixels, preserve neighboring active masks, then clean the covered edges from the background."
+      ]
+    }
+  ]
 }

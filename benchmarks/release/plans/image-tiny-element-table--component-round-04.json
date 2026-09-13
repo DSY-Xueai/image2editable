@@ -1,33 +1,93 @@
 {
-  "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0001"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0002"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0009"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0011"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0023"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0029"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0041"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0053"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-four quality report accepts this non-overlapping semantic table visual"], "object_ids": ["split_0118"], "parameters": {}},
-    {
-      "action": "rebuild_background",
-      "confidence": 0.99,
-      "evidence": ["remaining unexplained pixels are original table pixels beneath the fifteen accepted semantic table visuals"],
-      "object_ids": ["split_0001", "split_0002", "split_0006", "split_0009", "split_0011", "split_0023", "split_0028", "split_0029", "split_0030", "split_0037", "split_0041", "split_0042", "split_0053", "split_0096", "split_0118"],
-      "parameters": {"margin_ratio": 0.005}
-    },
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0011"], "parameters": {"margin_ratio": 0.09836065573770492}},
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0023"], "parameters": {"margin_ratio": 0.1}},
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0029"], "parameters": {"margin_ratio": 0.1}},
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0041"], "parameters": {"margin_ratio": 0.1}},
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0053"], "parameters": {"margin_ratio": 0.1}},
-    {"action": "rebuild_background", "confidence": 1.0, "evidence": ["CPU text-halo diagnostics require a six-pixel cleanup around this row"], "object_ids": ["split_0118"], "parameters": {"margin_ratio": 0.1}}
-  ],
-  "graph_sha256": "88906fd285e1406b8cee49f0913ba6a81aaa598c9a07bc9512c4288318c76166",
+  "schema_version": 1,
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "aab1b4c1315e220af649a29c79e31fd9921a6ea6cba3bb9fad747d178bce834a",
-  "schema_version": 1
+  "request_sha256": "1fac72f98c027c0626633a563e7f2b30b74c6256bb4bc0fce83f3e8c8fb7b7b1",
+  "graph_sha256": "36b1c09fa489614c2c521e5e7dd850eb82c1ddf5a0cb8350fdb994e32d4da12c",
+  "actions": [
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0010"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0012"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "split_0018"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "split_0010",
+        "split_0012",
+        "split_0014",
+        "split_0016",
+        "split_0018"
+      ],
+      "parameters": {
+        "margin_ratio": 0.015
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The four bound residual regions are vertical cell borders in rows split_0012 and split_0014. Restore those borders into their owning rows, then clean duplicate pixels without changing frozen rows."
+      ]
+    }
+  ]
 }

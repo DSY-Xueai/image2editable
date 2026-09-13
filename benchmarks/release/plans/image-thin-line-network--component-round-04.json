@@ -8,10 +8,10 @@
   "actions": [
     {
       "action": "rebuild_background",
-      "object_ids": ["component_0015","component_0017","component_0020","component_0025"],
+      "object_ids": ["component_0015","component_0016","component_0024"],
       "parameters": {"margin_ratio": 0.005},
       "confidence": 0.99,
-      "evidence": ["All four masks are structurally correct; the report isolates their remaining failures to local background or underlay pixels."]
+      "evidence": ["The current report isolates the pending edge, hub and node failures to local background or underlay pixels."]
     }
   ],
   "graph_sha256": "692bb2a4fb04b147db84e07470b51d3a12a0dc060504efcdd808e5ce71c5b28e"

@@ -4,28 +4,19 @@
   "page_id": "page_002",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "b280a53626cbdd9fe331a31b5b30988ae02ddcf9ef9c7adb784d853fadf39a7c",
+  "request_sha256": "0480325808d3c777cb9604cb1721bb6fdaafaf48dbb46c01a4118b1593c88ebd",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
         "component_0007"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0011"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -33,10 +24,25 @@
       "object_ids": [
         "component_0008"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -44,10 +50,25 @@
       "object_ids": [
         "component_0010"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -55,10 +76,12 @@
       "object_ids": [
         "component_0012"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -66,10 +89,38 @@
       "object_ids": [
         "component_0013"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -77,10 +128,12 @@
       "object_ids": [
         "component_0016"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -88,10 +141,12 @@
       "object_ids": [
         "component_0017"
       ],
-      "parameters": {},
+      "parameters": {
+        "preserve_mask": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "Complete card surface has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
@@ -99,88 +154,38 @@
       "object_ids": [
         "component_0018"
       ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Complete card surface has zero component violations."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0022"
-      ],
       "parameters": {
-        "independent": true
+        "preserve_mask": true
       },
       "confidence": 0.99,
       "evidence": [
-        "Complete independent icon; halo is caused by the current underlay."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0030"
-      ],
-      "parameters": {
-        "independent": true
-      },
-      "confidence": 0.99,
-      "evidence": [
-        "Complete independent icon; halo is caused by the current underlay."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0031"
-      ],
-      "parameters": {
-        "independent": true
-      },
-      "confidence": 0.99,
-      "evidence": [
-        "Complete independent icon; halo is caused by the current underlay."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0019"
-      ],
-      "parameters": {
-        "independent": true
-      },
-      "confidence": 0.99,
-      "evidence": [
-        "Complete title background has zero component violations."
+        "The complete rounded card retains its verified surface and editable label; the remaining defect is text residue in the canvas background."
       ]
     },
     {
       "action": "rebuild_background",
       "object_ids": [
         "component_0007",
-        "component_0011",
         "component_0008",
+        "component_0009",
         "component_0010",
+        "component_0011",
         "component_0012",
         "component_0013",
+        "component_0014",
+        "component_0015",
         "component_0016",
         "component_0017",
-        "component_0018",
-        "component_0022",
-        "component_0030",
-        "component_0031"
+        "component_0018"
       ],
       "parameters": {
         "margin_ratio": 0.005
       },
       "confidence": 0.99,
       "evidence": [
-        "Rebuild removes the remaining icon halo and restores the large unowned dark background without altering accepted component masks."
+        "Remove residual raster labels beneath all twelve cards and restore uncovered dark canvas from the verified source while retaining the separately frozen icons."
       ]
     }
   ],
-  "graph_sha256": "37aec06e3ce7d98602a2d4f85050be559f767a684dae2e64c7be098706eef7da"
+  "graph_sha256": "25181493b0e64f04de756033b377af2089fc247121a8a5516a673bdcdf8e6a4e"
 }

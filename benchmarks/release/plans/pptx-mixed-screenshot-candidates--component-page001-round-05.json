@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "d6497c662789e2d888a7216c582249daf6b58d56f2c08179fb3e41fb3b05d1c4",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": ["parent_0002"],
+      "parameters": {"preserve_mask": true},
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0002", "parent_0003", "component_0005",
+        "The lower table surface and frame have disjoint visible ownership from the left body and complete header."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": ["parent_0003"],
+      "parameters": {"preserve_mask": true},
+      "confidence": 0.99,
+      "evidence": [
+        "parent_0002", "parent_0003",
+        "The left body is independently movable; its owned pixels do not duplicate the lower surface."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": ["component_0005"],
+      "parameters": {"preserve_mask": true},
+      "confidence": 0.99,
+      "evidence": [
+        "component_0005", "parent_0002",
+        "The complete five-column header is a distinct top layer with editable text and no duplicated lower ownership."
+      ]
+    }
+  ],
+  "graph_sha256": "4dd5ed32bfb8146d4ff8c92cf1f05a0782f9bda7ac6adac488a6745e20dfd5a5"
+}

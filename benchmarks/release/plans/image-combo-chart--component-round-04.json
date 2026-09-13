@@ -1,21 +1,214 @@
 {
   "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0004"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0005"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0007"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0008"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0009"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts this independently movable chart bar with no component violation"], "object_ids": ["component_0010"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-three quality report accepts the independently movable line-chart parent with no component violation"], "object_ids": ["parent_0011"], "parameters": {}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the first horizontal grid line in this narrow box"], "object_ids": ["component_0001"], "parameters": {"box": [0.092, 0.353, 0.914, 0.36], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the second horizontal grid line in this narrow box"], "object_ids": ["component_0002"], "parameters": {"box": [0.092, 0.453, 0.914, 0.46], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the third horizontal grid line in this narrow box"], "object_ids": ["component_0003"], "parameters": {"box": [0.092, 0.553, 0.914, 0.56], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the fourth horizontal grid line in this narrow box"], "object_ids": ["component_0006"], "parameters": {"box": [0.092, 0.653, 0.914, 0.66], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the fifth horizontal grid line in this narrow box"], "object_ids": ["component_0012"], "parameters": {"box": [0.092, 0.753, 0.914, 0.76], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the sixth horizontal grid line in this narrow box"], "object_ids": ["component_0013"], "parameters": {"box": [0.092, 0.853, 0.914, 0.86], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the lower-middle left-axis marker"], "object_ids": ["component_0015"], "parameters": {"box": [0.055, 0.64, 0.08, 0.67], "independent": true}},
-    {"action": "retry_with_box", "confidence": 0.99, "evidence": ["unexplained-mask isolates the bottom left-axis marker"], "object_ids": ["component_0017"], "parameters": {"box": [0.055, 0.84, 0.077, 0.87], "independent": true}},
-    {"action": "rebuild_background", "confidence": 0.99, "evidence": ["background must be rebuilt only beneath the eight source-backed grid-line and axis-marker retries"], "object_ids": ["component_0001", "component_0002", "component_0003", "component_0006", "component_0012", "component_0013", "component_0015", "component_0017"], "parameters": {"margin_ratio": 0.005}}
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "parent_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Current quality confirms the complete bar or line series; retain it while restoring separate grid lines."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.353,
+          0.914,
+          0.36
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.453,
+          0.914,
+          0.46
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.553,
+          0.914,
+          0.56
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.653,
+          0.914,
+          0.66
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.753,
+          0.914,
+          0.76
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "retry_with_box",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {
+        "box": [
+          0.092,
+          0.853,
+          0.914,
+          0.86
+        ],
+        "independent": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The signed unexplained mask isolates this independent horizontal grid line."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0001",
+        "component_0002",
+        "component_0003",
+        "component_0010",
+        "component_0012",
+        "component_0015"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Rebuild only beneath the six recovered source grid lines."
+      ]
+    }
   ],
   "graph_sha256": "6e772988f980183327a847d67b9a38941635f7722db5c70274ec3cf266a5111a",
   "kind": "component_plan",

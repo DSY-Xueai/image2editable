@@ -1789,6 +1789,7 @@ def _rebuild_canvas_background(
     text_mask_path: Path,
     output_path: Path,
     repair_all_active: bool = True,
+    text_items: list[dict] | None = None,
 ) -> Path:
     import cv2
     import numpy as np
@@ -1812,6 +1813,7 @@ def _rebuild_canvas_background(
 
     graph_root = graph_dir.resolve()
     by_id = {node["id"]: node for node in graph["nodes"]}
+    text_by_id = {item.get("_component_id"): item for item in (text_items or [])}
     masks_by_id = {}
     repairable_visual = np.zeros(text_repair.shape, dtype=bool)
     visible_coverage = np.zeros(text_repair.shape, dtype=bool)
@@ -1884,6 +1886,13 @@ def _rebuild_canvas_background(
             request_mask = cv2.dilate(
                 masks_by_id[object_id].astype(np.uint8), kernel
             ) > 0
+            if object_id in text_by_id and by_id[object_id]["kind"] == "text":
+                x, y, width, height = map(int, text_by_id[object_id]["box"])
+                region = np.s_[
+                    max(0, y - radius):min(source.shape[0], y + height + radius),
+                    max(0, x - radius):min(source.shape[1], x + width + radius),
+                ]
+                request_mask[region] |= text_repair[region]
             if (
                 restored is not None
                 and by_id[object_id]["kind"] == "text"
@@ -2368,6 +2377,17 @@ def _effective_text_context(
         if component_id in frozen_ids
     ]
     effective_mask = original_mask & frozen_mask
+    if refine_text_clean:
+        from scripts.text_detect import refine_text_ink_bounds
+
+        refined_items = refine_text_ink_bounds(source, effective_items)
+        for before, after in zip(effective_items, refined_items, strict=True):
+            if before["box"] == after["box"]:
+                continue
+            x, y, width, height = map(int, after["box"])
+            old_right = int(before["box"][0] + before["box"][2])
+            effective_mask[y:y + height, old_right:x + width] = True
+        effective_items = refined_items
     authenticated_mask = effective_mask.copy()
     effective_clean = cleaned.copy()
     restore = suppressed_mask & ~frozen_mask
@@ -3510,7 +3530,7 @@ def _execute_legacy_round(
             "_text_cleanup_mask_path", prepared["_text_mask_path"]
         ))) as image:
             text_mask = np.asarray(image.convert("L")) > 0
-        _, effective_text_mask, effective_text_clean = _effective_text_context(
+        effective_text_items, effective_text_mask, effective_text_clean = _effective_text_context(
             source=pixels,
             text_clean=text_clean,
             text_mask=text_mask,
@@ -3540,6 +3560,7 @@ def _execute_legacy_round(
             graph=next_graph,
             graph_dir=output_dir,
             text_mask_path=effective_text_mask_path,
+            text_items=effective_text_items,
             output_path=output_dir / "background-rebuilt.png",
             repair_all_active=(
                 current_background is None
@@ -4068,6 +4089,7 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
     planned_records = {}
     published_records = []
     staging_records = {}
+    native_quality = {}
     try:
         for index, (variant, target) in enumerate(targets.items()):
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -4108,6 +4130,12 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
                     presentation = Presentation(staging)
                     if len(presentation.slides) != len(slides):
                         raise RuntimeError("PPTX reopen slide count mismatch")
+                    from image2editable.native_pdf_quality import validate_native_pdf_output
+
+                    for page_id, quality in validate_native_pdf_output(
+                        store, page_records, staging, variant,
+                    ).items():
+                        native_quality.setdefault(page_id, {})[variant] = quality
                 staged[variant] = staging
             except Exception:
                 if staging.exists():
@@ -4144,6 +4172,7 @@ def assemble_legacy_results(store: RunStore) -> dict[str, Any]:
             published,
             published_records,
             output_format=output_format,
+            native_quality=native_quality,
         )
         for record in published_records:
             _verify_legacy_output_record(record)
@@ -4481,6 +4510,7 @@ def _record_legacy_delivery(
     output_records: list[tuple[Path, tuple[int, int, int, int, int], str]],
     *,
     output_format: str = "pptx",
+    native_quality: dict | None = None,
 ) -> None:
     hashes = {str(path): digest for path, _, digest in output_records}
     output_refs = {
@@ -4504,6 +4534,15 @@ def _record_legacy_delivery(
             )
         if route_result_ref is not None:
             delivery["route_result"] = route_result_ref
+        if native_quality and page_id in native_quality:
+            relative = f"pages/{page_id}/reconstruction/native-quality.json"
+            store.write_json(relative, {
+                "schema_version": 1, "page_id": page_id,
+                "variants": native_quality[page_id],
+            })
+            delivery["native_quality_ref"] = {
+                "path": relative, "sha256": sha256_file(store.root / relative),
+            }
         store.write_json(
             f"pages/{page_id}/reconstruction/component_delivery.json",
             delivery,

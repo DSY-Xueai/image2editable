@@ -4,7 +4,7 @@
   "page_id": "page_003",
   "provider": "host",
   "repair_round": 1,
-  "request_sha256": "2edd9fcdfe62eeac56afbc0f299a076b6f604d1d0baaef755ec3837ead44af59",
+  "request_sha256": "3aa2a206c406b38aca2e8e479ce1508bb3be806f9ce32d8471934b2783708952",
   "actions": [
     {
       "action": "collapse_to_parent",
@@ -14,18 +14,18 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "The parent mask is the complete visible upper-right translucent circle; its smaller children are duplicate fragments."
+        "The parent mask contains the complete upper-right translucent circle."
       ]
     },
     {
       "action": "collapse_to_parent",
       "object_ids": [
-        "parent_0004"
+        "parent_0005"
       ],
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "The parent_0004 mask is the complete visible lower-left translucent circle with native text protected from its raster layer."
+        "The parent mask contains the complete lower-left translucent circle and preserves its independently editable text."
       ]
     },
     {
@@ -36,7 +36,7 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "The parent mask covers the full 420-pixel horizontal rule; the later line candidate is a shorter duplicate."
+        "The parent mask contains the complete horizontal rule."
       ]
     },
     {
@@ -47,7 +47,7 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This near-page mask is the fixed gradient background and would flatten the slide if retained as a movable foreground."
+        "This broad partial gradient surface belongs to the fixed canvas background."
       ]
     },
     {
@@ -58,7 +58,18 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This large right-side mask is another gradient-background region rather than an independent visual object."
+        "This broad right-side gradient surface belongs to the fixed canvas background."
+      ]
+    },
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "This partial upper-circle fragment duplicates the complete circle retained as parent_0003."
       ]
     },
     {
@@ -69,31 +80,9 @@
       "parameters": {},
       "confidence": 0.99,
       "evidence": [
-        "This mask is an overlapping partial duplicate of the complete upper-right circle retained as parent_0003."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0005"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This raster mask duplicates the two native editable headline text boxes."
-      ]
-    },
-    {
-      "action": "discard",
-      "object_ids": [
-        "component_0008"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "This shorter horizontal-rule mask duplicates the complete retained parent_0007."
+        "The headline is represented by native editable text; this raster fragment duplicates its glyphs."
       ]
     }
   ],
-  "graph_sha256": "c6f7ccf4c5ce928242841297b5f76cc059f417e4c08a8064d9998a84449dd4f6"
+  "graph_sha256": "cf9f5b05a3f875505bd7f19e36ab50255b4f9be2a7dbc41107d2788f7c6b050c"
 }

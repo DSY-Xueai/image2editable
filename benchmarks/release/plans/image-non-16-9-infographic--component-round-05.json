@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 5,
+  "request_sha256": "350643884b4b71ae0db00f6b21c428965118496b40de0f0b1fab884b1d2130cf",
+  "graph_sha256": "35a4dd4e7e63aa06503419c6126cc40158042c706be5e1439a81a89c9aa337d0",
+  "actions": [
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The card fill now passes every component check; preserve its verified border ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The card fill now passes every component check; preserve its verified border ownership."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "preserve_mask": true
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "The card fill now passes every component check; preserve its verified border ownership."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "text_0014"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Remove the source slash at the corrected end of the editable footer text box; it is text, not a graphic component."
+      ]
+    }
+  ]
+}

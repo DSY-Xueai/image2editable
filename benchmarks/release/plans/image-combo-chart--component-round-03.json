@@ -1,12 +1,82 @@
 {
   "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0004"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0005"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0009"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0007"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0008"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable visual"], "object_ids": ["component_0010"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["current quality evidence retains the complete independently movable line-chart parent"], "object_ids": ["parent_0011"], "parameters": {}}
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "parent_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The current residual review retains the complete independent bar or line series silhouette."
+      ]
+    }
   ],
   "kind": "component_plan",
   "page_id": "page_001",

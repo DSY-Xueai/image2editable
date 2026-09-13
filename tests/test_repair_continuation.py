@@ -46,8 +46,9 @@ def test_legacy_warning_is_repaired_before_assembly(
 
 
 @pytest.mark.parametrize("changed_output", [None, "background", "rgba"])
+@pytest.mark.parametrize("resumed", [False, True])
 def test_output_cycle_is_not_progress_despite_newly_refrozen_components(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed_output: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed_output: str | None, resumed: bool,
 ) -> None:
     store = RunStore(tmp_path)
 
@@ -98,8 +99,24 @@ def test_output_cycle_is_not_progress_despite_newly_refrozen_components(
             "failed_ids": ["component_a"], "frozen_ids": ["component_b"],
         }],
     }
+    if resumed:
+        state.update(phase="freeze_committed", status="active")
     monkeypatch.setattr(component_repair, "load_component_agent_request", lambda path: prior_request)
 
+    assert component_repair._repeated_component_output(store, state) is (changed_output is None)
     assert component_repair._next_round_progress_allowed(store, state) is (
-        changed_output is not None
+        resumed or changed_output is not None
     )
+
+
+def test_resumed_round_still_rejects_same_plan_on_identical_inputs(tmp_path, monkeypatch):
+    store = RunStore(tmp_path)
+    state = {
+        "repair_round": 3, "phase": "awaiting_plan", "status": "active",
+        "current_round": {"request_ref": {"path": "agent/round-03/request.json"}},
+        "round_history": [{"round": 2, "normalized_plan_sha256": "a" * 64}],
+    }
+    monkeypatch.setattr(component_repair, "load_component_agent_request", lambda path: {})
+    monkeypatch.setattr(component_repair, "_component_request_inputs", lambda *args: {"source": "same"})
+    assert component_repair._repeated_component_plan(store, state, {}, "a" * 64)
+    assert not component_repair._repeated_component_plan(store, state, {}, "b" * 64)

@@ -244,6 +244,10 @@ jobs:
         run: image2editable models install runtime --yes
       - name: Run doctor
         run: image2editable doctor
+      - name: Install native PDF renderer
+        if: ${{ matrix.shard == 'pdf-network' }}
+        shell: pwsh
+        run: ./scripts/install_release_renderer.ps1
       - name: Run diagnostic core benchmark shard
         working-directory: ${{ runner.temp }}
         run: >-
@@ -333,6 +337,10 @@ jobs:
         run: image2editable models install runtime --yes
       - name: Run doctor
         run: image2editable doctor
+      - name: Install native PDF renderer
+        if: ${{ matrix.shard == 'pdf-network' }}
+        shell: pwsh
+        run: ./scripts/install_release_renderer.ps1
       - name: Run strict core benchmark shard
         working-directory: ${{ runner.temp }}
         run: >-

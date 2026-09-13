@@ -179,7 +179,11 @@ def _build_text_result(
     for rb in raw_boxes:
         original_box = tuple(rb["box"])
         text = rb["text"].strip()
-        if len(text) == 1 and text in "?!" and rb.get("confidence", 0) >= .9:
+        if (
+            len(text) == 1 and text in "?!" and rb.get("confidence", 0) >= .9
+        ) or re.fullmatch(r"[+-]\d+(?:[.,]\d+)?%?", text) or (
+            rb.get("confidence", 0) >= .99 and text.endswith(("/", "\\"))
+        ):
             rb["text"] = text
         else:
             rb["text"] = text.lstrip("|/\\-_=.,:;!?~`'\"").rstrip("|/\\-_=,:;~`'\"")
@@ -243,6 +247,8 @@ def _build_text_result(
 
     # Refine alignment by grouping nearby lines
     text_items = _refine_alignment(text_items, w)
+
+    text_items = refine_text_ink_bounds(img_rgb, text_items)
 
     # Build mask
     text_mask = _build_text_mask((h, w), text_items, padding=mask_padding)
@@ -789,6 +795,9 @@ def _filter_noise(
         if preserve_symbol:
             filtered.append(b)
             continue
+        if re.fullmatch(r"[+-]\d+(?:[.,]\d+)?%?", text):
+            filtered.append(b)
+            continue
         if _NOISE_PATTERN.match(text) and not preserve_symbol:
             continue
 
@@ -878,6 +887,50 @@ def _is_likely_vertical_decorative_fragment(box: dict) -> bool:
     if has_cjk and len(text) == 1 and h >= 120 and w >= 80:
         return True
     return False
+
+
+def refine_text_ink_bounds(img_rgb: np.ndarray, items: list[dict]) -> list[dict]:
+    """Include a recognized terminal slash whose ink lies outside its OCR box."""
+    result = []
+    for item in items:
+        result.append(item)
+        text = item.get("text", "").rstrip()
+        if not text.endswith(("/", "\\")) or item.get("rotation") or item.get("runs"):
+            continue
+        x, y, width, height = map(int, item["box"])
+        right = x + width
+        left = max(0, right - height)
+        end = min(img_rgb.shape[1], right + height)
+        top, bottom = max(0, y), min(img_rgb.shape[0], y + height)
+        for other in items:
+            if other is item:
+                continue
+            ox, oy, ow, oh = other["box"]
+            if ox >= right and min(bottom, oy + oh) > max(top, oy):
+                end = min(end, int(ox))
+        color = item.get("color", "")
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color) or end <= left or bottom <= top:
+            continue
+        rgb = np.array([int(color[i:i + 2], 16) for i in (1, 3, 5)])
+        ink = np.max(np.abs(img_rgb[top:bottom, left:end].astype(np.int16) - rgb), axis=2) <= 24
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), 8)
+        matches = []
+        for label in range(1, count):
+            bx, by, bw, bh, area = stats[label]
+            if not (.12 * height <= bw <= .65 * height and .5 * height <= bh <= height
+                    and area >= 6 and bx + bw < end - left):
+                continue
+            ys, xs = np.nonzero(labels == label)
+            slope = float(np.corrcoef(xs, ys)[0, 1])
+            if slope * (-1 if text.endswith("/") else 1) > .8:
+                matches.append((int(bx), int(bw)))
+        if len(matches) == 1:
+            bx, bw = matches[0]
+            if left + bx >= right and left + bx + bw > right:
+                updated = {**item, "box": [x, y, left + bx + bw - x, height]}
+                updated.pop("words", None)
+                result[-1] = updated
+    return result
 
 
 def _recover_trailing_heading_period(

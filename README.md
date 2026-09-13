@@ -80,6 +80,8 @@ $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 
 完整仓库或已安装 `image2editable` 的环境会由 Skill 自动准备固定依赖、OCR 和 runtime 模型，并通过当前 Host Agent 完成转换。仅安装 standalone Skill 时，需要预先设置 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 的绝对本地路径；路径缺失时会列出缺失项并停止。
 
+原生 PDF 页面会保留文字与绘图对象，输出前核验 PPTX 的实际渲染。此路径需要 Microsoft PowerPoint（Windows，同时安装 `image2editable[render-qa]`）或 LibreOffice；LibreOffice 的 `soffice` 应能从命令行调用。
+
 ## 项目结构
 
 ```

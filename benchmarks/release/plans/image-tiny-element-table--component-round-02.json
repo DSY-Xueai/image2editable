@@ -4,7 +4,7 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate the table header background in this exact box"
+        "The source has seven independently bounded table-header cells; this box isolates header cell 1."
       ],
       "object_ids": [
         "split_0001"
@@ -12,6 +12,120 @@
       "parameters": {
         "box": [
           0.04375,
+          0.22777777777777777,
+          0.11875,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 2."
+      ],
+      "object_ids": [
+        "split_0002"
+      ],
+      "parameters": {
+        "box": [
+          0.11875,
+          0.22777777777777777,
+          0.325,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 3."
+      ],
+      "object_ids": [
+        "split_0003"
+      ],
+      "parameters": {
+        "box": [
+          0.325,
+          0.22777777777777777,
+          0.434375,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 4."
+      ],
+      "object_ids": [
+        "split_0004"
+      ],
+      "parameters": {
+        "box": [
+          0.434375,
+          0.22777777777777777,
+          0.540625,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 5."
+      ],
+      "object_ids": [
+        "split_0005"
+      ],
+      "parameters": {
+        "box": [
+          0.540625,
+          0.22777777777777777,
+          0.646875,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 6."
+      ],
+      "object_ids": [
+        "split_0006"
+      ],
+      "parameters": {
+        "box": [
+          0.646875,
+          0.22777777777777777,
+          0.759375,
+          0.2811111111111111
+        ],
+        "independent": true
+      }
+    },
+    {
+      "action": "retry_with_box",
+      "confidence": 0.99,
+      "evidence": [
+        "The source has seven independently bounded table-header cells; this box isolates header cell 7."
+      ],
+      "object_ids": [
+        "split_0007"
+      ],
+      "parameters": {
+        "box": [
+          0.759375,
           0.22777777777777777,
           0.940625,
           0.2811111111111111
@@ -23,10 +137,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 1 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 1, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0009"
+        "split_0008"
       ],
       "parameters": {
         "box": [
@@ -42,10 +156,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 2 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 2, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0028"
+        "split_0009"
       ],
       "parameters": {
         "box": [
@@ -61,10 +175,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 3 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 3, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0023"
+        "split_0010"
       ],
       "parameters": {
         "box": [
@@ -80,10 +194,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 4 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 4, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0037"
+        "split_0011"
       ],
       "parameters": {
         "box": [
@@ -99,10 +213,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 5 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 5, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0029"
+        "split_0012"
       ],
       "parameters": {
         "box": [
@@ -118,10 +232,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 6 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 6, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0030"
+        "split_0013"
       ],
       "parameters": {
         "box": [
@@ -137,10 +251,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 7 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 7, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0041"
+        "split_0014"
       ],
       "parameters": {
         "box": [
@@ -156,10 +270,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 8 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 8, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0042"
+        "split_0015"
       ],
       "parameters": {
         "box": [
@@ -175,10 +289,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 9 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 9, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0053"
+        "split_0016"
       ],
       "parameters": {
         "box": [
@@ -194,10 +308,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 10 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 10, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0096"
+        "split_0017"
       ],
       "parameters": {
         "box": [
@@ -213,10 +327,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 11 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 11, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0118"
+        "split_0018"
       ],
       "parameters": {
         "box": [
@@ -232,10 +346,10 @@
       "action": "retry_with_box",
       "confidence": 0.99,
       "evidence": [
-        "source and difference evidence isolate data-row background 12 in this exact box"
+        "The source has twelve complete data rows; this box isolates row 12, including its background and table boundaries."
       ],
       "object_ids": [
-        "split_0011"
+        "split_0019"
       ],
       "parameters": {
         "box": [
@@ -248,92 +362,10 @@
       }
     },
     {
-      "action": "retry_with_box",
-      "confidence": 0.99,
-      "evidence": [
-        "source and difference evidence isolate a vertical table structure line in this exact box"
-      ],
-      "object_ids": [
-        "split_0006"
-      ],
-      "parameters": {
-        "box": [
-          0.11625,
-          0.22777777777777777,
-          0.12125,
-          0.9211111111111111
-        ],
-        "independent": true
-      }
-    },
-    {
-      "action": "retry_with_box",
-      "confidence": 0.99,
-      "evidence": [
-        "source and difference evidence isolate a vertical table structure line in this exact box"
-      ],
-      "object_ids": [
-        "split_0002"
-      ],
-      "parameters": {
-        "box": [
-          0.3225,
-          0.22777777777777777,
-          0.3275,
-          0.9211111111111111
-        ],
-        "independent": true
-      }
-    },
-    {
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0016"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0017"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0018"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0019"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0020"
@@ -344,7 +376,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0021"
@@ -355,7 +387,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0022"
@@ -366,10 +398,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0003"
+        "split_0023"
       ],
       "parameters": {}
     },
@@ -377,7 +409,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0024"
@@ -388,7 +420,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0025"
@@ -399,7 +431,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0026"
@@ -410,7 +442,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0027"
@@ -421,10 +453,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0004"
+        "split_0028"
       ],
       "parameters": {}
     },
@@ -432,10 +464,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0005"
+        "split_0029"
       ],
       "parameters": {}
     },
@@ -443,10 +475,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0007"
+        "split_0030"
       ],
       "parameters": {}
     },
@@ -454,7 +486,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0031"
@@ -465,7 +497,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0032"
@@ -476,7 +508,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0033"
@@ -487,7 +519,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0034"
@@ -498,7 +530,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0035"
@@ -509,7 +541,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0036"
@@ -520,10 +552,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0008"
+        "split_0037"
       ],
       "parameters": {}
     },
@@ -531,7 +563,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0038"
@@ -542,7 +574,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0039"
@@ -553,7 +585,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0040"
@@ -564,10 +596,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0010"
+        "split_0041"
       ],
       "parameters": {}
     },
@@ -575,10 +607,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0012"
+        "split_0042"
       ],
       "parameters": {}
     },
@@ -586,7 +618,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0043"
@@ -597,7 +629,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0044"
@@ -608,7 +640,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0045"
@@ -619,7 +651,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0046"
@@ -630,7 +662,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0047"
@@ -641,7 +673,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0048"
@@ -652,7 +684,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0049"
@@ -663,7 +695,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0050"
@@ -674,7 +706,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0051"
@@ -685,7 +717,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0052"
@@ -696,10 +728,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0013"
+        "split_0053"
       ],
       "parameters": {}
     },
@@ -707,7 +739,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0054"
@@ -718,7 +750,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0055"
@@ -729,7 +761,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0056"
@@ -740,7 +772,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0057"
@@ -751,7 +783,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0058"
@@ -762,7 +794,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0059"
@@ -773,7 +805,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0060"
@@ -784,7 +816,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0061"
@@ -795,7 +827,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0062"
@@ -806,7 +838,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0063"
@@ -817,7 +849,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0064"
@@ -828,7 +860,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0065"
@@ -839,7 +871,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0066"
@@ -850,7 +882,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0067"
@@ -861,7 +893,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0068"
@@ -872,7 +904,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0069"
@@ -883,7 +915,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0070"
@@ -894,7 +926,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0071"
@@ -905,7 +937,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0072"
@@ -916,7 +948,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0073"
@@ -927,7 +959,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0074"
@@ -938,7 +970,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0075"
@@ -949,7 +981,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0076"
@@ -960,7 +992,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0077"
@@ -971,7 +1003,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0078"
@@ -982,7 +1014,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0079"
@@ -993,7 +1025,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0080"
@@ -1004,7 +1036,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0081"
@@ -1015,7 +1047,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0082"
@@ -1026,7 +1058,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0083"
@@ -1037,7 +1069,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0084"
@@ -1048,7 +1080,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0085"
@@ -1059,7 +1091,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0086"
@@ -1070,7 +1102,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0087"
@@ -1081,7 +1113,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0088"
@@ -1092,7 +1124,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0089"
@@ -1103,7 +1135,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0090"
@@ -1114,7 +1146,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0091"
@@ -1125,7 +1157,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0092"
@@ -1136,7 +1168,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0093"
@@ -1147,7 +1179,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0094"
@@ -1158,7 +1190,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0095"
@@ -1169,10 +1201,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0014"
+        "split_0096"
       ],
       "parameters": {}
     },
@@ -1180,7 +1212,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0097"
@@ -1191,7 +1223,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0098"
@@ -1202,7 +1234,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0099"
@@ -1213,7 +1245,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0100"
@@ -1224,7 +1256,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0101"
@@ -1235,7 +1267,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0102"
@@ -1246,7 +1278,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0103"
@@ -1257,7 +1289,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0104"
@@ -1268,7 +1300,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0105"
@@ -1279,7 +1311,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0106"
@@ -1290,7 +1322,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0107"
@@ -1301,7 +1333,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0108"
@@ -1312,7 +1344,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0109"
@@ -1323,7 +1355,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0110"
@@ -1334,7 +1366,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0111"
@@ -1345,7 +1377,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0112"
@@ -1356,7 +1388,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0113"
@@ -1367,7 +1399,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0114"
@@ -1378,7 +1410,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0115"
@@ -1389,7 +1421,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0116"
@@ -1400,7 +1432,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0117"
@@ -1411,10 +1443,10 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
-        "split_0015"
+        "split_0118"
       ],
       "parameters": {}
     },
@@ -1422,7 +1454,7 @@
       "action": "discard",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "This temporary connected region is a text or border fragment; the complete header cells and data rows replace its visual responsibility."
       ],
       "object_ids": [
         "split_0119"
@@ -1430,418 +1462,42 @@
       "parameters": {}
     },
     {
-      "action": "discard",
+      "action": "rebuild_background",
       "confidence": 0.99,
       "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
+        "Remove duplicate table and text pixels below the complete header cells and rows."
       ],
       "object_ids": [
-        "split_0120"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0121"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0122"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0123"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0124"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0125"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0126"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0127"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0128"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0129"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0130"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0131"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0132"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0133"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0134"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0135"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0136"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0137"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0138"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0139"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0140"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0141"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0142"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0143"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0144"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0145"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0146"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0147"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0148"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0149"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0150"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0151"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0152"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0153"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0154"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0155"
-      ],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": [
-        "connected-component analysis identifies this temporary split node as a border or text fragment; it is not accepted as a final visual"
-      ],
-      "object_ids": [
-        "split_0156"
-      ],
-      "parameters": {}
+        "split_0001",
+        "split_0002",
+        "split_0003",
+        "split_0004",
+        "split_0005",
+        "split_0006",
+        "split_0007",
+        "split_0008",
+        "split_0009",
+        "split_0010",
+        "split_0011",
+        "split_0012",
+        "split_0013",
+        "split_0014",
+        "split_0015",
+        "split_0016",
+        "split_0017",
+        "split_0018",
+        "split_0019"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      }
     }
   ],
+  "graph_sha256": "a595a187dbcc38bd41b5ac9e9b470495c30a8c905eae5b2e57c041e5c56bb35b",
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "2d4fb6f317db80c53f2fa85e1b95c4ea177141c0d135bac533bf304a055751b6",
-  "schema_version": 1,
-  "graph_sha256": "e009444d730fb206cae630a7cbf61f77659c6ab842e515f5e06cdb91d1c4a232"
+  "request_sha256": "db035b22f883723403369fce08749e7f6bcf1de194ec8ba6a709396ac8d99c3b",
+  "schema_version": 1
 }

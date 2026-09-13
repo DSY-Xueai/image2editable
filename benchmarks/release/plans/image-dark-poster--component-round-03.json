@@ -4,19 +4,56 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "015447e513606988e33c4281533a36d986fbd5b1728334d5f256debeb178b58a",
-  "graph_sha256": "2387150a37d0c3111bb67043f55dc269cf4e42ae6509b22fafc8016200e5ba4b",
+  "request_sha256": "fef56459b04322c42c33301c0b523da8858cceeece611fc9ddd8e4a793d6620e",
+  "graph_sha256": "d40cb1d82ba2cdb556e7db8fcb27df40ad96de2ac506006930f325320bdf3c4b",
   "actions": [
-    {"action": "accept", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the dark outer canvas with no violations"]},
-    {"action": "absorb_residual", "object_ids": ["component_0001"], "parameters": {}, "confidence": 0.99, "evidence": ["signed unexplained mask contains only exact dark-background holes adjacent to the outer canvas, including 86 pixels around the release label"]},
-    {"action": "accept", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the recovered dark circular interior with no violations"]},
-    {"action": "absorb_residual", "object_ids": ["component_0002"], "parameters": {}, "confidence": 0.99, "evidence": ["signed unexplained mask contains exact dark-background edge holes adjacent to the recovered circular interior"]},
-    {"action": "accept", "object_ids": ["component_0004"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique blue-ring fragment with no violations"]},
-    {"action": "accept", "object_ids": ["component_0005"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique blue-ring fragment with no violations"]},
-    {"action": "accept", "object_ids": ["component_0007"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this complete outer-ring arc with no violations"]},
-    {"action": "accept", "object_ids": ["component_0009"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts the remaining outer-ring crossing fragment with no violations"]},
-    {"action": "accept", "object_ids": ["component_0010"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this unique red-ring intersection fragment with no violations"]},
-    {"action": "accept", "object_ids": ["component_0013"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 graph retains this ring-and-line crossing owner and the isolation evidence shows no overlap"]},
-    {"action": "accept", "object_ids": ["component_0014"], "parameters": {}, "confidence": 0.99, "evidence": ["round-02 report accepts this diagonal-line crossing fragment with no violations"]}
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the outer dark canvas while correcting its duplicate background and text underlay."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Retain the remaining blue arc fragment; its component quality checks already pass."
+      ]
+    },
+    {
+      "action": "absorb_residual",
+      "object_ids": [
+        "parent_0005"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "The bound unexplained mask shows a blue outer-arc edge within this inactive source parent's bounds; restore only that residual edge."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0001",
+        "component_0006",
+        "parent_0005"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Remove duplicated dark canvas and residual text from the underlying background without changing the eight frozen visual layers."
+      ]
+    }
   ]
 }

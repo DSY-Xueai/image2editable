@@ -2494,6 +2494,15 @@ def _page_quality_progressed(store, state: dict) -> bool:
 
 
 def _next_round_progress_allowed(store, state: dict) -> bool:
+    if (
+        state.get("phase") == "freeze_committed"
+        and state.get("status") == "active"
+        and state.get("stop_reason") in {"round_limit", "no_quality_improvement"}
+        and state["repair_round"] < MAX_REPAIR_ROUNDS
+    ):
+        # A resumed repair needs a new request before it can change strategy.
+        # The next request clears stop_reason; repeated plans remain rejected.
+        return True
     if _repeated_component_output(store, state):
         return False
     return state.get("stop_reason") in {

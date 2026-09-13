@@ -1,31 +1,178 @@
 {
-  "actions": [
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0007"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0008"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two component isolation retains this complete card background"], "object_ids": ["component_0013"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0010"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0011"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0012"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two component isolation retains this complete card background"], "object_ids": ["component_0018"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0016"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two quality evidence retains this independent card or icon visual"], "object_ids": ["component_0017"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two component isolation retains this independent green icon"], "object_ids": ["component_0022"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two component isolation retains this independent red icon"], "object_ids": ["component_0030"], "parameters": {}},
-    {"action": "accept", "confidence": 0.99, "evidence": ["round-two component isolation retains this independent blue icon"], "object_ids": ["component_0031"], "parameters": {}},
-    {"action": "discard", "confidence": 0.99, "evidence": ["round-two component isolation shows a composite fragment that duplicates two retained cards and native text"], "object_ids": ["component_0006"], "parameters": {}},
-    {
-      "action": "rebuild_background",
-      "confidence": 0.99,
-      "evidence": ["duplicate and page-residual metrics are caused by original pixels remaining beneath these twelve independent visuals after composite removal"],
-      "object_ids": ["component_0007", "component_0008", "component_0010", "component_0011", "component_0012", "component_0013", "component_0016", "component_0017", "component_0018", "component_0022", "component_0030", "component_0031"],
-      "parameters": {"margin_ratio": 0.005}
-    }
-  ],
+  "schema_version": 1,
   "kind": "component_plan",
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 2,
-  "request_sha256": "cc6dd6793e04206a3f9a3a5cafab5a033343be712b9f3baf3c84ebf586b126de",
-  "schema_version": 1,
-  "graph_sha256": "c99a0f3e739741a1dda138357b4133184edb66644e1f90ff7f06423c0050f73b"
+  "request_sha256": "c58ec57460d0061cc3287dd102ce6107917bf8213e5e389d0e09b9cdd3b1ba4c",
+  "graph_sha256": "4bbf0817137ceced11357e125f951ce040d40ccad72fe7a539a3252e7990e882",
+  "actions": [
+    {
+      "action": "discard",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation contains a partial duplicate card border; the complete card is retained as component_0009."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0011"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "accept",
+      "object_ids": [
+        "component_0018"
+      ],
+      "parameters": {},
+      "confidence": 0.99,
+      "evidence": [
+        "Isolation shows a complete card surface with its independent colored icon already frozen separately."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0007",
+        "component_0008",
+        "component_0009",
+        "component_0010",
+        "component_0011",
+        "component_0012",
+        "component_0013",
+        "component_0014",
+        "component_0015",
+        "component_0016",
+        "component_0017",
+        "component_0018"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Restore the uncovered dark canvas and remove residual card text from the background before recomposition."
+      ]
+    }
+  ]
 }

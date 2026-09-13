@@ -1627,6 +1627,65 @@ def _validate_preserved_pptx_page(
         raise BenchmarkFailure("quality_gate")
 
 
+def _validate_native_pdf_page(result, page, page_number, reconstruction) -> None:
+    from image2editable.native_pdf_quality import evaluate_native_pdf_page
+
+    def read(path):
+        return _strict_json(_read_regular_file(path, _JSON_LIMIT, require_single_link=True), _JSON_LIMIT)
+
+    try:
+        state = read(reconstruction / "component_state.json")
+        delivery = read(reconstruction / "component_delivery.json")
+        native_path = reconstruction / "native_page.json"
+        quality_path = reconstruction / "native-quality.json"
+        native = read(native_path)
+        quality = read(quality_path)
+        root = Path(result.run_dir).resolve()
+        for ref, path in (
+            (state["native_page_ref"], native_path),
+            (delivery["native_quality_ref"], quality_path),
+        ):
+            if ref["path"] != path.resolve().relative_to(root).as_posix():
+                raise ValueError
+            if ref["sha256"] != hashlib.sha256(path.read_bytes()).hexdigest():
+                raise ValueError
+        page_id = f"page_{page_number:03d}"
+        if any(document.get("page_id") != page_id for document in (native, quality, delivery)):
+            raise ValueError
+        report = quality["variants"]["original"]
+        output = Path(delivery["outputs"]["original"]["path"])
+        source = reconstruction / "native-source.png"
+        rendered = reconstruction / "native-render-original.png"
+        for path, key in ((output, "pptx_sha256"), (source, "source_sha256"), (rendered, "rendered_sha256")):
+            payload = _read_regular_file(path, _JSON_LIMIT * 16, require_single_link=True)
+            if hashlib.sha256(payload).hexdigest() != report[key]:
+                raise ValueError
+        if (
+            report["analysis_sha256"] != state["native_page_ref"]["sha256"]
+            or report["page_id"] != page_id or report["page_number"] != page_number
+            or report["renderer"] not in {"powerpoint", "libreoffice"}
+            or delivery["outputs"]["original"]["sha256"] != report["pptx_sha256"]
+        ):
+            raise ValueError
+        verified = evaluate_native_pdf_page(
+            pptx_path=output, page_number=page_number, analysis=native["analysis"],
+            source_path=source, rendered_path=rendered,
+        )
+        if verified["report"] != report["report"]:
+            raise ValueError
+        objects = native["analysis"]["objects"]
+        if (
+            not verified["report"]["accepted"]
+            or sum(item["type"] == "text" for item in objects) < page["min_text_boxes"]
+            or sum(item["type"] != "text" for item in objects) < page["min_visual_components"]
+        ):
+            raise BenchmarkFailure("quality_gate")
+    except BenchmarkFailure:
+        raise
+    except Exception:
+        raise BenchmarkFailure("invalid_quality_result") from None
+
+
 def _validate_batch_case(
     case: dict[str, object], result: BenchmarkCaseResult
 ) -> None:
@@ -1655,6 +1714,17 @@ def _validate_batch_case(
             / "reconstruction"
             / "component_result.json"
         )
+        native_state_path = component_result_path.with_name("component_state.json")
+        if case.get("kind") == "pdf" and native_state_path.is_file():
+            try:
+                state = _strict_json(_read_regular_file(
+                    native_state_path, _JSON_LIMIT, require_single_link=True,
+                ), _JSON_LIMIT)
+            except Exception:
+                raise BenchmarkFailure("invalid_quality_result") from None
+            if state.get("route") == "pdf_native":
+                _validate_native_pdf_page(result, page, page_number, component_result_path.parent)
+                continue
         component_result = None
         if component_result_path.is_file():
             try:

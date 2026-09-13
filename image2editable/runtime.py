@@ -1240,6 +1240,10 @@ def _prune_completed_legacy_artifacts(
         "component_result.json",
         "component_delivery.json",
         "native_page.json",
+        "native-quality.json",
+        "native-source.png",
+        "native-render-original.png",
+        "native-render-16x9.png",
         _PERFORMANCE_SUMMARY_NAME,
     }
     for page_id in page_ids:
@@ -1261,6 +1265,25 @@ def _prune_completed_legacy_artifacts(
                 or native.get("page_id") != page_id
             ):
                 raise RuntimeError("Completed native PDF analysis binding is invalid")
+            delivery = store.read_json(f"pages/{page_id}/reconstruction/component_delivery.json")
+            report_path, report_payload = _load_legacy_ref(store, delivery.get("native_quality_ref"))
+            reports = json.loads(report_payload.decode("utf-8"))
+            if (
+                report_path != reconstruction / "native-quality.json"
+                or reports.get("page_id") != page_id
+                or set(reports.get("variants", {})) != set(delivery["outputs"])
+            ):
+                raise RuntimeError("Completed native PDF quality binding is invalid")
+            for variant, report in reports["variants"].items():
+                if (
+                    report["analysis_sha256"] != state["native_page_ref"]["sha256"]
+                    or report["pptx_sha256"] != delivery["outputs"][variant]["sha256"]
+                    or report["report"].get("accepted") is not True
+                    or report["report"].get("violations") != []
+                    or sha256_file(reconstruction / "native-source.png") != report["source_sha256"]
+                    or sha256_file(reconstruction / ("native-render-" + variant.replace(":", "x") + ".png")) != report["rendered_sha256"]
+                ):
+                    raise RuntimeError("Completed native PDF quality binding is invalid")
         quality_path = None
         result_path = reconstruction / "component_result.json"
         if result_path.is_file():

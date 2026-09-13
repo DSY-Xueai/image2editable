@@ -4,104 +4,62 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 4,
-  "request_sha256": "8e6f745a5a143841cb8ee4f4aded32a377ce49b39f1226c13eb101b76e4a2a02",
+  "request_sha256": "9152d18769806e5f090ff5c44a50751f854b1e2314016e4e305e310702b15321",
+  "graph_sha256": "c5211056f0c9fa0d44783ce8fa5fb45956c8400fc81de8bb76381018c62f294f",
   "actions": [
     {
-      "action": "accept",
+      "action": "expand",
       "object_ids": [
         "component_0003"
       ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0003 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0002"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0002 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0006"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0006 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0010"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0010 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0012"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0012 is a complete independently movable circular visual."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0014"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0014 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0017"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0017 passes every component quality check after residual ownership."
-      ]
-    },
-    {
-      "action": "retry_with_box",
-      "object_ids": [
-        "parent_0008"
-      ],
       "parameters": {
-        "box": [
-          0.292,
-          0.91,
-          0.31,
-          0.935
-        ],
-        "independent": true
+        "margin_ratio": 0.005
       },
       "confidence": 0.99,
       "evidence": [
-        "The only remaining residual is the missed 8 by 21 pixel footer slash inside this authenticated parent region."
+        "Include the uncovered antialiased card border now that the partial original parent no longer clips its ownership."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Include the uncovered antialiased card border now that the partial original parent no longer clips its ownership."
+      ]
+    },
+    {
+      "action": "expand",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Include the uncovered antialiased card border now that the partial original parent no longer clips its ownership."
+      ]
+    },
+    {
+      "action": "rebuild_background",
+      "object_ids": [
+        "component_0003",
+        "component_0004",
+        "component_0006"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
+      "confidence": 0.99,
+      "evidence": [
+        "Remove the measured exterior duplicate border from the background after assigning it to the card."
       ]
     }
-  ],
-  "graph_sha256": "9eb7086183ea3fc173faa4debfae23e9928f5604998b151b2ca8b785276738ef"
+  ]
 }

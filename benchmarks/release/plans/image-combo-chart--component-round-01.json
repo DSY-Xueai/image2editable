@@ -2,199 +2,212 @@
   "actions": [
     {
       "action": "accept",
+      "object_ids": [
+        "component_0004"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0004"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0005"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0005"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0006"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0009"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0007"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0007"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0008"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0008"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0009"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows one complete independently movable chart bar"],
-      "object_ids": ["component_0010"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows one complete independently movable chart bar."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0013"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows the independent blue legend swatch without raster text"],
-      "object_ids": ["component_0022"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows an independent legend swatch without raster text."
+      ]
     },
     {
       "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows the independent red legend swatch without raster text"],
-      "object_ids": ["component_0023"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation shows an independent legend swatch without raster text."
+      ]
     },
     {
       "action": "collapse_to_parent",
+      "object_ids": [
+        "parent_0011"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["the parent mask is the complete movable line-chart geometry while child proposals duplicate partial line segments and markers"],
-      "object_ids": ["parent_0011"],
-      "parameters": {}
+      "evidence": [
+        "The complete line and markers are a single chart series; partial proposals duplicate it."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0001"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows a composite full-page duplicate"],
-      "object_ids": ["component_0001"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0002"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows a composite multi-bar duplicate"],
-      "object_ids": ["component_0002"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0003"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows a composite multi-bar duplicate"],
-      "object_ids": ["component_0003"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0010"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["component-isolation shows raster title backing duplicated by native editable text"],
-      "object_ids": ["component_0006"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0012"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["the collapsed parent owns this partial line duplicate"],
-      "object_ids": ["component_0012"],
-      "parameters": {}
+      "evidence": [
+        "The title backing is already represented by editable native text."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0015"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["the collapsed parent owns this partial line duplicate"],
-      "object_ids": ["component_0013"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0016"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["the collapsed parent owns this partial line duplicate"],
-      "object_ids": ["component_0014"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0017"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster label backing"],
-      "object_ids": ["component_0015"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0018"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster label backing"],
-      "object_ids": ["component_0016"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     },
     {
       "action": "discard",
+      "object_ids": [
+        "component_0019"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0017"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0018"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0019"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0020"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["native editable text replaces this raster axis-label backing"],
-      "object_ids": ["component_0021"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0025"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0026"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0027"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0028"],
-      "parameters": {}
-    },
-    {
-      "action": "discard",
-      "confidence": 0.99,
-      "evidence": ["the collapsed line-chart parent already owns this isolated marker duplicate"],
-      "object_ids": ["component_0024"],
-      "parameters": {}
+      "evidence": [
+        "Current isolation is an overlapping composite or a partial duplicate of the retained complete chart geometry."
+      ]
     }
   ],
   "kind": "component_plan",

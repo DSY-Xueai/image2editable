@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "kind": "component_plan",
+  "page_id": "page_001",
+  "provider": "host",
+  "repair_round": 2,
+  "request_sha256": "c5b4bb3b0b9f6ef8ece3e579bfbfe0d32f818539bb61d905826a0725a7547c95",
+  "graph_sha256": "d40cb1d82ba2cdb556e7db8fcb27df40ad96de2ac506006930f325320bdf3c4b",
+  "actions": [
+    {"action":"accept","object_ids":["component_0001"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Round-02 ownership retains the remaining unique dark canvas pixels after foreground components were frozen."]},
+    {"action":"accept","object_ids":["component_0006"],"parameters":{"independent":true},"confidence":0.99,"evidence":["Round-02 ownership retains the remaining unique diagonal and ring crossing pixels without overlap."]}
+  ]
+}

@@ -2,31 +2,51 @@
   "actions": [
     {
       "action": "accept",
+      "object_ids": [
+        "component_0014"
+      ],
+      "parameters": {},
       "confidence": 0.99,
-      "evidence": ["round-two isolation retains the complete independently movable third chart bar"],
-      "object_ids": ["component_0008"],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": ["round-two isolation retains the complete line-chart parent without duplicate child proposals"],
-      "object_ids": ["parent_0011"],
-      "parameters": {}
-    },
-    {
-      "action": "accept",
-      "confidence": 0.99,
-      "evidence": ["round-two isolation retains the independent red legend swatch without raster text"],
-      "object_ids": ["component_0023"],
-      "parameters": {}
+      "evidence": [
+        "The current isolated red legend swatch is a complete independent object."
+      ]
     },
     {
       "action": "rebuild_background",
+      "object_ids": [
+        "component_0004",
+        "component_0005",
+        "component_0006",
+        "component_0007",
+        "component_0008",
+        "component_0009",
+        "parent_0011",
+        "component_0013",
+        "component_0014",
+        "text_0001",
+        "text_0002",
+        "text_0003",
+        "text_0004",
+        "text_0005",
+        "text_0006",
+        "text_0007",
+        "text_0008",
+        "text_0009",
+        "text_0010",
+        "text_0011",
+        "text_0012",
+        "text_0013",
+        "text_0014",
+        "text_0015",
+        "text_0016"
+      ],
+      "parameters": {
+        "margin_ratio": 0.005
+      },
       "confidence": 0.99,
-      "evidence": ["signed ownership after composite removal requires strict background reconstruction around the remaining independent visuals"],
-      "object_ids": ["component_0008", "parent_0011", "component_0023"],
-      "parameters": {"margin_ratio": 0.005}
+      "evidence": [
+        "Rebuild the background around retained chart geometry and editable text using the current complete ownership."
+      ]
     }
   ],
   "kind": "component_plan",

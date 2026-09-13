@@ -4,50 +4,32 @@
   "page_id": "page_001",
   "provider": "host",
   "repair_round": 3,
-  "request_sha256": "ba8a3967fe3c38495757f9da33ba7e9f6df53c0e0db31e3bec6782deb6aa9d91",
+  "request_sha256": "a9a1829cac8230f5b16c2e28eb712151037ef3225567f57826a3b19cbfb8e40e",
   "actions": [
     {
       "action": "accept",
       "object_ids": [
-        "component_0004"
+        "component_0003"
       ],
-      "parameters": {},
+      "parameters": {
+        "independent": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "component_0004 passes every component quality check after independent ownership and background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0004"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0004."
+        "Retain the complementary card fill as an independent layer; its original incomplete parent mask is not the complete card."
       ]
     },
     {
       "action": "accept",
       "object_ids": [
-        "component_0011"
+        "component_0004"
       ],
-      "parameters": {},
+      "parameters": {
+        "independent": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "component_0011 passes every component quality check after background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0011"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0011."
+        "Retain the complementary card fill as an independent layer; its original incomplete parent mask is not the complete card."
       ]
     },
     {
@@ -55,111 +37,29 @@
       "object_ids": [
         "component_0006"
       ],
-      "parameters": {},
+      "parameters": {
+        "independent": true
+      },
       "confidence": 0.99,
       "evidence": [
-        "component_0006 passes every component quality check after independent ownership and background cleanup."
+        "Retain the complementary card fill as an independent layer; its original incomplete parent mask is not the complete card."
       ]
     },
     {
-      "action": "absorb_residual",
+      "action": "rebuild_background",
       "object_ids": [
+        "component_0003",
+        "component_0004",
         "component_0006"
       ],
-      "parameters": {},
+      "parameters": {
+        "margin_ratio": 0.01
+      },
       "confidence": 0.99,
       "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0006."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0010"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0010 passes every component quality check after background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0010"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0010."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0012"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0012 passes every component quality check after background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0012"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0012."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0014"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0014 passes every component quality check after independent ownership and background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0014"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0014."
-      ]
-    },
-    {
-      "action": "accept",
-      "object_ids": [
-        "component_0017"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "component_0017 passes every component quality check after independent ownership and background cleanup."
-      ]
-    },
-    {
-      "action": "absorb_residual",
-      "object_ids": [
-        "component_0017"
-      ],
-      "parameters": {},
-      "confidence": 0.99,
-      "evidence": [
-        "Only uniquely adjacent unexplained pixels are assigned to component_0017."
+        "Repair the background around the retained card edges without regenerating frozen progress bars."
       ]
     }
   ],
-  "graph_sha256": "bbe2540dc18f7970ae1ac272b0365759adfdde4ed3e51d31227f5fa28e833598"
+  "graph_sha256": "f202b55a906b19190895e36c796b6ab87e15eb7ab6dc5b74ff59c0590122825a"
 }
