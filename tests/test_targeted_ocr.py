@@ -1550,6 +1550,7 @@ def _prepare_rerun_fixture(
     check_first_pass_cleanup: bool = False,
     safe_text_delta: bool = False,
     affected_text_delta: bool = False,
+    contained_text_delta: bool = False,
     corrupt_cache: bool = False,
     stable_visual_output: bool = False,
     background_error: bool = False,
@@ -1611,7 +1612,7 @@ def _prepare_rerun_fixture(
             cleanup[18:39, 40 if shrink_ocr_mask_outside_cleanup else 39:86] = 255
         elif safe_text_delta and text_items:
             cleanup[18:39, 39:86] = 255
-        if affected_text_delta and text_items:
+        if (affected_text_delta or contained_text_delta) and text_items:
             cleanup[12:20, 12:20] = 255
         cleanup_calls.append(cleanup.copy())
         return cleanup
@@ -1719,6 +1720,8 @@ def _prepare_rerun_fixture(
     recovered["box"] = [45, 24, 35, 9]
     recovered_mask = np.zeros((70, 120), dtype=np.uint8)
     recovered_mask[18:39, 39:86] = 255
+    if contained_text_delta:
+        recovered_mask[12:20, 12:20] = 255
     if ocr_mask_delta:
         recovered_mask[50, 50] = 255
     if shrink_ocr_mask:
@@ -1975,6 +1978,28 @@ def test_prepare_reuses_verified_visual_assets_for_disjoint_text_delta(
         removal_mask = np.asarray(removal.convert("L")) > 0
     assert np.all(removal_mask[18:39, 39:86])
     assert (Path(prepared["_work_dir"]) / "first-visual-cache.json").is_file()
+
+
+@pytest.mark.parametrize("with_worker", [False, True])
+def test_recovered_text_updates_overlapping_visual_pixels_without_second_segmentation(tmp_path, monkeypatch, with_worker):
+    prepared, calls = _prepare_rerun_fixture(
+        tmp_path, monkeypatch, contained_text_delta=True,
+        visual_worker_pool=object() if with_worker else None,
+        include_text_clean=with_worker,
+    )
+    assert calls == [0]
+    assert [item['text'] for item in prepared['text_items']] == ['NX']
+    with Image.open(prepared['components'][0]['path']) as image:
+        rgba = np.asarray(image.convert('RGBA'))
+    component = prepared['components'][0]
+    x, y = component['x'], component['y']
+    assert np.all(rgba[12-y:20-y, 12-x:20-x, 3] == 0)
+    assert tuple(rgba[0, 0]) == (255, 0, 0, 255)
+    with Image.open(prepared['_element_mask_paths'][0]) as image:
+        mask = np.asarray(image) > 0
+    assert not np.any(mask[12:20, 12:20])
+    assert np.count_nonzero(mask) == 400 - 64
+    assert Path(prepared['_text_clean_path']).name == 'targeted-text-clean.png'
 
 
 def test_prepare_reuses_visual_assets_with_worker_pool_and_trusted_text_clean(

@@ -5,6 +5,22 @@ from PIL import Image, ImageDraw, ImageFont
 import pytest
 
 
+@pytest.mark.parametrize('bold', [False, True])
+def test_variable_font_resolution_uses_requested_named_weight(monkeypatch, bold):
+    from scripts import font_match
+
+    path = Path(__file__).resolve().parents[1] / 'benchmarks/release/fonts/NotoSansSC[wght].ttf'
+    monkeypatch.setattr(font_match, 'installed_faces', lambda: tuple(
+        ('Noto Sans SC', weight, False, str(path), 0) for weight in (False, True)
+    ))
+    font_match.resolve_font.cache_clear()
+    font = font_match.resolve_font('Noto Sans SC', bold=bold, size=48)
+    expected = ImageFont.truetype(str(path), 48)
+    expected.set_variation_by_name('Bold' if bold else 'Regular')
+    assert bytes(font.getmask('Editable 2026')) == bytes(expected.getmask('Editable 2026'))
+    font_match.resolve_font.cache_clear()
+
+
 def test_art_metrics_resolve_installed_cjk_family():
     from scripts.art_text import _font_metrics
     if not Path("C:/Windows/Fonts/simhei.ttf").exists():

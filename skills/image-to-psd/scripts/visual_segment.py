@@ -296,6 +296,21 @@ def execute_component_actions(
             ],
         })
     retry_masks = {}
+    exact_retry_ids = set()
+    if retry_prompts:
+        known_text = np.zeros(image.shape[:2], dtype=bool)
+        for node in nodes.values():
+            if node['kind'] == 'text' and node['state'] == 'frozen':
+                known_text |= masks[node['id']]
+        remaining_prompts = []
+        for prompt in retry_prompts:
+            local_mask = _flat_stroke_prompt_mask(image, prompt, known_text)
+            if local_mask is None:
+                remaining_prompts.append(prompt)
+            else:
+                retry_masks[prompt['component_id']] = local_mask
+                exact_retry_ids.add(prompt['component_id'])
+        retry_prompts = remaining_prompts
     if retry_prompts:
         if sam_batch_runner is not None:
             proposed_results = sam_batch_runner(image=image, prompts=retry_prompts)
@@ -520,7 +535,8 @@ def execute_component_actions(
             component_id = object_ids[0]
             parameters = action["parameters"]
             proposed = retry_masks[component_id]
-            proposed = _complete_opaque_mask_regions(proposed, image)
+            if component_id not in exact_retry_ids:
+                proposed = _complete_opaque_mask_regions(proposed, image)
             masks[component_id] = proposed
             if nodes[component_id]["state"] == "inactive":
                 reactivated_ids.add(component_id)
@@ -1070,6 +1086,52 @@ def _sam_inference_context(generator):
             dtype=torch.bfloat16,
         ):
             yield
+
+
+def _flat_stroke_prompt_mask(image, prompt, text_mask):
+    """Separate uniform, thin connector branches from signed point evidence."""
+    positive, negative = prompt['positive'], prompt['negative']
+    if prompt['box'] is not None or len(positive) != 2 or len(negative) != 2:
+        return None
+    points = np.rint(positive + negative).astype(int)
+    if np.any(points < 0) or np.any(points >= np.array([image.shape[1], image.shape[0]])):
+        return None
+    colors = image[points[:, 1], points[:, 0]].astype(np.int16)
+    if np.max(np.abs(colors - colors[0])) > 3 or np.any(text_mask[points[:, 1], points[:, 0]]):
+        return None
+    color = colors[0]
+    compatible = (np.max(np.abs(image.astype(np.int16) - color), axis=2) <= 3) & ~text_mask
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(compatible.astype(np.uint8), 8)
+    selected_labels = labels[points[:, 1], points[:, 0]]
+    if selected_labels[0] == 0 or np.any(selected_labels != selected_labels[0]):
+        return None
+    left, top, width, height, area = stats[selected_labels[0]]
+    if area < 20 or area > image.shape[0] * image.shape[1] * .1 or area > width * height * .25:
+        return None
+    region = labels[top:top + height, left:left + width] == selected_labels[0]
+    ys, xs = np.nonzero(region)
+    locations = np.column_stack((xs + left, ys + top))
+
+    def distance(pair):
+        start, end = np.asarray(pair, dtype=float)
+        direction = end - start
+        length = np.linalg.norm(direction)
+        if length < 10:
+            return None
+        delta = locations - start
+        return np.abs(delta[:, 0] * direction[1] - delta[:, 1] * direction[0]) / length
+
+    positive_distance, negative_distance = distance(positive), distance(negative)
+    if positive_distance is None or negative_distance is None:
+        return None
+    selected = positive_distance < negative_distance
+    if tuple(map(tuple, positive)) < tuple(map(tuple, negative)):
+        selected |= positive_distance == negative_distance
+    result = np.zeros(image.shape[:2], dtype=bool)
+    result[ys[selected] + top, xs[selected] + left] = True
+    if not np.all(result[points[:2, 1], points[:2, 0]]) or np.any(result[points[2:, 1], points[2:, 0]]):
+        return None
+    return result
 
 
 def _binary_visual_mask(mask: object) -> np.ndarray:

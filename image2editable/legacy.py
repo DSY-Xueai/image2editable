@@ -1875,6 +1875,7 @@ def _rebuild_canvas_background(
         and node["state"] in {"pending", "pending_gate", "frozen"}
         for text_id in node["text_ids"]
     }
+    text_labels = None
     for object_ids, margin_ratio in repair_requests:
         if not 0 < margin_ratio <= 0.1:
             raise ValueError("background rebuild margin_ratio is invalid")
@@ -1893,6 +1894,13 @@ def _rebuild_canvas_background(
                     max(0, x - radius):min(source.shape[1], x + width + radius),
                 ]
                 request_mask[region] |= text_repair[region]
+            if by_id[object_id]["kind"] == "text":
+                # Cleanup includes antialiasing beyond the original OCR mask.
+                # Restore its whole connected region, including the outer rim.
+                if text_labels is None:
+                    _, text_labels = cv2.connectedComponents(text_repair.astype(np.uint8), 8)
+                touched = np.unique(text_labels[request_mask & text_repair])
+                request_mask |= np.isin(text_labels, touched[touched > 0])
             if (
                 restored is not None
                 and by_id[object_id]["kind"] == "text"
@@ -1913,7 +1921,8 @@ def _rebuild_canvas_background(
             source, restored, restored, text_repair,
             calibration=calibrate_page(source, text_repair),
         )
-        _, text_labels = cv2.connectedComponents(text_repair.astype(np.uint8), 8)
+        if text_labels is None:
+            _, text_labels = cv2.connectedComponents(text_repair.astype(np.uint8), 8)
         touched = np.unique(text_labels[text_context.background_residual_text_ink])
         touched = touched[touched > 0]
         residual_text_repair = np.isin(text_labels, touched)
@@ -2378,7 +2387,7 @@ def _effective_text_context(
     ]
     effective_mask = original_mask & frozen_mask
     if refine_text_clean:
-        from scripts.text_detect import refine_text_ink_bounds
+        from scripts.text_detect import refine_plain_text_fonts, refine_text_ink_bounds
 
         refined_items = refine_text_ink_bounds(source, effective_items)
         for before, after in zip(effective_items, refined_items, strict=True):
@@ -2388,6 +2397,7 @@ def _effective_text_context(
             old_right = int(before["box"][0] + before["box"][2])
             effective_mask[y:y + height, old_right:x + width] = True
         effective_items = refined_items
+        effective_items = refine_plain_text_fonts(source, effective_items)
     authenticated_mask = effective_mask.copy()
     effective_clean = cleaned.copy()
     restore = suppressed_mask & ~frozen_mask

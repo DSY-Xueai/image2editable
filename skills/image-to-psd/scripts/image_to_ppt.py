@@ -4183,7 +4183,7 @@ def _reuse_disjoint_text_delta(
     text_clean_path: Path,
     resource_isolation: bool,
 ) -> bool:
-    """Reuse first-pass visuals only when a non-empty text delta is disjoint."""
+    """Reuse authenticated visuals and remove newly recovered text locally."""
     try:
         payload = _read_first_visual_cache(cache_path, work_dir)
         cached, manifest = _load_component_layer_state(prepared_state_path)
@@ -4252,7 +4252,10 @@ def _reuse_disjoint_text_delta(
                 source_sha256=manifest["assets"]["source_image"]["sha256"],
                 cache_identity=payload["identity"],
             )
-        if scope != set():
+        if scope is None:
+            return False
+        delta = (np.asarray(new_cleanup_mask) > 0) & ~(np.asarray(old_cleanup_mask) > 0)
+        if scope and np.any(delta & ~(np.asarray(new_text_mask) > 0)):
             return False
         element_masks = []
         semantic_masks = []
@@ -4269,6 +4272,34 @@ def _reuse_disjoint_text_delta(
                     output.append(np.asarray(stored.convert("L")).copy() > 0)
     except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
         return False
+
+    components = cached["components"]
+    element_paths = cached["_element_mask_paths"]
+    semantic_paths = cached["_semantic_mask_paths"]
+    if scope:
+        # Preserve every pixel outside authenticated OCR additions. Text-only
+        # candidates disappear; other components keep their semantic surface.
+        components, retained_elements, retained_semantics = [], [], []
+        for index, (component, element, semantic) in enumerate(zip(
+            cached["components"], element_masks, semantic_masks, strict=True,
+        )):
+            updated = element & ~delta
+            if not np.any(updated):
+                continue
+            if np.any(element & delta):
+                with Image.open(component["path"]) as image:
+                    rgba = np.asarray(image.convert("RGBA")).copy()
+                x, y, width, height = (component[key] for key in ("x", "y", "w", "h"))
+                rgba[delta[y:y + height, x:x + width], 3] = 0
+                path = work_dir / f"targeted-component-{index:04d}.png"
+                Image.fromarray(rgba).save(path)
+                component = {**component, "path": str(path), "area": int(updated.sum())}
+            components.append(component)
+            retained_elements.append(updated)
+            retained_semantics.append(semantic)
+        element_masks, semantic_masks = retained_elements, retained_semantics
+        element_paths = _persist_visual_masks(work_dir, "targeted-element-masks", element_masks)
+        semantic_paths = _persist_visual_masks(work_dir, "targeted-semantic-masks", semantic_masks)
 
     background_kwargs = {}
     if np.array_equal(old_cleanup_mask, new_cleanup_mask):
@@ -4322,7 +4353,7 @@ def _reuse_disjoint_text_delta(
     )
 
     try:
-        verified, verified_manifest = _load_component_layer_state(prepared_state_path)
+        _, verified_manifest = _load_component_layer_state(prepared_state_path)
     except (OSError, ValueError, TypeError, KeyError, Image.UnidentifiedImageError):
         return False
     if verified_manifest != manifest:
@@ -4334,7 +4365,7 @@ def _reuse_disjoint_text_delta(
         "background_widescreen_path": str(background_widescreen_path),
         "background_removal_mask_path": str(background_removal_mask_path),
         "background_difference_path": str(background_difference_path),
-        "components": verified["components"],
+        "components": components,
         "text_items": new_text_items,
         "canvas_width": widescreen.shape[1],
         "canvas_height": widescreen.shape[0],
@@ -4343,8 +4374,8 @@ def _reuse_disjoint_text_delta(
         "widescreen_background_method": method,
         "_text_clean_path": str(text_clean_path),
         "_foreground_evidence_mask_path": str(foreground_evidence_path),
-        "_element_mask_paths": verified["_element_mask_paths"],
-        "_semantic_mask_paths": verified["_semantic_mask_paths"],
+        "_element_mask_paths": element_paths,
+        "_semantic_mask_paths": semantic_paths,
     })
     return True
 
@@ -4858,6 +4889,17 @@ def prepare_component_layers(
                             stored_clean.convert("RGB")
                         ).copy()
                     text_clean_path = first_text_clean_path
+                    if not np.array_equal(old_cleanup_mask, removal_mask):
+                        repair_kwargs = (
+                            {"large_inpainter": _isolated_large_inpainter(owned_work_dir)}
+                            if resource_isolation else {}
+                        )
+                        text_clean = _repair_text_background(
+                            source_image, removal_mask, text_items=text_items,
+                            **repair_kwargs,
+                        )
+                        text_clean_path = owned_work_dir / "targeted-text-clean.png"
+                        _save_rgb(text_clean_path, text_clean)
                     text_analysis["text_clean_path"] = str(text_clean_path)
                     reused = _reuse_disjoint_text_delta(
                         cache_path=cache_path,

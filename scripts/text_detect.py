@@ -1079,6 +1079,35 @@ def _select_font(text: str, font_size: float) -> str:
     return "Microsoft YaHei" if _has_cjk(text) else "Arial"
 
 
+def refine_plain_text_fonts(image: np.ndarray, items: list[dict]) -> list[dict]:
+    from scripts.font_match import match_text_face
+
+    refined = []
+    for item in items:
+        text = item.get('text', '')
+        x, y, width, height = map(int, item['box'])
+        if (item.get('runs') or item.get('rotation') or item.get('italic')
+                or item.get('outline_width') or item.get('gradient')
+                or 'font_size_pt' in item or item.get('box_kind') == 'ink'
+                or not 3 <= len(text) <= 128 or '\n' in text
+                or x < 0 or y < 0 or width * height > 170000):
+            refined.append(item)
+            continue
+        crop = np.ascontiguousarray(image[y:y+height, x:x+width])
+        if crop.shape != (height, width, 3) or not crop.size:
+            refined.append(item)
+            continue
+        match = match_text_face(crop.tobytes(), width, height, text)
+        if match is None:
+            refined.append(item)
+            continue
+        left, top, ink_width, ink_height = match['ink_box']
+        refined.append({**item, 'font': match['font'], 'bold': match['bold'],
+                        'font_size': match['font_size_px'] * 13.333 * 72 / image.shape[1],
+                        'box': [x+left, y+top, ink_width, ink_height], 'box_kind': 'ink'})
+    return refined
+
+
 def _adjust_font_size(
     text: str,
     font_size: float,

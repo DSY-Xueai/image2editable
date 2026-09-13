@@ -6221,9 +6221,10 @@ def test_quality_assets_rejects_replaced_bound_foreground_reference(
     [(False, (255, 255, 255)), (True, (160, 160, 160))],
 )
 @pytest.mark.parametrize("refined_bounds", [False, True])
+@pytest.mark.parametrize("cleanup_halo", [False, True])
 def test_background_rebuild_restores_selected_text_inside_active_visual(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    attached: bool, expected: tuple[int, int, int], refined_bounds: bool,
+    attached: bool, expected: tuple[int, int, int], refined_bounds: bool, cleanup_halo: bool,
 ) -> None:
     source = tmp_path / "source.png"
     current = tmp_path / "current.png"
@@ -6237,6 +6238,8 @@ def test_background_rebuild_restores_selected_text_inside_active_visual(
     ImageDraw.Draw(dirty).rectangle((14, 10, 25, 19), fill=(30, 30, 30))
     if refined_bounds:
         ImageDraw.Draw(dirty).rectangle((29, 10, 32, 19), fill=(30, 30, 30))
+    if cleanup_halo:
+        ImageDraw.Draw(dirty).rectangle((10, 6, 29, 23), outline=(240, 170, 40))
     dirty.save(current)
     Image.new("RGB", (40, 30), "white").save(restored)
     page_mask = masks / "page.png"
@@ -6249,6 +6252,8 @@ def test_background_rebuild_restores_selected_text_inside_active_visual(
     selected.save(frozen_text_mask)
     if refined_bounds:
         ImageDraw.Draw(selected).rectangle((26, 10, 32, 19), fill=255)
+    if cleanup_halo:
+        ImageDraw.Draw(selected).rectangle((10, 6, 29, 23), fill=255)
     selected.save(text_mask)
     graph = {"nodes": [{
         "id": "page", "kind": "parent", "parent_id": None,
@@ -6283,6 +6288,8 @@ def test_background_rebuild_restores_selected_text_inside_active_visual(
 
     with Image.open(output) as rebuilt:
         assert rebuilt.getpixel((20, 15)) == expected
+        if cleanup_halo:
+            assert rebuilt.getpixel((10, 6)) == expected
         if refined_bounds:
             assert rebuilt.getpixel((31, 15)) == expected
 

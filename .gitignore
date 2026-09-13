@@ -4,6 +4,7 @@
 .agents/
 .codex/
 /runs/
+/local-resources/
 .tmp-pytest/
 .pytest_cache/
 .ruff_cache/

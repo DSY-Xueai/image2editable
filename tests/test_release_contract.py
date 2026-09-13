@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,14 @@ def test_release_workflow_only_creates_v030_draft_from_same_commit_gate() -> Non
     assert "--draft" in commands
     assert "--verify-tag" in commands
     assert "--latest=false" in commands
+    release_command = next(
+        step["run"] for step in job["steps"]
+        if "gh release create" in str(step.get("run", ""))
+    )
+    arguments = shlex.split(release_command)
+    notes_path = ROOT / arguments[arguments.index("--notes-file") + 1]
+    assert notes_path.is_file()
+    assert notes_path.read_text(encoding="utf-8").strip()
     assert "gh release edit" not in commands
     assert "publish" not in commands.casefold()
     assert "continue-on-error" not in raw
