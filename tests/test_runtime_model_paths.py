@@ -203,7 +203,6 @@ def test_skill_documents_offline_product_and_standalone_model_contracts() -> Non
     )
 
     assert "推理不会下载模型或回退 Hugging Face cache" in skill
-    assert "独立 skill 不假设该包存在" in skill
     for env_name in ("SAM2_MODEL", "LAMA_MODEL", "GROUNDING_DINO_MODEL"):
         assert env_name in skill
     assert skill.index("image2editable models install runtime") < skill.index(
@@ -212,8 +211,5 @@ def test_skill_documents_offline_product_and_standalone_model_contracts() -> Non
     assert "agent-local" not in skill
     assert "image2editable models install agent" not in skill
     assert "image2editable doctor --agent-local" not in skill
-    assert "不运行 `image2editable doctor`" in skill
     assert "产品环境须通过 `doctor`，所有环境须通过下列设备预检" in skill
-    assert "SAM2_MODEL`、`LAMA_MODEL` 必须指向文件" in skill
-    assert "GROUNDING_DINO_MODEL` 必须指向目录" in skill
-    assert "runtime model paths: ok" in skill
+    assert "[自动环境准备](references/setup.md)" in skill

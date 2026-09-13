@@ -39,13 +39,12 @@ After conversion, you can edit recovered text, move separated visual elements, a
 | Mixed PPTX preservation | Native text, shapes, tables, charts, notes, and z-order that are not rebuilt remain unchanged. |
 | Multiple inputs | Supports images, image directories, PDFs, image-based PPTX files, and mixed PPTX files. |
 | Batch conversion | Converts multiple images or document pages into a multi-slide PPTX in order. |
-| Quality gates | Makes up to five repair rounds per page and stops early when quality does not improve; only reconstructed results that pass the quality gates are marked complete as editable conversions. |
+| Quality gates | Accepts up to five plan batches per component repair cycle and stops that path early when quality does not improve or plans repeat; only reconstructed results that pass the quality gates are marked complete as editable conversions. |
 
 ## Before you start
 
 - This is a tool for rebuilding **existing pages** into editable PowerPoint files. It does not create a new presentation from an article or outline.
-- **⚠️ Complex visuals are usually kept as movable image components.** Their internal elements are not guaranteed to become native PowerPoint shapes.
-- **🔒 Host Agent mode may send diagnostic images to the current host service.** Before processing sensitive files, verify that the host service's data policy meets your requirements.
+- **⚠️ Complex visuals are usually kept as movable image components.** There is no 100% guarantee that all their internal elements can be restored as native PowerPoint shapes.
 
 ## Quick start
 
@@ -61,7 +60,7 @@ npx skills add DSY-Xueai/image2editable --skill image-to-ppt
 Install the <image-to-ppt> skill from https://github.com/DSY-Xueai/image2editable.
 ```
 
-After installation, describe the task to an Agent that supports vision, file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:
+After installation, describe the task in an Agent such as Codex or Claude Code that supports Skills, vision, local file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:
 
 ```text
 # Codex
@@ -75,9 +74,11 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 /image-to-ppt Convert <input.pdf> to an editable PPTX.
 ```
 
-With a full repository or an installed `image2editable` Runtime, the Skill automatically prepares the pinned dependencies, OCR, and runtime models, then completes the conversion through the current Host Agent. A standalone Skill installation requires absolute local paths in `SAM2_MODEL`, `LAMA_MODEL`, and `GROUNDING_DINO_MODEL`; if any path is missing, the Skill lists the missing variables and stops.
+The Skill prepares missing runtime tools, dependencies, and models on Windows, macOS, and Linux, reusing working installations. New installations prefer drive D and then other non-C local drives on Windows, or other mounted local disks on macOS/Linux. When no other local disk exists, the user directory on the system disk is used. Download caches and temporary files use the same location.
 
-Native PDF pages retain text and drawing objects and undergo a render check before export. This path requires Microsoft PowerPoint (Windows, with `image2editable[render-qa]`) or LibreOffice. For portable LibreOffice, set `IMAGE2EDITABLE_LIBREOFFICE` to the absolute path of `soffice.com` on Windows or `soffice` on other platforms. Keep its bundled Python from taking precedence over the conversion environment.
+Native PDF pages retain text and drawing objects and undergo an actual render check before export. Missing rendering components are prepared automatically.
+
+The program is installed from the current repository. A Skill-only installation retrieves the current GitHub source and verifies the installed files, avoiding an outdated project version on PyPI.
 
 ## Project layout
 
@@ -112,14 +113,14 @@ image2editable/
 
 - **⚠️ Review complex pages manually.** Decorative text, dense tables, gradients, and complex illustrations may not be restored pixel for pixel. Check text, component positions, and layout before delivery.
 - Clear text and regular backgrounds generally reconstruct more reliably. Decorative text, dense tables, gradients, and complex illustrations are not guaranteed to match pixel for pixel.
-- **💳 Host Agent consumes the current model's token/context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity.
-- **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five repair rounds. Host mode also waits for Agent visual decisions.
+- **💳 Conversion consumes the selected Agent's model tokens and context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity.
+- **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five plan batches per component repair cycle, and waits for Agent visual decisions. Conversion may remain incomplete at this limit; results that fail acceptance are not delivered as finished files.
 
 ## Supported inputs
 
 | Input | Recommended route | Notes |
 |-------|-------------------|-------|
-| Images or an image directory | Skill | PNG, JPG/JPEG, BMP, TIFF/TIF, and WebP are supported. Directories scan images in the first level only. |
+| Images or an image directory | Skill | PNG, JPG/JPEG, BMP, TIFF/TIF, and WebP are supported. Image directories include their direct image files only, excluding subfolders. |
 | PDF | Skill | Pages are rendered and rebuilt into a multi-slide PPTX in order. |
 | Image-based or mixed PPTX | Skill | Processable image pages are selected for reconstruction; unmatched native objects stay unchanged. |
 

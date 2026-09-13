@@ -29,7 +29,13 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
         "readme": "README_EN.md",
         "requires-python": ">=3.10,<3.13",
         "license": {"file": "LICENSE"},
-        "dynamic": ["dependencies"],
+        "dependencies": [
+            "python-pptx>=1.0.2,<2", "opencv-python>=4.10.0.84,<5",
+            "Pillow>=10.4,<12", "numpy>=1.26.4,<2", "pypdfium2>=5.7.1,<6",
+            "pypdf>=5,<7", "psutil>=7,<8", "torch>=2.5.1,<3",
+            "torchvision>=0.20.1,<1", "sam2>=1.1.0,<2",
+            "transformers>=4.57,<5", "accelerate>=1.8,<2",
+        ],
         "scripts": {"image2editable": "image2editable.cli:main"},
         "optional-dependencies": {
             "psd": ["aspose-psd>=26.5.0"],
@@ -54,9 +60,6 @@ def test_pyproject_exposes_complete_package_metadata() -> None:
     ]
     assert data["tool"]["setuptools"]["package-data"] == {
         "image2editable": ["runtime_model_catalog.json"]
-    }
-    assert data["tool"]["setuptools"]["dynamic"]["dependencies"] == {
-        "file": ["requirements-pypi.txt"]
     }
     requirements = (root / "requirements.txt").read_text(encoding="utf-8")
     assert "aspose-psd" not in requirements.casefold()

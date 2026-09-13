@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+- 仅安装转换 Skill 时也自动准备项目 Runtime、依赖、OCR 和模型；Windows 新安装优先 D 盘及其他非 C 本地磁盘，macOS/Linux 优先其他已挂载本地磁盘，统一下载缓存和临时目录并复用已有环境。
+- 项目 Runtime 使用当前仓库或 GitHub main 的本次提交，逐文件核对安装内容和导入路径，不以相同版本号复用旧代码，不从滞后的 PyPI 项目包回退。
+- 发布说明从本文件提取对应版本，移除单独的版本说明文件；发行依赖直接维护在 `pyproject.toml`，安全政策移至 `.github/SECURITY.md`。
+- 简化中英文使用说明，统一使用 Agent 称呼，明确组件修复周期最多 5 批计划以及图片目录不递归的限制。
+
 ## [0.3.0]
 
 ### 新增与变更
@@ -49,4 +54,4 @@
 
 ### 安全与版本
 
-`SECURITY.md` 定义 0.2.x 的私密漏洞报告流程：48 小时内确认、7 天内完成初步评估。发布 workflow 只响应 `v0.2.0` tag，验证同一 commit 的 release-gate 产物后创建 draft release，不自动发布。
+该版本的安全政策定义 0.2.x 的私密漏洞报告流程：48 小时内确认、7 天内完成初步评估。发布 workflow 只响应 `v0.2.0` tag，验证同一 commit 的 release-gate 产物后创建 draft release，不自动发布。

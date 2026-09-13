@@ -127,6 +127,8 @@ def test_psd_skill_contains_current_standalone_engine() -> None:
     assert script_names == PSD_COMMON_ENGINE_FILES | {
         "image_to_psd.py",
         "psd_assemble.py",
+        "skill_environment.py",
+        "verify_skill_runtime.py",
     }
     assert "ppt_assemble.py" not in script_names
 

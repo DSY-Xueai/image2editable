@@ -13,19 +13,11 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 ## 环境
 
-- 本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。
-- 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
-- 产品 Runtime 的原生 PDF 路径在最终装配后核验实际 PPTX。先复用已安装的 PowerPoint（Windows 加装 `image2editable[render-qa]`）或 LibreOffice；均不可用时按当前平台安装 LibreOffice，再继续原 Run，不重新执行已有效的 OCR 或分割。便携安装使用 `IMAGE2EDITABLE_LIBREOFFICE` 指向 `soffice.com`（Windows）或 `soffice` 的绝对路径，并以该路径执行 `--version` 验证；不要将内置 Python 所在目录放到当前转换环境之前。Windows 发布基准使用已校验的 LibreOffice 26.8.0。只有实际渲染与原生对象检查通过，才能交付。
-- 先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`。缺少转换依赖时，运行 `python -m pip install -r "<skill-root>/references/requirements.txt"`，安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1；不得依赖调用者的当前工作目录。
-- LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
-- OCR 不可用时，默认运行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`。PaddleOCR 是本 Skill 的固定默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
-- 完整仓库或已安装 `image2editable` 产品包时，依次运行 `image2editable models install runtime --yes` 和 `image2editable doctor`。前者以非交互方式下载并校验固定的 SAM、LaMa、DINO runtime receipt。
-- 纯 standalone 环境中，独立 skill 不假设该包存在，也不运行 `image2editable doctor`。开始转换前，必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径；`SAM2_MODEL`、`LAMA_MODEL` 必须指向文件，`GROUNDING_DINO_MODEL` 必须指向目录，并运行最小只读预检：
-
-  ```bash
-  python -c "import os; from pathlib import Path; names=('SAM2_MODEL','LAMA_MODEL','GROUNDING_DINO_MODEL'); raw={name: os.environ.get(name, '') for name in names}; paths={name: Path(value) for name, value in raw.items()}; assert all(raw.values()) and all(path.is_absolute() for path in paths.values()) and paths['SAM2_MODEL'].is_file() and paths['LAMA_MODEL'].is_file() and paths['GROUNDING_DINO_MODEL'].is_dir(); print('runtime model paths: ok')"
-  ```
-- 纯 standalone 不包含模型下载器。任一模型路径缺失时，列出缺少的环境变量并停止；standalone 不得安装或切换到产品 Runtime。系统权限、网络策略或下载校验失败时，报告原始阻塞，不反复询问安装许可，也不伪装为安装成功。
+- 转换前必须阅读并执行 [自动环境准备](references/setup.md)，完整仓库和仅安装 Skill 在 Windows、macOS、Linux 都自动准备缺失的 Python、Git、项目 Runtime、依赖、OCR、模型和所需渲染器。不得为依赖或模型安装向用户询问确认；遵循宿主实际审批与权限限制。
+- Windows 新安装优先 D 盘，再选其他非 C 本地磁盘，仅在不存在其他本地磁盘时使用 C 盘；macOS/Linux 优先其他已挂载的本地磁盘，否则使用用户目录。使用 `scripts/skill_environment.py` 统一环境、模型、OCR、下载缓存与临时目录；复用已有可用环境和已验证模型。
+- 使用 Python 3.10–3.12。仅有 Skill 时自动安装项目 Runtime，默认使用下文 Runtime Host Agent 流程处理图片、PDF 和 PPTX；不再要求使用者预先配置模型路径。
+- 模型准备使用 `image2editable models install runtime --yes`，随后执行 `image2editable doctor`。LaMa 由本地 TorchScript adapter 调用，依赖 `torch>=2.5.1,<3`；SAM/LaMa/DINO 从已校验的 runtime receipt 解析。
+- 原生 PDF 先复用 PowerPoint 或 LibreOffice，缺少时按自动准备流程安装；Windows PowerPoint 需要 `image2editable[render-qa]`。实际渲染校验通过后才能交付。
 - 优先使用当前平台已正确安装的硬件加速环境；产品环境须通过 `doctor`，所有环境须通过下列设备预检。不要仅为 WSL 建议离开已经可用的环境：
 
   ```bash
@@ -36,9 +28,11 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 - macOS 保持当前受支持的设备选择；在完成真实 Apple Silicon 回归前，不把 MPS 自动设为新默认。
 - CPU 仍运行完整模型和相同质量门禁，包括 SAM 2.1 large，不替换为轻量分割模型，但推理会显著较慢。
 
-推理不会下载模型或回退 Hugging Face cache。产品环境先安装并验证 runtime 模型；独立 skill 必须把 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 设置为绝对本地路径，其中前两者校验固定文件身份，DINO 目录视为操作者显式信任的 override。源码和权重不存放在此 skill 中。大/深遮罩需要 LaMa；依赖缺失或初始化失败时明确失败，不降级到容易产生条带拖影的 OpenCV 修复。
+推理不会下载模型或回退 Hugging Face cache。准备阶段自动安装并验证 runtime 模型。已有 `SAM2_MODEL`、`LAMA_MODEL` 和 `GROUNDING_DINO_MODEL` 绝对路径可复用：前两者校验固定文件身份，DINO 目录视为操作者显式信任的 override。源码和权重不存放在此 skill 中。大/深遮罩需要 LaMa；依赖缺失或初始化失败时明确失败，不降级到容易产生条带拖影的 OpenCV 修复。
 
-## 命令行
+## 图片兼容命令行
+
+以下接口仅处理图片；自动准备环境后默认使用下文 Runtime 流程，PDF/PPTX 必须使用 Runtime。
 
 从 skill 根目录执行 module，不要直接运行 `scripts/image_to_ppt.py`：
 
@@ -76,7 +70,7 @@ convert_batch_variants(["img1.png", "img2.png"], output_path="slides.pptx")
 
 ## Runtime Host Agent 模式
 
-完整仓库环境只支持 `host` Provider。Provider 写入 Run 后不可切换；单个组件修复周期最多五轮，使用同一套严格组件动作和质量门禁。检测到无进展或重复产物时停止该无效策略，复用有效资产并切换针对性修复，不重复耗尽轮数。
+自动准备后的 Runtime 只支持 `host` Provider。Provider 写入 Run 后不可切换；单个组件修复周期最多五轮，使用同一套严格组件动作和质量门禁。检测到无进展或重复产物时停止该无效策略，复用有效资产并切换针对性修复，不重复耗尽轮数。
 
 当前 Codex、Claude Code 等宿主必须支持视觉识别、本地文件读取、工具调用和结构化 JSON。Runtime 直接使用当前 AI，不探测、加载、下载或要求配置其他组件决策模型。
 

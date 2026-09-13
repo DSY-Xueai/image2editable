@@ -10,6 +10,7 @@ import yaml
 
 from image2editable import cli
 from scripts import release_benchmark
+from scripts.release_notes import extract_notes
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,14 +43,13 @@ def test_citation_version_matches_project_version() -> None:
 
 
 def test_security_policy_uses_private_single_maintainer_process() -> None:
-    policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    policy = (ROOT / ".github/SECURITY.md").read_text(encoding="utf-8")
     folded = policy.casefold()
 
     assert "0.3.x" in policy
     assert "private vulnerability reporting" in folded
     assert "public issue" in folded
-    assert "48 hours" in folded
-    assert "7 days" in folded
+    assert "https://github.com/DSY-Xueai/image2editable/security/advisories/new" in policy
     assert "maintainers" not in folded
 
 
@@ -81,9 +81,9 @@ def test_release_workflow_only_creates_v030_draft_from_same_commit_gate() -> Non
         if "gh release create" in str(step.get("run", ""))
     )
     arguments = shlex.split(release_command)
-    notes_path = ROOT / arguments[arguments.index("--notes-file") + 1]
-    assert notes_path.is_file()
-    assert notes_path.read_text(encoding="utf-8").strip()
+    assert arguments[arguments.index("--notes-file") + 1] == "$RUNNER_TEMP/release-notes.md"
+    assert 'scripts/release_notes.py "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-notes.md"' in commands
+    assert extract_notes((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), "v0.3.0")
     assert "gh release edit" not in commands
     assert "publish" not in commands.casefold()
     assert "continue-on-error" not in raw

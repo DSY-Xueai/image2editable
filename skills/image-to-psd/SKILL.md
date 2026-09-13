@@ -1,6 +1,6 @@
 ---
 name: image-to-psd
-description: 将一张或多张图片转换为经过严格质量校验的分层 PSD；可独立运行，也可使用 image2editable 的 Host Agent。输出修复背景、独立透明视觉组件和可编辑 Photoshop 文字图层。仅支持图片输入，不用于 PDF 或 PPTX。
+description: 将一张或多张图片转换为经过严格质量校验的分层 PSD；自动准备运行环境，通过当前 Agent 执行转换。输出修复背景、独立透明视觉组件和可编辑 Photoshop 文字图层。仅支持图片输入，不用于 PDF 或 PPTX。
 ---
 
 # Image to PSD
@@ -34,29 +34,11 @@ export ASPOSE_PSD_LICENSE=/path/to/Aspose.PSD.lic
 
 授权文件、模型权重、OCR 缓存和运行产物都不存放在此 skill 中。
 
-## 独立运行
+## 环境准备与图片兼容入口
 
-本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。独立模式不需要安装 `image2editable` 产品包。使用 Python 3.10-3.12。先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`，再用绝对路径安装依赖；不得依赖调用者的当前工作目录：
+转换前必须阅读并执行 [自动环境准备](references/setup.md)。完整仓库和仅安装 Skill 在 Windows、macOS、Linux 都自动准备缺少的 Python、Git、项目 Runtime、依赖、OCR 和模型。不得为依赖或模型安装向用户询问确认；遵循宿主实际审批与权限限制。Windows 新安装优先 D 盘，再选其他非 C 本地磁盘，仅在不存在其他本地磁盘时使用 C 盘；macOS/Linux 优先其他已挂载的本地磁盘，否则使用用户目录。使用 `scripts/skill_environment.py` 统一环境、模型、下载缓存与临时目录。已有可用环境和模型继续复用。
 
-```bash
-python -m pip install -r "<skill-root>/references/requirements.txt"
-```
-
-OCR 尚未准备好时，直接安装固定版本的 PaddleOCR。它是本 Skill 的默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
-
-```bash
-python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"
-```
-
-开始转换前，把三个模型配置为绝对本地路径：`SAM2_MODEL` 和 `LAMA_MODEL` 指向文件，`GROUNDING_DINO_MODEL` 指向目录。独立模式不读取产品 receipt，也不运行 `image2editable doctor`。
-
-```bash
-python -c "import os; from pathlib import Path; names=('SAM2_MODEL','LAMA_MODEL','GROUNDING_DINO_MODEL'); raw={name: os.environ.get(name, '') for name in names}; paths={name: Path(value) for name, value in raw.items()}; assert all(raw.values()) and all(path.is_absolute() for path in paths.values()) and paths['SAM2_MODEL'].is_file() and paths['LAMA_MODEL'].is_file() and paths['GROUNDING_DINO_MODEL'].is_dir(); print('runtime model paths: ok')"
-```
-
-纯 standalone 不包含模型下载器。任一模型路径缺失时，列出缺少的环境变量并停止；standalone 不得安装或切换到产品 Runtime。系统权限、网络策略或下载校验失败时，报告原始阻塞，不反复询问安装许可，也不伪装为安装成功。
-
-推理不会下载模型或回退 Hugging Face cache。SAM 和 LaMa 文件必须匹配固定身份；DINO 目录视为用户明确提供的本地 override。LaMa 缺失或初始化失败时停止，不降级到容易产生条带或拖影的 OpenCV 修复。
+准备后默认使用下文产品 Runtime 的 Agent 流程；下面的 standalone CLI 是图片兼容入口。两者都使用自动安装的模型，不要求使用者手动配置 `SAM2_MODEL`、`LAMA_MODEL` 或 `GROUNDING_DINO_MODEL`。推理不会下载模型或回退 Hugging Face cache；准备阶段先校验 runtime receipt，已有显式模型路径须满足固定身份约束。LaMa 缺失或初始化失败时停止该无效路径并修复环境，不降低修复质量。
 
 检查当前设备后再运行：
 

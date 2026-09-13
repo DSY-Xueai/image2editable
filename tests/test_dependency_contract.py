@@ -263,9 +263,9 @@ def test_runtime_dependency_ranges_match_product_and_standalone() -> None:
 def test_pyproject_reads_runtime_dependencies_without_agent_extra() -> None:
     project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
 
-    assert project["project"]["dynamic"] == ["dependencies"]
-    assert project["tool"]["setuptools"]["dynamic"]["dependencies"]["file"] == [
-        "requirements-pypi.txt"
+    assert project["project"]["dependencies"] == [
+        "sam2>=1.1.0,<2" if requirement == SAM_PIN else requirement
+        for requirement in RUNTIME_REQUIREMENTS
     ]
     assert "agent-local" not in project["project"]["optional-dependencies"]
 
@@ -512,13 +512,6 @@ def test_readmes_are_skill_first_and_omit_the_cli_walkthrough() -> None:
     for text in (readme_text, readme_en_text):
         assert "npx skills add DSY-Xueai/image2editable --skill image-to-ppt" in text
         assert all(phrase.casefold() not in text.casefold() for phrase in forbidden)
-    assert "完整仓库或已安装 `image2editable` 的环境" in readme_text
-    assert "仅安装 standalone Skill 时" in readme_text
-    assert "a full repository or an installed `image2editable` Runtime" in readme_en_text
-    assert "A standalone Skill installation" in readme_en_text
-    for text in (readme_text, readme_en_text):
-        for variable in ("SAM2_MODEL", "LAMA_MODEL", "GROUNDING_DINO_MODEL"):
-            assert variable in text
     for phrase in (
         "普通用户",
         "开发者可",
@@ -531,28 +524,7 @@ def test_readmes_are_skill_first_and_omit_the_cli_walkthrough() -> None:
         assert phrase.casefold() not in readme_en_text.casefold()
 
 
-def test_model_setup_docs_never_claim_first_conversion_downloads_models() -> None:
-    documents = (
-        README.read_text(encoding="utf-8"),
-        README_EN.read_text(encoding="utf-8"),
-        SKILL.read_text(encoding="utf-8"),
-    )
-    forbidden = (
-        "首次转换自动下载",
-        "首次运行自动下载",
-        "first conversion automatically downloads",
-        "first run automatically downloads",
-    )
-
-    for document in documents:
-        assert all(text.casefold() not in document.casefold() for text in forbidden)
-
-
 def test_conversion_skills_install_dependencies_without_confirmation() -> None:
-    paddle_command = (
-        'python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" '
-        '"PaddleX==3.7.2" "PyYAML==6.0.2"'
-    )
     forbidden = (
         "先让用户选择",
         "未经用户确认",
@@ -563,12 +535,10 @@ def test_conversion_skills_install_dependencies_without_confirmation() -> None:
     for path in (SKILL, PSD_SKILL):
         text = path.read_text(encoding="utf-8")
         assert "不得为依赖或模型安装向用户询问确认" in text
-        assert "缺少时直接安装" in text
-        assert "<skill-root>/references/requirements.txt" in text
-        assert paddle_command in text
-        assert "image2editable models install runtime --yes" in text
-        assert "不得安装或切换到产品 Runtime" in text
-        assert "优先切换到上述产品 Runtime" not in text
+        assert "[自动环境准备](references/setup.md)" in text
+        assert (path.parent / "references/setup.md").is_file()
+        assert (path.parent / "scripts/skill_environment.py").is_file()
+        assert (path.parent / "scripts/verify_skill_runtime.py").is_file()
         assert all(phrase not in text for phrase in forbidden)
 
     psd_text = PSD_SKILL.read_text(encoding="utf-8")
