@@ -142,5 +142,5 @@ def test_installed_code_detects_old_same_version_missing_and_obsolete_files(tmp_
 @pytest.mark.parametrize("skill", ["image-to-ppt", "image-to-psd"])
 def test_bundled_setup_tools_match_source(skill):
     root = Path(__file__).resolve().parents[1]
-    for name in ("skill_environment.py", "verify_skill_runtime.py"):
+    for name in ("skill_environment.py", "verify_skill_runtime.py", "fetch_skill_source.py"):
         assert (root / "scripts" / name).read_bytes() == (root / "skills" / skill / "scripts" / name).read_bytes()

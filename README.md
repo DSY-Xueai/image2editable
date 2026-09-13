@@ -52,17 +52,23 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 
 ## 快速上手
 
+### **让 Agent 自动安装**
+
+```text
+请从 https://github.com/DSY-Xueai/image2editable 安装 image-to-ppt Skill。
+使用浅层部分克隆（--filter=blob:none --no-checkout），先设置稀疏检出仅包含 /skills/image-to-ppt/，再检出并从该本地目录安装。不要下载整份仓库或 ZIP。
+```
+
 ### 使用 **Skills CLI** 安装
 
 ```bash
-npx skills add DSY-Xueai/image2editable --skill image-to-ppt
+git clone --depth 1 --filter=blob:none --no-checkout https://github.com/DSY-Xueai/image2editable.git image2editable-skill
+git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
+git -C image2editable-skill checkout
+npx skills add ./image2editable-skill/skills/image-to-ppt
 ```
 
-### **让 Agent 自动安装**
-
-```bash
-请从 https://github.com/DSY-Xueai/image2editable 安装 <image-to-ppt> skill。
-```
+在准备存放 Skill 的磁盘目录执行以上命令。更新时保持稀疏检出，更新此克隆后重新从本地目录安装。
 
 安装后，可在支持 Skills、视觉识别、本地文件读取和工具调用的 Codex、Claude Code 等 Agent 中描述需求。在 Codex 中使用 `$image-to-ppt`，在 Claude Code 中使用 `/image-to-ppt`。图片、PDF 和 `.pptx` 可以直接粘贴或附加到对话框，也可以提供本地路径：
 
@@ -83,12 +89,15 @@ Skill 会在 Windows、macOS 和 Linux 上自动准备缺失的运行环境、�
 
 项目程序从当前仓库安装；仅安装 Skill 时自动获取 GitHub 当前源码，并核对安装内容，避免使用滞后的 PyPI 项目版本。
 
+Skill 仅获取运行源码、依赖配置和必要许可证，不下载基准语料、测试、演示图片或开发发布工具。
+
 ## 项目结构
 
 ```
 image2editable/
 ├── .claude-plugin/            # Claude Code 插件清单
 ├── .github/                   # CI、协作模板与安全政策
+├── benchmarks/                # 回归语料与发布验收基准
 ├── docs/                      # README 图片资源
 ├── image2editable/            # 统一 CLI、运行时和转换模块
 ├── scripts/                   # 转换、环境准备与发布工具
@@ -114,7 +123,7 @@ image2editable/
 - **⚠️ 复杂页面建议人工复核。** 艺术字、密集表格、渐变和复杂插画可能无法逐像素还原；请在交付前检查文字、组件位置和页面布局。
 - 图片中的文字越清晰、背景越规整，重建通常越可靠；艺术字、密集表格、渐变和复杂插画不保证逐像素一致。
 - **💳 转换会消耗所用 Agent 的模型 Token 和上下文额度。** 复杂页面可能经过多轮诊断与重修，实际消耗取决于所用 Agent、模型和页面复杂度。
-- **⏱️ 多页 PDF、复杂页面和高分辨率图片耗时较长。** 每页都会经过 OCR、视觉拆分、重建与质量检查，单个组件修复周期最多接收 5 批修复计划，还需要等待 Agent 完成视觉判断。到达上限后仍可能无法完成转换，未通过验收的结果不作为成品交付。
+- **⏱️ 多页 PDF、复杂页面和高分辨率图片耗时较长。** 每页都会经过 OCR、视觉拆分、重建与质量检查，单个组件修复周期最多接收 5 批修复计划，还需要等待 Agent 完成视觉判断。
 
 ## 支持的输入
 

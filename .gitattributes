@@ -1,8 +1,8 @@
-benchmark/corpus/*.png binary
-benchmark/corpus/*.jpg binary
-benchmark/corpus/*.pdf binary
-benchmark/corpus/*.pptx binary
-benchmark/corpus/manifest.json text eol=lf
+benchmarks/corpus/*.png binary
+benchmarks/corpus/*.jpg binary
+benchmarks/corpus/*.pdf binary
+benchmarks/corpus/*.pptx binary
+benchmarks/corpus/manifest.json text eol=lf
 benchmarks/release/inputs/*.png binary
 benchmarks/release/inputs/*.pdf binary
 benchmarks/release/inputs/*.pptx binary

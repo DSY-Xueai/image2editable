@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 基准语料统一至 `benchmarks/corpus/` 与 `benchmarks/release/`；Skill 通过部分克隆和文件清单仅获取运行所需源码，跳过基准、测试、演示图片和开发发布工具。
+
 - 仅安装转换 Skill 时也自动准备项目 Runtime、依赖、OCR 和模型；Windows 新安装优先 D 盘及其他非 C 本地磁盘，macOS/Linux 优先其他已挂载本地磁盘，统一下载缓存和临时目录并复用已有环境。
 - 项目 Runtime 使用当前仓库或 GitHub main 的本次提交，逐文件核对安装内容和导入路径，不以相同版本号复用旧代码，不从滞后的 PyPI 项目包回退。
 - 发布说明从本文件提取对应版本，移除单独的版本说明文件；发行依赖直接维护在 `pyproject.toml`，安全政策移至 `.github/SECURITY.md`。

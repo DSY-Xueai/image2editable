@@ -102,11 +102,11 @@ def test_all_golden_sha256_values_are_approved() -> None:
 def test_corpus_git_attributes_disable_text_conversion() -> None:
     root = Path(__file__).resolve().parents[1]
     expected_lines = {
-        "benchmark/corpus/*.png binary",
-        "benchmark/corpus/*.jpg binary",
-        "benchmark/corpus/*.pdf binary",
-        "benchmark/corpus/*.pptx binary",
-        "benchmark/corpus/manifest.json text eol=lf",
+        "benchmarks/corpus/*.png binary",
+        "benchmarks/corpus/*.jpg binary",
+        "benchmarks/corpus/*.pdf binary",
+        "benchmarks/corpus/*.pptx binary",
+        "benchmarks/corpus/manifest.json text eol=lf",
     }
     attribute_lines = {
         line.strip()
@@ -116,10 +116,10 @@ def test_corpus_git_attributes_disable_text_conversion() -> None:
     assert expected_lines <= attribute_lines
 
     for relative_path in (
-        "benchmark/corpus/01-zh-courseware.png",
-        "benchmark/corpus/07-compressed.jpg",
-        "benchmark/corpus/09-document.pdf",
-        "benchmark/corpus/10-mixed.pptx",
+        "benchmarks/corpus/01-zh-courseware.png",
+        "benchmarks/corpus/07-compressed.jpg",
+        "benchmarks/corpus/09-document.pdf",
+        "benchmarks/corpus/10-mixed.pptx",
     ):
         result = subprocess.run(
             ["git", "check-attr", "diff", "merge", "text", "--", relative_path],
@@ -142,7 +142,7 @@ def test_corpus_git_attributes_disable_text_conversion() -> None:
             "text",
             "eol",
             "--",
-            "benchmark/corpus/manifest.json",
+            "benchmarks/corpus/manifest.json",
         ],
         cwd=root,
         capture_output=True,
@@ -160,7 +160,7 @@ def test_corpus_git_attributes_disable_text_conversion() -> None:
 def test_benchmark_outputs_and_private_corpus_are_ignored_but_public_corpus_is_not() -> None:
     root = Path(__file__).resolve().parents[1]
     ignore_lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert ignore_lines[-2:] == ["/benchmark-results/", "/benchmark/private/"]
+    assert ignore_lines[-2:] == ["/benchmark-results/", "/benchmarks/private/"]
 
     ignored = subprocess.run(
         [
@@ -169,7 +169,7 @@ def test_benchmark_outputs_and_private_corpus_are_ignored_but_public_corpus_is_n
             "--no-index",
             "--",
             "benchmark-results/report.json",
-            "benchmark/private/manifest.json",
+            "benchmarks/private/manifest.json",
         ],
         cwd=root,
         capture_output=True,
@@ -179,7 +179,7 @@ def test_benchmark_outputs_and_private_corpus_are_ignored_but_public_corpus_is_n
     assert ignored.returncode == 0, ignored.stderr
     assert ignored.stdout.splitlines() == [
         "benchmark-results/report.json",
-        "benchmark/private/manifest.json",
+        "benchmarks/private/manifest.json",
     ]
 
     public = subprocess.run(
@@ -188,7 +188,7 @@ def test_benchmark_outputs_and_private_corpus_are_ignored_but_public_corpus_is_n
             "check-ignore",
             "--no-index",
             "--",
-            "benchmark/corpus/manifest.json",
+            "benchmarks/corpus/manifest.json",
         ],
         cwd=root,
         capture_output=True,
@@ -561,7 +561,7 @@ def test_generate_corpus_is_byte_reproducible_in_two_empty_directories(
 @REQUIRES_APPROVED_GENERATOR
 def test_tracked_corpus_matches_fresh_generation(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
-    tracked = root / "benchmark/corpus"
+    tracked = root / "benchmarks/corpus"
     generated = tmp_path / "generated"
     generate_corpus(generated)
 

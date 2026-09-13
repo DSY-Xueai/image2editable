@@ -2,11 +2,11 @@
 
 ## 公开语料
 
-`benchmark/corpus/` 固定包含 8 张图片、3 页 PDF、3 页 mixed PPTX，共 10 个输入、14 页、3 条 routes：`images`、`pdf` 和 `mixed_pptx`。
+`benchmarks/corpus/` 固定包含 8 张图片、3 页 PDF、3 页 mixed PPTX，共 10 个输入、14 页、3 条 routes：`images`、`pdf` 和 `mixed_pptx`。
 
 ## 当前用途
 
-该公开语料保留用于输入契约和回归覆盖，不是普通用户的日常转换入口。当前发布门禁由 `scripts/release_benchmark.py` 和 `benchmarks/release/` 下的固定 manifest 驱动，只使用 Host Agent 计划证据。
+`benchmarks/corpus/` 用于输入契约和回归覆盖。发布门禁由 `scripts/release_benchmark.py` 和 `benchmarks/release/` 下的固定 manifest 驱动，使用 Agent 计划证据。Skill 日常转换不读取这些基准文件，按需安装源码时不下载此目录。
 
 ## 发布门禁标准
 

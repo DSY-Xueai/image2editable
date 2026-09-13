@@ -14,16 +14,13 @@
 
 完整仓库使用已验证包含 `pyproject.toml`、`image2editable/` 和 `constraints/runtime.txt` 的当前仓库根目录作为 `<source>`，包括本地未提交修改；不要把调用者的任意当前目录当成项目源码。已有项目包必须核对实际代码，不能仅凭版本号或 `doctor` 通过就复用。
 
-仅安装 Skill 时，在所选盘的专用源码目录获取 GitHub `main` 当前提交。首次创建克隆，之后只在这份工具管理的干净克隆中 fetch；有本地修改则保留它并另建克隆，不执行 reset/clean。即使已安装同版本项目包，也先检查远端当前提交：
+仅安装 Skill 时，在所选盘用自带工具获取 GitHub `main` 当前提交。工具在检出前设置浅层部分克隆（`--filter=blob:none`）与非 cone 稀疏文件清单，只获取运行模块、入口、依赖配置、包元数据必需的英文README及许可证；不获取 benchmarks、tests、docs图片、其他Skills、CI、基准生成/发布/开发脚本。即使已安装同版本项目包，也先检查远端当前提交：
 
 ```bash
-git clone --branch main --depth 1 https://github.com/DSY-Xueai/image2editable.git "<root>/source/image2editable"
-git -C "<root>/source/image2editable" fetch --depth 1 origin main
-git -C "<root>/source/image2editable" rev-parse FETCH_HEAD
-git -C "<root>/source/image2editable" checkout --detach <上一步的完整提交SHA>
+<python> "<skill-root>/scripts/fetch_skill_source.py" "<root>/source/image2editable-runtime"
 ```
 
-把本次完整提交 SHA 记入准备记录，后续安装和验收绑定这份源码，不跟随中途变化的分支。项目主程序只能来自上述 `<source>`，不得运行 `pip install image2editable` 从 PyPI 取得可能滞后的代码。先执行 `<python> -I "<skill-root>/scripts/verify_skill_runtime.py" "<source>"`，逐文件检查已安装代码及实际导入位置；不一致或未安装时安装当前源码。第三方依赖仍可从 PyPI 安装。所有下列命令均继承上一步的缓存和临时目录设置：
+读取输出JSON的 `source` 和 `commit`，将完整SHA记入准备记录，后续安装和验收绑定此源码，不跟随中途变化的分支。工具只更新自己管理的干净克隆；遇到旧完整克隆或本地修改时保留它并另建专用目录，不执行 reset/clean，也不改用完整克隆或ZIP下载。项目主程序只能来自上述 `<source>`，不得运行 `pip install image2editable` 从 PyPI 取得可能滞后的代码。先执行 `<python> -I "<skill-root>/scripts/verify_skill_runtime.py" "<source>"`，逐文件检查已安装代码及实际导入位置；不一致或未安装时安装当前源码。第三方依赖仍可从 PyPI 安装。所有下列命令均继承上一步的缓存和临时目录设置：
 
 ```bash
 <python> -m pip install --constraint "<source>/constraints/runtime.txt" torch torchvision setuptools==84.0.0

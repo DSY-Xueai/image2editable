@@ -129,6 +129,7 @@ def test_psd_skill_contains_current_standalone_engine() -> None:
         "psd_assemble.py",
         "skill_environment.py",
         "verify_skill_runtime.py",
+        "fetch_skill_source.py",
     }
     assert "ppt_assemble.py" not in script_names
 

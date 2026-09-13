@@ -48,17 +48,23 @@ After conversion, you can edit recovered text, move separated visual elements, a
 
 ## Quick start
 
-### Install with the **skills CLI**
-
-```bash
-npx skills add DSY-Xueai/image2editable --skill image-to-ppt
-```
-
 ### **Let an Agent install it**
 
 ```text
-Install the <image-to-ppt> skill from https://github.com/DSY-Xueai/image2editable.
+Install the image-to-ppt Skill from https://github.com/DSY-Xueai/image2editable.
+Use a shallow partial clone (--filter=blob:none --no-checkout), set sparse checkout to /skills/image-to-ppt/ before checking out files, then install from that local directory. Do not download the full repository or a ZIP archive.
 ```
+
+### Install with the **skills CLI**
+
+```bash
+git clone --depth 1 --filter=blob:none --no-checkout https://github.com/DSY-Xueai/image2editable.git image2editable-skill
+git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
+git -C image2editable-skill checkout
+npx skills add ./image2editable-skill/skills/image-to-ppt
+```
+
+Run these commands on the disk where the Skill should be stored. For updates, keep sparse checkout enabled, update this clone, and reinstall from the local directory.
 
 After installation, describe the task in an Agent such as Codex or Claude Code that supports Skills, vision, local file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:
 
@@ -80,12 +86,15 @@ Native PDF pages retain text and drawing objects and undergo an actual render ch
 
 The program is installed from the current repository. A Skill-only installation retrieves the current GitHub source and verifies the installed files, avoiding an outdated project version on PyPI.
 
+The Skill retrieves only runtime source, dependency configuration, and required licenses, excluding benchmark data, tests, demo images, and development or release tools.
+
 ## Project layout
 
 ```
 image2editable/
 ├── .claude-plugin/            # Claude Code plugin manifest
 ├── .github/                   # CI, collaboration templates, and security policy
+├── benchmarks/                # Regression fixtures and release benchmarks
 ├── docs/                      # README image assets
 ├── image2editable/            # Unified CLI, runtime, and conversion modules
 ├── scripts/                   # Conversion, environment setup, and release tools
@@ -111,7 +120,7 @@ image2editable/
 - **⚠️ Review complex pages manually.** Decorative text, dense tables, gradients, and complex illustrations may not be restored pixel for pixel. Check text, component positions, and layout before delivery.
 - Clear text and regular backgrounds generally reconstruct more reliably. Decorative text, dense tables, gradients, and complex illustrations are not guaranteed to match pixel for pixel.
 - **💳 Conversion consumes the selected Agent's model tokens and context allowance.** Complex pages may require several diagnostic and repair rounds; actual usage depends on the Agent, model, and page complexity.
-- **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five plan batches per component repair cycle, and waits for Agent visual decisions. Conversion may remain incomplete at this limit; results that fail acceptance are not delivered as finished files.
+- **⏱️ Multi-page PDFs, complex pages, and high-resolution images take longer.** Each page goes through OCR, visual separation, reconstruction, and quality checks, with up to five plan batches per component repair cycle, and waits for Agent visual decisions.
 
 ## Supported inputs
 
