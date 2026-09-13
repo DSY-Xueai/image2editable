@@ -57,10 +57,7 @@ Install the image-to-ppt Skill from https://github.com/DSY-Xueai/image2editable.
 ### Install with the **skills CLI**
 
 ```bash
-git clone --depth 1 --filter=blob:none --no-checkout https://github.com/DSY-Xueai/image2editable.git image2editable-skill
-git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
-git -C image2editable-skill checkout
-npx skills add ./image2editable-skill/skills/image-to-ppt
+npx skills add DSY-Xueai/image2editable --skill image-to-ppt
 ```
 
 After installation, describe the task in an Agent such as Codex or Claude Code that supports Skills, vision, local file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:

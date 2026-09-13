@@ -61,10 +61,7 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 ### 使用 **Skills CLI** 安装
 
 ```bash
-git clone --depth 1 --filter=blob:none --no-checkout https://github.com/DSY-Xueai/image2editable.git image2editable-skill
-git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
-git -C image2editable-skill checkout
-npx skills add ./image2editable-skill/skills/image-to-ppt
+npx skills add DSY-Xueai/image2editable --skill image-to-ppt
 ```
 
 安装后，可在支持 Skills、视觉识别、本地文件读取和工具调用的 Codex、Claude Code 等 Agent 中描述需求。在 Codex 中使用 `$image-to-ppt`，在 Claude Code 中使用 `/image-to-ppt`。图片、PDF 和 `.pptx` 可以直接粘贴或附加到对话框，也可以提供本地路径：
