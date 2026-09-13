@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 
 from PIL import Image
@@ -8,6 +9,20 @@ import pytest
 
 from image2editable import libreoffice_renderer as module
 from image2editable.powerpoint_renderer import RendererUnavailable
+
+
+def test_portable_office_discovery_does_not_replace_python_path(tmp_path, monkeypatch):
+    executable = tmp_path / 'portable office' / 'soffice.com'
+    executable.parent.mkdir()
+    executable.touch()
+    original_path = os.environ.get('PATH')
+    monkeypatch.setenv('IMAGE2EDITABLE_LIBREOFFICE', str(executable))
+    assert module.LibreOfficeRenderer.discover().executable == str(executable)
+    assert os.environ.get('PATH') == original_path
+    monkeypatch.setenv('IMAGE2EDITABLE_LIBREOFFICE', 'relative/soffice.com')
+    assert not module.LibreOfficeRenderer.discover().available()
+    monkeypatch.setenv('IMAGE2EDITABLE_LIBREOFFICE', str(tmp_path / 'missing.com'))
+    assert not module.LibreOfficeRenderer.discover().available()
 
 
 def test_libreoffice_exports_selected_page_and_cleans_short_profile(tmp_path, monkeypatch):

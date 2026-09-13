@@ -38,10 +38,14 @@ function Start-Process {
     result = subprocess.run(
         [shell, '-NoProfile', '-NonInteractive', '-Command', command],
         env={**os.environ, 'RUNNER_TEMP': str(tmp_path),
+             'GITHUB_ENV': str(tmp_path / 'github-env.txt'),
              'GITHUB_PATH': str(tmp_path / 'github-path.txt'),
              'RENDERER_INSTALL_SCRIPT': str(script)},
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    program = Path((tmp_path / 'github-path.txt').read_text(encoding='utf-8-sig').strip())
-    assert (program / 'soffice.com').is_file()
+    setting = (tmp_path / 'github-env.txt').read_text(encoding='utf-8-sig').strip()
+    name, value = setting.split('=', 1)
+    assert name == 'IMAGE2EDITABLE_LIBREOFFICE'
+    assert Path(value).is_file()
+    assert not (tmp_path / 'github-path.txt').exists()

@@ -21,6 +21,10 @@ class LibreOfficeRenderer:
 
     @classmethod
     def discover(cls):
+        configured = os.environ.get("IMAGE2EDITABLE_LIBREOFFICE")
+        if configured:
+            path = Path(configured)
+            return cls(str(path) if path.is_absolute() and path.is_file() else None)
         executable = shutil.which("soffice.com") or shutil.which("soffice")
         if executable is None:
             candidates = [Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")]

@@ -15,4 +15,6 @@ $taskProgram = Join-Path $taskExtract 'program'
 if (-not (Test-Path -LiteralPath (Join-Path $taskProgram 'soffice.com'))) {
     throw 'LibreOffice executable is missing'
 }
-$taskProgram | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+# LibreOffice bundles python.exe; prepending program would shadow setup-python.
+('IMAGE2EDITABLE_LIBREOFFICE=' + (Join-Path $taskProgram 'soffice.com')) |
+    Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

@@ -15,7 +15,7 @@ description: 将图片、PDF、图片版 PPTX 或含原生对象的混合 PPTX �
 
 - 本 Skill 在转换前自动完成必要环境准备。依赖或 OCR 缺少时直接安装固定版本；产品 Runtime 模型缺少时直接安装并校验。不得为依赖或模型安装向用户询问确认，已满足的项目直接跳过。
 - 使用 Python 3.10–3.12；该范围与当前项目测试和分发契约一致。
-- 产品 Runtime 的原生 PDF 路径在最终装配后核验实际 PPTX。先复用已安装的 PowerPoint（Windows 加装 `image2editable[render-qa]`）或 LibreOffice；均不可用时按当前平台安装 LibreOffice，再继续原 Run，不重新执行已有效的 OCR 或分割。将其 `program` 目录加入当前任务 PATH；安装完成后用 `soffice --version` 验证。Windows 发布基准使用已校验的 LibreOffice 26.8.0。只有实际渲染与原生对象检查通过，才能交付。
+- 产品 Runtime 的原生 PDF 路径在最终装配后核验实际 PPTX。先复用已安装的 PowerPoint（Windows 加装 `image2editable[render-qa]`）或 LibreOffice；均不可用时按当前平台安装 LibreOffice，再继续原 Run，不重新执行已有效的 OCR 或分割。便携安装使用 `IMAGE2EDITABLE_LIBREOFFICE` 指向 `soffice.com`（Windows）或 `soffice` 的绝对路径，并以该路径执行 `--version` 验证；不要将内置 Python 所在目录放到当前转换环境之前。Windows 发布基准使用已校验的 LibreOffice 26.8.0。只有实际渲染与原生对象检查通过，才能交付。
 - 先解析当前 `SKILL.md` 所在目录为绝对路径 `<skill-root>`。缺少转换依赖时，运行 `python -m pip install -r "<skill-root>/references/requirements.txt"`，安装 `torch>=2.5.1`、`torchvision>=0.20.1`、Transformers 和 SAM 2.1；不得依赖调用者的当前工作目录。
 - LaMa 由内置的本地 TorchScript adapter 调用，依赖随 `references/requirements.txt` 中的 `torch>=2.5.1,<3` 安装。产品安装默认从已验证的 runtime receipt 解析模型；独立 skill 必须通过绝对路径设置 `LAMA_MODEL`，且文件须匹配固定 Big-LaMa 身份。
 - OCR 不可用时，默认运行 `python -m pip install "paddleocr==3.7.0" "paddlepaddle==3.3.1" "PaddleX==3.7.2" "PyYAML==6.0.2"`。PaddleOCR 是本 Skill 的固定默认 OCR，覆盖中文、英文和复杂版面，不再停下来要求用户选择 OCR 实现。
