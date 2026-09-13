@@ -56,7 +56,6 @@ image2editable 用于把图片、PDF 和截图式 PPT 转换成可以继续修�
 
 ```text
 请从 https://github.com/DSY-Xueai/image2editable 安装 image-to-ppt Skill。
-使用浅层部分克隆（--filter=blob:none --no-checkout），先设置稀疏检出仅包含 /skills/image-to-ppt/，再检出并从该本地目录安装。不要下载整份仓库或 ZIP。
 ```
 
 ### 使用 **Skills CLI** 安装
@@ -67,8 +66,6 @@ git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
 git -C image2editable-skill checkout
 npx skills add ./image2editable-skill/skills/image-to-ppt
 ```
-
-在准备存放 Skill 的磁盘目录执行以上命令。更新时保持稀疏检出，更新此克隆后重新从本地目录安装。
 
 安装后，可在支持 Skills、视觉识别、本地文件读取和工具调用的 Codex、Claude Code 等 Agent 中描述需求。在 Codex 中使用 `$image-to-ppt`，在 Claude Code 中使用 `/image-to-ppt`。图片、PDF 和 `.pptx` 可以直接粘贴或附加到对话框，也可以提供本地路径：
 
@@ -82,14 +79,6 @@ $image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 /image-to-ppt 把 input.png 转成可编辑 PPTX。
 /image-to-ppt 把 <input.pdf> 转成可编辑 PPT。
 ```
-
-Skill 会在 Windows、macOS 和 Linux 上自动准备缺失的运行环境、依赖和模型，已有可用环境会复用。Windows 优先安装到 D 盘，其次其他非 C 本地磁盘；macOS/Linux 优先其他已挂载的本地磁盘。没有其他本地磁盘时使用系统盘用户目录，下载缓存和临时文件使用同一位置。
-
-原生 PDF 保留文字和绘图对象，输出前进行实际渲染校验，缺少渲染组件时会自动准备。
-
-项目程序从当前仓库安装；仅安装 Skill 时自动获取 GitHub 当前源码，并核对安装内容，避免使用滞后的 PyPI 项目版本。
-
-Skill 仅获取运行源码、依赖配置和必要许可证，不下载基准语料、测试、演示图片或开发发布工具。
 
 ## 项目结构
 

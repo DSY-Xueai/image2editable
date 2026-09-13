@@ -52,7 +52,6 @@ After conversion, you can edit recovered text, move separated visual elements, a
 
 ```text
 Install the image-to-ppt Skill from https://github.com/DSY-Xueai/image2editable.
-Use a shallow partial clone (--filter=blob:none --no-checkout), set sparse checkout to /skills/image-to-ppt/ before checking out files, then install from that local directory. Do not download the full repository or a ZIP archive.
 ```
 
 ### Install with the **skills CLI**
@@ -63,8 +62,6 @@ git -C image2editable-skill sparse-checkout set --no-cone /skills/image-to-ppt/
 git -C image2editable-skill checkout
 npx skills add ./image2editable-skill/skills/image-to-ppt
 ```
-
-Run these commands on the disk where the Skill should be stored. For updates, keep sparse checkout enabled, update this clone, and reinstall from the local directory.
 
 After installation, describe the task in an Agent such as Codex or Claude Code that supports Skills, vision, local file access, and tool calls. Images, PDFs, and `.pptx` files can be pasted or attached in the chat, or provided as local paths:
 
@@ -79,14 +76,6 @@ $image-to-ppt Convert <input.pdf> to an editable PPTX.
 /image-to-ppt Convert input.png to an editable PPTX.
 /image-to-ppt Convert <input.pdf> to an editable PPTX.
 ```
-
-The Skill prepares missing runtime tools, dependencies, and models on Windows, macOS, and Linux, reusing working installations. New installations prefer drive D and then other non-C local drives on Windows, or other mounted local disks on macOS/Linux. When no other local disk exists, the user directory on the system disk is used. Download caches and temporary files use the same location.
-
-Native PDF pages retain text and drawing objects and undergo an actual render check before export. Missing rendering components are prepared automatically.
-
-The program is installed from the current repository. A Skill-only installation retrieves the current GitHub source and verifies the installed files, avoiding an outdated project version on PyPI.
-
-The Skill retrieves only runtime source, dependency configuration, and required licenses, excluding benchmark data, tests, demo images, and development or release tools.
 
 ## Project layout
 
