@@ -1430,6 +1430,118 @@ def test_quality_text_refinement_preserves_structure_crossing_text_box() -> None
     assert not np.any(np.all(refined[glyph] == (245, 245, 245), axis=1))
 
 
+@pytest.mark.parametrize("line_end", [(86, 60), (132, 60)])
+def test_effective_text_context_keeps_diagonal_graphics_out_of_text_ownership(
+    tmp_path: Path, line_end: tuple[int, int],
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+    from scripts.component_underlay import build_presentation_layer
+
+    background = np.full((110, 180, 3), (249, 251, 253), dtype=np.uint8)
+    source = background.copy()
+    line = np.zeros(source.shape[:2], dtype=np.uint8)
+    start = (20, 16) if line_end[0] < 100 else (175, 16)
+    cv2.line(line, start, line_end, 255, 2)
+    source[line > 0] = (159, 179, 200)
+    cv2.putText(source, "AX", (83, 79), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (209, 73, 91), 1, cv2.LINE_AA)
+    glyph = np.max(np.abs(source.astype(np.int16) - background), axis=2) > 0
+    glyph &= line == 0
+    text_mask = np.zeros(line.shape, dtype=np.uint8)
+    text_mask[54:83, 78:138] = 255
+    cleaned = source.copy()
+    cleaned[text_mask > 0] = background[text_mask > 0]
+    nodes = []
+    for object_id, kind, mask, bbox in (
+        ("text_0001", "text", text_mask, [78, 54, 138, 83]),
+        ("visual_0001", "parent", line, [18, 14, 178, 63]),
+    ):
+        path = tmp_path / f"{object_id}.png"
+        Image.fromarray(mask).save(path)
+        nodes.append({
+            "id": object_id, "kind": kind, "parent_id": None,
+            "state": "frozen" if kind == "text" else "pending",
+            "mask": path.name, "mask_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bbox": bbox, "z_index": 1, "text_ids": [],
+        })
+    _, effective_mask, effective_clean = legacy._effective_text_context(
+        source=source, text_clean=cleaned, text_mask=text_mask,
+        text_items=[{"box": [78, 54, 60, 29], "text": "AX", "color": "#d1495b"}],
+        graph={"nodes": nodes}, graph_dir=tmp_path,
+        refine_text_clean=True, refine_cleanup_mask=True,
+    )
+    structure = line > 0
+    assert not np.any(effective_mask & structure)
+    assert np.array_equal(effective_clean[structure], source[structure])
+    assert np.all(effective_mask[glyph])
+    assert not np.any(np.all(effective_clean[glyph] == source[glyph], axis=1))
+    layer = build_presentation_layer(
+        source_rgb=source, text_clean_rgb=effective_clean,
+        ownership_mask=structure, semantic_mask=structure,
+        higher_layer_mask=np.zeros_like(structure), text_mask=effective_mask,
+    )
+    assert np.array_equal(layer["ownership_mask"], structure)
+    assert not np.any(layer["generated_underlay_mask"])
+    assert layer["metrics"]["boundary_color_mae"] == 0
+
+
+@pytest.mark.parametrize("declared_color", ["#d1495b", "#2f829c", None])
+def test_text_boundary_structure_does_not_reclassify_diagonal_letter_strokes(
+    declared_color: str | None,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+
+    source = np.full((120, 180, 3), 249, dtype=np.uint8)
+    cv2.putText(source, "AX", (20, 92), cv2.FONT_HERSHEY_SIMPLEX,
+                2.5, (209, 73, 91), 2, cv2.LINE_AA)
+    glyph = np.any(source != 249, axis=2)
+    protected = legacy._text_boundary_structure_mask(
+        source,
+        [{"box": [15, 35, 115, 62], "text": "AX", "color": declared_color}],
+        glyph,
+    )
+    assert not np.any(protected & glyph)
+
+
+@pytest.mark.parametrize("antialiased", [False, True])
+@pytest.mark.parametrize("reverse_items", [False, True])
+@pytest.mark.parametrize("text_variant", ["plain", "runs", "left_clipped", "top_clipped"])
+def test_text_boundary_structure_preserves_other_colored_text_in_overlapping_boxes(
+    antialiased: bool, reverse_items: bool, text_variant: str,
+) -> None:
+    import cv2
+
+    from image2editable import legacy
+
+    source = np.full((120, 180, 3), (249, 251, 253), dtype=np.uint8)
+    background = source.copy()
+    cv2.line(source, (30, 70), (110, 70), (47, 130, 156), 2,
+             cv2.LINE_AA if antialiased else cv2.LINE_8)
+    dash = np.any(source != background, axis=2)
+    cv2.putText(source, "A", (118, 85), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (209, 73, 91), 1, cv2.LINE_AA)
+    items = [
+        {"box": [100, 65, 55, 24], "text": "A", "color": "#d1495b"},
+        {"box": [25, 65, 90, 12], "text": "—", "color": "#2f829c"},
+    ]
+    if text_variant == "runs":
+        items[1]["color"] = "#d1495b"
+        items[1]["runs"] = [{"text": "—", "box": [0, 0, 1, 1], "color": "#2f829c"}]
+    elif text_variant == "left_clipped":
+        items[1]["box"] = [-10, 65, 125, 12]
+    elif text_variant == "top_clipped":
+        items[1]["box"] = [25, -10, 90, 87]
+    protected = legacy._text_boundary_structure_mask(
+        source, items[::-1] if reverse_items else items,
+        np.ones(dash.shape, dtype=bool),
+    )
+    assert not np.any(protected & dash)
+
+
 def test_quality_text_refinement_uses_colored_horizontal_container() -> None:
     from image2editable import legacy
 

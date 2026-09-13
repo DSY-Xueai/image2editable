@@ -785,7 +785,7 @@ def record_component_execution(
             for action in plan["actions"]
             if action["action"] in {
                 "retry_with_box", "retry_with_points",
-                "collapse_to_parent", "absorb_into_parent",
+                "collapse_to_parent", "absorb_into_parent", "absorb_residual",
             }
             and before_by_id[action["object_ids"][0]]["state"] == "inactive"
             and after_by_id.get(action["object_ids"][0], {}).get("state") == "pending"

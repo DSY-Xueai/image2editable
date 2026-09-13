@@ -5100,6 +5100,74 @@ def test_absorb_residual_unions_only_bound_unexplained_pixels(
     assert np.array_equal(actual, left_before | (residual > 0))
 
 
+def test_record_execution_accepts_bound_inactive_residual_recovery(
+    page_session: dict,
+) -> None:
+    evidence = page_session["evidence"]
+    graph_path = evidence["component-graph.json"]
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph["nodes"][0]["state"] = "inactive"
+    frozen = graph["nodes"][1]
+    frozen_mask = graph_path.parent / frozen["mask"]
+    Image.fromarray(np.array([[0, 0], [0, 255]], dtype=np.uint8)).save(frozen_mask)
+    frozen["mask_sha256"] = hashlib.sha256(frozen_mask.read_bytes()).hexdigest()
+    frozen["bbox"] = [1, 1, 2, 2]
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    Image.fromarray(np.array([[255, 0], [0, 0]], dtype=np.uint8)).save(
+        evidence["unexplained-mask.png"]
+    )
+    _refresh_test_presentation_manifest(page_session)
+    store, request_path = _start_quality_mutation_round(page_session)
+
+    _execute_composite_quality_round(
+        store, request_path, load_component_agent_graph(request_path),
+        action=_action("absorb_residual", ["candidate_b"]), shape=(2, 2),
+    )
+
+    result_dir = request_path.parents[2] / "execution-01"
+    result = json.loads((result_dir / "component-graph.json").read_text(encoding="utf-8"))
+    recovered = next(n for n in result["nodes"] if n["id"] == "candidate_b")
+    assert recovered["state"] == "pending"
+    assert np.array_equal(
+        np.asarray(Image.open(result_dir / recovered["mask"])),
+        np.array([[255, 0], [0, 0]], dtype=np.uint8),
+    )
+    assert next(n for n in result["nodes"] if n["id"] == "frozen_a") == frozen
+
+
+def test_absorb_residual_reactivates_only_bound_pixels_from_inactive_composite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    left.update(state="inactive", z_index=3)
+    residual = np.zeros(image.shape[:2], dtype=np.uint8)
+    residual[7:9, 2:4] = 255
+    residual_path = input_dir / "unexplained-mask.png"
+    Image.fromarray(residual).save(residual_path)
+    request = {"evidence": {"unexplained-mask.png": {
+        "path": "unexplained-mask.png",
+        "sha256": hashlib.sha256(residual_path.read_bytes()).hexdigest(),
+    }}}
+    monkeypatch.setattr(
+        component_repair, "load_component_agent_request", lambda _: request,
+    )
+    output = tmp_path / "round-recovered"
+    result = execute_component_actions(
+        image, graph, [_action("absorb_residual", ["left"])],
+        sam_runner=None, input_dir=input_dir, output_dir=output,
+    )
+    recovered = next(n for n in result["nodes"] if n["id"] == "left")
+    assert recovered["state"] == "pending"
+    assert recovered["parent_id"] is None
+    assert recovered["z_index"] > 4
+    assert np.array_equal(np.asarray(Image.open(output / recovered["mask"])) > 0,
+                          residual > 0)
+    assert [n for n in result["nodes"] if n["state"] == "frozen"] == [
+        n for n in graph["nodes"] if n["state"] == "frozen"
+    ]
+
+
 def test_accept_then_absorb_residual_preserves_gate_and_pair_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5475,6 +5543,26 @@ def test_expand_stays_inside_parent_and_collapse_activates_parent(tmp_path: Path
     states = {node["id"]: node["state"] for node in collapsed["nodes"]}
     assert states["parent"] == "pending"
     assert states["left"] == states["right"] == "inactive"
+
+
+@pytest.mark.parametrize("neighbor_state", ["pending", "pending_gate", "frozen"])
+def test_expand_does_not_claim_neighbor_pixels(tmp_path: Path, neighbor_state: str) -> None:
+    image, graph, input_dir = _action_case(tmp_path)
+    right = next(n for n in graph["nodes"] if n["id"] == "right")
+    right["state"] = neighbor_state
+    output = tmp_path / "expanded"
+    result = execute_component_actions(
+        image, graph, [_action("expand", ["left"], {"margin_ratio": 0.5})],
+        sam_runner=None, input_dir=input_dir, output_dir=output,
+    )
+    left = next(n for n in result["nodes"] if n["id"] == "left")
+    before = np.asarray(Image.open(input_dir / "masks/left.png")) > 0
+    after = np.asarray(Image.open(output / left["mask"])) > 0
+    neighbor = np.asarray(Image.open(input_dir / right["mask"])) > 0
+    assert np.any(after & ~before)
+    assert np.all(after[before])
+    assert not np.any((after & ~before) & neighbor)
+    assert next(n for n in result["nodes"] if n["id"] == "right") == right
 
 
 def test_action_margin_uses_page_short_edge_for_different_component_sizes(
@@ -5909,6 +5997,51 @@ def test_presentation_assets_use_refined_text_mask_instead_of_ocr_box(
     reused = json.loads(reused_path.read_text(encoding="utf-8"))
     assert reused["components"] == manifest["components"]
     assert list(reused_output.rglob("*.png")) == []
+
+
+def test_presentation_repair_reserves_actual_frozen_ownership(tmp_path: Path) -> None:
+    from image2editable.store import RunStore
+
+    source, graph, graph_dir = _action_case(tmp_path)
+    source[:] = 210
+    source_path = tmp_path / "source.png"
+    Image.fromarray(source).save(source_path)
+    graph_path = graph_dir / "component-graph.json"
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    original_path = legacy._build_presentation_assets(
+        RunStore(tmp_path), source_path=source_path, text_clean_path=source_path,
+        graph_path=graph_path, output_dir=graph_dir,
+    )
+    original = json.loads(original_path.read_text(encoding="utf-8"))
+    frozen = next(n for n in original["components"] if n["component_id"] == "left")
+    # A later graph mask can differ from the already accepted presentation owner.
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    left["state"] = "frozen"
+    smaller = np.zeros(source.shape[:2], dtype=np.uint8)
+    smaller[2:4, 2:4] = 255
+    Image.fromarray(smaller).save(graph_dir / left["mask"])
+    left["mask_sha256"] = hashlib.sha256((graph_dir / left["mask"]).read_bytes()).hexdigest()
+    left["bbox"] = [2, 2, 4, 4]
+    right = next(n for n in graph["nodes"] if n["id"] == "right")
+    extended = np.zeros_like(smaller)
+    extended[4:6, 2:14] = 255
+    Image.fromarray(extended).save(graph_dir / right["mask"])
+    right["mask_sha256"] = hashlib.sha256((graph_dir / right["mask"]).read_bytes()).hexdigest()
+    right["bbox"] = [2, 4, 14, 6]
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    output = tmp_path / "repair"
+    output.mkdir()
+    repaired_path = legacy._build_presentation_assets(
+        RunStore(tmp_path), source_path=source_path, text_clean_path=source_path,
+        graph_path=graph_path, output_dir=output, frozen_components={"left": frozen},
+    )
+    repaired = json.loads(repaired_path.read_text(encoding="utf-8"))
+    assert next(n for n in repaired["components"] if n["component_id"] == "left") == frozen
+    pending = next(n for n in repaired["components"] if n["component_id"] == "right")
+    fixed_mask = np.asarray(Image.open(tmp_path / frozen["ownership_mask"]["path"])) > 0
+    new_mask = np.asarray(Image.open(tmp_path / pending["ownership_mask"]["path"])) > 0
+    assert not np.any(fixed_mask & new_mask)
+    assert np.all((fixed_mask | new_mask)[extended > 0])
 
 
 def test_opaque_mask_completion_repairs_solid_holes_but_keeps_line_art() -> None:

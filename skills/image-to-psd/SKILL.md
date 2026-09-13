@@ -116,6 +116,8 @@ image2editable run execute runs/psd-job
 
 计划必须绑定当前 `request_sha256`。每个 action 只使用请求组件图中的 ID，并限定为现有十四类动作：`accept`、`discard`、`merge`、`split`、`expand`、`shrink`、`retry_with_box`、`retry_with_points`、`attach_text`、`suppress_text`、`collapse_to_parent`、`rebuild_background`、`absorb_residual`、`absorb_into_parent`。Agent confidence 不能放宽硬失败。
 
+若绑定的 `unexplained-mask.png` 中有经验证的结构碎片，可用 `absorb_residual` 并入相关候选；请求图中的 inactive visual 有对应来源证据时，该动作仅恢复绑定残差，不恢复整个已停用复合对象，也不调用 SAM。随后按需 `rebuild_background` 并重新验证。只有残差证据不足以确定结构时才重新分割，不得将残差归为背景来消除违规。
+
 ## 质量与失败
 
 - 每张图片独立判断，不能跨图片套用拆分结果。

@@ -234,7 +234,7 @@ def execute_component_actions(
                 or value in planned_retry_ids
                 for value in object_ids
             )
-        elif name in {"retry_with_box", "retry_with_points"}:
+        elif name in {"retry_with_box", "retry_with_points", "absorb_residual"}:
             valid_states = nodes[object_ids[0]]["state"] in {
                 "pending", "inactive"
             }
@@ -254,6 +254,8 @@ def execute_component_actions(
                 raise ValueError("component plan has conflicting object actions")
             touched.update({value: name for value in object_ids})
         if name in {"retry_with_box", "retry_with_points"}:
+            planned_retry_ids.update(object_ids)
+        elif name == "absorb_residual" and nodes[object_ids[0]]["state"] == "inactive":
             planned_retry_ids.update(object_ids)
 
     height, width = image.shape[:2]
@@ -484,10 +486,29 @@ def execute_component_actions(
             if name == "expand":
                 support = masks[parent_id] if parent_id is not None else cv2.dilate(current, kernel)
                 changed = np.asarray(changed, dtype=bool) & np.asarray(support, dtype=bool)
+                # Add uncovered edges without taking pixels from neighboring objects.
+                added = changed & ~current.astype(bool)
+                for other_id, other in nodes.items():
+                    if (
+                        other_id != component_id and other["kind"] != "text"
+                        and other["state"] in {"pending", "pending_gate", "frozen"}
+                    ):
+                        added &= ~masks[other_id]
+                changed = current.astype(bool) | added
             masks[component_id] = np.asarray(changed, dtype=bool)
         elif name == "absorb_residual":
             component_id = object_ids[0]
-            masks[component_id] |= bound_residuals[component_id]
+            if nodes[component_id]["state"] == "inactive":
+                # Restore only signed residual evidence, not the discarded composite.
+                masks[component_id] = bound_residuals[component_id].copy()
+                nodes[component_id].update(
+                    state="pending", kind="parent", parent_id=None,
+                    z_index=max(node["z_index"] for node in nodes.values()) + 1,
+                    text_ids=[],
+                )
+                reactivated_ids.add(component_id)
+            else:
+                masks[component_id] |= bound_residuals[component_id]
         elif name in {"retry_with_box", "retry_with_points"}:
             component_id = object_ids[0]
             parameters = action["parameters"]

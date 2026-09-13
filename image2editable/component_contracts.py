@@ -498,7 +498,7 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                     and value in recoverable_parent_ids
                 )
                 and not (
-                    name in {"retry_with_box", "retry_with_points"}
+                    name in {"retry_with_box", "retry_with_points", "absorb_residual"}
                     and value in recoverable_retry_ids
                 )
                 and not (
@@ -597,6 +597,8 @@ def validate_component_plan(plan: object, *, request: dict, graph: dict | None =
                 raise ValueError("component action positive coordinates are invalid")
         if name in {"retry_with_box", "retry_with_points"}:
             retried_ids.update(object_ids)
+        elif name == "absorb_residual":
+            retried_ids.update(set(object_ids) & recoverable_retry_ids)
     return plan
 
 

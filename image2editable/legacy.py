@@ -1154,8 +1154,25 @@ def _build_presentation_assets(
             for item in text_items
         ],
     )
+    frozen_ownership = {}
+    frozen_coverage = np.zeros(source.shape[:2], dtype=bool) if frozen_components else None
+    for component_id, record in frozen_components.items():
+        _, payload = _load_legacy_ref(
+            store, record["ownership_mask"],
+            max_bytes=max(1024 * 1024, source.shape[0] * source.shape[1] * 2),
+        )
+        owned = _decode_binary_grayscale_png(
+            payload, source.shape[:2], label="frozen presentation ownership",
+        )
+        frozen_ownership[component_id] = owned
+        frozen_coverage |= owned
     ownership_masks = resolve_visual_mask_ownership(
-        active_nodes, assigned_masks
+        active_nodes,
+        [
+            frozen_ownership[node["id"]]
+            if node["id"] in frozen_ownership else mask & ~frozen_coverage
+            for node, mask in zip(active_nodes, assigned_masks, strict=True)
+        ] if frozen_components else assigned_masks,
     )
     assigned_by_id = {
         node["id"]: mask
@@ -2217,6 +2234,78 @@ def _reuse_frozen_presentation_records(
     }
 
 
+def _text_boundary_structure_mask(source, text_items: list[dict], visual_mask):
+    import re
+
+    import cv2
+    import numpy as np
+
+    protected = np.zeros(source.shape[:2], dtype=bool)
+    known_text = np.zeros(source.shape[:2], dtype=bool)
+    for item in text_items:
+        color = item.get("color")
+        x, y, width, height = (int(value) for value in item["box"])
+        text_radius = _text_item_repair_padding_px(height)
+        if item.get("runs") or not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            # A single color cannot describe styled runs or unknown text ink.
+            known_text[
+                max(0, y - text_radius):min(source.shape[0], y + height + text_radius),
+                max(0, x - text_radius):min(source.shape[1], x + width + text_radius),
+            ] = True
+            continue
+        pad = max(12, height * 2)
+        left, top = max(0, x - pad), max(0, y - pad)
+        right = min(source.shape[1], x + width + pad)
+        bottom = min(source.shape[0], y + height + pad)
+        crop = source[top:bottom, left:right]
+        background = np.median(np.concatenate((
+            crop[0], crop[-1], crop[:, 0], crop[:, -1],
+        )), axis=0)
+        target = np.array([int(color[i:i + 2], 16) for i in (1, 3, 5)])
+        axis = target - background
+        length = float(axis @ axis)
+        if length <= 0:
+            continue
+        delta = crop.astype(np.float32) - background
+        opacity = np.clip((delta @ axis) / length, 0, 1)
+        color_match = np.linalg.norm(delta - opacity[..., None] * axis, axis=2) <= 12
+        text_color = color_match & (opacity >= 0.02)
+        foreground = (np.linalg.norm(delta, axis=2) > 12) & ~text_color
+        box = np.zeros(foreground.shape, dtype=bool)
+        box[
+            max(0, y - top):min(crop.shape[0], y + height - top),
+            max(0, x - left):min(crop.shape[1], x + width - left),
+        ] = True
+        text_support = cv2.dilate(
+            box.astype(np.uint8),
+            np.ones((2 * text_radius + 1, 2 * text_radius + 1), dtype=np.uint8),
+        ).astype(bool)
+        known_text[top:bottom, left:right] |= text_support & color_match & (opacity > 0)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            foreground.astype(np.uint8), 8
+        )
+        for label in range(1, count):
+            component = labels == label
+            inside = component & box
+            if not np.any(inside) or np.count_nonzero(inside) * 4 > stats[label, 4]:
+                continue
+            if not np.any(component & ~box & visual_mask[top:bottom, left:right]):
+                continue
+            points = cv2.findNonZero(component.astype(np.uint8))
+            short, long = sorted(cv2.minAreaRect(points)[1])
+            if short > 4 or long < max(12, height, short * 6):
+                continue
+            # Only a thin, differently colored structure continuing outside the
+            # OCR box can reclaim pixels; text-colored A/X strokes stay text.
+            halo = cv2.dilate(
+                component.astype(np.uint8), np.ones((5, 5), dtype=np.uint8),
+            ).astype(bool)
+            halo &= ~text_color & (~foreground | component)
+            protected[top:bottom, left:right] |= halo
+    # Another overlapping OCR item may own a differently colored thin glyph.
+    return protected & ~known_text
+
+
 def _effective_text_context(
     *,
     source,
@@ -2348,6 +2437,12 @@ def _effective_text_context(
         if refine_cleanup_mask:
             protected_visual_mask &= ~effective_mask
         effective_clean[protected_visual_mask] = cleaned[protected_visual_mask]
+        if refine_cleanup_mask:
+            structure = _text_boundary_structure_mask(
+                source, effective_items, active_visual_mask,
+            )
+            effective_mask &= ~structure
+            effective_clean[structure] = source[structure]
     return effective_items, effective_mask, effective_clean
 
 

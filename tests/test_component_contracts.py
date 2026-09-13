@@ -333,6 +333,21 @@ def test_component_plan_rebuilds_background_with_retried_inactive_visual() -> No
     ) is plan
 
 
+def test_component_plan_recovers_bound_residual_from_inactive_visual() -> None:
+    request, graph = _plan_contract_fixture()
+    request["candidate_ids"].remove("visual")
+    next(n for n in graph["nodes"] if n["id"] == "visual")["state"] = "inactive"
+    plan = _plan(request, "absorb_residual", ["visual"])
+    plan["actions"].append({
+        "action": "rebuild_background", "object_ids": ["visual"],
+        "parameters": {"margin_ratio": 0.005}, "confidence": 0.9,
+        "evidence": ["Remove only recovered signed residual pixels."],
+    })
+    assert component_contracts.validate_component_plan(
+        plan, request=request, graph=graph,
+    ) is plan
+
+
 def test_component_plan_rejects_inactive_secondary_parent_absorption() -> None:
     request, graph = _plan_contract_fixture()
     for parent_id in ("parent_a", "parent_b"):
