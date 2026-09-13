@@ -96,6 +96,8 @@ def test_native_pdf_bypasses_visual_workers_and_builds_editable_pptx(
     )
     assert state["route"] == "pdf_native"
     assert state["status"] == "ready_for_assembly"
+    native_path, _ = legacy._load_legacy_ref(RunStore.open(run), state["native_page_ref"])
+    assert native_path.is_file()
     assert not (run / "pages/page_001/source.png").exists()
     assert not (run / "pages/page_001/pdf-assets").exists()
 
@@ -263,14 +265,11 @@ def test_hybrid_pdf_bypasses_workers_and_keeps_editable_text(
     source = tmp_path / "hybrid.pdf"
     document = canvas.Canvas(str(source), pagesize=(200, 120))
     document.drawString(20, 95, "Editable heading")
-    document.beginForm("formula", 0, 0, 80, 20)
+    document.setFillColorRGB(0.1, 0.3, 0.8)
+    document.roundRect(45, 30, 140, 30, 6, fill=1, stroke=0)
+    document.setFillColorRGB(1, 1, 1)
     document.setFont("Times-Roman", 16)
-    document.drawString(0, 2, "a / b = c")
-    document.endForm()
-    document.saveState()
-    document.translate(60, 35)
-    document.doForm("formula")
-    document.restoreState()
+    document.drawString(60, 35, "a / b = c")
     document.save()
 
     def unexpected_worker(*args, **kwargs):
@@ -292,6 +291,10 @@ def test_hybrid_pdf_bypasses_workers_and_keeps_editable_text(
     slide = presentation.slides[0]
     assert any(
         shape.has_text_frame and shape.text == "Editable heading"
+        for shape in slide.shapes
+    )
+    assert any(
+        shape.has_text_frame and shape.text == "a / b = c"
         for shape in slide.shapes
     )
     patches = [

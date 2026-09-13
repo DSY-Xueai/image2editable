@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import math
 import os
 import shutil
@@ -12,6 +13,8 @@ from typing import BinaryIO, Literal, Sequence
 
 import pypdfium2 as pdfium
 from PIL import Image
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ContentStream
 
 from image2editable.component_contracts import validate_agent_provider
 from image2editable.contracts import SCHEMA_VERSION, RunStatus
@@ -189,11 +192,15 @@ def _prepare_pdf_analysis(
 ) -> dict:
     prepared = {**analysis, "objects": []}
     keep_assets = analysis.get("requires_visual") is False
+    patch_page = None
     for item in analysis.get("objects", []):
         prepared_item = dict(item)
         if keep_assets and prepared_item.get("type") == "patch":
+            if patch_page is None:
+                reader = PdfReader(store.root / "input" / "original.pdf")
+                patch_page = reader.pages[analysis["page_index"]]
             prepared_item["asset_path"] = str(
-                _write_pdf_patch(store, analysis, source_image, prepared_item)
+                _write_pdf_patch(store, analysis, source_image, prepared_item, patch_page)
             )
         asset_value = prepared_item.get("asset_path")
         if isinstance(asset_value, str):
@@ -226,37 +233,76 @@ def _write_pdf_patch(
     analysis: dict,
     source_image: Path,
     item: dict,
+    source_page,
 ) -> Path:
     width_pt = float(analysis["width_pt"])
     height_pt = float(analysis["height_pt"])
     left, bottom, right, top = (float(value) for value in item["bbox_pt"])
-    with Image.open(source_image) as source:
-        scale_x = source.width / width_pt
-        scale_y = source.height / height_pt
+    # A page screenshot includes neighbouring objects and editable text. Render
+    # only this object's paint operation, retaining its graphics state and clip.
+    writer = PdfWriter()
+    page = writer.add_page(source_page)
+    contents = ContentStream(page.get_contents(), writer)
+    paint_index = item["paint_operation_index"]
+    path_paints = {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"S", b"s"}
+    isolated = []
+    for index, (operands, operator) in enumerate(contents.operations):
+        if index != paint_index:
+            if operator in path_paints:
+                operands, operator = [], b"n"
+            elif operator in {b"Tj", b"TJ", b"'", b'"', b"Do", b"sh", b"INLINE IMAGE"}:
+                continue
+        isolated.append((operands, operator))
+    contents.operations = isolated
+    page.replace_contents(contents)
+    payload = io.BytesIO()
+    writer.write(payload)
+    with Image.open(source_image) as original:
+        scale = plan_pdf_render(width_pt, height_pt, "standard").scale
+        expected_size = original.size
+    document = pdfium.PdfDocument(payload.getvalue())
+    render_page = document[0]
+    bitmap = None
+    try:
+        # Include painted stroke extents, then rasterise only this local region.
+        for obj in render_page.get_objects(max_depth=1):
+            bounds = obj.get_bounds()
+            left, bottom = min(left, bounds[0]), min(bottom, bounds[1])
+            right, top = max(right, bounds[2]), max(top, bounds[3])
+        pixel_width, pixel_height = expected_size
+        scale_x, scale_y = pixel_width / width_pt, pixel_height / height_pt
         pixel_left = max(0, math.floor(left * scale_x) - 2)
         pixel_top = max(0, math.floor((height_pt - top) * scale_y) - 2)
-        pixel_right = min(source.width, math.ceil(right * scale_x) + 2)
-        pixel_bottom = min(
-            source.height, math.ceil((height_pt - bottom) * scale_y) + 2
-        )
-        crop = source.crop((pixel_left, pixel_top, pixel_right, pixel_bottom))
+        pixel_right = min(pixel_width, math.ceil(right * scale_x) + 2)
+        pixel_bottom = min(pixel_height, math.ceil((height_pt - bottom) * scale_y) + 2)
+        # PDFium rounds each crop side upwards in device pixels.
+        crop = tuple(max(0, value - 0.25) / scale for value in (
+            pixel_left, pixel_height - pixel_bottom,
+            pixel_width - pixel_right, pixel_top,
+        ))
+        bitmap = render_page.render(scale=scale, crop=crop, fill_color=(0, 0, 0, 0))
+        source = bitmap.to_pil()
         try:
+            if source.size != (pixel_right - pixel_left, pixel_bottom - pixel_top):
+                raise ValueError("PDF patch render size differs from source")
             target = (
-                store.root / "pages"
-                / f"page_{analysis['page_index'] + 1:03d}"
+                store.root / "pages" / f"page_{analysis['page_index'] + 1:03d}"
                 / "pdf-assets" / f"{item['id']}.png"
             )
             target.parent.mkdir(parents=True, exist_ok=True)
-            crop.save(target, format="PNG")
+            source.save(target, format="PNG")
+            item["bbox_pt"] = [
+                pixel_left / scale_x, height_pt - pixel_bottom / scale_y,
+                pixel_right / scale_x, height_pt - pixel_top / scale_y,
+            ]
+            return target
         finally:
-            crop.close()
-    item["bbox_pt"] = [
-        pixel_left / scale_x,
-        height_pt - pixel_bottom / scale_y,
-        pixel_right / scale_x,
-        height_pt - pixel_top / scale_y,
-    ]
-    return target
+            source.close()
+    finally:
+        if bitmap is not None:
+            bitmap.close()
+        render_page.close()
+        document.close()
 
 
 def _analysis_error_result(render: dict[str, object]) -> dict[str, object]:

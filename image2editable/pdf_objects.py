@@ -90,8 +90,11 @@ def _analyze_open_page(
         context.unsupported_features.add("crop_box")
     contents = page.get_contents()
     if contents is not None:
-        for operands, operator in ContentStream(contents, reader).operations:
+        for index, (operands, operator) in enumerate(ContentStream(contents, reader).operations):
+            before = len(context.objects)
             context.handle(operands, operator)
+            for item in context.objects[before:]:
+                item["paint_operation_index"] = index
     _replace_text_objects(context, pdfium_page)
     _apply_object_clips(context)
     objects = context.objects
@@ -457,6 +460,8 @@ class _ParserContext:
                 return
             matrix = _numbers(list(xobject.get("/Matrix", _identity())))
             combined = _multiply(self._ctm, matrix)
+            if self._add_text_form(xobject, combined):
+                return
             values = [_float(value, 0.0) for value in xobject.get("/BBox", [])]
             if len(values) != 4:
                 self.unsupported_features.add("form_xobject")
@@ -488,6 +493,42 @@ class _ParserContext:
         }
         self._attach_clip(item)
         self.objects.append(item)
+
+    def _add_text_form(self, xobject: Any, combined: tuple) -> bool:
+        # Text-only Forms can be read directly without rasterising formulas or
+        # running OCR. Other Forms still need their existing visual treatment.
+        operations = ContentStream(xobject, self.reader).operations
+        if any(operator == b"Do" for _, operator in operations):
+            return False
+        child = _ParserContext(xobject, self.reader, self.width, self.height, None)
+        child._ctm = combined
+        for name in (
+            "_fill", "_stroke", "_fill_alpha", "_stroke_alpha", "_font_name",
+            "_font_bold", "_font_size", "_character_spacing", "_leading",
+        ):
+            setattr(child, name, getattr(self, name))
+        bbox = xobject.get("/BBox")
+        if bbox is None or len(bbox) != 4:
+            return False
+        left, bottom, right, top = (float(value) for value in bbox)
+        clip = _box_intersection(self._clip_box, _bbox([
+            _point(combined, left, bottom), _point(combined, right, bottom),
+            _point(combined, right, top), _point(combined, left, top),
+        ]))
+        if clip is None:
+            return False
+        child._clip_box = clip
+        for operands, operator in operations:
+            child.handle(operands, operator)
+        if child.unsupported_features or not child.objects or any(
+            item["type"] != "text" for item in child.objects
+        ):
+            return False
+        for item in child.objects:
+            item["id"] = f"text-{len(self.objects) + 1:04d}"
+            item["z_index"] = len(self.objects) + 1
+            self.objects.append(item)
+        return True
 
     def _add_patch(self, feature: str, bbox: list[float], *, z_index=None) -> bool:
         visible = _box_intersection(
@@ -668,25 +709,39 @@ class _ParserContext:
         self._path_closed = False
 
 
+def _pdfium_text_objects(page: Any, form=None, parent=None, depth=0):
+    if depth > 15:
+        raise ValueError("PDF Form nesting exceeds text inspection limit")
+    parent = _identity() if parent is None else parent
+    for item in page.get_objects(max_depth=1, form=form):
+        if isinstance(item, pdfium.PdfTextObj):
+            yield item, parent
+        elif item.type == pdfium.raw.FPDF_PAGEOBJ_FORM:
+            combined = _multiply(parent, tuple(item.get_matrix().get()))
+            yield from _pdfium_text_objects(page, item.raw, combined, depth + 1)
+
+
 def _replace_text_objects(context: _ParserContext, page: Any) -> None:
     parsed = [item for item in context.objects if item["type"] == "text"]
     text_page = None
     try:
         text_page = page.get_textpage()
         exact = []
-        for item in page.get_objects():
-            if not isinstance(item, pdfium.PdfTextObj) or item.level != 0:
-                continue
+        for item, parent in _pdfium_text_objects(page):
             bound = pdfium.PdfTextObj(item.raw, textpage=text_page)
             text = bound.extract()
             font = item.get_font()
             font_name = _normalize_font_name(font.get_base_name())
-            matrix = [float(value) for value in item.get_matrix().get()]
+            matrix = list(_multiply(parent, tuple(item.get_matrix().get())))
             text_scale = _axis_aligned_text_scale(matrix)
             if text_scale is None:
                 context.unsupported_features.add("text_transform")
                 text_scale = 1.0
-            bounds = [float(value) for value in item.get_bounds()]
+            left, bottom, right, top = item.get_bounds()
+            bounds = _bbox([
+                _point(parent, left, bottom), _point(parent, right, bottom),
+                _point(parent, right, top), _point(parent, left, top),
+            ])
             bounds[0] = min(bounds[0], matrix[4])
             exact.append({
                 "text": text,
@@ -709,34 +764,17 @@ def _replace_text_objects(context: _ParserContext, page: Any) -> None:
     if len(parsed) != len(exact):
         context.unsupported_features.add("text_object_mapping")
         return
-    remove = []
     for current, replacement in zip(parsed, exact, strict=True):
         text = replacement["text"]
         if not text:
-            if context._add_patch(
-                "text_decode",
-                current["bbox_pt"],
-                z_index=current["z_index"],
-            ):
-                remove.append(current)
-                continue
             context.unsupported_features.add("text_decode")
             continue
         if "\ufffd" in text or any(
             ord(character) < 32 and character not in "\t\r\n"
             for character in text
         ):
-            if context._add_patch(
-                "text_decode",
-                replacement["bbox_pt"],
-                z_index=current["z_index"],
-            ):
-                remove.append(current)
-                continue
             context.unsupported_features.add("text_decode")
         current.update(replacement)
-    for current in remove:
-        context.objects.remove(current)
 
 
 def _apply_object_clips(context: _ParserContext) -> None:
@@ -755,10 +793,14 @@ def _apply_object_clips(context: _ParserContext) -> None:
         if intersection is None:
             remove.append(item)
             continue
+        if item.get("type") == "text":
+            context.unsupported_features.add("text_clip")
+            continue
         if item.get("type") != "image":
             if context._add_patch(
                 "clip", intersection, z_index=item.get("z_index")
             ):
+                context.objects[-1]["paint_operation_index"] = item["paint_operation_index"]
                 remove.append(item)
                 continue
             context.unsupported_features.add("clip")

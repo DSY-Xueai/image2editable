@@ -1239,6 +1239,7 @@ def _prune_completed_legacy_artifacts(
         "component_state.json",
         "component_result.json",
         "component_delivery.json",
+        "native_page.json",
         _PERFORMANCE_SUMMARY_NAME,
     }
     for page_id in page_ids:
@@ -1247,19 +1248,75 @@ def _prune_completed_legacy_artifacts(
         )
         if owned is None:
             continue
-        reconstruction, expected_identity = owned
+        reconstruction = owned[0]
+        native_path = reconstruction / "native_page.json"
+        if native_path.is_file():
+            state = store.read_json(
+                f"pages/{page_id}/reconstruction/component_state.json"
+            )
+            bound_path, payload = _load_legacy_ref(store, state.get("native_page_ref"))
+            native = json.loads(payload.decode("utf-8"))
+            if (
+                state.get("route") != "pdf_native" or bound_path != native_path
+                or native.get("page_id") != page_id
+            ):
+                raise RuntimeError("Completed native PDF analysis binding is invalid")
+        quality_path = None
+        result_path = reconstruction / "component_result.json"
+        if result_path.is_file():
+            result = json.loads(_read_bound_file(
+                result_path, reconstruction, max_bytes=16 * 1024 * 1024,
+                label="completed component result",
+            ))
+            repair_round = result.get("repair_rounds")
+            if repair_round is not None:
+                if type(repair_round) is not int or repair_round < 1:
+                    raise RuntimeError("Completed quality report binding is invalid")
+                quality_path = (
+                    reconstruction / f"execution-{repair_round:02d}"
+                    / "component-quality.json"
+                )
+                quality = json.loads(_read_bound_file(
+                    quality_path, reconstruction, max_bytes=16 * 1024 * 1024,
+                    label="completed quality report",
+                ))
+                # A parent fallback accepts a new graph; retain the original
+                # round's report as failure evidence, not proof of acceptance.
+                parent_fallback = (
+                    result.get("fallback", {}).get("status") == "parent_preserved"
+                )
+                if (
+                    quality.get("page_id") != page_id
+                    or quality.get("repair_round") != repair_round
+                    or not result.get("accepted_graph_sha256")
+                    or (
+                        not parent_fallback
+                        and quality.get("input_graph_sha256")
+                        != result["accepted_graph_sha256"]
+                    )
+                ):
+                    raise RuntimeError("Completed quality report binding is invalid")
+        preserved_directories = [owned]
         directories = []
         files = []
-        for child in reconstruction.iterdir():
+        entries = list(reconstruction.iterdir())
+        for child in entries:
             status = child.lstat()
             if _is_link_or_reparse(status):
                 raise RuntimeError(
                     f"Completed reconstruction contains an unsafe link: {child}"
                 )
             if stat.S_ISDIR(status.st_mode):
-                directories.append((child, (status.st_dev, status.st_ino)))
+                directory = (child, (status.st_dev, status.st_ino))
+                if quality_path is not None and child == quality_path.parent:
+                    preserved_directories.append(directory)
+                    entries.extend(child.iterdir())
+                else:
+                    directories.append(directory)
             elif stat.S_ISREG(status.st_mode):
-                if child.name not in retained:
+                if child != quality_path and not (
+                    child.parent == reconstruction and child.name in retained
+                ):
                     files.append((
                         child,
                         _legacy_output_identity(child),
@@ -1273,13 +1330,14 @@ def _prune_completed_legacy_artifacts(
             _safe_rmtree(*directory)
         if files:
             _remove_legacy_outputs(files)
-        current = reconstruction.lstat()
-        if (
-            _is_link_or_reparse(current)
-            or not stat.S_ISDIR(current.st_mode)
-            or (current.st_dev, current.st_ino) != expected_identity
-        ):
-            raise RuntimeError("Completed reconstruction identity changed")
+        for directory, expected_identity in preserved_directories:
+            current = directory.lstat()
+            if (
+                _is_link_or_reparse(current)
+                or not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected_identity
+            ):
+                raise RuntimeError("Completed reconstruction identity changed")
 
 
 def _quarantine_run_owned_directory(

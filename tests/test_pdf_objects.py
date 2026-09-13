@@ -528,7 +528,7 @@ def test_transparent_mirrored_image_stays_native(tmp_path: Path) -> None:
         assert extracted.getpixel((extracted.width - 1, 0)) == (0, 255, 0, 255)
 
 
-def test_text_form_becomes_bounded_local_patch(tmp_path: Path) -> None:
+def test_text_form_requires_editable_reconstruction(tmp_path: Path) -> None:
     source = tmp_path / "formula-form.pdf"
 
     def draw(document):
@@ -544,14 +544,12 @@ def test_text_form_becomes_bounded_local_patch(tmp_path: Path) -> None:
 
     _write_pdf(source, draw, size=(200, 120))
     result = analyze_pdf_page(source, 0, asset_dir=tmp_path / "assets")
-    patch = next(item for item in result["objects"] if item["type"] == "patch")
-
-    assert result["classification"] == "hybrid"
+    assert result["classification"] == "native"
     assert result["requires_visual"] is False
     assert result["unsupported_features"] == []
-    assert result["localized_features"] == ["form_xobject"]
-    left, bottom, right, top = patch["bbox_pt"]
-    assert (right - left) * (top - bottom) <= 200 * 120 * 0.35
+    formula = next(item for item in result["objects"] if item.get("text") == "a / b = c")
+    assert formula["matrix"][4:] == [60.0, 37.0]
+    assert not any(item["type"] == "patch" for item in result["objects"])
     assert any(
         item["type"] == "text" and item["text"] == "Editable heading"
         for item in result["objects"]
@@ -649,7 +647,7 @@ def test_nonzero_word_spacing_requires_visual_fallback(tmp_path: Path) -> None:
     assert "word_spacing" in result["unsupported_features"]
 
 
-def test_unmappable_text_becomes_local_patch(tmp_path: Path) -> None:
+def test_unmappable_text_cannot_be_delivered_as_a_patch(tmp_path: Path) -> None:
     source = tmp_path / "undecodable.pdf"
 
     def draw(document):
@@ -658,13 +656,32 @@ def test_unmappable_text_becomes_local_patch(tmp_path: Path) -> None:
     _write_pdf(source, draw)
     result = analyze_pdf_page(source, 0, asset_dir=tmp_path / "assets")
 
-    patch = next(item for item in result["objects"] if item["type"] == "patch")
-    assert result["classification"] == "hybrid"
-    assert result["requires_visual"] is False
-    assert result["unsupported_features"] == []
-    assert result["localized_features"] == ["text_decode"]
-    left, bottom, right, top = patch["bbox_pt"]
-    assert (right - left) * (top - bottom) <= 200 * 120 * 0.35
+    assert result["requires_visual"] is True
+    assert "text_decode" in result["unsupported_features"]
+    assert not any(item["type"] == "patch" for item in result["objects"])
+
+
+def test_scaled_text_form_preserves_metrics_and_editability(tmp_path: Path) -> None:
+    source = tmp_path / "scaled-form.pdf"
+
+    def draw(document):
+        document.beginForm("label", 0, 0, 80, 30)
+        document.setFont("Helvetica", 12)
+        document.drawString(2, 8, "Editable")
+        document.endForm()
+        document.translate(30, 20)
+        document.scale(1.5, 1.5)
+        document.doForm("label")
+
+    _write_pdf(source, draw)
+    result = analyze_pdf_page(source, 0)
+    assert result["classification"] == "native"
+    text = result["objects"][0]
+    assert text["text"] == "Editable"
+    assert text["font_size"] == 18
+    assert text["matrix"][4:] == [33, 32]
+    assert 32 < text["bbox_pt"][0] < 35
+    assert 30 < text["bbox_pt"][1] < 34
 
 
 def test_result_is_json_serializable_without_inline_binary(tmp_path: Path) -> None:
