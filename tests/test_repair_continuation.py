@@ -45,6 +45,59 @@ def test_legacy_warning_is_repaired_before_assembly(
             )
 
 
+def test_new_legacy_warning_continues_repair_in_same_execution(tmp_path, monkeypatch):
+    store = RunStore(tmp_path)
+    manifest = {"schema_version": 1, "options": {"pipeline_mode": "fast"}}
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"},
+    }})
+    store.write_json("pages/page_001/reconstruction/component_state.json", {})
+    monkeypatch.setattr(runtime, "_native_pdf_analysis", lambda *args: {})
+    monkeypatch.setattr(runtime, "_page_performance_trace", lambda *args: None)
+    monkeypatch.setattr(runtime, "_batch_legacy_ocr", lambda *args, **kwargs: {})
+    events = []
+    outcomes = iter(["preserved_with_warning", "processing", "ready_for_assembly"])
+
+    def advance(*args, **kwargs):
+        status = next(outcomes)
+        events.append(status)
+        return {"status": status, "page_id": "page_001"}
+
+    def resume(*args):
+        events.append("resume")
+        return True
+
+    monkeypatch.setattr(runtime, "advance_legacy_page", advance)
+    monkeypatch.setattr(runtime, "resume_round_limited_component_repair", resume)
+    with ExecutionLease(tmp_path / "execution.lock", run_root=tmp_path) as lease:
+        assert runtime._advance_legacy_pages(
+            store, manifest, ["page_001"], lease,
+        ) is None
+    assert events == ["preserved_with_warning", "resume", "processing", "ready_for_assembly"]
+    assert store.read_json("page_jobs.json")["pages"]["page_001"]["status"] == "validated"
+
+
+def test_new_legacy_warning_cannot_loop_indefinitely(tmp_path, monkeypatch):
+    store = RunStore(tmp_path)
+    manifest = {"schema_version": 1, "options": {"pipeline_mode": "fast"}}
+    store.write_json("page_jobs.json", {"schema_version": 1, "pages": {
+        "page_001": {"schema_version": 1, "status": "processing"},
+    }})
+    store.write_json("pages/page_001/reconstruction/component_state.json", {})
+    monkeypatch.setattr(runtime, "_native_pdf_analysis", lambda *args: {})
+    monkeypatch.setattr(runtime, "_page_performance_trace", lambda *args: None)
+    monkeypatch.setattr(runtime, "_batch_legacy_ocr", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime, "advance_legacy_page", lambda *args, **kwargs: {
+        "status": "preserved_with_warning", "page_id": "page_001",
+    })
+    monkeypatch.setattr(runtime, "resume_round_limited_component_repair", lambda *args: True)
+    monkeypatch.setattr(runtime, "MAX_REPAIR_ROUNDS", 1)
+    with ExecutionLease(tmp_path / "execution.lock", run_root=tmp_path) as lease:
+        with pytest.raises(RuntimeError, match="durable boundary limit"):
+            runtime._advance_legacy_pages(store, manifest, ["page_001"], lease)
+    assert store.read_json("page_jobs.json")["pages"]["page_001"]["status"] == "processing"
+
+
 @pytest.mark.parametrize("changed_output", [None, "background", "rgba"])
 @pytest.mark.parametrize("resumed", [False, True])
 def test_output_cycle_is_not_progress_despite_newly_refrozen_components(

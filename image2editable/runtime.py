@@ -941,6 +941,11 @@ def _advance_legacy_pages(
                     page_id,
                     **advance_kwargs,
                 )
+                if (
+                    outcome["status"] == "preserved_with_warning"
+                    and resume_round_limited_component_repair(store, page_id)
+                ):
+                    continue
                 if outcome["status"] != "processing":
                     break
             else:
