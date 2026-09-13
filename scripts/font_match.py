@@ -62,8 +62,8 @@ def _load_face(face, size):
 
 
 @lru_cache(maxsize=4096)
-def _glyph(face, text):
-    font = _load_face(face, 128)
+def _glyph(face, text, size=128):
+    font = _load_face(face, size)
     missing = font.getmask("\U0010ffff")
     missing_signature = (missing.size, bytes(missing))
     for char in text:
@@ -94,6 +94,16 @@ def match_text_face(pixels: bytes, width: int, height: int, text: str):
     gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY).astype(np.float32)
     border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
     contrast = np.abs(gray - np.median(border))
+    # A cell border at the OCR crop edge is not part of the glyph height.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        (contrast > contrast.max() * .2).astype(np.uint8), 8,
+    )
+    for label in range(1, count):
+        x, y, w, h, _ = stats[label]
+        if (h == height and w <= 2 and (x == 0 or x + w == width)) or (
+            w == width and h <= 2 and (y == 0 or y + h == height)
+        ):
+            contrast[labels == label] = 0
     # OCR boxes may include the descenders of the preceding line. Do not
     # measure that fragment as part of this line's font height.
     rows = np.flatnonzero((contrast > contrast.max() * .2).any(axis=1))
@@ -129,6 +139,7 @@ def match_text_face(pixels: bytes, width: int, height: int, text: str):
         return float(overlap - .15 * aspect)
 
     best = None
+    measured_faces = []
     for face in installed_faces():
         if face[2]:
             continue
@@ -139,6 +150,8 @@ def match_text_face(pixels: bytes, width: int, height: int, text: str):
             reference = _normalized_ink(np.asarray(glyph, dtype=np.float32))
             if reference is None:
                 continue
+            size = 128 * target.shape[0] / reference.shape[0]
+            measured_faces.append((face, round(size)))
             score = max(similarity(target, reference), similarity(
                 compact, reference[:, reference.max(axis=0) > .2],
             ))
@@ -152,9 +165,24 @@ def match_text_face(pixels: bytes, width: int, height: int, text: str):
                 if len(letter_scores) == len(letters):
                     score = max(score, sum(letter_scores) / len(letter_scores))
             if best is None or score > best[0]:
-                best = (score, face, 128 * target.shape[0] / reference.shape[0])
+                best = (score, face, size)
         except OSError:
             continue
+    if best is not None and best[0] < .75:
+        # Small raster text is hinted at its actual size. Downsampling a large
+        # reference can reject the right face, so retry at the measured size.
+        for face, size in measured_faces:
+            try:
+                for pixels in range(max(1, size - 1), size + 2):
+                    glyph = _glyph.__wrapped__(face, text, pixels)
+                    reference = _normalized_ink(np.asarray(glyph, dtype=np.float32))
+                    if reference is None:
+                        continue
+                    score = similarity(target, reference)
+                    if score > best[0]:
+                        best = (score, face, pixels)
+            except OSError:
+                continue
     if best is None or best[0] < .75:
         return None
     score, face, size = best

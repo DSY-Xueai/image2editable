@@ -519,6 +519,26 @@ def _project_resolved_infographic_actions(
     return {**plan, "actions": projected}
 
 
+def _project_frozen_accept_actions(plan: dict, request: dict, graph: dict) -> dict:
+    frozen = {
+        node["id"] for node in graph.get("nodes", [])
+        if node.get("state") == "frozen" and node.get("kind") != "text"
+        and node["id"] in request.get("frozen_ids", [])
+        and node["id"] not in request.get("candidate_ids", [])
+    }
+    actions = [
+        action for action in plan["actions"]
+        if not (
+            action["action"] == "accept" and action["parameters"] == {}
+            and len(action["object_ids"]) == 1
+            and action["object_ids"][0] in frozen
+        )
+    ]
+    # An already frozen object's plain accept is a no-op. Keep all repairs,
+    # including background-only repairs referencing frozen visual objects.
+    return {**plan, "actions": actions} if actions else plan
+
+
 def _sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
 
@@ -882,6 +902,9 @@ def _resolve_component_plan(
             validation_request,
             validation_graph,
         )
+        projected = _project_frozen_accept_actions(
+            projected, validation_request, validation_graph,
+        )
         candidate = {
             key: value for key, value in projected.items() if key != "graph_sha256"
         }
@@ -944,6 +967,13 @@ def _resolve_component_plan(
             for filename, plan in identity
             if compatible(filename, plan, require_context=True)
         ]
+        graph_matches = [
+            item for item in compatible_identity
+            if item[1]["graph_sha256"] == request["graph_sha256"]
+        ]
+        if len(graph_matches) == 1:
+            filename, plan = graph_matches[0]
+            return PlanSelection(filename, plan, rebound_for(filename, plan))
         if len(compatible_identity) == 1:
             filename, plan = compatible_identity[0]
             return PlanSelection(filename, plan, rebound_for(filename, plan))

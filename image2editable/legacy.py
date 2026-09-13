@@ -2034,6 +2034,7 @@ def _assign_text_regions_to_component_masks(
         ]
     mask_boxes = []
     silhouette_masks = []
+    silhouette_areas = []
     for mask in assigned:
         ys, xs = np.nonzero(mask)
         mask_boxes.append(
@@ -2048,6 +2049,7 @@ def _assign_text_regions_to_component_masks(
         if contours:
             cv2.drawContours(silhouette, contours, -1, 1, thickness=cv2.FILLED)
         silhouette_masks.append(silhouette.astype(bool))
+        silhouette_areas.append(int(np.count_nonzero(silhouette)))
     for ownership_region, fill_region, box_region, explicit_owner in regions:
         pixels = int(np.count_nonzero(ownership_region))
         overlaps = [
@@ -2074,11 +2076,27 @@ def _assign_text_regions_to_component_masks(
         ]
         if explicit_owner is None and box_pixels:
             box_best = max(range(len(assigned)), key=box_backing.__getitem__)
-            if box_backing[box_best] > box_backing[best]:
+            # A smaller containing surface owns the text backing when it has
+            # dense support. A page-wide composite must not take the text holes
+            # away from a row/card that can freeze before that composite retires.
+            box_area = max(int(np.count_nonzero(box_region)), 1)
+            containing = [
+                index for index, bounds in enumerate(mask_boxes)
+                if box_backing[index] >= max(1, round(box_pixels * 0.5))
+                and bounds is not None
+                and np.count_nonzero(box_region[
+                    bounds[1]:bounds[3], bounds[0]:bounds[2]
+                ]) / box_area >= 0.8
+            ]
+            if containing:
+                box_best = min(
+                    containing,
+                    key=silhouette_areas.__getitem__,
+                )
+            if containing or box_backing[box_best] > box_backing[best]:
                 best = box_best
                 overlap_ratio = overlaps[best] / max(pixels, 1)
                 backing_ratio = 0.0
-        box_backing_ratio = box_backing[best] / max(box_pixels, 1)
         box = mask_boxes[best]
         contained_ratio = 0.0
         box_contained_ratio = 0.0
@@ -2091,7 +2109,7 @@ def _assign_text_regions_to_component_masks(
                 box_region[top:bottom, left:right]
             ) / max(int(np.count_nonzero(box_region)), 1)
         dense_box_owner = bool(text_items) and (
-            box_backing_ratio >= 0.5
+            box_backing[best] >= max(1, round(box_pixels * 0.5))
             and box_contained_ratio >= 0.8
         )
         owns_text_region = explicit_owner is not None or (

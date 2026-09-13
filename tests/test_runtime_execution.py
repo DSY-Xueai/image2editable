@@ -3074,6 +3074,41 @@ def test_item_text_region_fills_a_containing_sparse_component() -> None:
     assert np.all(assigned[0][2:10, 3:17])
 
 
+def test_text_backing_stays_with_row_before_composite_is_discarded() -> None:
+    text = np.zeros((60, 100), dtype=bool)
+    text[25:35, 40:60] = True
+    composite = np.ones_like(text)
+    row = np.zeros_like(text)
+    row[20:40, 10:90] = True
+    row[text] = False
+    # Small holes make the broad composite's raw overlap score higher.
+    row[22:24, 35:40] = False
+
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [composite, row], text, [{"box": [35, 22, 30, 16]}],
+    )
+
+    assert np.all(assigned[1][text])
+    assert not np.any(assigned[0][text])
+
+
+def test_text_backing_uses_same_rounded_support_as_underlay_check() -> None:
+    text = np.zeros((15, 15), dtype=bool)
+    text[5:8, 4:8] = True
+    composite = np.ones_like(text)
+    row = np.zeros_like(text)
+    # Six of thirteen nontext pixels meet the quality check's rounded half.
+    row[4, 4:7] = True
+    row[4, 8] = True
+    row[8, [4, 8]] = True
+    box = [4, 4, 5, 5]
+    assigned = legacy._assign_text_regions_to_component_masks(
+        [composite, row], text, [{"box": box}],
+    )
+    assert np.all(assigned[1][text])
+    assert not np.any(assigned[0][text])
+
+
 def test_item_text_region_fills_text_hole_backed_by_surrounding_component() -> None:
     text = np.zeros((12, 20), dtype=bool)
     text[4:8, 5:7] = True

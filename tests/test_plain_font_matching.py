@@ -36,6 +36,26 @@ def test_plain_text_matches_native_variable_weight_and_reuses_evidence(monkeypat
     font_match.match_text_face.cache_clear()
 
 
+@pytest.mark.parametrize('size', [9, 14, 32])
+def test_plain_font_matching_excludes_cell_border(monkeypatch, size):
+    path = Path(__file__).resolve().parents[1] / 'benchmarks/release/fonts/NotoSansSC[wght].ttf'
+    monkeypatch.setattr(font_match, 'installed_faces', lambda: (
+        ('Noto Sans SC', True, False, str(path), 0),
+    ))
+    font_match.match_text_face.cache_clear()
+    font = ImageFont.truetype(str(path), size)
+    font.set_variation_by_name('Bold')
+    image = Image.new('RGB', (100, 60), '#182838')
+    draw = ImageDraw.Draw(image)
+    draw.text((12, 5), 'DUE', font=font, fill='white')
+    draw.line((0, 0, 0, 59), fill='white')
+    result = font_match.match_text_face(image.tobytes(), 100, 60, 'DUE')
+    assert result is not None
+    assert abs(result['font_size_px'] - size) < 3
+    assert result['ink_box'][0] > 1
+    font_match.match_text_face.cache_clear()
+
+
 def test_plain_font_refinement_preserves_styled_and_rotated_text(monkeypatch):
     def unexpected(*args):
         raise AssertionError('Art text must retain its own layout')

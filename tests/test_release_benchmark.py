@@ -1934,6 +1934,32 @@ def test_release_runner_diagnostic_rebinds_only_component_hashes(
     assert selection.rebound_plan["actions"] == stale["actions"]
 
 
+@pytest.mark.parametrize("state,listed", [("frozen", True), ("pending", True), ("frozen", False)])
+def test_release_runner_skips_only_confirmed_frozen_plain_accepts(state, listed):
+    runner = importlib.import_module("scripts.release_benchmark")
+    accept = {"action": "accept", "object_ids": ["visual_a"], "parameters": {}}
+    repair = {"action": "rebuild_background", "object_ids": ["visual_a"],
+              "parameters": {"margin_ratio": 0.005}}
+    plan = {"actions": [accept, repair]}
+    request = {"candidate_ids": [], "frozen_ids": ["visual_a"] if listed else []}
+    graph = {"nodes": [{"id": "visual_a", "kind": "child", "state": state}]}
+    result = runner._project_frozen_accept_actions(plan, request, graph)
+    assert result["actions"] == ([repair] if state == "frozen" and listed else [accept, repair])
+    assert plan["actions"] == [accept, repair]
+
+
+@pytest.mark.parametrize("action,parameters", [
+    ("discard", {}), ("accept", {"independent": True}),
+    ("accept", {"preserve_mask": True}), ("absorb_residual", {}),
+])
+def test_release_runner_does_not_project_mutations_of_frozen_objects(action, parameters):
+    runner = importlib.import_module("scripts.release_benchmark")
+    plan = {"actions": [{"action": action, "object_ids": ["visual_a"], "parameters": parameters}]}
+    request = {"candidate_ids": [], "frozen_ids": ["visual_a"]}
+    graph = {"nodes": [{"id": "visual_a", "kind": "child", "state": "frozen"}]}
+    assert runner._project_frozen_accept_actions(plan, request, graph) == plan
+
+
 def test_release_runner_rejects_stale_component_without_complete_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2008,6 +2034,26 @@ def test_release_runner_diagnostic_rejects_duplicate_identity_plans(
             allow_stale_binding=True,
             graph=request["_component_graph"],
         )
+
+
+def test_release_runner_prefers_exact_graph_for_compatible_plan_variants(tmp_path, monkeypatch):
+    runner = importlib.import_module("scripts.release_benchmark")
+    run_dir = tmp_path / "run"
+    response, _ = _bound_component_request(run_dir)
+    request = runner._component_binding(response, run_dir)
+    selected = {**_component_plan(), "request_sha256": "5" * 64,
+                "graph_sha256": request["graph_sha256"]}
+    plans = _install_runner_plans(tmp_path, monkeypatch, component_plan=selected)
+    _write_benchmark_plan(
+        plans / "pptx-mixed-screenshot-candidates--component-copy.json",
+        {**_component_plan(), "request_sha256": "6" * 64, "graph_sha256": "7" * 64},
+    )
+    selection = runner._resolve_component_plan(
+        "pptx-mixed-screenshot-candidates", request, allow_stale_binding=True,
+        graph=request["_component_graph"],
+    )
+    assert selection.plan == selected
+    assert selection.rebound_plan["actions"] == selected["actions"]
 
 
 def test_release_runner_uses_graph_selector_for_compatible_plan_families(
