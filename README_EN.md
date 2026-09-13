@@ -85,27 +85,24 @@ The program is installed from the current repository. A Skill-only installation 
 ```
 image2editable/
 ├── .claude-plugin/            # Claude Code plugin manifest
-│   └── plugin.json
-├── .github/                   # CI, issue forms, and PR template
-├── docs/
-│   └── images/                # README image assets
+├── .github/                   # CI, collaboration templates, and security policy
+├── docs/                      # README image assets
 ├── image2editable/            # Unified CLI, runtime, and conversion modules
-├── scripts/                   # Recognition, reconstruction, and PPTX/PSD assembly modules
-├── skills/
-│   ├── image-to-ppt/          # Installable image-to-PPT Skill
-│   └── image-to-psd/          # Compatible image-to-PSD Skill
+├── scripts/                   # Conversion, environment setup, and release tools
+├── skills/                    # Image-to-PPT and image-to-PSD Skills
 ├── tests/                     # Automated tests
-├── third_party/
-│   └── licenses/              # Third-party license materials
+├── third_party/               # Third-party license materials
+├── .gitattributes             # Git file handling rules
 ├── .gitignore
+├── CHANGELOG.md               # Version history and source of release notes
 ├── CITATION.cff               # Citation information
 ├── image_to_ppt.py            # Legacy image-only pipeline; not the recommended entry point
 ├── image_to_psd.py            # Compatible image-to-PSD entry point
 ├── LICENSE                    # MIT license
-├── pyproject.toml             # Python package and CLI configuration
+├── pyproject.toml             # Python package, distribution dependencies, and CLI configuration
 ├── README.md                  # Chinese documentation
 ├── README_EN.md               # English documentation
-├── requirements.txt           # Core dependencies
+├── requirements.txt           # Dependency list with a pinned SAM source revision
 └── THIRD_PARTY_NOTICES.md     # Third-party dependency and license notices
 ```
 

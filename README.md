@@ -88,27 +88,24 @@ Skill 会在 Windows、macOS 和 Linux 上自动准备缺失的运行环境、�
 ```
 image2editable/
 ├── .claude-plugin/            # Claude Code 插件清单
-│   └── plugin.json
-├── .github/                   # CI、Issue 表单和 PR 模板
-├── docs/
-│   └── images/                # README 图片资源
+├── .github/                   # CI、协作模板与安全政策
+├── docs/                      # README 图片资源
 ├── image2editable/            # 统一 CLI、运行时和转换模块
-├── scripts/                   # 识别、重建和 PPTX/PSD 组装模块
-├── skills/
-│   ├── image-to-ppt/          # 可安装的图片转 PPT Skill
-│   └── image-to-psd/          # 兼容的图片转 PSD Skill
+├── scripts/                   # 转换、环境准备与发布工具
+├── skills/                    # 图片转 PPT 和 PSD Skills
 ├── tests/                     # 自动化测试
-├── third_party/
-│   └── licenses/              # 第三方许可证资料
+├── third_party/               # 第三方许可证资料
+├── .gitattributes             # Git 文件处理规则
 ├── .gitignore
+├── CHANGELOG.md               # 版本变更与发布说明来源
 ├── CITATION.cff               # 引用信息
 ├── image_to_ppt.py            # 旧版图片专用技术路线，非当前推荐入口
 ├── image_to_psd.py            # 兼容的图片转 PSD 入口
 ├── LICENSE                    # MIT 许可证
-├── pyproject.toml             # Python 包与 CLI 配置
+├── pyproject.toml             # Python 包、发行依赖与 CLI 配置
 ├── README.md                  # 中文说明
 ├── README_EN.md               # English documentation
-├── requirements.txt           # 核心依赖
+├── requirements.txt           # 依赖安装清单（固定 SAM 源码版本）
 └── THIRD_PARTY_NOTICES.md     # 第三方依赖与许可证说明
 ```
 
