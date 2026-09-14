@@ -10,6 +10,10 @@ import secrets
 import shutil
 import stat
 import sys
+import time
+from http.client import IncompleteRead
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 from image2editable.model_receipts import (
@@ -25,6 +29,7 @@ CATALOG_PATH = Path(__file__).with_name("runtime_model_catalog.json")
 RECEIPT_NAME = "runtime-receipt.json"
 INSTALL_COMMAND = "image2editable models install runtime"
 _MODEL_NAMES = {"sam2_large", "big_lama", "grounding_dino"}
+_REPAIR_DEFAULT = False
 
 
 class RuntimeModelError(RuntimeError):
@@ -32,14 +37,28 @@ class RuntimeModelError(RuntimeError):
 
 
 def download_file(url: str, descriptor: int) -> None:
-    with urlopen(url) as response:
-        while chunk := response.read(1024 * 1024):
-            remaining = memoryview(chunk)
-            while remaining:
-                written = os.write(descriptor, remaining)
-                if written <= 0:
-                    raise OSError("runtime model download write failed")
-                remaining = remaining[written:]
+    for attempt in range(3):
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.ftruncate(descriptor, 0)
+        try:
+            with urlopen(url, timeout=60) as response:
+                while chunk := response.read(1024 * 1024):
+                    remaining = memoryview(chunk)
+                    while remaining:
+                        written = os.write(descriptor, remaining)
+                        if written <= 0:
+                            raise OSError("runtime model download write failed")
+                        remaining = remaining[written:]
+            return
+        except (HTTPError, URLError, TimeoutError, ConnectionError, IncompleteRead) as error:
+            code = error.code if isinstance(error, HTTPError) else None
+            if attempt == 2 or (code is not None and code not in {408, 429, 500, 502, 503, 504}):
+                source = urlsplit(url)
+                detail = f"HTTP {code}" if code is not None else type(error).__name__
+                raise RuntimeModelError(
+                    f"model download failed: {source.hostname}{source.path}: {detail}"
+                ) from None
+            time.sleep(attempt + 1)
 
 
 def snapshot_download(**kwargs: object) -> str:
@@ -117,19 +136,56 @@ def install_runtime_models(
     *,
     cache_dir: str | Path | None = None,
     confirmed: bool = False,
+    repair: bool | None = None,
 ) -> dict[str, object]:
+    if repair is None:
+        repair = _REPAIR_DEFAULT
     if not confirmed:
         raise PermissionError("explicit confirmation required before model download")
     cache = _cache_path(cache_dir)
     catalog = load_runtime_catalog()
     _validate_catalog(catalog)
     cache.mkdir(parents=True, exist_ok=True)
+    previous = None
     if os.path.lexists(cache / RECEIPT_NAME):
-        return _load_valid_receipt(cache, catalog)
+        try:
+            return _load_valid_receipt(cache, catalog)
+        except (OSError, ValueError, RuntimeError):
+            if not repair:
+                raise
+        # Keep the receipt until all models are ready, so a retry can reuse DINO.
+        strict_file_record(cache / RECEIPT_NAME, cache)
+        try:
+            previous = read_strict_json(cache / RECEIPT_NAME, cache)
+        except ValueError:
+            pass
     records = {}
     for name in ("sam2_large", "big_lama"):
-        records[name] = _install_file(cache, catalog["models"][name])
-    records["grounding_dino"] = _install_snapshot(
+        entry = catalog["models"][name]
+        target = cache / entry["relative_path"]
+        if repair and os.path.lexists(target):
+            actual = strict_file_record(target, cache)
+            if actual["size"] != entry["size"] or actual["sha256"] != entry["sha256"]:
+                _quarantine_asset(target, cache)
+        records[name] = _install_file(cache, entry)
+    snapshot_record = None
+    if repair and isinstance(previous, dict) and isinstance(previous.get("models"), dict):
+        candidate = previous["models"].get("grounding_dino")
+        try:
+            _validate_snapshot_receipt(cache, catalog["models"]["grounding_dino"], candidate)
+        except (KeyError, TypeError, ValueError, OSError, RuntimeError):
+            pass
+        else:
+            snapshot_record = candidate
+    if repair and snapshot_record is None:
+        parent = cache / "grounding_dino"
+        if os.path.lexists(parent):
+            _directory_status(parent, "snapshot parent")
+            revision = catalog["models"]["grounding_dino"]["revision"]
+            for name in (revision, f".grounding-dino-{revision}.installing"):
+                if os.path.lexists(parent / name):
+                    _quarantine_asset(parent / name, cache)
+    records["grounding_dino"] = snapshot_record or _install_snapshot(
         cache,
         catalog["models"]["grounding_dino"],
     )
@@ -138,8 +194,57 @@ def install_runtime_models(
         "catalog_sha256": canonical_sha256(catalog),
         "models": records,
     }
+    _validate_receipt(cache, catalog, receipt)
+    if repair and os.path.lexists(cache / RECEIPT_NAME):
+        _quarantine_asset(cache / RECEIPT_NAME, cache)
     _publish_json(cache / RECEIPT_NAME, receipt)
     return receipt
+
+
+def install_runtime_models_repair(**kwargs: object) -> dict[str, object]:
+    global _REPAIR_DEFAULT
+    previous = _REPAIR_DEFAULT
+    _REPAIR_DEFAULT = True
+    try:
+        return install_runtime_models(**kwargs)
+    finally:
+        _REPAIR_DEFAULT = previous
+
+
+def _quarantine_asset(path: Path, cache: Path) -> None:
+    # Preserve rejected downloads; never overwrite a file or follow a link.
+    if not path.resolve().is_relative_to(cache.resolve()):
+        raise RuntimeModelError("model repair target is outside the cache")
+    before = path.lstat()
+    if stat.S_ISDIR(before.st_mode):
+        _directory_status(path, "repair target")
+        for child in path.rglob("*"):
+            if child.is_dir():
+                _directory_status(child, "repair target")
+            else:
+                strict_file_record(child, cache)
+    else:
+        strict_file_record(path, cache)
+    destination = path.with_name(f".{path.name}.rejected-{secrets.token_hex(16)}")
+    parent_status = _directory_status(path.parent, "repair parent")
+    binding = _open_directory(path.parent)
+    try:
+        _validate_parent(path.parent, binding, parent_status)
+        current = path.lstat()
+        if (current.st_dev, current.st_ino, current.st_mtime_ns) != (
+            before.st_dev, before.st_ino, before.st_mtime_ns
+        ):
+            raise RuntimeModelError("model repair target changed")
+        if os.name == "nt":
+            handle = _open_windows_directory(path)
+            try:
+                _rename_windows_directory(handle, destination)
+            finally:
+                _close_windows_handle(handle)
+        else:
+            os.rename(path.name, destination.name, src_dir_fd=binding[0], dst_dir_fd=binding[0])
+    finally:
+        _close_directory(binding)
 
 
 def _private_file(
@@ -213,7 +318,10 @@ def _require_file_identity(
 ) -> None:
     if record["size"] != entry["size"] or record["sha256"] != entry["sha256"]:
         raise RuntimeError(
-            f"runtime model integrity verification failed: {entry['relative_path']}"
+            "runtime model integrity verification failed: "
+            f"{entry['relative_path']} "
+            f"(expected size={entry['size']}, sha256={entry['sha256']}; "
+            f"actual size={record.get('size')}, sha256={record.get('sha256')})"
         )
 
 
@@ -727,7 +835,10 @@ def runtime_model_status(
         "install_command": INSTALL_COMMAND,
     }
     if not os.path.lexists(receipt_path):
-        return base
+        return {
+            **base,
+            "reason": "runtime model receipt is missing; run: " + INSTALL_COMMAND,
+        }
     try:
         catalog = load_runtime_catalog()
         _validate_catalog(catalog)
@@ -794,8 +905,10 @@ def _validate_receipt(
             raise RuntimeError(f"runtime model receipt {name} does not match catalog")
         actual = strict_file_record(cache / record["relative_path"], cache)
         _require_file_identity(actual, entry)
-    entry = catalog["models"]["grounding_dino"]
-    record = records["grounding_dino"]
+    _validate_snapshot_receipt(cache, catalog["models"]["grounding_dino"], records["grounding_dino"])
+
+
+def _validate_snapshot_receipt(cache: Path, entry: dict[str, object], record: object) -> None:
     snapshot_fields = {
         "kind", "model_id", "requested_revision", "resolved_revision",
         "relative_path", "files",

@@ -425,11 +425,12 @@ def test_doctor_requires_valid_runtime_models_without_installing(
     assert report["checks"]["runtime-models"] == {
         "ok": False,
         "required": True,
-        "detail": {
-            "module": "runtime-models",
-            "ok": False,
-            "error_type": "MissingOrInvalidReceipt",
-        },
+            "detail": {
+                "module": "runtime-models",
+                "ok": False,
+                "error_type": "MissingOrInvalidReceipt",
+                "reason": "runtime model receipt is missing; run: image2editable models install runtime",
+            },
         "next_command": "image2editable models install runtime",
     }
     assert "agent-model" not in report["checks"]
@@ -452,6 +453,50 @@ def test_doctor_normalizes_unsafe_model_status_exception_name(
         "StatusFailed"
     )
     assert "private" not in json.dumps(report)
+
+
+def test_doctor_reports_safe_runtime_model_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_ready_doctor(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "runtime_model_status",
+        lambda: {
+            "installed": True,
+            "valid": False,
+            "reason": (
+                "runtime model integrity verification failed: "
+                "sam2.1_hiera_large.pt (expected size=10, actual size=9)"
+            ),
+        },
+    )
+
+    report = doctor.check_environment()
+
+    detail = report["checks"]["runtime-models"]["detail"]
+    assert detail["reason"].startswith("runtime model integrity verification failed")
+
+
+def test_doctor_redacts_model_cache_path_from_runtime_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_ready_doctor(monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "runtime_model_status",
+        lambda: {
+            "installed": True,
+            "valid": False,
+            "reason": r"model file is outside cache: C:\Users\private\model.pt",
+        },
+    )
+
+    report = doctor.check_environment()
+
+    detail = report["checks"]["runtime-models"]["detail"]
+    assert "private" not in json.dumps(detail)
+    assert "<model-cache>" in detail["reason"]
 
 
 def test_doctor_uses_platform_appropriate_python_next_command(
@@ -961,6 +1006,7 @@ def test_cli_models_status_prints_runtime_status(
         "installed": False,
         "valid": False,
         "install_command": "image2editable models install runtime",
+        "reason": "runtime model receipt is missing; run: image2editable models install runtime",
     }
     monkeypatch.setattr(
         runtime_models,

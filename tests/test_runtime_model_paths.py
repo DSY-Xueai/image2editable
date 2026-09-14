@@ -141,6 +141,25 @@ def test_default_model_path_delegates_to_product_receipt_resolver(
     assert calls == ["grounding_dino"]
 
 
+def test_missing_psd_module_reports_incomplete_product_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SAM2_MODEL", raising=False)
+    monkeypatch.setattr(
+        runtime_model_paths,
+        "_product_runtime_model_path",
+        lambda _name: (_ for _ in ()).throw(
+            ModuleNotFoundError("scripts.psd_assemble", name="scripts.psd_assemble")
+        ),
+    )
+
+    with pytest.raises(
+        runtime_model_paths.RuntimeModelPathError,
+        match="package is incomplete.*scripts\\.psd_assemble",
+    ):
+        runtime_model_paths.resolve_runtime_model_path("sam2_large")
+
+
 def test_sam_consumer_uses_runtime_model_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

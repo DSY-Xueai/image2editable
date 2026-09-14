@@ -42,7 +42,19 @@ def main() -> int:
     except metadata.PackageNotFoundError:
         print(json.dumps({"ready": False, "problems": ["image2editable is not installed"]}))
         return 1
-    problems = verify(args.source.resolve(), distribution)
+    source = args.source.resolve()
+    required = ("image2editable/cli.py", "image2editable/runtime_models.py",
+                "scripts/__init__.py", "scripts/psd_assemble.py",
+                "image_to_ppt.py", "image_to_psd.py",
+                "image2editable/runtime_model_catalog.json")
+    missing = [name for name in required if not (source / name).is_file()]
+    try:
+        if missing:
+            raise ValueError("Source is incomplete: " + ", ".join(missing))
+        problems = verify(source, distribution)
+    except (OSError, ValueError) as error:
+        print(json.dumps({"ready": False, "problems": [str(error)]}))
+        return 1
     for name in ("image2editable", "scripts"):
         spec = util.find_spec(name)
         expected = Path(distribution.locate_file(f"{name}/__init__.py")).resolve()

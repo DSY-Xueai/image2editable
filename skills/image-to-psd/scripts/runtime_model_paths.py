@@ -78,6 +78,7 @@ def _verified_file(path: Path, env_name: str, size: int, sha256: str) -> Path:
             ) from None
     finally:
         os.close(descriptor)
+    actual_sha256 = digest.hexdigest()
     expected = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
     if (
         (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
@@ -88,10 +89,12 @@ def _verified_file(path: Path, env_name: str, size: int, sha256: str) -> Path:
         or after.st_nlink != 1
         or current.st_nlink != 1
         or opened.st_size != size
-        or digest.hexdigest() != sha256
+        or actual_sha256 != sha256
     ):
         raise RuntimeModelPathError(
-            f"{env_name} model file failed integrity verification"
+            f"{env_name} model file failed integrity verification "
+            f"(expected size={size}, sha256={sha256}; "
+            f"actual size={opened.st_size}, sha256={actual_sha256})"
         )
     return path.resolve()
 
@@ -126,11 +129,24 @@ def resolve_runtime_model_path(name: str) -> Path:
         raise RuntimeModelPathError(f"Unknown runtime model: {name}") from None
     override = os.environ.get(env_name)
     if override:
-        return _explicit_model_path(name, override)
+        try:
+            return _explicit_model_path(name, override)
+        except RuntimeModelPathError as error:
+            # A rejected override may use the fully verified managed installation.
+            try:
+                return Path(_product_runtime_model_path(name))
+            except (ImportError, OSError, RuntimeError):
+                raise error from None
     try:
         return Path(_product_runtime_model_path(name))
     except ModuleNotFoundError as exc:
         if exc.name not in {"image2editable", "image2editable.runtime_models"}:
+            if exc.name == "scripts.psd_assemble":
+                raise RuntimeModelPathError(
+                    "image2editable package is incomplete or shadowed: "
+                    "scripts.psd_assemble cannot be imported; verify the current "
+                    "GitHub source installation with Python -I"
+                ) from None
             raise
         raise RuntimeModelPathError(
             f"image2editable is unavailable; set {env_name} to an absolute local path"

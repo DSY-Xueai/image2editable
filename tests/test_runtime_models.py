@@ -319,6 +319,7 @@ def test_runtime_status_is_read_only_when_receipt_is_missing(
         "installed": False,
         "valid": False,
         "install_command": "image2editable models install runtime",
+        "reason": "runtime model receipt is missing; run: image2editable models install runtime",
     }
     assert not cache.exists()
     with pytest.raises(
@@ -439,6 +440,38 @@ def test_install_reuses_valid_assets_and_receipt_without_network(
         cache_dir=cache,
         confirmed=True,
     ) == receipt
+
+
+def test_repair_install_replaces_corrupt_file_and_keeps_valid_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_models = _runtime_models()
+    cache = tmp_path / "runtime-cache"
+    catalog, receipt = _install_small_runtime(runtime_models, monkeypatch, cache)
+    (cache / "sam.pt").write_bytes(b"broken")
+    calls: list[str] = []
+
+    def download(url: str, descriptor: int) -> None:
+        calls.append(url)
+        name = "sam2_large" if "sam" in url else "big_lama"
+        _write_download(descriptor, {"sam2_large": b"sam", "big_lama": b"lama"}[name])
+
+    monkeypatch.setattr(runtime_models, "download_file", download)
+    monkeypatch.setattr(
+        runtime_models,
+        "snapshot_download",
+        lambda **kwargs: pytest.fail("valid DINO snapshot should be reused"),
+    )
+
+    assert runtime_models.install_runtime_models_repair(
+        cache_dir=cache,
+        confirmed=True,
+    ) == receipt
+    assert (cache / "sam.pt").read_bytes() == b"sam"
+    assert (cache / catalog["models"]["big_lama"]["relative_path"]).read_bytes() == b"lama"
+    assert len(calls) == 1
+    assert list(cache.glob(".sam.pt.rejected-*"))
 
 
 @pytest.mark.parametrize("failure", ["file", "snapshot"])

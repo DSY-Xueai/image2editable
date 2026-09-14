@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+import re
 import subprocess
 import sys
 from typing import Any, Callable
@@ -200,13 +202,35 @@ def _model_check(
 ) -> dict[str, Any]:
     error_type = "MissingOrInvalidReceipt"
     try:
-        ok = status().get("valid") is True
+        model_status = status()
+        ok = model_status.get("valid") is True
     except Exception:
         ok = False
         error_type = "StatusFailed"
     detail: dict[str, object] = {"module": name, "ok": ok}
+    if ok and name == "runtime-models":
+        try:
+            package_spec = importlib.util.find_spec("scripts.psd_assemble")
+            ok = package_spec is not None and package_spec.origin is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            ok = False
+        if not ok:
+            detail["ok"] = False
+            detail["error_type"] = "PackageIncomplete"
+            detail["reason"] = (
+                "installed image2editable package is incomplete: "
+                "scripts.psd_assemble is missing"
+            )
     if not ok:
         detail["error_type"] = error_type
+        if error_type == "MissingOrInvalidReceipt":
+            reason = model_status.get("reason")
+            if isinstance(reason, str) and reason:
+                detail["reason"] = re.sub(
+                    r"(?:[A-Za-z]:[\\/]|/)[^\r\n;]+",
+                    "<model-cache>",
+                    reason[:500],
+                )
     return _module_check(detail, next_command=install_command)
 
 

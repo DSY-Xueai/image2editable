@@ -8,8 +8,15 @@ from pathlib import Path
 import sys
 from typing import Sequence
 
-from image2editable import runtime
 from image2editable.doctor import check_environment
+
+
+def __getattr__(name: str):
+    if name == "runtime":
+        from importlib import import_module
+
+        return import_module("image2editable.runtime")
+    raise AttributeError(name)
 
 
 def _add_image_options(parser: argparse.ArgumentParser) -> None:
@@ -207,12 +214,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not confirmed:
                 _print_json({"status": "cancelled"})
                 return 1
-            receipt = runtime_models.install_runtime_models(
-                cache_dir=None,
-                confirmed=True,
-            )
+            try:
+                receipt = runtime_models.install_runtime_models_repair(
+                    cache_dir=None,
+                    confirmed=True,
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                _print_json({"status": "failed", "reason": str(error)[:1000]})
+                return 1
             _print_json(receipt)
             return 0
+
+    from image2editable import runtime
 
     if args.command == "convert":
         format_kwargs = (

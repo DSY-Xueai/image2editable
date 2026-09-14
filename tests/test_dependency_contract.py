@@ -510,7 +510,7 @@ def test_readmes_are_skill_first_and_omit_the_cli_walkthrough() -> None:
     )
 
     for text in (readme_text, readme_en_text):
-        assert "npx skills add ./image2editable-skill/skills/image-to-ppt" in text
+        assert "npx skills add DSY-Xueai/image2editable --skill image-to-ppt" in text
         assert all(phrase.casefold() not in text.casefold() for phrase in forbidden)
     for phrase in (
         "普通用户",
