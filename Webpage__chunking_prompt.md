@@ -8,7 +8,7 @@
 
 保姆级教程在网页转换示例下方
 
-仓库右上角点个免费的star，感谢您的支持
+[仓库右上角点个免费的star，感谢您的支持](https://github.com/DSY-Xueai/image2editable)
 
 ## 网页转换示例
 
@@ -40,10 +40,8 @@
 不进行确认，不要求重复输入提示词，不等待“继续”，直接执行。
 
 ====================
-
 一、任务隔离
 ====================
-
 每个聊天只处理当前聊天直接上传的源图片。
 
 禁止使用、引用、混入或复用其他聊天中的：
@@ -56,10 +54,8 @@
 1张源图片对应1个独立聊天任务。
 
 ====================
-
 二、阶段1核心原则
 ====================
-
 阶段1的目标是“对象级视觉分离”，不是区域裁剪。
 
 必须优先使用当前ChatGPT会话原生提供的图像理解和图像编辑能力，逐个提取独立视觉对象。
@@ -95,10 +91,8 @@ Python不得根据目测轮廓制造人物或物体的最终透明Mask。
 如果当前原生图像编辑能力无法得到合格对象，不得退化为矩形、多边形或粗略区域裁剪继续制作PPT。
 
 ====================
-
 三、识别全部视觉对象
 ====================
-
 先完整分析源图，识别全部具有独立素材意义的非文字视觉对象。
 
 包括但不限于：
@@ -128,10 +122,8 @@ Python不得根据目测轮廓制造人物或物体的最终透明Mask。
 标题、正文、数字、标签、说明文字等普通排版文字不作为PNG素材。
 
 ====================
-
 四、逐对象提取
 ====================
-
 每次只处理一个目标对象。
 
 对每个目标对象使用原生图像编辑能力执行对象级提取。
@@ -160,10 +152,8 @@ Python不得根据目测轮廓制造人物或物体的最终透明Mask。
 不得因为对象提取困难，把目标对象和相邻人物、物品或背景一起保留。
 
 ====================
-
 五、遮挡规则
 ====================
-
 对象被其他对象遮挡时，只保留源图中真实可见的部分。
 
 例如儿童站在成人前方时：
@@ -176,10 +166,8 @@ Python不得根据目测轮廓制造人物或物体的最终透明Mask。
 PPT阶段按照源图真实前后关系恢复遮挡层级。
 
 ====================
-
 六、对象边缘
 ====================
-
 透明PNG边缘必须沿对象真实视觉轮廓。
 
 必须尽可能保留属于对象本身的：
@@ -216,10 +204,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 禁止使用Polygon、矩形、PPT裁剪或遮罩修补失败结果。
 
 ====================
-
 七、独立性与唯一性
 ====================
-
 每张PNG只能包含一个独立视觉对象。
 
 同一个人物或物体不得重复出现在多个PNG中。
@@ -235,10 +221,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 不得通过PPT前后层级隐藏重复对象。
 
 ====================
-
 八、PNG规格
 ====================
-
 阶段1每张PNG使用与源图片完全相同的画布尺寸。
 
 保持对象：
@@ -261,10 +245,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 必须保持对象本身比例和尺寸关系，并根据其在源图中的真实位置放回与源图同尺寸的透明画布。
 
 ====================
-
 九、文字承载图形
 ====================
-
 卷轴、牌子、标签框、气泡等“图形+文字”结构必须将图形和普通文字分离。
 
 图形作为独立视觉素材保留。
@@ -283,10 +265,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 -改变图形结构
 
 ====================
-
 十、背景
 ====================
-
 背景作为完整场景层单独处理。
 
 不得将背景拆成无意义的小块。
@@ -318,10 +298,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 -明显修复痕迹
 
 ====================
-
 十一、逐对象视觉验收
 ====================
-
 每个对象提取完成后必须立即检查。
 
 将透明PNG置于棋盘格或高对比背景上检查。
@@ -346,10 +324,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 不得使用Python几何Mask返修。
 
 ====================
-
 十二、反向合成验收
 ====================
-
 全部视觉对象完成后，将：
 
 完整背景
@@ -378,10 +354,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 只有逐对象视觉验收和反向合成验收全部通过，阶段1才算完成。
 
 ====================
-
 十三、阶段1输出
 ====================
-
 必须逐张输出全部独立PNG。
 
 禁止：
@@ -397,10 +371,8 @@ PPT阶段按照源图真实前后关系恢复遮挡层级。
 阶段1全部完成后立即继续阶段2。
 
 ====================
-
 十四、阶段2：重建可编辑PPT
 ====================
-
 PPT中的实际非文字视觉素材只能使用阶段1验收通过的独立PNG。
 
 源图片仅用于：
@@ -423,10 +395,8 @@ PPT中的实际非文字视觉素材只能使用阶段1验收通过的独立PNG�
 如果PPT阶段发现某个PNG存在问题，必须返回阶段1重新处理。
 
 ====================
-
 十五、PNG进入PPT
 ====================
-
 阶段1全部独立PNG都必须用于PPT，不得遗漏。
 
 每个视觉对象在PPT中必须保持为独立图片对象。
@@ -464,10 +434,8 @@ PPT_Height=元素边界高度/源图高度×PPT页面高度
 PowerPoint中单击任意视觉元素时，其图片框必须贴合对象实际边界，不得接近整张幻灯片大小。
 
 ====================
-
 十六、文字重建
 ====================
-
 所有普通排版文字必须重新建立为可编辑文本框。
 
 不得把普通文字制作成图片。
@@ -597,10 +565,8 @@ PowerPoint中单击任意视觉元素时，其图片框必须贴合对象实际�
 如果发现相同文字在同一位置或近似位置出现两次以上，而源图并不存在真实多层文字设计，必须删除重复文字层并重新实现文字效果。
 
 ====================
-
 十七、最终验收
 ====================
-
 正式输出PPT前必须检查：
 
 1.全部非文字视觉对象均已拆分
@@ -628,14 +594,13 @@ PowerPoint中单击任意视觉元素时，其图片框必须贴合对象实际�
 23.不得通过复制同一文字模拟描边、阴影、发光、加粗或字体补偿
 24.每处文字字体必须依据源图实际字形进行匹配，不得直接使用默认字体或明显不匹配字体
 25.文字最终验收必须同时比较文字内容和字形外观，不得只检查OCR内容是否正确
+26.PPTX正式交付前必须执行Microsoft PowerPoint兼容性结构验收，不得以文件成功保存、Python库可读取、LibreOffice可打开或可导出PDF作为最终通过标准。必须检查Slide→SlideLayout→SlideMaster→Theme关系链、所有.rels目标、Content Types和XML结构完整性，并重新打开生成后的PPTX验证。发现结构异常或PowerPoint无法读取时，禁止继续基于异常文件修改，必须从合法的标准PPTX重新构建。
 
 发现任何问题必须先修复，再输出。
 
 ====================
-
 十八、禁止降级策略
 ====================
-
 对象提取失败时，禁止改用：
 -矩形裁剪
 -多边形裁剪
@@ -653,10 +618,8 @@ PowerPoint中单击任意视觉元素时，其图片框必须贴合对象实际�
 不得为了完成任务而提交明显错误的粗略拆分结果。
 
 ====================
-
 十九、最终交付
 ====================
-
 最终必须实际创建并交付：
 
 1.全部独立透明PNG
@@ -669,10 +632,6 @@ PowerPoint中单击任意视觉元素时，其图片框必须贴合对象实际�
 -说明
 -步骤
 -完成声明
-
-
-
-
 ```
 
 ------
@@ -704,6 +663,8 @@ Principle: split every independent non-text visual element in the source image i
 
 This workflow is for the ChatGPT web interface. Select the 5.6 High model. Processing time depends on image complexity; current tests generally finish within 10 minutes. The tutorial appears below the web conversion examples.
 
+[Leave a free star in the top-right corner of the repository. Thank you for your support!](https://github.com/DSY-Xueai/image2editable)
+
 ## Web Conversion Examples
 
 | Original image | Editable result | Time and process |
@@ -715,9 +676,9 @@ This workflow is for the ChatGPT web interface. Select the 5.6 High model. Proce
 
 ## Tutorial
 
-![image-20260907222207460](docs/images/image-20260907222207460.png)
+![Create a project and select project-only memory](docs/images/image-20260907222207460-en.png)
 
-![image-20260907223306672](docs/images/image-20260907223306672.png)
+![Paste the full prompt into project instructions and save](docs/images/image-20260907223306672-en.png)
 
 **The notes below the prompt are also important; please read them.**
 
@@ -732,12 +693,11 @@ When a new chat contains exactly one uploaded image, execute the complete workfl
 Stage 1: separate every non-text visual element.
 Stage 2: use every separated asset to rebuild an editable PowerPoint presentation.
 
-Do not ask for confirmation, request the prompt again, or wait for ?continue?. Execute directly.
+Do not ask for confirmation, request the prompt again, or wait for "continue". Execute directly.
 
 ====================
 I. TASK ISOLATION
 ====================
-
 Process only the source image uploaded directly in the current chat.
 
 Never use, reference, mix, or reuse any of the following from another chat:
@@ -752,7 +712,6 @@ One source image is one independent chat task.
 ====================
 II. STAGE 1 CORE PRINCIPLES
 ====================
-
 Stage 1 aims for object-level visual separation, not region cropping.
 
 Prioritize the native image understanding and image editing capabilities available in the current ChatGPT session to extract independent visual objects one at a time.
@@ -789,7 +748,6 @@ If native image editing cannot produce an acceptable object, do not fall back to
 ====================
 III. IDENTIFY EVERY VISUAL OBJECT
 ====================
-
 First analyze the entire source image and identify every non-text visual object that can serve as an independent asset.
 
 Include, but do not limit the scope to:
@@ -817,7 +775,6 @@ Ordinary typeset text, including titles, body text, numbers, labels, and caption
 ====================
 IV. EXTRACT ONE OBJECT AT A TIME
 ====================
-
 Process only one target object at a time. Use native image editing to extract each target at the object level.
 
 Requirements:
@@ -846,7 +803,6 @@ Do not retain adjacent people, items, or background together with the target jus
 ====================
 V. OCCLUSION RULES
 ====================
-
 When another object occludes the target, retain only the parts actually visible in the source image.
 
 For example, when a child stands in front of an adult:
@@ -861,7 +817,6 @@ Restore the actual front-to-back occlusion order during PPT reconstruction.
 ====================
 VI. OBJECT EDGES
 ====================
-
 Transparent PNG edges must follow the object's actual visual contour.
 
 Preserve the following parts of the object as fully as possible:
@@ -896,7 +851,6 @@ Do not repair failed results with polygons, rectangles, PPT cropping, or masks.
 ====================
 VII. INDEPENDENCE AND UNIQUENESS
 ====================
-
 Each PNG must contain only one independent visual object. The same person or item must not appear in multiple PNGs.
 
 After completing all foreground objects, check:
@@ -912,7 +866,6 @@ Do not hide duplicate objects through PPT layer order.
 ====================
 VIII. PNG SPECIFICATIONS
 ====================
-
 Every Stage 1 PNG must use exactly the source image's canvas size.
 
 Preserve the object's original coordinates, dimensions, proportions, and orientation. All areas outside the current object must be transparent.
@@ -924,7 +877,6 @@ If native image editing produces a tight crop, preserve the object's proportions
 ====================
 IX. GRAPHICS THAT CONTAIN TEXT
 ====================
-
 Separate graphics from ordinary text in structures such as scrolls, signs, label frames, and speech bubbles.
 
 Keep the graphic as an independent visual asset. Remove ordinary text from the PNG and rebuild it as editable text during the PPT stage.
@@ -941,7 +893,6 @@ Text removal must not:
 ====================
 X. BACKGROUND
 ====================
-
 Process the background separately as a complete scene layer. Do not split it into meaningless small pieces.
 
 After completing all foreground objects, generate a complete, clean background without foreground objects or ordinary text.
@@ -965,7 +916,6 @@ The background must not contain holes, geometric seams, radial artifacts, obviou
 ====================
 XI. VISUAL ACCEPTANCE FOR EACH OBJECT
 ====================
-
 Inspect each object immediately after extraction. View each transparent PNG on a checkerboard or high-contrast background.
 
 Confirm for each PNG:
@@ -988,7 +938,6 @@ Do not repair it with Python-generated geometric masks.
 ====================
 XII. RECOMPOSITION ACCEPTANCE
 ====================
-
 After completing every visual object, overlay the complete background and all independent PNGs using the source image's original coordinates and front-to-back order.
 
 Generate a reconstruction preview and compare it with the source image.
@@ -1013,7 +962,6 @@ Stage 1 is complete only after both per-object visual acceptance and recompositi
 ====================
 XIII. STAGE 1 OUTPUT
 ====================
-
 Output every independent PNG individually.
 
 Do not output:
@@ -1031,7 +979,6 @@ Immediately continue to Stage 2 after completing all of Stage 1.
 ====================
 XIV. STAGE 2: REBUILD AN EDITABLE PPT
 ====================
-
 Use only the independent PNGs that passed Stage 1 acceptance as the PPT's actual non-text visual assets.
 
 Use the source image only to read text, confirm the original layout, coordinates, and layer order, and perform the final visual check.
@@ -1051,7 +998,6 @@ If a PNG problem is found during the PPT stage, return to Stage 1 and reprocess 
 ====================
 XV. PLACING PNGS IN THE PPT
 ====================
-
 Use every independent Stage 1 PNG in the PPT without omissions. Keep each visual object as an independent picture object.
 
 Stage 1 PNGs use the full source canvas only to preserve original coordinates.
@@ -1068,10 +1014,10 @@ Do not trim real edges, shadows, glows, soft edges, or semi-transparent pixels.
 
 Use these conversions:
 
-PPT_X = element left boundary X / source image width ? PPT page width
-PPT_Y = element top boundary Y / source image height ? PPT page height
-PPT_Width = element boundary width / source image width ? PPT page width
-PPT_Height = element boundary height / source image height ? PPT page height
+PPT_X = element left boundary X / source image width × PPT page width
+PPT_Y = element top boundary Y / source image height × PPT page height
+PPT_Width = element boundary width / source image width × PPT page width
+PPT_Height = element boundary height / source image height × PPT page height
 
 Do not estimate positions visually. Do not change original proportions or relative dimensions to shrink the selection box.
 
@@ -1082,7 +1028,6 @@ When any visual element is clicked in PowerPoint, its picture selection box must
 ====================
 XVI. TEXT REBUILD
 ====================
-
 Recreate all ordinary typeset text as editable text boxes. Never render ordinary text as images, omit it, or duplicate the same ordinary text in both PNGs and text boxes.
 
 Handle text recognition and font reconstruction separately:
@@ -1198,7 +1143,6 @@ If the same text appears two or more times at the same or nearly the same positi
 ====================
 XVII. FINAL ACCEPTANCE
 ====================
-
 Before outputting the PPT, verify:
 
 1. Every non-text visual object has been separated.
@@ -1226,13 +1170,13 @@ Before outputting the PPT, verify:
 23. Copies of identical text are not used to simulate outlines, shadows, glows, bold weight, or font compensation.
 24. Every font is matched against the source's actual glyph shapes; no default or clearly mismatched font is used without this matching process.
 25. Final text acceptance compares both content and glyph appearance, not just OCR accuracy.
+26. Before final PPTX delivery, perform structural validation for Microsoft PowerPoint compatibility. Successfully saving the file, reading it with a Python library, opening it in LibreOffice, or exporting it to PDF must not count as final acceptance. Check the Slide→SlideLayout→SlideMaster→Theme relationship chain, all .rels targets, Content Types, and XML structural integrity, then reopen the generated PPTX to verify it. If structural errors are found or PowerPoint cannot read the file, do not continue modifying the invalid file; rebuild it from a valid, standard PPTX.
 
 Fix every issue before output.
 
 ====================
 XVIII. PROHIBITED FALLBACKS
 ====================
-
 When object extraction fails, do not switch to:
 - Rectangular crops
 - Polygonal crops
@@ -1252,7 +1196,6 @@ Do not submit obviously incorrect, roughly separated results just to finish the 
 ====================
 XIX. FINAL DELIVERY
 ====================
-
 Actually create and deliver:
 
 1. Every independent transparent PNG.
@@ -1263,9 +1206,9 @@ Do not provide only a processing plan, element list, code, explanations, steps, 
 
 ------
 
-![image-20260907224907090](docs/images/image-20260907224907090.png)
+![Upload an image directly in a project chat](docs/images/image-20260907224907090-en.png)
 
-![image-20260907224551544](docs/images/image-20260907224551544.png)
+![Organize chats by project](docs/images/image-20260907224551544-en.png)
 
 ### FAQ
 
